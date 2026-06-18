@@ -1,7 +1,7 @@
 """GPU-parallel orbit grid-search (adaptive importance sampling).
 
 Discovery tier of photomancy.orbit: enumerate orbits consistent with sparse data
-and return weighted particles. See the design spec for the configurable seams.
+and return weighted particles.
 """
 
 from abc import abstractmethod

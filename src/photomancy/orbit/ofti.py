@@ -7,8 +7,7 @@ posterior-exact in the short-arc regime where MAP+Laplace's Gaussian
 approximation under-covers and NUTS is slow.
 
 This is a from-scratch JAX reimplementation, not a wrapper around orbitize!; the
-scale-and-rotate mechanics were cross-checked against orbitize.sampler.OFTI. See
-the design spec (orbix-paper/brain/specs/2026-06-17-ofti-design.md).
+scale-and-rotate mechanics were cross-checked against orbitize.sampler.OFTI.
 
 The phase parameter is the mean anomaly at the reference epoch, ``m_ref`` (drawn
 uniform). This decouples orbital phase from the semimajor axis, so the scale

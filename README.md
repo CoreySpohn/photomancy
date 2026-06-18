@@ -14,8 +14,5 @@ prior -- and run through a uniform `Backend` (Laplace mixture, NUTS, adaptive
 tempered SMC, MCLMC, Pathfinder) that returns one `Posterior` exposing `.sample`,
 `.log_prob`, and `.evidence`.
 
-Status: early development; orbit fitting first (reconciled from orbix), disks next.
-Design and method notes live in
-`hwo-mission-control/burn/orbix-paper/brain/` (`FITTING_LIBRARY_NOTES`,
-`SAMPLER_SURVEY`, `BLACKJAX_PATTERNS`, and the `specs/` design + implementation
-plan).
+Status: early development. Orbit fitting is implemented; disk, atmosphere, and
+image-domain fitting are planned.
