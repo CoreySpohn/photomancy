@@ -1,0 +1,111 @@
+"""Orbit fitting: differentiable forward models, likelihoods, and inference.
+
+The orbit-domain plug-ins for the photomancy inference engine: data containers,
+differentiable RV / astrometry / photometry forward models, pure-JAX likelihoods,
+eccentricity priors, blind initializers (Thiele-Innes grid search, OFTI, adaptive
+importance sampling), and the MAP + Laplace / EIG machinery. Built on orbix
+geometry (``orbix.equations``, ``orbix.kepler``).
+"""
+
+from orbix.equations import period_to_sma
+from orbix.kepler.core import diff_solve_trig
+
+from photomancy.orbit.data import AstromData, ImagingData, NullData, RVData
+from photomancy.orbit.eig import (
+    alias_breaking_eig,
+    evaluate_candidates,
+    geometric_eig,
+)
+from photomancy.orbit.forward import (
+    predict_astrometry,
+    predict_photometry,
+    predict_rv,
+)
+from photomancy.orbit.grid_search import (
+    AbstractGridStrategy,
+    AbstractShapeParam,
+    AdaptiveImportanceSampler,
+    EccVectorShape,
+    ParamBounds,
+    ParticlePosterior,
+    grid_search,
+)
+from photomancy.orbit.init import find_init, find_init_top_k, ti_to_init
+from photomancy.orbit.laplace import (
+    LaplaceMixtureResult,
+    LaplaceResult,
+    map_laplace_fit,
+    map_laplace_mixture_fit,
+)
+from photomancy.orbit.likelihoods import (
+    loglike_astrom,
+    loglike_imaging,
+    loglike_null,
+    loglike_rv_marginalized,
+)
+from photomancy.orbit.ofti import AbstractConditioner, ScaleAndRotate, ofti
+from photomancy.orbit.priors import (
+    ECC_PRIOR_NAMES,
+    ecc_distribution,
+    eccentricity_disk_transform,
+    sample_ecc_prior,
+)
+from photomancy.orbit.thiele_innes import (
+    TIFitResult,
+    thiele_innes_fit,
+    thiele_innes_grid_search,
+)
+
+__all__ = [
+    "ECC_PRIOR_NAMES",
+    # OFTI (Orbits For The Impatient) rejection sampler
+    "AbstractConditioner",
+    # Grid-search (adaptive importance sampling)
+    "AbstractGridStrategy",
+    "AbstractShapeParam",
+    "AdaptiveImportanceSampler",
+    "AstromData",
+    "EccVectorShape",
+    "ImagingData",
+    "LaplaceMixtureResult",
+    # MAP + Laplace
+    "LaplaceResult",
+    "NullData",
+    "ParamBounds",
+    "ParticlePosterior",
+    # Data containers
+    "RVData",
+    "ScaleAndRotate",
+    # Thiele-Innes fitter
+    "TIFitResult",
+    "alias_breaking_eig",
+    # Orbital-mechanics primitives (re-exported from orbix)
+    "diff_solve_trig",
+    "ecc_distribution",
+    # Priors
+    "eccentricity_disk_transform",
+    "evaluate_candidates",
+    "find_init",
+    "find_init_top_k",
+    # Bayesian experimental design
+    "geometric_eig",
+    "grid_search",
+    "loglike_astrom",
+    "loglike_imaging",
+    "loglike_null",
+    # Likelihoods
+    "loglike_rv_marginalized",
+    "map_laplace_fit",
+    "map_laplace_mixture_fit",
+    "ofti",
+    "period_to_sma",
+    "predict_astrometry",
+    "predict_photometry",
+    # Forward models
+    "predict_rv",
+    "sample_ecc_prior",
+    "thiele_innes_fit",
+    "thiele_innes_grid_search",
+    # Initialization
+    "ti_to_init",
+]
