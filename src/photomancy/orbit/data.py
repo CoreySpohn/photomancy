@@ -224,6 +224,27 @@ class NullData(eqx.Module):
         )
 
     @classmethod
+    def pad(
+        cls,
+        *,
+        epochs,
+        sep_grid,
+        dmag0_grid,
+        snr_thresh=5.0,
+        max_n=MAX_IMG,
+        max_pts=MAX_CC_PTS,
+    ):
+        """Create a padded NullData with an ``is_valid`` mask."""
+        n = jnp.asarray(epochs).shape[0]
+        return cls(
+            epochs=_pad_1d(epochs, max_n),
+            sep_grid=_pad_2d(sep_grid, max_n, max_pts),
+            dmag0_grid=_pad_2d(dmag0_grid, max_n, max_pts, fill=-jnp.inf),
+            is_valid=_valid_mask(n, max_n),
+            snr_thresh=snr_thresh,
+        )
+
+    @classmethod
     def zeros(cls, max_n=MAX_IMG, max_pts=MAX_CC_PTS, snr_thresh=5.0):
         """Create an all-invalid placeholder."""
         return cls(
@@ -344,6 +365,33 @@ class ImagingData(eqx.Module):
             dmag_obs=_pad_1d(dmag_obs, max_n),
             dmag_err=_pad_1d(dmag_err, max_n, fill=1.0),
             is_valid=_valid_mask(n_total, max_n),
+            snr_thresh=snr_thresh,
+        )
+
+    @classmethod
+    def pad(
+        cls,
+        *,
+        epochs,
+        sep_grid,
+        dmag0_grid,
+        is_detected,
+        dmag_obs,
+        dmag_err,
+        snr_thresh=5.0,
+        max_n=MAX_IMG,
+        max_pts=MAX_CC_PTS,
+    ):
+        """Create a padded ImagingData with an ``is_valid`` mask."""
+        n = jnp.asarray(epochs).shape[0]
+        return cls(
+            epochs=_pad_1d(epochs, max_n),
+            sep_grid=_pad_2d(sep_grid, max_n, max_pts),
+            dmag0_grid=_pad_2d(dmag0_grid, max_n, max_pts, fill=-jnp.inf),
+            is_detected=_pad_1d(is_detected, max_n).astype(bool),
+            dmag_obs=_pad_1d(dmag_obs, max_n),
+            dmag_err=_pad_1d(dmag_err, max_n, fill=1.0),
+            is_valid=_valid_mask(n, max_n),
             snr_thresh=snr_thresh,
         )
 

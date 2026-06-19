@@ -14,6 +14,51 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import log_ndtr
 
+# Finite "undetectable" dMag0 sentinel (replaces -inf): the predicted flux ratio
+# still underflows to 0 (no non-detection penalty), but staying finite keeps the
+# interpolation gradient finite on padded grids.
+_UNDETECTABLE_DMAG0 = -1e8
+
+
+def _interp_dmag0(alpha_pred, sep_grid, dmag0_grid):
+    """Interpolate the dMag0 detection limit at each epoch, gradient-safely.
+
+    The contrast-curve grids are padded (trailing sep=0, dmag0=-inf). A raw
+    ``jnp.interp`` over that non-monotonic query grid divides by zero in its slopes
+    and subtracts ``inf - inf`` -- it returns a finite value but a nan gradient
+    w.r.t. the separation (and even the wrong value when the curve is padded), so a
+    fit cannot initialize. The padded columns (identified by ``dmag0 == -inf``) are
+    pushed just past the last real separation as a strictly increasing tail, and the
+    undetectable limit is a finite sentinel. The real curve is left untouched, so the
+    value is exact within the curve; out-of-curve separations map to the sentinel
+    (``flux_ratio -> 0``, no penalty) with a finite gradient.
+
+    Args:
+        alpha_pred: Predicted separation per epoch. Shape ``(N,)``.
+        sep_grid: Per-epoch separation grid (padded). Shape ``(N, K)``.
+        dmag0_grid: Per-epoch dMag0 limit grid (padded with -inf). Shape ``(N, K)``.
+
+    Returns:
+        The interpolated dMag0 limit per epoch. Shape ``(N,)``.
+    """
+    is_pad = ~jnp.isfinite(dmag0_grid)
+    max_real = jnp.max(jnp.where(is_pad, -jnp.inf, sep_grid), axis=1, keepdims=True)
+    max_real = jnp.where(jnp.isfinite(max_real), max_real, 0.0)
+    pad_xp = max_real + (jnp.arange(sep_grid.shape[1]) + 1.0) * 1e-6
+    xp = jnp.where(is_pad, pad_xp, sep_grid)
+    fp = jnp.where(is_pad, _UNDETECTABLE_DMAG0, dmag0_grid)
+
+    def _one(alpha_val, xp_row, fp_row):
+        return jnp.interp(
+            alpha_val,
+            xp_row,
+            fp_row,
+            left=_UNDETECTABLE_DMAG0,
+            right=_UNDETECTABLE_DMAG0,
+        )
+
+    return jax.vmap(_one)(alpha_pred, xp, fp)
+
 
 def loglike_rv_marginalized(
     rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters, is_valid
@@ -105,10 +150,9 @@ def loglike_null(alpha_pred, dMag_pred, data):
     exceeds 1, producing a negative z-score and a heavy log-likelihood
     penalty.
 
-    Planets outside the coronagraph's working angles receive zero penalty
-    via ``jnp.interp(..., left=-jnp.inf, right=-jnp.inf)`` which returns
-    ``dMag0 = -inf`` -> ``flux_ratio = 0`` -> ``z = snr_thresh`` ->
-    ``log_ndtr ~= 0``.
+    Planets outside the contrast curve receive zero penalty: the limit maps to a
+    finite "undetectable" sentinel (see :func:`_interp_dmag0`) giving
+    ``flux_ratio -> 0`` -> ``z = snr_thresh`` -> ``log_ndtr ~= 0``.
 
     Args:
         alpha_pred: Predicted angular separation (arcsec). Shape
@@ -121,12 +165,7 @@ def loglike_null(alpha_pred, dMag_pred, data):
     """
     mask = data.is_valid  # boolean
 
-    def _interp_epoch(alpha_val, sep_row, dmag0_row):
-        """Interpolate dMag0 limit at a single epoch."""
-        return jnp.interp(alpha_val, sep_row, dmag0_row, left=-jnp.inf, right=-jnp.inf)
-
-    # Vectorize over epochs
-    dMag0_limit = jax.vmap(_interp_epoch)(alpha_pred, data.sep_grid, data.dmag0_grid)
+    dMag0_limit = _interp_dmag0(alpha_pred, data.sep_grid, data.dmag0_grid)
 
     # Exact flux ratio: F_pred / F_limit
     # Clip the exponent to prevent float64 overflow (10**309 = inf)
@@ -166,12 +205,8 @@ def loglike_imaging(alpha_pred, dMag_pred, data):
     """
     mask = data.is_valid  # boolean
 
-    def _interp_epoch(alpha_val, sep_row, dmag0_row):
-        """Interpolate dMag0 limit at a single epoch."""
-        return jnp.interp(alpha_val, sep_row, dmag0_row, left=-jnp.inf, right=-jnp.inf)
-
     # --- Null branch: flux-space z-score ---
-    dMag0_limit = jax.vmap(_interp_epoch)(alpha_pred, data.sep_grid, data.dmag0_grid)
+    dMag0_limit = _interp_dmag0(alpha_pred, data.sep_grid, data.dmag0_grid)
     exp_arg = jnp.clip(-0.4 * (dMag_pred - dMag0_limit), max=200.0)
     flux_ratio = 10.0**exp_arg
     z = data.snr_thresh * (1.0 - flux_ratio)
