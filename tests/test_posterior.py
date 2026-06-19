@@ -2,9 +2,36 @@
 
 import jax
 import jax.numpy as jnp
+import pytest
 from jax.scipy.special import logsumexp
 
-from photomancy.posterior import GaussianPosterior, MixturePosterior
+from photomancy.posterior import (
+    AbstractPosterior,
+    GaussianPosterior,
+    MixturePosterior,
+    SamplePosterior,
+)
+
+
+def test_posterior_subtypes_share_abstract_base_with_scalar_evidence():
+    """Gaussian and Mixture are AbstractPosterior with a scalar ``.evidence``.
+
+    The base reconciles ``evidence`` as a field (Gaussian) vs a property
+    (Mixture) through ``AbstractVar``, so consumers type against one interface.
+    """
+    gaussian = GaussianPosterior(
+        mean=jnp.zeros(2), cov=jnp.eye(2), evidence=jnp.asarray(-3.0)
+    )
+    mixture = MixturePosterior(
+        means=jnp.zeros((2, 2)),
+        covs=jnp.broadcast_to(jnp.eye(2), (2, 2, 2)),
+        log_evidences=jnp.asarray([-1.0, -2.0]),
+    )
+
+    assert isinstance(gaussian, AbstractPosterior)
+    assert isinstance(mixture, AbstractPosterior)
+    assert jnp.ndim(gaussian.evidence) == 0
+    assert jnp.ndim(mixture.evidence) == 0
 
 
 def test_gaussian_posterior_samples_log_probs_and_exposes_evidence():
@@ -41,3 +68,32 @@ def test_mixture_posterior_weights_by_evidence_and_dominant_mode():
     samples = post.sample(jax.random.key(0), 4000)
     assert samples.shape == (4000, 1)
     assert jnp.mean(jnp.abs(samples[:, 0]) < 3.0) > 0.9
+
+
+def test_sample_posterior_resamples_by_weight_and_reports_evidence():
+    """SamplePosterior resamples stored particles by weight and exposes log Z."""
+    samples = jnp.array([[0.0, 0.0], [5.0, 5.0]])
+    log_weights = jnp.log(jnp.array([0.99, 0.01]))
+    post = SamplePosterior(
+        samples=samples, log_weights=log_weights, evidence=jnp.asarray(-2.0)
+    )
+
+    assert isinstance(post, AbstractPosterior)
+
+    draws = post.sample(jax.random.key(0), 2000)
+    assert draws.shape == (2000, 2)
+    near_first = jnp.mean(jnp.all(jnp.abs(draws - samples[0]) < 1e-6, axis=1))
+    assert near_first > 0.9
+
+    assert jnp.allclose(post.evidence, -2.0)
+
+
+def test_sample_posterior_log_prob_unsupported():
+    """A sample-based posterior carries no closed-form density."""
+    post = SamplePosterior(
+        samples=jnp.zeros((3, 2)),
+        log_weights=jnp.zeros(3),
+        evidence=jnp.asarray(jnp.nan),
+    )
+    with pytest.raises(NotImplementedError):
+        post.log_prob(jnp.zeros(2))

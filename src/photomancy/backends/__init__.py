@@ -6,6 +6,14 @@ that returns a Posterior.
 """
 
 from photomancy.backends.base import AbstractBackend
-from photomancy.backends.laplace import LaplaceBackend
+from photomancy.backends.laplace import LaplaceBackend, LaplaceMixtureBackend
+from photomancy.backends.nuts import NUTSBackend
+from photomancy.backends.smc import SMCBackend
 
-__all__ = ["AbstractBackend", "LaplaceBackend"]
+__all__ = [
+    "AbstractBackend",
+    "LaplaceBackend",
+    "LaplaceMixtureBackend",
+    "NUTSBackend",
+    "SMCBackend",
+]

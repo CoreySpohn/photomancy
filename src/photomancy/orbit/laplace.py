@@ -40,6 +40,54 @@ from photomancy.orbit.data import (
 )
 from photomancy.orbit.model import build_model
 
+
+def _pad_orbit_data(rv_data, astrom_data, null_data, imaging_data):
+    """Pad each present data container to its ``MAX_*`` size.
+
+    The cached model is traced once at the ``MAX_*`` shapes, so runtime data must
+    be padded to match for the JIT cache to hit. Containers already at ``MAX_*``
+    (or ``None``) pass through unchanged.
+    """
+    if astrom_data is not None and astrom_data.times.shape[0] != MAX_ASTROM:
+        n = astrom_data.times.shape[0]
+        astrom_data = AstromData.pad(
+            times=astrom_data.times[:n],
+            ra=astrom_data.ra[:n],
+            dec=astrom_data.dec[:n],
+            ra_err=astrom_data.ra_err[:n],
+            dec_err=astrom_data.dec_err[:n],
+            corr=astrom_data.corr[:n],
+            planet_id=astrom_data.planet_id[:n],
+        )
+    if rv_data is not None and rv_data.times.shape[0] != MAX_RV:
+        n = rv_data.times.shape[0]
+        rv_data = RVData.pad(
+            times=rv_data.times[:n],
+            rv=rv_data.rv[:n],
+            rv_err=rv_data.rv_err[:n],
+            inst_ids=rv_data.inst_ids[:n],
+            n_inst=rv_data.n_inst,
+        )
+    if null_data is not None and null_data.epochs.shape[0] != MAX_IMG:
+        n = null_data.epochs.shape[0]
+        null_data = NullData.pad(
+            epochs=null_data.epochs[:n],
+            sep_grid=null_data.sep_grid[:n],
+            dmag0_grid=null_data.dmag0_grid[:n],
+        )
+    if imaging_data is not None and imaging_data.epochs.shape[0] != MAX_IMG:
+        n = imaging_data.epochs.shape[0]
+        imaging_data = ImagingData.pad(
+            epochs=imaging_data.epochs[:n],
+            sep_grid=imaging_data.sep_grid[:n],
+            dmag0_grid=imaging_data.dmag0_grid[:n],
+            is_detected=imaging_data.is_detected[:n],
+            dmag_obs=imaging_data.dmag_obs[:n],
+            dmag_err=imaging_data.dmag_err[:n],
+        )
+    return rv_data, astrom_data, null_data, imaging_data
+
+
 # ---------------------------------------------------------------------------
 # LaplaceResult -- equinox container
 # ---------------------------------------------------------------------------
@@ -492,44 +540,9 @@ def map_laplace_fit(
         seed=seed,
     )
 
-    # 2. Pad data to MAX sizes for shape consistency with JIT cache
-    if astrom_data is not None and astrom_data.times.shape[0] != MAX_ASTROM:
-        n = astrom_data.times.shape[0]
-        astrom_data = AstromData.pad(
-            times=astrom_data.times[:n],
-            ra=astrom_data.ra[:n],
-            dec=astrom_data.dec[:n],
-            ra_err=astrom_data.ra_err[:n],
-            dec_err=astrom_data.dec_err[:n],
-            corr=astrom_data.corr[:n],
-            planet_id=astrom_data.planet_id[:n],
-        )
-    if rv_data is not None and rv_data.times.shape[0] != MAX_RV:
-        n = rv_data.times.shape[0]
-        rv_data = RVData.pad(
-            times=rv_data.times[:n],
-            rv=rv_data.rv[:n],
-            rv_err=rv_data.rv_err[:n],
-            inst_ids=rv_data.inst_ids[:n],
-            n_inst=rv_data.n_inst,
-        )
-    if null_data is not None and null_data.epochs.shape[0] != MAX_IMG:
-        n = null_data.epochs.shape[0]
-        null_data = NullData.pad(
-            epochs=null_data.epochs[:n],
-            sep_grid=null_data.sep_grid[:n],
-            dmag0_grid=null_data.dmag0_grid[:n],
-        )
-    if imaging_data is not None and imaging_data.epochs.shape[0] != MAX_IMG:
-        n = imaging_data.epochs.shape[0]
-        imaging_data = ImagingData.pad(
-            epochs=imaging_data.epochs[:n],
-            sep_grid=imaging_data.sep_grid[:n],
-            dmag0_grid=imaging_data.dmag0_grid[:n],
-            is_detected=imaging_data.is_detected[:n],
-            dmag_obs=imaging_data.dmag_obs[:n],
-            dmag_err=imaging_data.dmag_err[:n],
-        )
+    rv_data, astrom_data, null_data, imaging_data = _pad_orbit_data(
+        rv_data, astrom_data, null_data, imaging_data
+    )
 
     model_args = (Ms, dist_pc, rv_data, astrom_data, null_data, imaging_data)
 
@@ -875,44 +888,9 @@ def map_laplace_mixture_fit(
         seed=seed,
     )
 
-    # 2. Pad data to MAX sizes for shape consistency with JIT cache
-    if astrom_data is not None and astrom_data.times.shape[0] != MAX_ASTROM:
-        n = astrom_data.times.shape[0]
-        astrom_data = AstromData.pad(
-            times=astrom_data.times[:n],
-            ra=astrom_data.ra[:n],
-            dec=astrom_data.dec[:n],
-            ra_err=astrom_data.ra_err[:n],
-            dec_err=astrom_data.dec_err[:n],
-            corr=astrom_data.corr[:n],
-            planet_id=astrom_data.planet_id[:n],
-        )
-    if rv_data is not None and rv_data.times.shape[0] != MAX_RV:
-        n = rv_data.times.shape[0]
-        rv_data = RVData.pad(
-            times=rv_data.times[:n],
-            rv=rv_data.rv[:n],
-            rv_err=rv_data.rv_err[:n],
-            inst_ids=rv_data.inst_ids[:n],
-            n_inst=rv_data.n_inst,
-        )
-    if null_data is not None and null_data.epochs.shape[0] != MAX_IMG:
-        n = null_data.epochs.shape[0]
-        null_data = NullData.pad(
-            epochs=null_data.epochs[:n],
-            sep_grid=null_data.sep_grid[:n],
-            dmag0_grid=null_data.dmag0_grid[:n],
-        )
-    if imaging_data is not None and imaging_data.epochs.shape[0] != MAX_IMG:
-        n = imaging_data.epochs.shape[0]
-        imaging_data = ImagingData.pad(
-            epochs=imaging_data.epochs[:n],
-            sep_grid=imaging_data.sep_grid[:n],
-            dmag0_grid=imaging_data.dmag0_grid[:n],
-            is_detected=imaging_data.is_detected[:n],
-            dmag_obs=imaging_data.dmag_obs[:n],
-            dmag_err=imaging_data.dmag_err[:n],
-        )
+    rv_data, astrom_data, null_data, imaging_data = _pad_orbit_data(
+        rv_data, astrom_data, null_data, imaging_data
+    )
 
     # 3. Build model args
     model_args = (Ms, dist_pc, rv_data, astrom_data, null_data, imaging_data)

@@ -30,6 +30,7 @@ from photomancy.orbit.grid_search import (
     ParticlePosterior,
     grid_search,
 )
+from photomancy.orbit.inference import OrbitProblem, build_orbit_logdensity
 from photomancy.orbit.init import find_init, find_init_top_k, ti_to_init
 from photomancy.orbit.laplace import (
     LaplaceMixtureResult,
@@ -71,6 +72,8 @@ __all__ = [
     # MAP + Laplace
     "LaplaceResult",
     "NullData",
+    # Orbit -> generic-backend bridge
+    "OrbitProblem",
     "ParamBounds",
     "ParticlePosterior",
     # Data containers
@@ -79,6 +82,7 @@ __all__ = [
     # Thiele-Innes fitter
     "TIFitResult",
     "alias_breaking_eig",
+    "build_orbit_logdensity",
     # Orbital-mechanics primitives (re-exported from orbix)
     "diff_solve_trig",
     "ecc_distribution",

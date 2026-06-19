@@ -25,6 +25,7 @@ dependencies = [
     "jaxtyping",
     "numpy",
     "numpyro>=0.15.0",
+    "optax>=0.2.3",
     "orbix",
     "skyscapes",
 ]

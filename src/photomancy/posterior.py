@@ -6,14 +6,47 @@ A fit returns one Posterior with a uniform query interface -- ``sample``,
 comparison) read this interface and stay agnostic to which backend produced it.
 """
 
+from abc import abstractmethod
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from equinox import AbstractVar
 from jax.scipy.special import logsumexp
 from jax.scipy.stats import multivariate_normal
 
 
-class GaussianPosterior(eqx.Module):
+class AbstractPosterior(eqx.Module):
+    """The uniform posterior interface every backend returns.
+
+    A posterior answers three queries regardless of its internal representation
+    (Gaussian, evidence-weighted mixture, or weighted samples):
+
+    - ``sample(key, n)`` draws ``n`` positions in flat parameter space,
+    - ``log_prob(z)`` scores a flat position (may be unsupported for sample-based
+      posteriors),
+    - ``evidence`` is the scalar log marginal likelihood ``log Z``.
+
+    ``evidence`` is an ``AbstractVar`` so a subtype may back it with a field (the
+    Laplace ``log Z``) or a property (the mixture's ``logsumexp`` over modes). The
+    EIG / scheduling layer and model comparison read this interface and stay
+    agnostic to which backend produced the posterior.
+    """
+
+    evidence: AbstractVar[jnp.ndarray]
+
+    @abstractmethod
+    def sample(self, key, n):
+        """Draw ``n`` samples in flat parameter space. Shape ``(n, d)``."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def log_prob(self, z):
+        """Log-density at flat position ``z``."""
+        raise NotImplementedError
+
+
+class GaussianPosterior(AbstractPosterior):
     """A Gaussian posterior over the flat parameter position.
 
     Produced by the Laplace / Pathfinder backends; ``sample`` and ``log_prob``
@@ -38,7 +71,7 @@ class GaussianPosterior(eqx.Module):
         return multivariate_normal.logpdf(z, self.mean, self.cov)
 
 
-class MixturePosterior(eqx.Module):
+class MixturePosterior(AbstractPosterior):
     """An evidence-weighted Gaussian mixture posterior (the Laplace mixture).
 
     Each mode is a Gaussian; modes are weighted by ``softmax(log_evidences)`` and
@@ -80,4 +113,35 @@ class MixturePosterior(eqx.Module):
         keys = jax.random.split(k_draw, n)
         return jax.vmap(jax.random.multivariate_normal)(
             keys, self.means[comp], self.covs[comp]
+        )
+
+
+class SamplePosterior(AbstractPosterior):
+    """A posterior represented by weighted samples (NUTS / SMC particles).
+
+    ``sample`` resamples the stored particles by their weights with replacement;
+    ``log_prob`` is unsupported (no closed-form density); ``evidence`` is the
+    backend's log marginal likelihood -- the SMC tempering ``log Z`` for SMC, or
+    ``NaN`` for plain MCMC samples that carry no evidence estimate.
+
+    Args:
+        samples: Particle positions in flat parameter space. Shape ``(n, d)``.
+        log_weights: Per-particle log weights, normalized or not. Shape ``(n,)``.
+        evidence: Scalar log marginal likelihood ``log Z`` (or ``NaN``).
+    """
+
+    samples: jnp.ndarray
+    log_weights: jnp.ndarray
+    evidence: jnp.ndarray
+
+    def sample(self, key, n):
+        """Resample ``n`` particles by weight, with replacement. Shape ``(n, d)``."""
+        idx = jax.random.categorical(key, self.log_weights, shape=(n,))
+        return self.samples[idx]
+
+    def log_prob(self, z):
+        """Unsupported: a weighted-sample posterior has no closed-form density."""
+        raise NotImplementedError(
+            "SamplePosterior has no closed-form density; refit a Gaussian to the "
+            "samples or use a kernel density estimate to evaluate log_prob."
         )
