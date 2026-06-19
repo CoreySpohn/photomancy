@@ -57,6 +57,7 @@ def build_orbit_logdensity(
     log_Ag_range=(-2.0, 0.0),
     ecc_prior="kipping13",
     jitter_scale=1e-10,
+    n_planets=1,
     seed=0,
 ):
     """Build a flat orbit ``logdensity`` (and its z<->physical maps) for a backend.
@@ -81,6 +82,8 @@ def build_orbit_logdensity(
         ecc_prior: Eccentricity prior name (see
             :func:`~photomancy.orbit.model.build_model`).
         jitter_scale: Scale for the HalfNormal RV-jitter prior.
+        n_planets: Number of planets to fit (the model vmaps over planets and
+            indexes astrometry by ``planet_id``).
         seed: PRNG seed for the one-time model trace.
 
     Returns:
@@ -97,6 +100,7 @@ def build_orbit_logdensity(
         log_Ag_range=log_Ag_range,
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
+        n_planets=n_planets,
         seed=seed,
     )
     rv_data, astrom_data, null_data, imaging_data = _pad_orbit_data(
