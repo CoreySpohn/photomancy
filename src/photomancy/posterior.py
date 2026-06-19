@@ -37,7 +37,7 @@ class AbstractPosterior(eqx.Module):
 
     @abstractmethod
     def sample(self, key, n):
-        """Draw ``n`` samples in flat parameter space. Shape ``(n, d)``."""
+        """Draw ``n`` samples in the posterior's parameter space. Shape ``(n, d)``."""
         raise NotImplementedError
 
     @abstractmethod
@@ -117,31 +117,93 @@ class MixturePosterior(AbstractPosterior):
 
 
 class SamplePosterior(AbstractPosterior):
-    """A posterior represented by weighted samples (NUTS / SMC particles).
+    """A posterior represented by weighted samples (OFTI, grid_search, NUTS, SMC).
 
-    ``sample`` resamples the stored particles by their weights with replacement;
-    ``log_prob`` is unsupported (no closed-form density); ``evidence`` is the
-    backend's log marginal likelihood -- the SMC tempering ``log Z`` for SMC, or
-    ``NaN`` for plain MCMC samples that carry no evidence estimate.
+    Columns are named by ``param_names`` -- the space is whatever those names denote
+    (physical for OFTI / grid_search, unconstrained ``z`` for NUTS / SMC). ``sample``
+    resamples particles by weight (inverse-CDF SIR, ``O(n)`` memory); ``log_prob`` is
+    unsupported; ``evidence`` is the backend's ``log Z`` (or ``NaN``).
 
     Args:
-        samples: Particle positions in flat parameter space. Shape ``(n, d)``.
+        samples: Particle rows. Shape ``(n, d)``.
         log_weights: Per-particle log weights, normalized or not. Shape ``(n,)``.
         evidence: Scalar log marginal likelihood ``log Z`` (or ``NaN``).
+        param_names: Names of the ``d`` columns. Default ``()``.
     """
 
     samples: jnp.ndarray
     log_weights: jnp.ndarray
     evidence: jnp.ndarray
+    param_names: tuple[str, ...] = eqx.field(static=True, default=())
+
+    def _resample_idx(self, key, n):
+        cdf = jnp.cumsum(jax.nn.softmax(self.log_weights))
+        u = jax.random.uniform(key, (n,))
+        return jnp.clip(
+            jnp.searchsorted(cdf, u, side="right"), 0, self.samples.shape[0] - 1
+        )
 
     def sample(self, key, n):
-        """Resample ``n`` particles by weight, with replacement. Shape ``(n, d)``."""
-        idx = jax.random.categorical(key, self.log_weights, shape=(n,))
-        return self.samples[idx]
+        """Resample ``n`` particles by weight (inverse-CDF SIR). Shape ``(n, d)``."""
+        return self.samples[self._resample_idx(key, n)]
+
+    def sample_dict(self, key, n):
+        """Resample ``n`` particles and return ``{name: (n,)}`` by ``param_names``."""
+        drawn = self.samples[self._resample_idx(key, n)]
+        return {name: drawn[:, i] for i, name in enumerate(self.param_names)}
 
     def log_prob(self, z):
         """Unsupported: a weighted-sample posterior has no closed-form density."""
         raise NotImplementedError(
-            "SamplePosterior has no closed-form density; refit a Gaussian to the "
-            "samples or use a kernel density estimate to evaluate log_prob."
+            "SamplePosterior has no closed-form density; cluster_to_mixture or a KDE."
         )
+
+
+def cluster_to_mixture(posterior, k, *, key, iters=25, cov_floor=1e-6):
+    """Cluster weighted samples into a ``k``-mode Gaussian ``MixturePosterior``.
+
+    Weighted k-means (fixed iterations) assigns particles to ``k`` clusters; each mode
+    is the cluster's weighted mean and covariance, weighted by its mass. The per-mode
+    ``log_evidence`` is the log cluster mass, so ``softmax`` gives the mixture weights
+    (what the EIG alias-breaking term needs). Operates in whatever coordinates the
+    samples are in.
+
+    Args:
+        posterior: A :class:`SamplePosterior`.
+        k: Number of mixture modes.
+        key: PRNG key for k-means initialization.
+        iters: k-means iterations. Default 25.
+        cov_floor: Diagonal added to each covariance for conditioning. Default 1e-6.
+
+    Returns:
+        A :class:`MixturePosterior` with ``means (k, d)``, ``covs (k, d, d)``,
+        ``log_evidences (k,)``.
+    """
+    x = posterior.samples
+    w = jax.nn.softmax(posterior.log_weights)
+    n, d = x.shape
+    centers = x[jax.random.choice(key, n, (k,), replace=False)]
+
+    def step(centers, _):
+        sq = jnp.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=-1)
+        onehot = jax.nn.one_hot(jnp.argmin(sq, axis=1), k)
+        wmass = onehot * w[:, None]
+        mass = jnp.sum(wmass, axis=0)
+        new = (wmass.T @ x) / jnp.maximum(mass[:, None], 1e-30)
+        return jnp.where(mass[:, None] > 0, new, centers), None
+
+    centers, _ = jax.lax.scan(step, centers, None, length=iters)
+
+    sq = jnp.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=-1)
+    onehot = jax.nn.one_hot(jnp.argmin(sq, axis=1), k)
+    wmass = onehot * w[:, None]
+    mass = jnp.sum(wmass, axis=0)
+    means = (wmass.T @ x) / jnp.maximum(mass[:, None], 1e-30)
+
+    def _cov(mu_k, wcol):
+        diff = x - mu_k
+        return (diff * wcol[:, None]).T @ diff / jnp.maximum(jnp.sum(wcol), 1e-30)
+
+    covs = jax.vmap(_cov)(means, wmass.T) + cov_floor * jnp.eye(d)[None]
+    log_evidences = jnp.log(jnp.maximum(mass, 1e-30))
+    return MixturePosterior(means=means, covs=covs, log_evidences=log_evidences)

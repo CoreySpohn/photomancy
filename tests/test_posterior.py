@@ -10,6 +10,7 @@ from photomancy.posterior import (
     GaussianPosterior,
     MixturePosterior,
     SamplePosterior,
+    cluster_to_mixture,
 )
 
 
@@ -97,3 +98,39 @@ def test_sample_posterior_log_prob_unsupported():
     )
     with pytest.raises(NotImplementedError):
         post.log_prob(jnp.zeros(2))
+
+
+def test_sample_posterior_param_names_and_sample_dict():
+    """param_names labels the columns; sample_dict returns named draws."""
+    samples = jnp.array([[0.0, 10.0], [1.0, 11.0], [2.0, 12.0]])
+    post = SamplePosterior(
+        samples=samples,
+        log_weights=jnp.zeros(3),
+        evidence=jnp.asarray(jnp.nan),
+        param_names=("a", "b"),
+    )
+    drawn = post.sample(jax.random.key(0), 5)
+    assert drawn.shape == (5, 2)
+    d = post.sample_dict(jax.random.key(0), 5)
+    assert set(d) == {"a", "b"}
+    assert d["a"].shape == (5,)
+
+
+def test_cluster_to_mixture_recovers_two_clusters():
+    """Two separated clusters become a 2-mode mixture with correct means/weights."""
+    k0, k1 = jax.random.split(jax.random.key(1))
+    a = jax.random.normal(k0, (200, 2)) * 0.2
+    b = jax.random.normal(k1, (200, 2)) * 0.2 + jnp.array([5.0, 5.0])
+    samples = jnp.concatenate([a, b], axis=0)
+    post = SamplePosterior(
+        samples=samples,
+        log_weights=jnp.zeros(400),
+        evidence=jnp.asarray(jnp.nan),
+        param_names=("x", "y"),
+    )
+    mix = cluster_to_mixture(post, 2, key=jax.random.key(2))
+    assert mix.means.shape == (2, 2)
+    assert mix.covs.shape == (2, 2, 2)
+    centers = jnp.sort(mix.means[:, 0])
+    assert jnp.allclose(centers, jnp.array([0.0, 5.0]), atol=0.5)
+    assert jnp.allclose(jnp.exp(mix.log_weights), jnp.array([0.5, 0.5]), atol=0.1)
