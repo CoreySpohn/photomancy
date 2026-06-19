@@ -10,6 +10,12 @@ Unlike the single-logdensity backends, tempered SMC needs the prior and likeliho
 separately: ``run(logprior, loglikelihood, init, key)``. The core builds the
 combined logdensity from these same plug-ins, so a caller that has the pieces hands
 them straight here (or recovers the split as ``loglikelihood = logjoint - logprior``).
+
+TODO (traced-vs-baked forward arrays): ``logprior`` / ``loglikelihood`` are handed to
+BlackJAX, which jits them internally, so a Module forward carrying a large array (e.g.
+a coronagraph PSF datacube) BAKES that array as a constant here. Thread it as a traced
+input the way ``LaplaceBackend`` does (filter_jit the compiled region with the
+plug-ins as arguments). See ``AbstractBackend``.
 """
 
 import blackjax

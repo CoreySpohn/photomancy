@@ -11,6 +11,17 @@ class AbstractBackend(eqx.Module):
     Backends are ``eqx.Module`` config objects (hyperparameters as fields) with a
     pure ``run``. A backend sees only the flat ``logdensity`` -- never the scene or
     the forward model -- which is what keeps the engine forward-model agnostic.
+
+    Traced-vs-baked forward arrays: when ``logdensity`` is a ``SceneLogDensity``
+    Module, its array leaves (e.g. a forward's PSF datacube) thread as traced
+    inputs only if the backend's compiled region receives the logdensity as a
+    ``filter_jit`` argument. ``LaplaceBackend`` does this (``laplace_fit`` is
+    ``filter_jit``'d), so a large coronagraph/IFS forward stays an input buffer.
+    The NUTS and SMC backends hand the logdensity straight to BlackJAX, which jits
+    it internally and so still BAKES a large forward array as a compile-time
+    constant. Threading big-array forwards through the BlackJAX samplers (and any
+    sampler added later) needs the same filter_jit/partition treatment (not yet
+    implemented).
     """
 
     @abstractmethod

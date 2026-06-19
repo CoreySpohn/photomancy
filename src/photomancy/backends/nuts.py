@@ -4,6 +4,12 @@ Window adaptation tunes the step size and mass matrix, then the chain runs throu
 ``run_inference_algorithm`` (a single ``lax.scan``, O(1) compile regardless of
 chain length). The draws are equally weighted and carry no evidence estimate
 (``evidence`` is ``NaN``); use the SMC backend when you need ``log Z``.
+
+TODO (traced-vs-baked forward arrays): ``logdensity`` is handed to BlackJAX, which
+jits it internally, so a ``SceneLogDensity`` whose forward carries a large array
+(e.g. a coronagraph PSF datacube) BAKES that array as a constant here. Thread it as
+a traced input the way ``LaplaceBackend`` does (filter_jit the compiled region with
+the logdensity as an argument). See ``AbstractBackend``.
 """
 
 import blackjax
