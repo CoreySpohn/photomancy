@@ -104,3 +104,48 @@ def test_orbit_fit_through_generic_backend_recovers_period():
     best_z = post.means[jnp.argmax(post.log_evidences)]
     t_fit = float(problem.to_physical(best_z)["T"])
     assert abs(t_fit - TRUE_T) / TRUE_T < 0.10, f"t_fit={t_fit:.1f} vs {TRUE_T}"
+
+
+def test_orbit_problem_exposes_unflatten_and_trace():
+    """The problem exposes the model unflatten + trace for the EIG forward."""
+    astrom = _make_astrom(6)
+    problem = build_orbit_logdensity(
+        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        init_dict = find_init(astrom, MSUN_KG, DIST_PC, log_T_range=LOG_P_RANGE)
+    z = problem.init_to_z(init_dict)
+
+    assert callable(problem.unflatten)
+    assert callable(problem.constrain)
+    assert set(problem.unflatten(z)) == set(problem.param_names)
+    phys = problem.constrain(problem.unflatten(z))
+    assert -1.0 < float(phys["cos_i"]) < 1.0  # constrained into Uniform(-1, 1)
+
+
+def test_to_unconstrained_round_trips_known_orbit():
+    """Physical orbit rows -> z -> physical recovers the orbit (OFTI bridge)."""
+    from photomancy.orbit.inference import to_unconstrained
+    from photomancy.posterior import SamplePosterior
+
+    T = 700.0
+    a = float(period_to_sma(T, MSUN_KG))
+    cw, sw = float(jnp.cos(0.6)), float(jnp.sin(0.6))
+    row = jnp.array([[a, 0.2, 0.4, 1.1, cw, sw, 30.0]])  # a,e,cos_i,W,cos_w,sin_w,tp
+    phys_post = SamplePosterior(
+        samples=row,
+        log_weights=jnp.zeros(1),
+        evidence=jnp.asarray(jnp.nan),
+        param_names=("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp"),
+    )
+    problem = build_orbit_logdensity(
+        MSUN_KG, DIST_PC, astrom_data=_make_astrom(6), log_P_range=LOG_P_RANGE
+    )
+    zpost = to_unconstrained(phys_post, problem, MSUN_KG)
+    assert zpost.samples.shape == (1, len(problem.param_names))
+
+    phys = jax.vmap(problem.to_physical)(zpost.samples)
+    assert abs(float(phys["T"][0]) - T) / T < 0.02
+    assert abs(float(phys["e"][0]) - 0.2) < 0.02
+    assert abs(float(phys["cos_i"][0]) - 0.4) < 0.02

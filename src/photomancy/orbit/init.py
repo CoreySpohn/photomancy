@@ -27,60 +27,51 @@ from photomancy.orbit.likelihoods import loglike_astrom
 from photomancy.orbit.thiele_innes import thiele_innes_fit
 
 
-def ti_to_init(ti_result, Ms, n_planets=1):
-    """Convert a :class:`TIFitResult` to a NumPyro ``init_to_value`` dict.
+def elements_to_sites(T, e, cos_i, W, cos_w, sin_w, tp, n_planets=1):
+    """Physical orbital elements -> NumPyro raw sample sites (clamped into support).
 
-    Maps the TI-recovered orbital elements back to the raw NumPyro
-    parameter names used by :func:`~photomancy.orbit.model.build_model`.
-
-    Values are clamped to lie strictly within the support of each
-    NumPyro distribution (e.g. ``e_raw`` away from 0 for Beta priors).
-    Any NaN values (common with very sparse data) are replaced with
-    prior-center defaults before clamping.
+    Maps period / eccentricity / angles to the raw site names used by
+    :func:`~photomancy.orbit.model.build_model`, clamped strictly inside each
+    distribution's support; NaN inputs (common with very sparse data) fall back to
+    prior-center defaults. Shared by the TI initializer and the OFTI / grid_search
+    physical -> z bridge.
 
     Args:
-        ti_result: A :class:`TIFitResult` from the TI fitter or grid search.
-        Ms: Stellar mass (kg). Needed only for logging/validation.
-        n_planets: Number of planets in the model. Default 1.
+        T: Orbital period (days).
+        e: Eccentricity.
+        cos_i: Cosine of inclination.
+        W: Longitude of ascending node (rad).
+        cos_w: Cosine of the argument of periapsis.
+        sin_w: Sine of the argument of periapsis.
+        tp: Time of periapsis (days).
+        n_planets: Number of planets (the plate size). Default 1.
 
     Returns:
-        Dict mapping NumPyro sample site names to initial values, suitable
-        for ``numpyro.infer.init_to_value(values=...)``.
+        Dict of raw site arrays of shape ``(n_planets,)``.
     """
     eps = 1e-6  # small offset to keep values inside open supports
 
-    # Period -> log10(T)
-    log_P = jnp.log10(ti_result.T)
-    log_P = jnp.where(jnp.isnan(log_P), 2.5, log_P)
+    log_P = jnp.where(jnp.isnan(jnp.log10(T)), 2.5, jnp.log10(T))
 
-    # Eccentricity -> e_raw.  Clamp to (eps, 1-eps) so it lies strictly
-    # inside Beta(a,b) support (0,1).  e=0 from a circular-orbit grid
-    # point would give -inf log-prob under Beta.
-    e_raw = jnp.where(jnp.isnan(ti_result.e), 0.2, ti_result.e)
-    e_raw = jnp.clip(e_raw, eps, 1.0 - eps)
+    # e_raw clamped strictly inside Beta support (0, 1)
+    e_raw = jnp.clip(jnp.where(jnp.isnan(e), 0.2, e), eps, 1.0 - eps)
 
-    # Argument of periapsis -> w_raw in (eps, 2pi-eps)
-    sin_w = jnp.where(jnp.isnan(ti_result.sin_w), 0.0, ti_result.sin_w)
-    cos_w = jnp.where(jnp.isnan(ti_result.cos_w), 1.0, ti_result.cos_w)
-    w = jnp.arctan2(sin_w, cos_w) % (2.0 * jnp.pi)
+    w = jnp.arctan2(
+        jnp.where(jnp.isnan(sin_w), 0.0, sin_w),
+        jnp.where(jnp.isnan(cos_w), 1.0, cos_w),
+    ) % (2.0 * jnp.pi)
     w = jnp.clip(w, eps, 2.0 * jnp.pi - eps)
 
-    # cos_i -- clamp to (-1+eps, 1-eps) for Uniform(-1,1)
-    cos_i = jnp.where(jnp.isnan(ti_result.cos_i), 0.0, ti_result.cos_i)
-    cos_i = jnp.clip(cos_i, -1.0 + eps, 1.0 - eps)
+    cos_i = jnp.clip(jnp.where(jnp.isnan(cos_i), 0.0, cos_i), -1.0 + eps, 1.0 - eps)
 
-    # Longitude of ascending node -- clamp to (eps, 2pi-eps)
-    W_val = jnp.where(jnp.isnan(ti_result.W), jnp.pi, ti_result.W)
-    W = W_val % (2.0 * jnp.pi)
+    W = jnp.where(jnp.isnan(W), jnp.pi, W) % (2.0 * jnp.pi)
     W = jnp.clip(W, eps, 2.0 * jnp.pi - eps)
 
-    # Convert tp -> M0: M0 = n * (0 - tp) = -2pi*tp / T, then mod 2pi
-    tp_val = jnp.where(jnp.isnan(ti_result.tp), 0.0, ti_result.tp)
-    T_safe = jnp.where(jnp.isnan(ti_result.T), 1.0, ti_result.T)
-    M0 = (-tp_val * 2.0 * jnp.pi / T_safe) % (2.0 * jnp.pi)
+    # tp -> M0 = -2pi*tp / T, then mod 2pi
+    T_safe = jnp.where(jnp.isnan(T), 1.0, T)
+    M0 = (-jnp.where(jnp.isnan(tp), 0.0, tp) * 2.0 * jnp.pi / T_safe) % (2.0 * jnp.pi)
     M0 = jnp.clip(M0, eps, 2.0 * jnp.pi - eps)
 
-    # Pack into plate-shaped arrays (shape = (n_planets,))
     return {
         "log_P": jnp.full(n_planets, log_P),
         "e_raw": jnp.full(n_planets, e_raw),
@@ -89,6 +80,32 @@ def ti_to_init(ti_result, Ms, n_planets=1):
         "W": jnp.full(n_planets, W),
         "M0": jnp.full(n_planets, M0),
     }
+
+
+def ti_to_init(ti_result, Ms, n_planets=1):
+    """Convert a :class:`TIFitResult` to a NumPyro ``init_to_value`` dict.
+
+    Thin wrapper over :func:`elements_to_sites` for the TI-recovered elements.
+
+    Args:
+        ti_result: A :class:`TIFitResult` from the TI fitter or grid search.
+        Ms: Stellar mass (kg). Unused; kept for call-site compatibility.
+        n_planets: Number of planets in the model. Default 1.
+
+    Returns:
+        Dict mapping NumPyro sample site names to initial values, suitable
+        for ``numpyro.infer.init_to_value(values=...)``.
+    """
+    return elements_to_sites(
+        ti_result.T,
+        ti_result.e,
+        ti_result.cos_i,
+        ti_result.W,
+        ti_result.cos_w,
+        ti_result.sin_w,
+        ti_result.tp,
+        n_planets,
+    )
 
 
 def _grid_results(astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp):

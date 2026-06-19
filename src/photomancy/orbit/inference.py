@@ -16,13 +16,17 @@ bridge is the engine-agnostic path that closure-captures the (small, padded) dat
 from collections.abc import Callable
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
+from hwoutils.constants import G
 
+from photomancy.orbit.init import elements_to_sites
 from photomancy.orbit.laplace import (
     _get_or_build_cached,
     _init_dict_to_z_flat,
     _pad_orbit_data,
 )
+from photomancy.posterior import SamplePosterior
 
 
 class OrbitProblem(eqx.Module):
@@ -34,12 +38,17 @@ class OrbitProblem(eqx.Module):
             parameters (``T``, ``e``, ``a``, ...).
         init_to_z: ``init_dict -> z`` converting a blind-initializer dict (e.g. from
             ``photomancy.orbit.init.find_init``) to a flat unconstrained position.
+        unflatten: ``z -> dict`` of raw (unconstrained) sample sites.
+        constrain: ``raw-site dict -> physical-site dict`` applying each site's forward
+            constraint bijector (the seam the EIG forward differentiates through).
         param_names: The unconstrained sample-site names, in flat order.
     """
 
     logdensity: Callable = eqx.field(static=True)
     to_physical: Callable = eqx.field(static=True)
     init_to_z: Callable = eqx.field(static=True)
+    unflatten: Callable = eqx.field(static=True)
+    constrain: Callable = eqx.field(static=True)
     param_names: tuple[str, ...] = eqx.field(static=True)
 
 
@@ -128,9 +137,68 @@ def build_orbit_logdensity(
             init_dict, cached["z_template"], cached["inv_transforms"]
         )
 
+    # Forward (unconstrained -> physical) bijectors are the inverse of the cached
+    # inverse transforms; capture them in a closure so they are not stored as static
+    # JAX-array leaves on the module.
+    fwd_transforms = {name: t.inv for name, t in cached["inv_transforms"].items()}
+
+    def constrain(z_dict):
+        return {
+            name: jnp.squeeze(fwd_transforms[name](v))
+            if name in fwd_transforms
+            else jnp.squeeze(v)
+            for name, v in z_dict.items()
+        }
+
     return OrbitProblem(
         logdensity=logdensity,
         to_physical=to_physical,
         init_to_z=init_to_z,
+        unflatten=unflatten,
+        constrain=constrain,
         param_names=cached["param_names"],
+    )
+
+
+def to_unconstrained(posterior, problem, Ms):
+    """Map a physical orbit SamplePosterior to the model's unconstrained z-space.
+
+    OFTI / grid_search emit physical rows ``(a, e, cos_i, W, cos_w, sin_w, tp)``; the
+    EIG needs the model's unconstrained ``z``. Converts ``a -> period`` (Kepler) then
+    each row -> raw sites -> ``z`` via ``problem.init_to_z`` (vmapped, no Python loop).
+
+    Args:
+        posterior: A physical :class:`~photomancy.posterior.SamplePosterior` whose
+            ``param_names`` include ``a, e, cos_i, W, cos_w, sin_w, tp``.
+        problem: The :class:`OrbitProblem` defining the target ``z`` space.
+        Ms: Stellar mass (kg), for the ``a -> period`` Kepler inversion.
+
+    Returns:
+        A :class:`~photomancy.posterior.SamplePosterior` in ``z`` space (``param_names``
+        are ``problem.param_names``), preserving the input weights and evidence.
+    """
+    cols = {
+        name: posterior.samples[:, i] for i, name in enumerate(posterior.param_names)
+    }
+    period = 2.0 * jnp.pi * jnp.sqrt(cols["a"] ** 3 / (G * Ms))
+
+    def one(t, e, cos_i, w_node, cos_w, sin_w, tp):
+        return problem.init_to_z(
+            elements_to_sites(t, e, cos_i, w_node, cos_w, sin_w, tp, n_planets=1)
+        )
+
+    z = jax.vmap(one)(
+        period,
+        cols["e"],
+        cols["cos_i"],
+        cols["W"],
+        cols["cos_w"],
+        cols["sin_w"],
+        cols["tp"],
+    )
+    return SamplePosterior(
+        samples=z,
+        log_weights=posterior.log_weights,
+        evidence=posterior.evidence,
+        param_names=problem.param_names,
     )
