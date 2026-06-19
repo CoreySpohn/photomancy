@@ -11,15 +11,16 @@ separately: ``run(logprior, loglikelihood, init, key)``. The core builds the
 combined logdensity from these same plug-ins, so a caller that has the pieces hands
 them straight here (or recovers the split as ``loglikelihood = logjoint - logprior``).
 
-TODO (traced-vs-baked forward arrays): ``logprior`` / ``loglikelihood`` are handed to
-BlackJAX, which jits them internally, so a Module forward carrying a large array (e.g.
-a coronagraph PSF datacube) BAKES that array as a constant here. Thread it as a traced
-input the way ``LaplaceBackend`` does (filter_jit the compiled region with the
-plug-ins as arguments). See ``AbstractBackend``.
+``run`` is ``filter_jit``-wrapped, so when ``logprior`` / ``loglikelihood`` are
+``SceneLogDensity``-style Modules their forward's array leaves (e.g. a coronagraph PSF
+datacube) thread as traced inputs to BlackJAX rather than being baked into the
+compiled kernel as constants -- which is what makes coronagraph/IFS-aware evidence
+(``log Z``) tractable.
 """
 
 import blackjax
 import blackjax.smc.resampling as resampling
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from blackjax.smc import extend_params
@@ -41,6 +42,7 @@ class SMCBackend(AbstractBackend):
     n_mcmc_steps: int = 10
     target_ess: float = 0.5
 
+    @eqx.filter_jit
     def run(self, logprior, loglikelihood, init, key=None):
         """Temper the particles ``init`` (shape ``(n, d)``) from prior to posterior."""
         if key is None:

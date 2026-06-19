@@ -5,14 +5,13 @@ Window adaptation tunes the step size and mass matrix, then the chain runs throu
 chain length). The draws are equally weighted and carry no evidence estimate
 (``evidence`` is ``NaN``); use the SMC backend when you need ``log Z``.
 
-TODO (traced-vs-baked forward arrays): ``logdensity`` is handed to BlackJAX, which
-jits it internally, so a ``SceneLogDensity`` whose forward carries a large array
-(e.g. a coronagraph PSF datacube) BAKES that array as a constant here. Thread it as
-a traced input the way ``LaplaceBackend`` does (filter_jit the compiled region with
-the logdensity as an argument). See ``AbstractBackend``.
+``run`` is ``filter_jit``-wrapped, so when ``logdensity`` is a ``SceneLogDensity``
+Module its forward's array leaves (e.g. a coronagraph PSF datacube) thread as traced
+inputs to BlackJAX rather than being baked into the compiled kernel as constants.
 """
 
 import blackjax
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from blackjax.util import run_inference_algorithm
@@ -32,6 +31,7 @@ class NUTSBackend(AbstractBackend):
     n_warmup: int = 500
     n_samples: int = 2000
 
+    @eqx.filter_jit
     def run(self, logdensity, init, key=None):
         """Adapt, then sample NUTS from ``init``; returns equal-weight samples."""
         if key is None:
