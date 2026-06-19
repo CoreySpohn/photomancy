@@ -1,8 +1,8 @@
 """Laplace backend: MAP + Hessian -> GaussianPosterior.
 
-The MAP is found with ``optax.lbfgs`` (the Kidger first-order stack; a quasi-Newton
-line search that converges to high precision). The covariance is the inverse of
-the negative-log-density Hessian at the MAP, computed by Hessian-vector products
+The MAP is found with ``optax.lbfgs`` (a quasi-Newton line search that
+converges to high precision). The covariance is the inverse of the
+negative-log-density Hessian at the MAP, computed by Hessian-vector products
 (forward-over-reverse AD) and regularized by flooring its eigenvalues at
 ``min_eigenvalue`` -- so a direction the data barely constrains gets a bounded
 variance instead of inverting to an enormous one. The single-mode fit lives in
