@@ -7,13 +7,16 @@ that returns a Posterior.
 
 from photomancy.backends.base import AbstractBackend
 from photomancy.backends.laplace import LaplaceBackend, LaplaceMixtureBackend
+from photomancy.backends.nested import JaxnsBackend, build_scene_nested_model
 from photomancy.backends.nuts import NUTSBackend
 from photomancy.backends.smc import SMCBackend
 
 __all__ = [
     "AbstractBackend",
+    "JaxnsBackend",
     "LaplaceBackend",
     "LaplaceMixtureBackend",
     "NUTSBackend",
     "SMCBackend",
+    "build_scene_nested_model",
 ]

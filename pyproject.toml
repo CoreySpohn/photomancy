@@ -22,6 +22,7 @@ dependencies = [
     "hwoutils",
     "jax>=0.8.1",
     "jaxlib>=0.8.1",
+    "jaxns>=2.6.9",
     "jaxtyping",
     "numpy",
     "numpyro>=0.15.0",
