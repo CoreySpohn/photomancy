@@ -3,8 +3,9 @@
 Supplies the orbit forward model (unconstrained ``z`` -> sky position via Kepler) and
 the contrast-curve detectability, then delegates the analytic EIG to
 :mod:`photomancy.eig`. The geometric / alias-breaking / detectability primitives are
-re-exported from there. ``evaluate_candidates`` keeps its public signature and output,
-now scheduling against any orbit Laplace mixture through the Posterior interface.
+re-exported from there. ``evaluate_candidates`` (a Laplace mixture) and
+``evaluate_candidates_mixture`` (any z-space MixturePosterior + an OrbitProblem) both
+schedule through this layer.
 """
 
 from collections.abc import Callable
@@ -27,12 +28,14 @@ from photomancy.eig import (
     geometric_eig,
 )
 from photomancy.eig import evaluate_candidates as _eval_candidates
+from photomancy.orbit.inference import make_constrain
 from photomancy.posterior import MixturePosterior
 
 __all__ = [
     "alias_breaking_eig",
     "detectability_eig",
     "evaluate_candidates",
+    "evaluate_candidates_mixture",
     "geometric_eig",
 ]
 
@@ -46,30 +49,18 @@ def _predict_astrom_pure(
     z_flat: jnp.ndarray,
     t: float,
     unflatten: Callable,
-    fwd_transforms: dict,
+    constrain: Callable,
     Ms: float,
     dist_pc: float,
 ) -> jnp.ndarray:
     """Predict (RA, Dec) from unconstrained z at a single time.
 
-    Uses constraint bijectors directly -- no NumPyro model trace.
-    Returns shape ``(2,)`` array ``[RA, Dec]`` in arcsec.
-
-    All physical params are squeezed to true scalars to ensure
-    compatibility with the Kepler solver under double-vmap.
+    ``constrain`` applies the forward bijectors (no NumPyro model trace), squeezing each
+    param to a scalar for the Kepler solver under double-vmap. Returns shape ``(2,)``
+    array ``[RA, Dec]`` in arcsec.
     """
-    z_dict = unflatten(z_flat)
+    phys = constrain(unflatten(z_flat))
 
-    # Apply forward (unconstrained -> constrained) transforms
-    # Squeeze to scalar -- unflatten may produce shape (1,) values
-    phys = {}
-    for name, z_val in z_dict.items():
-        if name in fwd_transforms:
-            phys[name] = jnp.squeeze(fwd_transforms[name](z_val))
-        else:
-            phys[name] = jnp.squeeze(z_val)
-
-    # Extract physical parameters (all scalar after squeeze)
     log_P = phys["log_P"]
     T = 10.0**log_P
     e = phys["e_raw"]  # after transform: physical eccentricity
@@ -107,27 +98,18 @@ def _predict_sep_dmag_pure(
     z_flat: jnp.ndarray,
     t: float,
     unflatten: Callable,
-    fwd_transforms: dict,
+    constrain: Callable,
     Ms: float,
     dist_pc: float,
     Lambda: float,
 ) -> jnp.ndarray:
     """Predict separation (arcsec) and dMag from unconstrained z.
 
-    Uses the same orbital mechanics as ``_predict_astrom_pure`` plus
-    the Lambert phase function to compute photometric observables.
-    ``Lambda = Ag * Rp^2`` is provided as a known constant (the planet
-    has already been detected once).
-
-    Returns shape ``(2,)`` array ``[sep_arcsec, dMag]``.
+    Same orbital mechanics as ``_predict_astrom_pure`` plus the Lambert phase function.
+    ``Lambda = Ag * Rp^2`` is a known constant (the planet was detected once). Returns
+    shape ``(2,)`` array ``[sep_arcsec, dMag]``.
     """
-    z_dict = unflatten(z_flat)
-    phys = {}
-    for name, z_val in z_dict.items():
-        if name in fwd_transforms:
-            phys[name] = jnp.squeeze(fwd_transforms[name](z_val))
-        else:
-            phys[name] = jnp.squeeze(z_val)
+    phys = constrain(unflatten(z_flat))
 
     log_P = phys["log_P"]
     T = 10.0**log_P
@@ -178,54 +160,37 @@ def _predict_sep_dmag_pure(
 # ---------------------------------------------------------------------------
 
 
-def evaluate_candidates(
-    mixture,
+def _fwd_from_trace(model_trace):
+    """Forward constraint bijectors per unobserved sample site, from a model trace."""
+    from numpyro.distributions.transforms import biject_to
+
+    return {
+        name: biject_to(site["fn"].support)
+        for name, site in model_trace.items()
+        if site["type"] == "sample" and not site.get("is_observed", False)
+    }
+
+
+def _orbit_evaluate(
+    means,
+    covs,
+    log_evidences,
+    unflatten,
+    constrain,
     candidate_epochs,
     obs_variance,
     Ms,
     dist_pc,
     *,
-    Lambda=None,
-    contrast_curve=None,
-    iwa=0.0,
+    Lambda,
+    contrast_curve,
+    iwa,
 ):
-    """Imaging-aware EIG over candidate epochs for an orbit Laplace mixture.
-
-    Thin wrapper over :func:`photomancy.eig.evaluate_candidates`: builds the orbit
-    forward model and (optionally) the contrast-curve detectability, then delegates.
-
-    Args:
-        mixture: A fitted ``LaplaceMixtureResult``.
-        candidate_epochs: Candidate observation times (days). Shape ``(N,)``.
-        obs_variance: Measurement variance per observable (scalar or ``(n_obs,)``).
-        Ms: Stellar mass (kg).
-        dist_pc: Distance (parsec).
-        Lambda: Planet photometric area ``Ag * Rp^2`` (AU^2). With ``contrast_curve``,
-            enables imaging-aware EIG.
-        contrast_curve: ``(sep_arcsec, dmag_limit)`` arrays for the detection threshold.
-        iwa: Inner working angle (arcsec); planets inside are not detectable.
-
-    Returns:
-        Dict with ``total_eig``, ``geometric_eig``, ``alias_eig``, ``predictions``,
-        ``detectability`` (all per candidate), plus orbit ``separation`` and ``dMag``
-        per mode.
-    """
-    from numpyro.distributions.transforms import biject_to
-
-    fwd_transforms = {}
-    for name, site in mixture._model_trace.items():
-        if site["type"] == "sample" and not site.get("is_observed", False):
-            fwd_transforms[name] = biject_to(site["fn"].support)
-    unflatten = mixture._unflatten
-
-    posterior = MixturePosterior(
-        means=mixture.z_maps,
-        covs=mixture.covariances,
-        log_evidences=mixture.log_evidence,
-    )
+    """Shared orbit-EIG core: build forward + detectability, delegate, add sep/dMag."""
+    posterior = MixturePosterior(means=means, covs=covs, log_evidences=log_evidences)
 
     def forward(z, t):
-        return _predict_astrom_pure(z, t, unflatten, fwd_transforms, Ms, dist_pc)
+        return _predict_astrom_pure(z, t, unflatten, constrain, Ms, dist_pc)
 
     has_imaging = Lambda is not None and contrast_curve is not None
     detectable = None
@@ -235,7 +200,7 @@ def evaluate_candidates(
 
         def detectable(z, t):
             sep, dmag = _predict_sep_dmag_pure(
-                z, t, unflatten, fwd_transforms, Ms, dist_pc, Lambda
+                z, t, unflatten, constrain, Ms, dist_pc, Lambda
             )
             dmag_limit = jnp.interp(sep, csep, cdmag, left=jnp.inf, right=jnp.inf)
             return ((sep > iwa) & (dmag < dmag_limit)).astype(jnp.float64)
@@ -255,7 +220,7 @@ def evaluate_candidates(
         sep_dmag = jax.vmap(
             lambda t: jax.vmap(
                 lambda z: _predict_sep_dmag_pure(
-                    z, t, unflatten, fwd_transforms, Ms, dist_pc, Lambda
+                    z, t, unflatten, constrain, Ms, dist_pc, Lambda
                 )
             )(posterior.means)
         )(epochs)
@@ -265,3 +230,84 @@ def evaluate_candidates(
         res["separation"] = jnp.zeros_like(res["detectability"])
         res["dMag"] = jnp.zeros_like(res["detectability"])
     return res
+
+
+def evaluate_candidates(
+    mixture,
+    candidate_epochs,
+    obs_variance,
+    Ms,
+    dist_pc,
+    *,
+    Lambda=None,
+    contrast_curve=None,
+    iwa=0.0,
+):
+    """Imaging-aware EIG over candidate epochs for an orbit Laplace mixture.
+
+    Builds the orbit forward + contrast-curve detectability from the
+    ``LaplaceMixtureResult`` and delegates to the shared core.
+
+    Args:
+        mixture: A fitted ``LaplaceMixtureResult``.
+        candidate_epochs: Candidate observation times (days). Shape ``(N,)``.
+        obs_variance: Measurement variance per observable (scalar or ``(n_obs,)``).
+        Ms: Stellar mass (kg).
+        dist_pc: Distance (parsec).
+        Lambda: Planet photometric area ``Ag * Rp^2`` (AU^2); with ``contrast_curve``
+            enables imaging-aware EIG.
+        contrast_curve: ``(sep_arcsec, dmag_limit)`` arrays for the detection threshold.
+        iwa: Inner working angle (arcsec); planets inside are not detectable.
+
+    Returns:
+        Dict with ``total_eig``, ``geometric_eig``, ``alias_eig``, ``predictions``,
+        ``detectability`` (per candidate), plus orbit ``separation`` / ``dMag``.
+    """
+    return _orbit_evaluate(
+        mixture.z_maps,
+        mixture.covariances,
+        mixture.log_evidence,
+        mixture._unflatten,
+        make_constrain(_fwd_from_trace(mixture._model_trace)),
+        candidate_epochs,
+        obs_variance,
+        Ms,
+        dist_pc,
+        Lambda=Lambda,
+        contrast_curve=contrast_curve,
+        iwa=iwa,
+    )
+
+
+def evaluate_candidates_mixture(
+    posterior,
+    problem,
+    candidate_epochs,
+    obs_variance,
+    Ms,
+    dist_pc,
+    *,
+    Lambda=None,
+    contrast_curve=None,
+    iwa=0.0,
+):
+    """EIG over candidate epochs for a generic z-space MixturePosterior + OrbitProblem.
+
+    Lets OFTI / grid_search (via ``to_unconstrained`` -> ``cluster_to_mixture``) drive
+    the same analytic EIG as the Laplace mixture. ``problem`` supplies the model
+    ``unflatten`` and ``constrain``. Same return as :func:`evaluate_candidates`.
+    """
+    return _orbit_evaluate(
+        posterior.means,
+        posterior.covs,
+        posterior.log_evidences,
+        problem.unflatten,
+        problem.constrain,
+        candidate_epochs,
+        obs_variance,
+        Ms,
+        dist_pc,
+        Lambda=Lambda,
+        contrast_curve=contrast_curve,
+        iwa=iwa,
+    )

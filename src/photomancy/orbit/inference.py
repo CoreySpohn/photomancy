@@ -52,6 +52,25 @@ class OrbitProblem(eqx.Module):
     param_names: tuple[str, ...] = eqx.field(static=True)
 
 
+def make_constrain(fwd_transforms):
+    """Build a ``raw-site dict -> physical-site dict`` closure from forward bijectors.
+
+    Each named transform maps an unconstrained value to physical; sites without a
+    transform pass through (squeezed). Shared by the orbit problem and the EIG Laplace
+    path so both apply identical constraints.
+    """
+
+    def constrain(z_dict):
+        return {
+            name: jnp.squeeze(fwd_transforms[name](v))
+            if name in fwd_transforms
+            else jnp.squeeze(v)
+            for name, v in z_dict.items()
+        }
+
+    return constrain
+
+
 def build_orbit_logdensity(
     Ms,
     dist_pc,
@@ -138,17 +157,10 @@ def build_orbit_logdensity(
         )
 
     # Forward (unconstrained -> physical) bijectors are the inverse of the cached
-    # inverse transforms; capture them in a closure so they are not stored as static
-    # JAX-array leaves on the module.
-    fwd_transforms = {name: t.inv for name, t in cached["inv_transforms"].items()}
-
-    def constrain(z_dict):
-        return {
-            name: jnp.squeeze(fwd_transforms[name](v))
-            if name in fwd_transforms
-            else jnp.squeeze(v)
-            for name, v in z_dict.items()
-        }
+    # inverse transforms; the closure keeps them off the module as static array leaves.
+    constrain = make_constrain(
+        {name: t.inv for name, t in cached["inv_transforms"].items()}
+    )
 
     return OrbitProblem(
         logdensity=logdensity,

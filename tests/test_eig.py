@@ -97,3 +97,80 @@ def test_evaluate_candidates_returns_finite_nonnegative_eig():
     assert result["total_eig"].shape == (8,)
     assert jnp.all(jnp.isfinite(result["total_eig"]))
     assert jnp.all(result["total_eig"] >= -1e-6)
+
+
+def test_mixture_path_matches_laplace_path():
+    """evaluate_candidates_mixture on a generic mixture matches the Laplace path."""
+    from photomancy.orbit.eig import evaluate_candidates_mixture
+    from photomancy.orbit.inference import build_orbit_logdensity
+    from photomancy.posterior import MixturePosterior
+
+    astrom = _make_astrom(5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mixture = map_laplace_mixture_fit(
+            MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
+        )
+    epochs = jnp.linspace(0.0, 3.0 * TRUE_T, 12)
+    res_a = evaluate_candidates(mixture, epochs, (5.0e-3) ** 2, MSUN_KG, DIST_PC)
+
+    problem = build_orbit_logdensity(
+        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+    )
+    post = MixturePosterior(
+        means=mixture.z_maps,
+        covs=mixture.covariances,
+        log_evidences=mixture.log_evidence,
+    )
+    res_b = evaluate_candidates_mixture(
+        post, problem, epochs, (5.0e-3) ** 2, MSUN_KG, DIST_PC
+    )
+    assert jnp.allclose(res_a["total_eig"], res_b["total_eig"], atol=1e-6)
+
+
+def test_ofti_to_eig_end_to_end():
+    """OFTI -> to_unconstrained -> cluster_to_mixture -> EIG runs and is finite."""
+    from photomancy.orbit.eig import evaluate_candidates_mixture
+    from photomancy.orbit.inference import build_orbit_logdensity, to_unconstrained
+    from photomancy.orbit.ofti import ofti
+    from photomancy.posterior import cluster_to_mixture
+
+    a = float(period_to_sma(TRUE_T, MSUN_KG))
+    tp = -1.5 / (2.0 * jnp.pi / TRUE_T)
+    times = jnp.linspace(0.0, 0.08 * TRUE_T, 4)  # short arc -> OFTI's regime
+    ra, dec = predict_astrometry(
+        times, a, 0.15, 0.5, 2.3, jnp.cos(0.8), jnp.sin(0.8), tp, MSUN_KG, DIST_PC
+    )
+    err = 5.0e-3
+    astrom = AstromData(
+        times=times,
+        ra=ra,
+        dec=dec,
+        ra_err=jnp.full(4, err),
+        dec_err=jnp.full(4, err),
+        corr=jnp.zeros(4),
+        planet_id=jnp.zeros(4, dtype=int),
+        is_valid=jnp.ones(4, dtype=bool),
+    )
+    problem = build_orbit_logdensity(
+        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+    )
+    samp = ofti(
+        astrom,
+        Ms=MSUN_KG,
+        dist_pc=DIST_PC,
+        key=jax.random.key(0),
+        n_accept=1000,
+        ecc_prior="disk",
+        log_P_range=LOG_P_RANGE,
+        batch=50000,
+        max_batches=300,
+    )
+    zpost = to_unconstrained(samp, problem, MSUN_KG)
+    mix = cluster_to_mixture(zpost, 4, key=jax.random.key(1))
+    epochs = jnp.linspace(0.0, 3.0 * TRUE_T, 12)
+    res = evaluate_candidates_mixture(
+        mix, problem, epochs, (5.0e-3) ** 2, MSUN_KG, DIST_PC
+    )
+    assert res["total_eig"].shape == (12,)
+    assert jnp.all(jnp.isfinite(res["total_eig"]))
