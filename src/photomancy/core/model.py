@@ -7,9 +7,37 @@ nothing domain-specific; orbix / skyscapes supply the forward models.
 """
 
 from collections.abc import Callable
+from typing import Any
 
 import equinox as eqx
 from jax.flatten_util import ravel_pytree
+
+
+class SceneLogDensity(eqx.Module):
+    """A callable logdensity over a partitioned scene; array deps stay PyTree leaves.
+
+    Holding ``forward_model`` / ``likelihood`` / ``prior`` / ``static`` as fields --
+    rather than closing over them in a bare function -- keeps any arrays they carry as
+    leaves of this Module. In particular, a forward written as an ``eqx.Module`` (e.g.
+    a coronagraph forward holding a PSF datacube) exposes its arrays here. A backend
+    that ``filter_jit``s with this logdensity as an argument then threads those arrays
+    as traced inputs instead of constant-folding them into the compiled kernel.
+
+    Arrays captured inside a *closure* forward/likelihood (rather than a Module) remain
+    hidden and are baked as before; keep those small (e.g. the observed image) and make
+    any large-array forward a Module.
+    """
+
+    forward_model: Callable
+    likelihood: Callable
+    prior: Callable
+    static: Any
+    unravel: Callable = eqx.field(static=True)
+
+    def __call__(self, z):
+        """Score a flat position ``z``: ``prior + likelihood(forward(scene))``."""
+        scene = eqx.combine(self.unravel(z), self.static)
+        return self.prior(scene) + self.likelihood(self.forward_model(scene))
 
 
 def build_logdensity(
@@ -67,15 +95,11 @@ def build_scene_logdensity(
     params0, static = eqx.partition(scene, filter_spec)
     z0, unravel = ravel_pytree(params0)
 
-    def scene_forward(params):
-        return forward_model(eqx.combine(params, static))
-
-    def scene_prior(params):
-        return prior(eqx.combine(params, static))
-
-    pytree_logdensity = build_logdensity(scene_forward, likelihood, scene_prior)
-
-    def logdensity(z):
-        return pytree_logdensity(unravel(z))
-
+    logdensity = SceneLogDensity(
+        forward_model=forward_model,
+        likelihood=likelihood,
+        prior=prior,
+        static=static,
+        unravel=unravel,
+    )
     return logdensity, z0, unravel

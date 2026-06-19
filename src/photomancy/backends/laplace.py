@@ -9,6 +9,7 @@ variance instead of inverting to an enormous one. The single-mode fit lives in
 ``laplace_fit`` so the multi-start mixture backend can ``vmap`` it.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
@@ -51,8 +52,13 @@ def _laplace_covariance(neg_logdensity, z_map, min_eigenvalue):
     return jnp.linalg.inv(precision)
 
 
+@eqx.filter_jit
 def laplace_fit(logdensity, init, n_steps, min_eigenvalue):
     """Single-mode Laplace fit: MAP, covariance, and Laplace log-evidence.
+
+    ``filter_jit``-compiled: when ``logdensity`` is a ``SceneLogDensity`` Module its
+    array leaves (e.g. a forward's PSF datacube) are traced inputs, not baked-in
+    constants. ``n_steps`` / ``min_eigenvalue`` are Python scalars and stay static.
 
     Args:
         logdensity: ``z -> scalar`` log-density over the flat parameter position.
