@@ -24,11 +24,11 @@ from hwoutils.constants import G
 from orbix.equations.orbit import mean_motion
 
 from photomancy.orbit.forward import predict_astrometry
-from photomancy.orbit.grid_search import ParticlePosterior
 from photomancy.orbit.likelihoods import loglike_astrom
 from photomancy.orbit.priors import ecc_distribution
+from photomancy.posterior import SamplePosterior
 
-# Output rows match grid_search.ParticlePosterior for cross-tier compatibility.
+# Output rows match grid_search column order for cross-tier compatibility.
 PARAM_NAMES = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
 
 _TWO_PI = 2.0 * jnp.pi
@@ -228,7 +228,7 @@ def ofti(
 
     Draws orbits from priors, scale-and-rotates each onto a reference epoch, and
     rejection-samples against the full astrometric likelihood until ``n_accept``
-    orbits are accepted. Returns a ParticlePosterior with uniform weights (the
+    orbits are accepted. Returns a SamplePosterior with uniform weights (the
     accepted set is an unweighted posterior sample).
 
     Args:
@@ -252,7 +252,7 @@ def ofti(
         conditioner: An AbstractConditioner; None uses ScaleAndRotate().
 
     Returns:
-        A ParticlePosterior with ``n_accept`` particles, uniform log_weights, and
+        A SamplePosterior with ``n_accept`` particles, uniform log_weights, and
         param_names ``("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")``.
 
     Raises:
@@ -297,6 +297,9 @@ def ofti(
 
     particles = jnp.concatenate(accepted, axis=0)[:n_accept]
     log_weights = jnp.full((n_accept,), -jnp.log(n_accept))
-    return ParticlePosterior(
-        particles=particles, log_weights=log_weights, param_names=PARAM_NAMES
+    return SamplePosterior(
+        samples=particles,
+        log_weights=log_weights,
+        evidence=jnp.asarray(jnp.nan),
+        param_names=PARAM_NAMES,
     )

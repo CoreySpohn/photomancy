@@ -11,11 +11,11 @@ from photomancy.orbit.grid_search import (
     AdaptiveImportanceSampler,
     EccVectorShape,
     ParamBounds,
-    ParticlePosterior,
     batched_loglike,
     build_evaluator,
 )
 from photomancy.orbit.likelihoods import loglike_astrom
+from photomancy.posterior import SamplePosterior
 
 TWO_PI = 2.0 * jnp.pi
 MSUN = 1.98892e30
@@ -165,14 +165,17 @@ def test_stage2_returns_samples_and_logq():
     assert jnp.all(jnp.isfinite(log_q))
 
 
-def test_particleposterior_sir_sampling():
-    """ParticlePosterior.sample draws by weight; near-zero weight never drawn."""
-    from photomancy.orbit.grid_search import ParticlePosterior
-
+def test_sample_posterior_sir_sampling():
+    """SamplePosterior.sample draws by weight; near-zero weight never drawn."""
     parts = jnp.array([[0.0, 0.0], [1.0, 1.0]])
     logw = jnp.array([-1e9, 0.0])
-    pp = ParticlePosterior(particles=parts, log_weights=logw, param_names=("x", "y"))
-    out = pp.sample(jax.random.PRNGKey(0), n=64)
+    pp = SamplePosterior(
+        samples=parts,
+        log_weights=logw,
+        evidence=jnp.asarray(jnp.nan),
+        param_names=("x", "y"),
+    )
+    out = pp.sample_dict(jax.random.PRNGKey(0), n=64)
     assert set(out) == {"x", "y"}
     assert out["x"].shape == (64,)
     assert jnp.allclose(out["x"], 1.0)
@@ -200,9 +203,10 @@ def test_grid_search_recovers_period():
         n_survivors=500,
         key=jax.random.PRNGKey(0),
     )
-    draws = pp.sample(jax.random.PRNGKey(1), n=2000)
+    draws = pp.sample_dict(jax.random.PRNGKey(1), n=2000)
     med_a = float(jnp.median(draws["a"]))
     assert 0.7 < med_a < 1.4
+    assert jnp.isfinite(pp.evidence)  # importance-sampling log Z
 
 
 def test_chunking_is_shape_stable():
@@ -232,12 +236,11 @@ def test_chunking_is_shape_stable():
 
 
 def test_public_api_exports():
-    """All seven grid-search names are in photomancy.orbit.__all__ and accessible."""
+    """All six grid-search names are in photomancy.orbit.__all__ and accessible."""
     import photomancy.orbit as f
 
     for name in (
         "grid_search",
-        "ParticlePosterior",
         "EccVectorShape",
         "AdaptiveImportanceSampler",
         "AbstractGridStrategy",
@@ -271,8 +274,13 @@ def test_sample_respects_weights():
     """Inverse-CDF SIR draws particles in proportion to their weights."""
     logw = jnp.log(jnp.array([0.1, 0.3, 0.6]))
     parts = jnp.array([[0.0], [1.0], [2.0]])
-    pp = ParticlePosterior(particles=parts, log_weights=logw, param_names=("x",))
-    x = pp.sample(jax.random.PRNGKey(0), n=40000)["x"]
+    pp = SamplePosterior(
+        samples=parts,
+        log_weights=logw,
+        evidence=jnp.asarray(jnp.nan),
+        param_names=("x",),
+    )
+    x = pp.sample_dict(jax.random.PRNGKey(0), n=40000)["x"]
     freq = jnp.array([jnp.mean(x == v) for v in (0.0, 1.0, 2.0)])
     assert jnp.allclose(freq, jnp.array([0.1, 0.3, 0.6]), atol=0.02)
 
@@ -282,6 +290,11 @@ def test_sample_scales_to_large_particle_count():
     n_particles = 200000
     parts = jnp.arange(n_particles, dtype=float)[:, None]
     logw = jnp.zeros(n_particles)
-    pp = ParticlePosterior(particles=parts, log_weights=logw, param_names=("x",))
-    draws = pp.sample(jax.random.PRNGKey(0), n=5000)
+    pp = SamplePosterior(
+        samples=parts,
+        log_weights=logw,
+        evidence=jnp.asarray(jnp.nan),
+        param_names=("x",),
+    )
+    draws = pp.sample_dict(jax.random.PRNGKey(0), n=5000)
     assert draws["x"].shape == (5000,)

@@ -15,6 +15,7 @@ from orbix.utils.quasi_random import roberts_sequence
 from photomancy.orbit.data import AstromData
 from photomancy.orbit.forward import predict_astrometry
 from photomancy.orbit.likelihoods import loglike_astrom
+from photomancy.posterior import SamplePosterior
 
 
 class ParamBounds(eqx.Module):
@@ -224,43 +225,6 @@ def build_evaluator(data, Ms, dist_pc, shape):
     return single_eval
 
 
-class ParticlePosterior(eqx.Module):
-    """Weighted particle approximation to the orbit posterior.
-
-    Attributes:
-        particles: Physical-parameter rows, shape ``(n, d)``.
-        log_weights: Normalized log-importance weights, shape ``(n,)``.
-        param_names: Ordered parameter names corresponding to ``particles`` columns.
-    """
-
-    particles: jnp.ndarray
-    log_weights: jnp.ndarray
-    param_names: tuple = eqx.field(static=True)
-
-    def sample(self, key, n=2000):
-        """Inverse-CDF sampling-importance-resampling: draw ``n`` particles by weight.
-
-        Uses a cumulative-weight inverse-CDF lookup, which costs
-        ``O(n_particles + n)`` memory. (A ``jax.random.categorical`` draw would
-        materialize an ``(n, n_particles)`` array and blow up for large particle
-        counts.)
-
-        Args:
-            key: JAX PRNG key.
-            n: Number of posterior draws to return.
-
-        Returns:
-            Dict mapping each name in ``param_names`` to a ``(n,)`` array.
-        """
-        cdf = jnp.cumsum(jax.nn.softmax(self.log_weights))
-        u = jax.random.uniform(key, (n,))
-        idx = jnp.clip(
-            jnp.searchsorted(cdf, u, side="right"), 0, self.particles.shape[0] - 1
-        )
-        drawn = self.particles[idx]
-        return {name: drawn[:, i] for i, name in enumerate(self.param_names)}
-
-
 def batched_loglike(single_eval, phys, n_particles, chunk_size):
     """Evaluate ``single_eval`` over ``n_particles`` via vmap inside lax.scan.
 
@@ -351,7 +315,10 @@ def grid_search(
     u2, log_q = sampler.stage2(k2, u1[order], n_particles)
     phys2, rows2 = physical_rows(u2)
     ll2 = batched_loglike(ev, phys2, n_particles, chunk_size)
-    log_w = ll2 - log_q
-    log_w = log_w - jax.scipy.special.logsumexp(log_w)
+    log_w_raw = ll2 - log_q
+    log_Z = jax.scipy.special.logsumexp(log_w_raw) - jnp.log(n_particles)
+    log_w = log_w_raw - jax.scipy.special.logsumexp(log_w_raw)
 
-    return ParticlePosterior(particles=rows2, log_weights=log_w, param_names=phys_names)
+    return SamplePosterior(
+        samples=rows2, log_weights=log_w, evidence=log_Z, param_names=phys_names
+    )

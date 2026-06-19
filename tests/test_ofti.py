@@ -16,7 +16,6 @@ from orbix.equations.orbit import mean_anomaly_tp, mean_motion
 
 from photomancy.orbit.data import AstromData
 from photomancy.orbit.forward import predict_astrometry
-from photomancy.orbit.grid_search import ParticlePosterior
 from photomancy.orbit.ofti import (
     PARAM_NAMES,
     _default_ref_idx,
@@ -24,6 +23,7 @@ from photomancy.orbit.ofti import (
     ofti,
 )
 from photomancy.orbit.priors import ECC_PRIOR_NAMES, ecc_distribution
+from photomancy.posterior import SamplePosterior
 
 MSUN = 1.98892e30
 DIST_PC = 10.0
@@ -154,7 +154,7 @@ def test_period_kepler_consistent():
 
 
 def test_returns_particle_posterior():
-    """Output is a normalized ParticlePosterior with the expected contract."""
+    """Output is a normalized SamplePosterior with the expected contract."""
     data = make_data(jax.random.PRNGKey(0), 2)
     pp = ofti(
         data,
@@ -165,9 +165,9 @@ def test_returns_particle_posterior():
         log_P_range=(2.0, 3.0),
         batch=20000,
     )
-    assert isinstance(pp, ParticlePosterior)
+    assert isinstance(pp, SamplePosterior)
     assert pp.param_names == PARAM_NAMES
-    assert pp.particles.shape == (500, 7)
+    assert pp.samples.shape == (500, 7)
     assert float(jax.scipy.special.logsumexp(pp.log_weights)) == pytest.approx(
         0.0, abs=1e-5
     )
@@ -187,7 +187,7 @@ def test_prior_recovery():
         e_max=0.999,
         batch=20000,
     )
-    s = pp.sample(jax.random.PRNGKey(2), 6000)
+    s = pp.sample_dict(jax.random.PRNGKey(2), 6000)
     cos_i = np.asarray(s["cos_i"])
     e = np.asarray(s["e"])
     assert cos_i.mean() == pytest.approx(0.0, abs=0.05)  # Uniform(-1, 1)
@@ -207,7 +207,7 @@ def test_single_epoch_broad_posterior():
         log_P_range=(2.0, 3.0),
         batch=20000,
     )
-    s = pp.sample(jax.random.PRNGKey(2), 4000)
+    s = pp.sample_dict(jax.random.PRNGKey(2), 4000)
     logP = _logP_from_a(s["a"])
     # Broad: fills much of the unit-wide log-P range (std of U[2,3] ~ 0.29).
     assert logP.std() > 0.15
@@ -234,7 +234,7 @@ def test_truth_recovery():
         batch=100000,
         max_batches=200,
     )
-    a = np.asarray(pp.sample(jax.random.PRNGKey(5), 3000)["a"])
+    a = np.asarray(pp.sample_dict(jax.random.PRNGKey(5), 3000)["a"])
     lo, hi = np.percentile(a, [2.5, 97.5])
     assert lo <= TRUTH["a"] <= hi
     assert np.median(a) == pytest.approx(TRUTH["a"], rel=0.4)
@@ -287,7 +287,7 @@ def test_ofti_matches_nuts():
         batch=100000,
         max_batches=400,
     )
-    a_ofti = np.asarray(pp.sample(jax.random.PRNGKey(9), 2000)["a"])
+    a_ofti = np.asarray(pp.sample_dict(jax.random.PRNGKey(9), 2000)["a"])
 
     padded = AstromData.pad(
         times=data.times,

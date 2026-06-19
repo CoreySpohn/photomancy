@@ -27,7 +27,6 @@ from photomancy.orbit.grid_search import (
     AdaptiveImportanceSampler,
     EccVectorShape,
     ParamBounds,
-    ParticlePosterior,
     grid_search,
 )
 from photomancy.orbit.inference import OrbitProblem, build_orbit_logdensity
@@ -75,7 +74,6 @@ __all__ = [
     # Orbit -> generic-backend bridge
     "OrbitProblem",
     "ParamBounds",
-    "ParticlePosterior",
     # Data containers
     "RVData",
     "ScaleAndRotate",
