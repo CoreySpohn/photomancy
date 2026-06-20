@@ -191,6 +191,10 @@ def _orbit_evaluate(
             dmag_limit = jnp.interp(sep, csep, cdmag, left=jnp.inf, right=jnp.inf)
             return ((sep > iwa) & (dmag < dmag_limit)).astype(jnp.float64)
 
+    # id(unflatten) is a stable per-config identity: _MODEL_CACHE keeps one unflatten
+    # per model config alive for the process lifetime, so the id never dangles or
+    # aliases. A param-name key would be wrong here -- two configs with the same sites
+    # but different prior ranges share param_names yet need distinct compiled kernels.
     cache_key = (id(unflatten), Ms, dist_pc, has_imaging, Lambda, iwa)
     epochs = jnp.asarray(candidate_epochs)
     res = _eval_candidates(
