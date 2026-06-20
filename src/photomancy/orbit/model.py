@@ -53,7 +53,7 @@ def build_model(
         n_planets: Number of planets to fit. Default 1.
         has_rv: Whether RV data will be provided.
         has_astrom: Whether astrometry data will be provided.
-        has_null: Whether null-detection data will be provided (legacy).
+        has_null: Whether null-detection data will be provided.
         has_imaging: Whether unified imaging data will be provided.
         log_P_range: (min, max) for log10(period/days) uniform prior.
         log_Mp_range: (min, max) for log10(mass/M_earth) uniform prior.
@@ -201,7 +201,7 @@ def build_model(
                 numpyro.factor("ll_astrom", ll_astrom_val)
                 ll_total = ll_total + ll_astrom_val
 
-            # --- Null detections (legacy) ---
+            # --- Null detections ---
             if has_null:
                 Lambda_s = jnp.squeeze(Lambda)
                 alpha_pred, dMag_pred = predict_photometry(

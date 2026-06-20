@@ -186,7 +186,7 @@ def loglike_imaging(alpha_pred, dMag_pred, data):
     At **detection epochs** (``data.is_detected == True``): evaluates a
     Gaussian photometric likelihood comparing the predicted dMag to the
     measured ``dMag_obs +/- dMag_err``. This provides an unbounded parabolic
-    penalty that prevents the optimizer from crushing Λ to zero.
+    penalty that prevents the optimizer from crushing Lambda to zero.
 
     At **null epochs** (``data.is_detected == False``): uses the existing
     flux-space z-score approach via :func:`loglike_null`.

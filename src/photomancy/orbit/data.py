@@ -157,7 +157,7 @@ class AstromData(eqx.Module):
 
 
 # ---------------------------------------------------------------------------
-# NullData (legacy -- kept for backward compat)
+# NullData -- non-detection (null) epochs (orbit constraints without a dMag)
 # ---------------------------------------------------------------------------
 
 

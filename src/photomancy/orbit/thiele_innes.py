@@ -222,8 +222,8 @@ def _abfg_to_elements(A_scaled, F_scaled, B_scaled, G_scaled, e):
     q2 = F_scaled**2 + G_scaled**2
 
     # a^2 from: p^2 + q^2/(1-e^2) = a^2(1 + cos^2i)
-    # and: (AG-BF)^2 = a⁴(1-e^2)*cos^2i
-    # So a⁴(1-e^2)*cos^2i = (AG-BF)^2
+    # and: (AG-BF)^2 = a^4(1-e^2)*cos^2i
+    # So a^4(1-e^2)*cos^2i = (AG-BF)^2
     # And a^2(1+cos^2i) = p^2 + q^2/(1-e^2)
     #
     # Alternative direct formula:
@@ -239,7 +239,7 @@ def _abfg_to_elements(A_scaled, F_scaled, B_scaled, G_scaled, e):
     #   = a^2(cos^2w + sin^2w*cos^2i + sin^2w + cos^2w*cos^2i)
     #   = a^2(1 + cos^2i)
     #
-    # Then a⁴(1-e^2)cos^2i = d^2
+    # Then a^4(1-e^2)cos^2i = d^2
     # and  a^2(1+cos^2i) = s
     #
     # From these: let u = a^2*cos^2i  (unknown)

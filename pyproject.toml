@@ -42,8 +42,7 @@ docs = [
     "matplotlib",
 ]
 test = ["nox", "pytest", "hypothesis", "pytest-cov", "arviz"]
-# Deferred extras (declared, not installed in the BlackJAX-only first cut):
-ns = ["jaxns"]          # nested-sampling evidence backend
+# Optional extras (jaxns and numpyro are core deps, not extras):
 npe = ["flowjax"]       # amortized neural posterior estimation
 imaging = ["coronalyze"]  # differentiable detection/extraction likelihood helpers
 
