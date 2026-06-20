@@ -40,7 +40,9 @@ def test_jaxns_recovers_analytic_evidence():
 
 
 def test_build_scene_nested_model_recovers_and_gives_evidence():
-    """Scene adapter: Uniform priors on the fitted leaves; recovers truth + log Z."""
+    """Scene adapter: a photomancy AbstractPrior over z; recovers truth + log Z."""
+    from photomancy.priors import Uniform
+
     truth = jnp.array([0.3, -0.4])
     sigma = 0.05
     data = truth  # noiseless for a deterministic recovery check
@@ -55,9 +57,9 @@ def test_build_scene_nested_model_recovers_and_gives_evidence():
     def fit_leaves(s):
         return [s.theta]
 
-    bounds = [(-jnp.ones(2), jnp.ones(2))]  # Uniform(-1, 1) on each component
+    prior = Uniform(low=-jnp.ones(2), high=jnp.ones(2))  # Uniform(-1, 1) over z
     model, unravel = build_scene_nested_model(
-        scene, forward, likelihood, fit_leaves=fit_leaves, bounds=bounds
+        scene, forward, likelihood, fit_leaves=fit_leaves, prior=prior
     )
     post = JaxnsBackend(max_samples=4e4).run(model, key=jax.random.key(0))
 
@@ -69,3 +71,39 @@ def test_build_scene_nested_model_recovers_and_gives_evidence():
     w = jax.nn.softmax(post.log_weights)
     mean = jnp.sum(post.samples * w[:, None], axis=0)
     assert jnp.allclose(mean, truth, atol=0.06)
+
+
+def test_jaxns_prior_adapter_recovers_analytic_evidence_tfp_free():
+    """A photomancy Normal prior, via the _JaxnsPrior adapter, recovers log Z (no tfp).
+
+    The conjugate-Gaussian check of test_jaxns_recovers_analytic_evidence, but the prior
+    is our own ``photomancy.priors.Normal`` wrapped by the adapter inside
+    ``build_scene_nested_model`` -- so the whole prior path is tfp-free.
+    """
+    from photomancy.priors import Normal
+
+    data, lik_s, pri_s = 2.0, 0.5, 1.0
+    log2pi = jnp.log(2.0 * jnp.pi)
+    # data ~ N(0, sqrt(pri_s^2 + lik_s^2)); analytic evidence (closed form, no tfp).
+    var = pri_s**2 + lik_s**2
+    analytic = float(-0.5 * (data**2 / var + jnp.log(var) + log2pi))
+
+    scene = _Toy(theta=jnp.zeros(1), label="t")
+
+    def forward(s):
+        return s.theta
+
+    def likelihood(pred):
+        return -0.5 * ((pred[0] - data) / lik_s) ** 2 - jnp.log(lik_s) - 0.5 * log2pi
+
+    model, _ = build_scene_nested_model(
+        scene,
+        forward,
+        likelihood,
+        fit_leaves=lambda s: [s.theta],
+        prior=Normal(loc=jnp.zeros(1), scale=jnp.full((1,), pri_s)),
+    )
+    post = JaxnsBackend(max_samples=2e4).run(model, key=jax.random.key(0))
+
+    assert bool(jnp.isfinite(post.evidence))
+    assert abs(float(post.evidence) - analytic) < 0.5  # nested-sampling Z is stochastic

@@ -12,6 +12,8 @@ from typing import Any
 import equinox as eqx
 from jax.flatten_util import ravel_pytree
 
+from photomancy.priors import AbstractPrior
+
 
 class SceneLogDensity(eqx.Module):
     """A callable logdensity over a partitioned scene; array deps stay PyTree leaves.
@@ -30,14 +32,22 @@ class SceneLogDensity(eqx.Module):
 
     forward_model: Callable
     likelihood: Callable
-    prior: Callable
+    prior: Callable | AbstractPrior
     static: Any
     unravel: Callable = eqx.field(static=True)
 
     def __call__(self, z):
-        """Score a flat position ``z``: ``prior + likelihood(forward(scene))``."""
+        """Score a flat position ``z``: ``prior + likelihood(forward(scene))``.
+
+        An :class:`~photomancy.priors.AbstractPrior` is scored in z-space
+        (``prior.log_prob(z)``); a plain callable is scored on the recombined scene.
+        """
         scene = eqx.combine(self.unravel(z), self.static)
-        return self.prior(scene) + self.likelihood(self.forward_model(scene))
+        if isinstance(self.prior, AbstractPrior):
+            log_prior = self.prior.log_prob(z)
+        else:
+            log_prior = self.prior(scene)
+        return log_prior + self.likelihood(self.forward_model(scene))
 
 
 def build_logdensity(
@@ -68,7 +78,7 @@ def build_scene_logdensity(
     scene,
     forward_model: Callable,
     likelihood: Callable,
-    prior: Callable,
+    prior: Callable | AbstractPrior,
     filter_spec: Callable = eqx.is_inexact_array,
 ):
     """Build a flat-position logdensity over a scene Module's differentiable leaves.
@@ -83,7 +93,9 @@ def build_scene_logdensity(
         scene: An ``eqx.Module`` whose inexact-array leaves are the parameters.
         forward_model: Maps the (recombined) scene to predicted data.
         likelihood: Maps predicted data to a scalar log-likelihood.
-        prior: Maps the (recombined) scene to a scalar log-prior.
+        prior: Either an :class:`~photomancy.priors.AbstractPrior` (scored in z-space
+            as ``prior.log_prob(z)``) or a callable mapping the scene to a scalar
+            log-prior.
         filter_spec: Partition filter selecting the differentiable leaves
             (default: ``eqx.is_inexact_array``).
 

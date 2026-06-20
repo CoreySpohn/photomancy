@@ -134,3 +134,29 @@ def test_cluster_to_mixture_recovers_two_clusters():
     centers = jnp.sort(mix.means[:, 0])
     assert jnp.allclose(centers, jnp.array([0.0, 5.0]), atol=0.5)
     assert jnp.allclose(jnp.exp(mix.log_weights), jnp.array([0.5, 0.5]), atol=0.1)
+
+
+def test_gaussian_posterior_to_prior_is_matching_jointprior():
+    """GaussianPosterior.to_prior() is a JointPrior with the same MVN density."""
+    from photomancy.priors import JointPrior
+
+    mean = jnp.array([1.0, -2.0])
+    cov = jnp.array([[2.0, 0.5], [0.5, 1.0]])
+    post = GaussianPosterior(mean=mean, cov=cov, evidence=jnp.asarray(-3.0))
+
+    prior = post.to_prior()
+    assert isinstance(prior, JointPrior)
+    z = jnp.array([0.5, -1.0])
+    # The posterior-as-prior carries the full covariance: same density.
+    assert jnp.allclose(prior.log_prob(z), post.log_prob(z), atol=1e-4)
+
+
+def test_mixture_to_prior_deferred_to_p2():
+    """Mixture / sample to_prior raises in P1 (the cluster_to_mixture path is P2)."""
+    post = MixturePosterior(
+        means=jnp.zeros((2, 1)),
+        covs=jnp.ones((2, 1, 1)),
+        log_evidences=jnp.zeros(2),
+    )
+    with pytest.raises(NotImplementedError):
+        post.to_prior()

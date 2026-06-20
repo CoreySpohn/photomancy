@@ -15,6 +15,8 @@ from equinox import AbstractVar
 from jax.scipy.special import logsumexp
 from jax.scipy.stats import multivariate_normal
 
+from photomancy.priors import JointPrior
+
 
 class AbstractPosterior(eqx.Module):
     """The uniform posterior interface every backend returns.
@@ -45,6 +47,19 @@ class AbstractPosterior(eqx.Module):
         """Log-density at flat position ``z``."""
         raise NotImplementedError
 
+    def to_prior(self):
+        """Convert this posterior into an ``AbstractPrior`` over the same z-space.
+
+        Enables sequential Bayesian updating -- a fit's posterior becomes the next
+        fit's prior. Implemented for :class:`GaussianPosterior` in P1 (an exact MVN
+        :class:`~photomancy.priors.JointPrior`); the mixture / weighted-sample paths
+        (via ``cluster_to_mixture``) land in P2.
+        """
+        raise NotImplementedError(
+            "to_prior is implemented for GaussianPosterior in P1; the mixture / "
+            "sample paths (cluster_to_mixture) are P2."
+        )
+
 
 class GaussianPosterior(AbstractPosterior):
     """A Gaussian posterior over the flat parameter position.
@@ -69,6 +84,10 @@ class GaussianPosterior(AbstractPosterior):
     def log_prob(self, z):
         """Exact Gaussian log-density at flat position ``z``."""
         return multivariate_normal.logpdf(z, self.mean, self.cov)
+
+    def to_prior(self):
+        """Exact MVN ``JointPrior`` over z -- this fit's posterior as the next prior."""
+        return JointPrior(mean=self.mean, cholesky=jnp.linalg.cholesky(self.cov))
 
 
 class MixturePosterior(AbstractPosterior):

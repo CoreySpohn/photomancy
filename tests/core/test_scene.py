@@ -77,3 +77,29 @@ def test_forward_module_arrays_are_traced_not_baked():
     constvar_sizes = [int(np.prod(v.aval.shape)) for v in jaxpr.jaxpr.constvars]
     assert 32 * 32 in invar_sizes, "kernel is not a traced input"
     assert all(s < 32 * 32 for s in constvar_sizes), "kernel was baked as a constant"
+
+
+def test_scene_logdensity_accepts_abstract_prior_over_z():
+    """An AbstractPrior is scored in z-space (prior.log_prob(z)), not as a callable."""
+    from photomancy.priors import Normal
+
+    obs = 2.0
+
+    def forward(scene):
+        return scene.mu
+
+    def likelihood(pred):
+        return -0.5 * ((pred - obs) / 0.5) ** 2
+
+    def lik_term(z):
+        return likelihood(forward(_ToyScene(mu=z[0], label="t")))
+
+    scene = _ToyScene(mu=jnp.asarray(0.0), label="toy")
+    prior = Normal(loc=jnp.zeros(1), scale=jnp.ones(1))
+    logdensity, _z0, _ = build_scene_logdensity(scene, forward, likelihood, prior)
+
+    z = jnp.asarray([0.7])
+    assert jnp.allclose(logdensity(z), prior.log_prob(z) + lik_term(z), atol=1e-5)
+    # the back-compat scene-callable prior path still works
+    ld2, _, _ = build_scene_logdensity(scene, forward, likelihood, lambda s: -1.5)
+    assert jnp.allclose(ld2(z), -1.5 + lik_term(z))
