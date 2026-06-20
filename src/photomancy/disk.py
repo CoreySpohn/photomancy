@@ -57,7 +57,9 @@ def build_disk_logdensity(
             ``lambda s: [s.disk.sma_AU, s.midplane_inc_deg, ...]``).
         noise_sigma: Per-pixel Gaussian noise sigma (scalar).
         forward: ``system -> predicted image`` -- the swappable seam.
-        prior: Optional ``system -> scalar`` log-prior; ``None`` is flat (improper).
+        prior: Optional prior, forwarded to ``build_scene_logdensity`` -- either a
+            ``photomancy.priors.AbstractPrior`` (scored in z-space) or a
+            ``system -> scalar`` callable. ``None`` is flat (improper).
 
     Returns:
         ``(logdensity, z0, unravel)`` from ``build_scene_logdensity``: ``logdensity(z)``
