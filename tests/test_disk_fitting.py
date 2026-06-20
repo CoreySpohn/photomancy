@@ -118,3 +118,32 @@ def test_forward_is_swappable():
     )
     assert jnp.isfinite(logdensity(z0))
     assert jnp.all(jnp.isfinite(jax.grad(logdensity)(z0)))
+
+
+def test_default_disk_prior_aligns_and_centers_on_system():
+    """default_disk_prior pairs with disk_fit_leaves: aligned z, centered on system."""
+    from photomancy.disk import default_disk_prior, disk_fit_leaves
+    from photomancy.priors import IndependentPrior
+
+    system = _make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
+    forward = surface_brightness_forward(WL, TIME)
+    prior = default_disk_prior(system)
+    assert isinstance(prior, IndependentPrior)
+
+    # the prior threads through build_disk_logdensity; its z matches the fit's z
+    logdensity, z0, _ = build_disk_logdensity(
+        system,
+        forward(system),
+        fit_leaves=disk_fit_leaves,
+        noise_sigma=1.0,
+        forward=forward,
+        prior=prior,
+    )
+    assert prior.ndim == z0.shape[0] == 6
+    assert jnp.isfinite(logdensity(z0))
+
+    # centered on the system: each component's median recovers the current value.
+    median = prior.forward(jnp.full(6, 0.5))
+    assert jnp.allclose(median, z0, rtol=1e-5)
+    # weakly informative: log_prob is higher at the truth than far from it.
+    assert prior.log_prob(z0) > prior.log_prob(z0 + 30.0)

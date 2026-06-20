@@ -10,8 +10,10 @@ share one code path.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
 
 from photomancy.core import build_scene_logdensity
+from photomancy.priors import IndependentPrior, LogNormal, Normal
 
 
 def surface_brightness_forward(wavelength_nm, time_jd):
@@ -82,3 +84,72 @@ def build_disk_logdensity(
             return 0.0
 
     return build_scene_logdensity(system, forward, likelihood, prior, filter_spec=mask)
+
+
+# The canonical disk fit-leaf prior specs, aligned to ``disk_fit_leaves`` order:
+# (kind, scale) per leaf -- LogNormal for positive scales, Normal for slopes / angles.
+_DISK_PRIOR_SPECS = (
+    ("lognormal", 0.5),  # sma_AU -- positive radial scale
+    ("normal", 3.0),  # alpha_in -- inner radial slope
+    ("normal", 3.0),  # alpha_out -- outer radial slope
+    ("lognormal", 0.5),  # ksi0_AU -- positive vertical scale
+    ("normal", 20.0),  # midplane_inc_deg -- orientation angle (deg)
+    ("normal", 20.0),  # midplane_pa_deg -- orientation angle (deg)
+)
+
+
+def disk_fit_leaves(system):
+    """The canonical disk fit-leaves: radial / vertical shape + shared orientation.
+
+    Returns the six leaves ``sma_AU, alpha_in, alpha_out, ksi0_AU, midplane_inc_deg,
+    midplane_pa_deg`` -- the selection ``default_disk_prior`` is aligned to. Pass it as
+    ``build_disk_logdensity``'s ``fit_leaves``.
+    """
+    return [
+        system.disk.sma_AU,
+        system.disk.alpha_in,
+        system.disk.alpha_out,
+        system.disk.ksi0_AU,
+        system.midplane_inc_deg,
+        system.midplane_pa_deg,
+    ]
+
+
+def default_disk_prior(system):
+    """A weakly-informative ``IndependentPrior`` for the canonical disk fit.
+
+    Aligned to ``disk_fit_leaves`` and centered on the system's current geometry with
+    broad scales -- LogNormal for the positive scales (``sma_AU``, ``ksi0_AU``), Normal
+    for the radial slopes and the orientation angles. No absolute physics is hardcoded:
+    each prior sits around whatever value ``system`` currently holds. Pass it together
+    with ``disk_fit_leaves`` so the prior's z matches the fit's z.
+
+    Args:
+        system: A skyscapes ``System`` whose current disk geometry centers the prior.
+
+    Returns:
+        An ``IndependentPrior`` over the raveled ``disk_fit_leaves`` selection (ndim 6).
+    """
+    n = len(_DISK_PRIOR_SPECS)
+    mask = jax.tree_util.tree_map(lambda _: False, system)
+    mask = eqx.tree_at(disk_fit_leaves, mask, [True] * n)
+    z0 = ravel_pytree(eqx.partition(system, mask)[0])[0]  # current values, z order
+
+    # Tag each fitted leaf with its spec index, then ravel so specs line up with z0
+    # (the ravel order need not match the disk_fit_leaves list order).
+    tagged = eqx.tree_at(
+        disk_fit_leaves, system, [jnp.asarray(float(i)) for i in range(n)]
+    )
+    spec_z = ravel_pytree(eqx.partition(tagged, mask)[0])[0]
+
+    components = []
+    for j in range(n):
+        kind, scale = _DISK_PRIOR_SPECS[int(spec_z[j])]
+        value = z0[j]
+        if kind == "lognormal":
+            components.append(
+                LogNormal(loc=jnp.log(value)[None], scale=jnp.asarray([scale]))
+            )
+        else:
+            components.append(Normal(loc=value[None], scale=jnp.asarray([scale])))
+    return IndependentPrior(tuple(components))
