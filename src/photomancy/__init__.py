@@ -25,6 +25,7 @@ from photomancy.posterior import (
     MixturePosterior,
     SamplePosterior,
 )
+from photomancy.posterior_utils import project_samples, sample_capped
 
 try:
     from photomancy._version import __version__
@@ -44,4 +45,6 @@ __all__ = [
     "__version__",
     "build_logdensity",
     "build_scene_logdensity",
+    "project_samples",
+    "sample_capped",
 ]
