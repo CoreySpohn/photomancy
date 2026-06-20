@@ -14,8 +14,8 @@ from hwoutils.constants import G
 from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_anomaly_tp, mean_motion
 
-from photomancy.orbit.data import AstromData
-from photomancy.orbit.forward import predict_astrometry
+from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.ofti import (
     PARAM_NAMES,
     _default_ref_idx,
@@ -42,9 +42,9 @@ TRUTH = {
 
 
 def make_data(key, n_obs, noise_mas=1.0, span=1.5 * T_TRUE):
-    """Synthetic AstromData: n_obs epochs over `span` days at TRUTH."""
+    """Synthetic RelativeAstromData: n_obs epochs over `span` days at TRUTH."""
     times = jnp.linspace(0.0, span, n_obs)
-    ra, dec = predict_astrometry(
+    ra, dec = predict_relative_astrometry(
         times,
         TRUTH["a"],
         TRUTH["e"],
@@ -61,7 +61,7 @@ def make_data(key, n_obs, noise_mas=1.0, span=1.5 * T_TRUE):
     ra = ra + sigma * jax.random.normal(kra, ra.shape)
     dec = dec + sigma * jax.random.normal(kdec, dec.shape)
     err = jnp.full(n_obs, sigma)
-    return AstromData(
+    return RelativeAstromData(
         times=times,
         ra=ra,
         dec=dec,
@@ -110,7 +110,7 @@ def test_scale_and_rotate_hits_ref_point():
         0.99,
     )
     a, e, cos_i, W, cos_w, sin_w, tp = (float(row[i]) for i in range(7))
-    ra_p, dec_p = predict_astrometry(
+    ra_p, dec_p = predict_relative_astrometry(
         jnp.atleast_1d(t_ref), a, e, cos_i, W, cos_w, sin_w, tp, MSUN, DIST_PC
     )
     assert jnp.isfinite(ll)
@@ -289,7 +289,7 @@ def test_ofti_matches_nuts():
     )
     a_ofti = np.asarray(pp.sample_dict(jax.random.PRNGKey(9), 2000)["a"])
 
-    padded = AstromData.pad(
+    padded = RelativeAstromData.pad(
         times=data.times,
         ra=data.ra,
         dec=data.dec,
@@ -299,7 +299,7 @@ def test_ofti_matches_nuts():
         planet_id=data.planet_id,
     )
     model = partial(
-        build_model(has_astrom=True, log_P_range=log_P_range),
+        build_model(has_relative_astrom=True, log_P_range=log_P_range),
         MSUN,
         DIST_PC,
         RVData.zeros(),

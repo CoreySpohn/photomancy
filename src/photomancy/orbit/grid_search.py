@@ -12,9 +12,9 @@ import jax.numpy as jnp
 from orbix.equations import period_to_sma
 from orbix.utils.quasi_random import roberts_sequence
 
-from photomancy.orbit.data import AstromData
-from photomancy.orbit.forward import predict_astrometry
-from photomancy.orbit.likelihoods import loglike_astrom
+from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.forward import predict_relative_astrometry
+from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.posterior import SamplePosterior
 
 
@@ -187,12 +187,12 @@ class AdaptiveImportanceSampler(AbstractGridStrategy):
 def build_evaluator(data, Ms, dist_pc, shape):
     """Return ``single_eval(phys) -> scalar log-likelihood`` over present data.
 
-    ``data`` is a tuple of present data containers. v1 handles AstromData;
+    ``data`` is a tuple of present data containers. v1 handles RelativeAstromData;
     absent observables contribute nothing. The ``if astrom is not None`` check
     runs at build time (static), not under JAX trace, so it is JAX-safe.
 
     Args:
-        data: Tuple of data containers (e.g. AstromData).
+        data: Tuple of data containers (e.g. RelativeAstromData).
         Ms: Stellar mass (kg).
         dist_pc: Distance to system (parsec).
         shape: An AbstractShapeParam instance (unused here, reserved for Plan 2).
@@ -202,12 +202,12 @@ def build_evaluator(data, Ms, dist_pc, shape):
         dict of scalar orbit parameters (as returned by ``to_physical`` for
         a single particle).
     """
-    astrom = next((d for d in data if isinstance(d, AstromData)), None)
+    astrom = next((d for d in data if isinstance(d, RelativeAstromData)), None)
 
     def single_eval(phys):
         ll = 0.0
         if astrom is not None:
-            ra, dec = predict_astrometry(
+            ra, dec = predict_relative_astrometry(
                 astrom.times,
                 phys["a"],
                 phys["e"],
@@ -219,7 +219,7 @@ def build_evaluator(data, Ms, dist_pc, shape):
                 Ms,
                 dist_pc,
             )
-            ll = ll + loglike_astrom(ra, dec, astrom)
+            ll = ll + loglike_relative_astrom(ra, dec, astrom)
         return ll
 
     return single_eval
@@ -281,7 +281,7 @@ def grid_search(
     ``ll - log_q``, and returns a normalized ParticlePosterior.
 
     Args:
-        data: Tuple of data containers (e.g. AstromData).
+        data: Tuple of data containers (e.g. RelativeAstromData).
         Ms: Stellar mass (kg).
         dist_pc: Distance to system (parsec).
         shape: An AbstractShapeParam instance.

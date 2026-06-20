@@ -10,9 +10,9 @@ jax.config.update("jax_enable_x64", True)
 
 from orbix.equations import period_to_sma  # noqa: E402
 
-from photomancy.orbit.data import AstromData  # noqa: E402
+from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.diagnostics import sample_physical  # noqa: E402
-from photomancy.orbit.forward import predict_astrometry  # noqa: E402
+from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init  # noqa: E402
 from photomancy.orbit.laplace import map_laplace_fit  # noqa: E402
@@ -35,7 +35,7 @@ def _make_astrom(n_obs, seed=42):
     tp_true = -1.5 / (2.0 * jnp.pi / TRUE_T)
     np.random.seed(seed)
     times = np.sort(np.random.uniform(0, 3 * TRUE_T, 20))[:n_obs]
-    ra_true, dec_true = predict_astrometry(
+    ra_true, dec_true = predict_relative_astrometry(
         jnp.array(times),
         a_true,
         0.15,
@@ -49,7 +49,7 @@ def _make_astrom(n_obs, seed=42):
     )
     ra = jnp.array(np.array(ra_true) + np.random.randn(n_obs) * ASTROM_ERR)
     dec = jnp.array(np.array(dec_true) + np.random.randn(n_obs) * ASTROM_ERR)
-    return AstromData(
+    return RelativeAstromData(
         times=jnp.array(times),
         ra=ra,
         dec=dec,
@@ -75,7 +75,7 @@ def test_map_laplace_fit_smoke():
         result = map_laplace_fit(
             Msun2kg,
             DIST_PC,
-            astrom_data=astrom,
+            relative_astrom_data=astrom,
             log_P_range=LOG_P_RANGE,
             init_vals=init_vals,
             n_steps=200,
@@ -95,12 +95,12 @@ def test_map_converges():
         result = map_laplace_fit(
             Msun2kg,
             DIST_PC,
-            astrom_data=astrom,
+            relative_astrom_data=astrom,
             log_P_range=LOG_P_RANGE,
             init_vals=init_vals,
         )
     problem = build_orbit_logdensity(
-        Msun2kg, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+        Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     samples = sample_physical(result, problem, jax.random.PRNGKey(0), 500)
     T_median = float(jnp.median(samples["T"]))
@@ -119,7 +119,7 @@ def test_covariance_positive_definite():
             result = map_laplace_fit(
                 Msun2kg,
                 DIST_PC,
-                astrom_data=astrom,
+                relative_astrom_data=astrom,
                 log_P_range=LOG_P_RANGE,
                 init_vals=init_vals,
                 n_steps=100,
@@ -137,7 +137,7 @@ def test_samples_shape():
         result = map_laplace_fit(
             Msun2kg,
             DIST_PC,
-            astrom_data=astrom,
+            relative_astrom_data=astrom,
             log_P_range=LOG_P_RANGE,
             init_vals=init_vals,
             n_steps=100,
@@ -155,7 +155,7 @@ def test_log_prob_finite():
         result = map_laplace_fit(
             Msun2kg,
             DIST_PC,
-            astrom_data=astrom,
+            relative_astrom_data=astrom,
             log_P_range=LOG_P_RANGE,
             init_vals=init_vals,
             n_steps=100,

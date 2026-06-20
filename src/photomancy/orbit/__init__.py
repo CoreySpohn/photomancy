@@ -10,7 +10,7 @@ geometry (``orbix.equations``, ``orbix.kepler``).
 from orbix.equations import period_to_sma
 from orbix.kepler.core import diff_solve_trig
 
-from photomancy.orbit.data import AstromData, ImagingData, NullData, RVData
+from photomancy.orbit.data import RelativeAstromData, ImagingData, NullData, RVData
 from photomancy.orbit.diagnostics import mode_summary, sample_physical
 from photomancy.orbit.eig import (
     alias_breaking_eig,
@@ -18,7 +18,7 @@ from photomancy.orbit.eig import (
     geometric_eig,
 )
 from photomancy.orbit.forward import (
-    predict_astrometry,
+    predict_relative_astrometry,
     predict_photometry,
     predict_rv,
 )
@@ -34,7 +34,7 @@ from photomancy.orbit.inference import OrbitProblem, build_orbit_logdensity
 from photomancy.orbit.init import find_init, find_init_top_k, ti_to_init
 from photomancy.orbit.laplace import map_laplace_fit, map_laplace_mixture_fit
 from photomancy.orbit.likelihoods import (
-    loglike_astrom,
+    loglike_relative_astrom,
     loglike_imaging,
     loglike_null,
     loglike_rv_marginalized,
@@ -61,7 +61,7 @@ __all__ = [
     "AbstractGridStrategy",
     "AbstractShapeParam",
     "AdaptiveImportanceSampler",
-    "AstromData",
+    "RelativeAstromData",
     "EccVectorShape",
     "ImagingData",
     "NullData",
@@ -86,7 +86,7 @@ __all__ = [
     # Bayesian experimental design
     "geometric_eig",
     "grid_search",
-    "loglike_astrom",
+    "loglike_relative_astrom",
     "loglike_imaging",
     "loglike_null",
     # Likelihoods
@@ -98,7 +98,7 @@ __all__ = [
     # Nested sampling (NumPyro/jaxns) -> evidence / model comparison
     "orbit_nested_sampling",
     "period_to_sma",
-    "predict_astrometry",
+    "predict_relative_astrometry",
     "predict_photometry",
     # Forward models
     "predict_rv",

@@ -63,7 +63,7 @@ def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp):
     return rv_model
 
 
-def predict_astrometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc):
+def predict_relative_astrometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc):
     """Predict relative astrometry (RA, DEC offsets) for a single planet.
 
     Projects the 3D position vector onto the sky plane and converts to

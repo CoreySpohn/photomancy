@@ -21,7 +21,7 @@ from hwoutils.constants import Mearth2kg
 from orbix.equations import period_to_sma
 
 from photomancy.orbit.likelihoods import (
-    loglike_astrom,
+    loglike_relative_astrom,
     loglike_imaging,
     loglike_null,
     loglike_rv_marginalized,
@@ -33,7 +33,7 @@ def build_model(
     *,
     n_planets=1,
     has_rv=False,
-    has_astrom=False,
+    has_relative_astrom=False,
     has_null=False,
     has_imaging=False,
     log_P_range=(0.0, 5.0),
@@ -45,14 +45,14 @@ def build_model(
 ):
     """Build a NumPyro model function for orbit fitting.
 
-    The returned function accepts ``(Ms, dist_pc, rv_data, astrom_data,
+    The returned function accepts ``(Ms, dist_pc, rv_data, relative_astrom_data,
     null_data, imaging_data)`` as arguments (dynamic, for JIT caching).
     Prior configuration is captured in the closure (static).
 
     Args:
         n_planets: Number of planets to fit. Default 1.
         has_rv: Whether RV data will be provided.
-        has_astrom: Whether astrometry data will be provided.
+        has_relative_astrom: Whether astrometry data will be provided.
         has_null: Whether null-detection data will be provided.
         has_imaging: Whether unified imaging data will be provided.
         log_P_range: (min, max) for log10(period/days) uniform prior.
@@ -64,21 +64,21 @@ def build_model(
         jitter_scale: Scale for HalfNormal jitter prior (AU/day).
 
     Returns:
-        A callable ``model(Ms, dist_pc, rv_data, astrom_data, null_data,
+        A callable ``model(Ms, dist_pc, rv_data, relative_astrom_data, null_data,
         imaging_data)`` suitable for ``numpyro.infer.MCMC`` and for use
         with ``dynamic_args=True`` in ``initialize_model``.
     """
     has_photometry = has_null or has_imaging
 
-    if not any([has_rv, has_astrom, has_null, has_imaging]):
+    if not any([has_rv, has_relative_astrom, has_null, has_imaging]):
         raise ValueError(
-            "At least one of has_rv, has_astrom, has_null, or has_imaging must be True."
+            "At least one of has_rv, has_relative_astrom, has_null, or has_imaging must be True."
         )
 
-    def model(Ms, dist_pc, rv_data, astrom_data, null_data, imaging_data):
+    def model(Ms, dist_pc, rv_data, relative_astrom_data, null_data, imaging_data):
         # CIRCULAR IMPORT: photomancy.orbit.forward -> photomancy.orbit.model
         from photomancy.orbit.forward import (
-            predict_astrometry,
+            predict_relative_astrometry,
             predict_photometry,
             predict_rv,
         )
@@ -184,9 +184,9 @@ def build_model(
                 ll_total = ll_total + ll_rv_val
 
             # --- Astrometry ---
-            if has_astrom:
-                ra_pred, dec_pred = predict_astrometry(
-                    astrom_data.times,
+            if has_relative_astrom:
+                ra_pred, dec_pred = predict_relative_astrometry(
+                    relative_astrom_data.times,
                     a_s,
                     e_s,
                     cos_i_s,
@@ -197,9 +197,9 @@ def build_model(
                     Ms,
                     dist_pc,
                 )
-                ll_astrom_val = loglike_astrom(ra_pred, dec_pred, astrom_data)
-                numpyro.factor("ll_astrom", ll_astrom_val)
-                ll_total = ll_total + ll_astrom_val
+                ll_relative_astrom_val = loglike_relative_astrom(ra_pred, dec_pred, relative_astrom_data)
+                numpyro.factor("ll_relative_astrom", ll_relative_astrom_val)
+                ll_total = ll_total + ll_relative_astrom_val
 
             # --- Null detections ---
             if has_null:
@@ -248,7 +248,7 @@ def build_model(
         else:
             # Multi-planet: vmap forward models over planet axis
             # CIRCULAR IMPORT: photomancy.orbit.forward -> photomancy.orbit.model
-            from photomancy.orbit.forward import predict_astrometry as _pa
+            from photomancy.orbit.forward import predict_relative_astrometry as _pa
             from photomancy.orbit.forward import predict_rv as _prv
 
             def _single_planet_rv(T_p, Mp_sini_p, e_p, cos_w_p, sin_w_p, tp_p):
@@ -265,7 +265,7 @@ def build_model(
 
             def _single_planet_astrom(a_p, e_p, cos_i_p, W_p, cos_w_p, sin_w_p, tp_p):
                 return _pa(
-                    astrom_data.times,
+                    relative_astrom_data.times,
                     a_p,
                     e_p,
                     cos_i_p,
@@ -293,19 +293,19 @@ def build_model(
                 )
                 numpyro.factor("ll_rv", ll_rv)
 
-            if has_astrom:
+            if has_relative_astrom:
                 ra_all, dec_all = jax.vmap(_single_planet_astrom)(
                     a, e, cos_i, W, cos_w, sin_w, tp
                 )
                 ra_pred = ra_all[
-                    astrom_data.planet_id,
-                    jnp.arange(astrom_data.times.shape[0]),
+                    relative_astrom_data.planet_id,
+                    jnp.arange(relative_astrom_data.times.shape[0]),
                 ]
                 dec_pred = dec_all[
-                    astrom_data.planet_id,
-                    jnp.arange(astrom_data.times.shape[0]),
+                    relative_astrom_data.planet_id,
+                    jnp.arange(relative_astrom_data.times.shape[0]),
                 ]
-                ll_astrom = loglike_astrom(ra_pred, dec_pred, astrom_data)
-                numpyro.factor("ll_astrom", ll_astrom)
+                ll_relative_astrom = loglike_relative_astrom(ra_pred, dec_pred, relative_astrom_data)
+                numpyro.factor("ll_relative_astrom", ll_relative_astrom)
 
     return model

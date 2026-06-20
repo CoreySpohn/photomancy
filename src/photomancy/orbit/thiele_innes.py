@@ -350,7 +350,7 @@ def _compute_chi2_and_ll(X, Y, A_s, F_s, B_s, G_s, ra, dec, ra_err, dec_err, cor
 # ---------------------------------------------------------------------------
 
 
-def thiele_innes_fit(astrom_data, T, e, tp, Ms, dist_pc):
+def thiele_innes_fit(relative_astrom_data, T, e, tp, Ms, dist_pc):
     """Fit Thiele-Innes constants via linear least squares.
 
     Given trial ``(T, e, tp)`` and astrometry data, finds the optimal
@@ -358,7 +358,7 @@ def thiele_innes_fit(astrom_data, T, e, tp, Ms, dist_pc):
     the model is linear in these constants for fixed ``(T, e, tp)``.
 
     Args:
-        astrom_data: An :class:`~photomancy.orbit.data.AstromData` instance.
+        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
         T: Trial orbital period (days). Scalar.
         e: Trial eccentricity. Scalar.
         tp: Trial time of periapsis passage (days). Scalar.
@@ -372,7 +372,7 @@ def thiele_innes_fit(astrom_data, T, e, tp, Ms, dist_pc):
     # Compute basis functions X(t) = cosE(t) - e, Y(t) = sinE(t)
     # n = 2pi/T directly -- no need to go through Kepler III
     n = 2.0 * jnp.pi / T
-    M = mean_anomaly_tp(astrom_data.times, n, tp)
+    M = mean_anomaly_tp(relative_astrom_data.times, n, tp)
     sinE, cosE = diff_solve_trig(M, e)
 
     X = cosE - e  # shape (N,)
@@ -382,11 +382,11 @@ def thiele_innes_fit(astrom_data, T, e, tp, Ms, dist_pc):
     A_s, F_s, B_s, G_s = _solve_abfg(
         X,
         Y,
-        astrom_data.ra,
-        astrom_data.dec,
-        astrom_data.ra_err,
-        astrom_data.dec_err,
-        astrom_data.corr,
+        relative_astrom_data.ra,
+        relative_astrom_data.dec,
+        relative_astrom_data.ra_err,
+        relative_astrom_data.dec_err,
+        relative_astrom_data.corr,
     )
 
     # Recover orbital elements from scaled constants
@@ -403,11 +403,11 @@ def thiele_innes_fit(astrom_data, T, e, tp, Ms, dist_pc):
         F_s,
         B_s,
         G_s,
-        astrom_data.ra,
-        astrom_data.dec,
-        astrom_data.ra_err,
-        astrom_data.dec_err,
-        astrom_data.corr,
+        relative_astrom_data.ra,
+        relative_astrom_data.dec,
+        relative_astrom_data.ra_err,
+        relative_astrom_data.dec_err,
+        relative_astrom_data.corr,
     )
 
     # TI constants in AU
@@ -434,7 +434,7 @@ def thiele_innes_fit(astrom_data, T, e, tp, Ms, dist_pc):
     )
 
 
-def thiele_innes_grid_search(astrom_data, Ms, dist_pc, log_T_grid, e_grid, n_tp=30):
+def thiele_innes_grid_search(relative_astrom_data, Ms, dist_pc, log_T_grid, e_grid, n_tp=30):
     """Search over (T, e, tp) grid with Thiele-Innes linearization.
 
     For each ``(T, e)`` pair, evaluates ``n_tp`` uniformly spaced
@@ -445,7 +445,7 @@ def thiele_innes_grid_search(astrom_data, Ms, dist_pc, log_T_grid, e_grid, n_tp=
     acceleration.
 
     Args:
-        astrom_data: An :class:`~photomancy.orbit.data.AstromData` instance.
+        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
         Ms: Stellar mass (kg). Scalar.
         dist_pc: Distance to system (parsec). Scalar.
         log_T_grid: Array of log10(T/days) values to search.
@@ -460,7 +460,7 @@ def thiele_innes_grid_search(astrom_data, Ms, dist_pc, log_T_grid, e_grid, n_tp=
         """Fit at a single (T, e, tp) point."""
         T = 10.0**log_T
         tp = tp_frac * T
-        return thiele_innes_fit(astrom_data, T, e_val, tp, Ms, dist_pc)
+        return thiele_innes_fit(relative_astrom_data, T, e_val, tp, Ms, dist_pc)
 
     # Build the 3D grid
     tp_fracs = jnp.linspace(0.0, 1.0, n_tp, endpoint=False)

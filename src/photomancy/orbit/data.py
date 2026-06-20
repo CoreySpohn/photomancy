@@ -17,7 +17,7 @@ import jax.numpy as jnp
 # ---------------------------------------------------------------------------
 # Static shape limits (for JIT-cacheable fitting)
 # ---------------------------------------------------------------------------
-MAX_ASTROM = 64
+MAX_REL_ASTROM = 64
 MAX_IMG = 64
 MAX_CC_PTS = 200
 MAX_RV = 256
@@ -96,11 +96,11 @@ class RVData(eqx.Module):
 
 
 # ---------------------------------------------------------------------------
-# AstromData
+# RelativeAstromData
 # ---------------------------------------------------------------------------
 
 
-class AstromData(eqx.Module):
+class RelativeAstromData(eqx.Module):
     """Relative astrometry observations.
 
     Positions are measured in arcseconds relative to the host star.
@@ -127,8 +127,8 @@ class AstromData(eqx.Module):
     is_valid: jnp.ndarray
 
     @classmethod
-    def pad(cls, *, times, ra, dec, ra_err, dec_err, corr, planet_id, max_n=MAX_ASTROM):
-        """Create a padded AstromData with ``is_valid`` mask."""
+    def pad(cls, *, times, ra, dec, ra_err, dec_err, corr, planet_id, max_n=MAX_REL_ASTROM):
+        """Create a padded RelativeAstromData with ``is_valid`` mask."""
         n = jnp.asarray(times).shape[0]
         return cls(
             times=_pad_1d(times, max_n),
@@ -142,7 +142,7 @@ class AstromData(eqx.Module):
         )
 
     @classmethod
-    def zeros(cls, max_n=MAX_ASTROM):
+    def zeros(cls, max_n=MAX_REL_ASTROM):
         """Create an all-invalid placeholder (for model tracing)."""
         return cls(
             times=jnp.zeros(max_n),

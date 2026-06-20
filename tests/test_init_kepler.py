@@ -11,8 +11,8 @@ import jax
 import jax.numpy as jnp
 from orbix.equations import period_to_sma
 
-from photomancy.orbit.data import AstromData
-from photomancy.orbit.forward import predict_astrometry
+from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.init import find_init
 
 MSUN = 1.98892e30
@@ -24,7 +24,7 @@ def _seed3001_three_epoch():
     """Reproduce the documented n=3, seed-3001 alias-prone case."""
     a_true = period_to_sma(T_TRUE, MSUN)
     times = jnp.linspace(0.0, 1.5 * T_TRUE, 3)
-    ra0, dec0 = predict_astrometry(
+    ra0, dec0 = predict_relative_astrometry(
         times, a_true, 0.1, 0.7, 0.8, jnp.cos(0.5), jnp.sin(0.5), 40.0, MSUN, DIST_PC
     )
     sigma = 1e-3  # 1 mas, in arcsec
@@ -33,7 +33,7 @@ def _seed3001_three_epoch():
     ra = ra0 + sigma * jax.random.normal(kra, ra0.shape)
     dec = dec0 + sigma * jax.random.normal(kdec, dec0.shape)
     err = jnp.full(3, sigma)
-    data = AstromData(
+    data = RelativeAstromData(
         times=times,
         ra=ra,
         dec=dec,
@@ -66,7 +66,7 @@ def test_find_init_kepler_residual_is_small():
     a = period_to_sma(T, MSUN)
     e = float(iv["e_raw"][0])
     w = float(iv["w_raw"][0])
-    ra, dec = predict_astrometry(
+    ra, dec = predict_relative_astrometry(
         data.times,
         a,
         e,

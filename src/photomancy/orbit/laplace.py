@@ -132,7 +132,7 @@ def map_laplace_fit(
     dist_pc: float,
     *,
     rv_data: Any | None = None,
-    astrom_data: Any | None = None,
+    relative_astrom_data: Any | None = None,
     null_data: Any | None = None,
     imaging_data: Any | None = None,
     log_P_range: tuple[float, float] = (1.0, 4.0),
@@ -157,7 +157,7 @@ def map_laplace_fit(
         Ms: Stellar mass (kg).
         dist_pc: Distance to system (parsec).
         rv_data: An :class:`~photomancy.orbit.data.RVData`, or ``None``.
-        astrom_data: An :class:`~photomancy.orbit.data.AstromData`, or ``None``.
+        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData`, or ``None``.
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
         log_P_range: ``(min, max)`` for ``log10(period/days)`` prior.
@@ -177,14 +177,14 @@ def map_laplace_fit(
         Laplace covariance, and the Laplace log-evidence.
     """
     has_rv = rv_data is not None
-    has_astrom = astrom_data is not None
+    has_relative_astrom = relative_astrom_data is not None
     has_null = null_data is not None
     has_imaging = imaging_data is not None
 
     # 1. Get or build cached model
     cached = _get_or_build_cached(
         has_rv=has_rv,
-        has_astrom=has_astrom,
+        has_relative_astrom=has_relative_astrom,
         has_null=has_null,
         has_imaging=has_imaging,
         log_P_range=log_P_range,
@@ -196,11 +196,11 @@ def map_laplace_fit(
         seed=seed,
     )
 
-    rv_data, astrom_data, null_data, imaging_data = _pad_orbit_data(
-        rv_data, astrom_data, null_data, imaging_data
+    rv_data, relative_astrom_data, null_data, imaging_data = _pad_orbit_data(
+        rv_data, relative_astrom_data, null_data, imaging_data
     )
 
-    model_args = (Ms, dist_pc, rv_data, astrom_data, null_data, imaging_data)
+    model_args = (Ms, dist_pc, rv_data, relative_astrom_data, null_data, imaging_data)
 
     # 3. Get initial z-vector
     if init_vals is not None:
@@ -249,7 +249,7 @@ def map_laplace_mixture_fit(
     dist_pc: float,
     *,
     rv_data: Any | None = None,
-    astrom_data: Any | None = None,
+    relative_astrom_data: Any | None = None,
     null_data: Any | None = None,
     imaging_data: Any | None = None,
     log_P_range: tuple[float, float] = (1.0, 4.0),
@@ -273,7 +273,7 @@ def map_laplace_mixture_fit(
         Ms: Stellar mass (kg).
         dist_pc: Distance to system (parsec).
         rv_data: An :class:`~photomancy.orbit.data.RVData`, or ``None``.
-        astrom_data: An :class:`~photomancy.orbit.data.AstromData`, or ``None``.
+        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData`, or ``None``.
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
         log_P_range: ``(min, max)`` for ``log10(period/days)`` prior.
@@ -298,14 +298,14 @@ def map_laplace_mixture_fit(
         start, weighted by per-mode Laplace log-evidence.
     """
     has_rv = rv_data is not None
-    has_astrom = astrom_data is not None
+    has_relative_astrom = relative_astrom_data is not None
     has_null = null_data is not None
     has_imaging = imaging_data is not None
 
     # 1. Get or build cached model
     cached = _get_or_build_cached(
         has_rv=has_rv,
-        has_astrom=has_astrom,
+        has_relative_astrom=has_relative_astrom,
         has_null=has_null,
         has_imaging=has_imaging,
         log_P_range=log_P_range,
@@ -317,24 +317,24 @@ def map_laplace_mixture_fit(
         seed=seed,
     )
 
-    rv_data, astrom_data, null_data, imaging_data = _pad_orbit_data(
-        rv_data, astrom_data, null_data, imaging_data
+    rv_data, relative_astrom_data, null_data, imaging_data = _pad_orbit_data(
+        rv_data, relative_astrom_data, null_data, imaging_data
     )
 
     # 3. Build model args
-    model_args = (Ms, dist_pc, rv_data, astrom_data, null_data, imaging_data)
+    model_args = (Ms, dist_pc, rv_data, relative_astrom_data, null_data, imaging_data)
 
     # 3. Get K initial conditions
     if init_list is None:
-        if astrom_data is None:
+        if relative_astrom_data is None:
             raise ValueError(
-                "astrom_data is required for automatic init; "
+                "relative_astrom_data is required for automatic init; "
                 "pass init_list explicitly for non-astrometry fits."
             )
 
         if use_top_k_init:
             init_list = find_init_top_k(
-                astrom_data,
+                relative_astrom_data,
                 Ms,
                 dist_pc,
                 k=k,
@@ -348,7 +348,7 @@ def map_laplace_mixture_fit(
                 sub_range = (float(edges[j]), float(edges[j + 1]))
                 init_list.append(
                     find_init(
-                        astrom_data,
+                        relative_astrom_data,
                         Ms,
                         dist_pc,
                         log_T_range=sub_range,

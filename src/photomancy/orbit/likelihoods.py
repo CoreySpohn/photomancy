@@ -105,13 +105,13 @@ def loglike_rv_marginalized(
     )
 
 
-def loglike_astrom(ra_pred, dec_pred, data):
+def loglike_relative_astrom(ra_pred, dec_pred, data):
     """Relative astrometry log-likelihood (bivariate Gaussian with correlation).
 
     Args:
         ra_pred: Predicted RA offsets (arcsec). Shape ``(N,)``.
         dec_pred: Predicted DEC offsets (arcsec). Shape ``(N,)``.
-        data: An :class:`~photomancy.orbit.data.AstromData` instance.
+        data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
 
     Returns:
         Scalar log-likelihood value.

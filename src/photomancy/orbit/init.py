@@ -14,7 +14,7 @@ Kepler-constrained orbit, so the chosen period is physically consistent with the
 Usage::
 
     from photomancy.orbit.init import find_init
-    init_vals = find_init(astrom_data, Ms, dist_pc)
+    init_vals = find_init(relative_astrom_data, Ms, dist_pc)
     kernel = NUTS(model, init_strategy=init_to_value(values=init_vals))
 """
 
@@ -22,8 +22,8 @@ import jax
 import jax.numpy as jnp
 from orbix.equations import period_to_sma
 
-from photomancy.orbit.forward import predict_astrometry
-from photomancy.orbit.likelihoods import loglike_astrom
+from photomancy.orbit.forward import predict_relative_astrometry
+from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import thiele_innes_fit
 
 
@@ -108,14 +108,14 @@ def ti_to_init(ti_result, Ms, n_planets=1):
     )
 
 
-def _grid_results(astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp):
+def _grid_results(relative_astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp):
     """Vmapped Thiele-Innes fit over the full ``(log_T, e, tp)`` grid."""
     log_T_grid = jnp.linspace(log_T_range[0], log_T_range[1], n_log_T)
     tp_fracs = jnp.linspace(0.0, 1.0, n_tp, endpoint=False)
 
     def _fit(log_T, e_val, tp_frac):
         T = 10.0**log_T
-        return thiele_innes_fit(astrom_data, T, e_val, tp_frac * T, Ms, dist_pc)
+        return thiele_innes_fit(relative_astrom_data, T, e_val, tp_frac * T, Ms, dist_pc)
 
     log_T_flat = jnp.repeat(log_T_grid, len(e_grid) * n_tp)
     e_flat = jnp.tile(jnp.repeat(jnp.asarray(e_grid), n_tp), n_log_T)
@@ -123,7 +123,7 @@ def _grid_results(astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp):
     return jax.vmap(_fit)(log_T_flat, e_flat, tp_flat)
 
 
-def _kepler_consistent_loglike(results, astrom_data, Ms, dist_pc):
+def _kepler_consistent_loglike(results, relative_astrom_data, Ms, dist_pc):
     """Log-likelihood of each grid candidate with ``a`` constrained to Kepler III.
 
     The Thiele-Innes fit reports a freely-fit ``a`` (apparent ellipse). Here we
@@ -134,10 +134,10 @@ def _kepler_consistent_loglike(results, astrom_data, Ms, dist_pc):
     a_kepler = period_to_sma(results.T, Ms)
 
     def _ll(a, e, cos_i, W, cos_w, sin_w, tp):
-        ra, dec = predict_astrometry(
-            astrom_data.times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc
+        ra, dec = predict_relative_astrometry(
+            relative_astrom_data.times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc
         )
-        return loglike_astrom(ra, dec, astrom_data)
+        return loglike_relative_astrom(ra, dec, relative_astrom_data)
 
     ll = jax.vmap(_ll)(
         a_kepler,
@@ -152,7 +152,7 @@ def _kepler_consistent_loglike(results, astrom_data, Ms, dist_pc):
 
 
 def find_init(
-    astrom_data,
+    relative_astrom_data,
     Ms,
     dist_pc,
     log_T_range=(1.0, 4.0),
@@ -171,7 +171,7 @@ def find_init(
     imply an orbit size inconsistent with the stellar mass.
 
     Args:
-        astrom_data: An :class:`~photomancy.orbit.data.AstromData` instance.
+        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
         Ms: Stellar mass (kg). Scalar.
         dist_pc: Distance to system (parsec). Scalar.
         log_T_range: (min, max) log10(T/days) for the period grid.
@@ -192,8 +192,8 @@ def find_init(
         from photomancy.orbit.init import find_init
         from photomancy.orbit.model import build_model
 
-        init_vals = find_init(astrom_data, Ms, dist_pc)
-        model = build_model(Ms, dist_pc, astrom_data=astrom_data)
+        init_vals = find_init(relative_astrom_data, Ms, dist_pc)
+        model = build_model(Ms, dist_pc, relative_astrom_data=relative_astrom_data)
         kernel = NUTS(model, init_strategy=init_to_value(values=init_vals))
         mcmc = MCMC(kernel, num_warmup=500, num_samples=2000)
         mcmc.run(jax.random.PRNGKey(0))
@@ -202,15 +202,15 @@ def find_init(
         e_grid = jnp.linspace(0.0, 0.8, 9)
 
     results = _grid_results(
-        astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp
+        relative_astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp
     )
-    kep_ll = _kepler_consistent_loglike(results, astrom_data, Ms, dist_pc)
+    kep_ll = _kepler_consistent_loglike(results, relative_astrom_data, Ms, dist_pc)
     best = jax.tree.map(lambda x: x[jnp.argmax(kep_ll)], results)
     return ti_to_init(best, Ms, n_planets=n_planets)
 
 
 def find_init_top_k(
-    astrom_data,
+    relative_astrom_data,
     Ms,
     dist_pc,
     k=5,
@@ -227,7 +227,7 @@ def find_init_top_k(
     candidate.
 
     Args:
-        astrom_data: An :class:`~photomancy.orbit.data.AstromData` instance.
+        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
         Ms: Stellar mass (kg). Scalar.
         dist_pc: Distance to system (parsec). Scalar.
         k: Number of top initializations to return. Default 5.
@@ -246,9 +246,9 @@ def find_init_top_k(
         e_grid = jnp.linspace(0.0, 0.8, 9)
 
     results = _grid_results(
-        astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp
+        relative_astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp
     )
-    kep_ll = _kepler_consistent_loglike(results, astrom_data, Ms, dist_pc)
+    kep_ll = _kepler_consistent_loglike(results, relative_astrom_data, Ms, dist_pc)
 
     top_k_indices = jnp.argsort(kep_ll)[-k:][::-1]
     init_dicts = []

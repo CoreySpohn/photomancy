@@ -20,10 +20,10 @@ from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import initialize_model
 
 from photomancy.orbit.data import (
-    MAX_ASTROM,
+    MAX_REL_ASTROM,
     MAX_IMG,
     MAX_RV,
-    AstromData,
+    RelativeAstromData,
     ImagingData,
     NullData,
     RVData,
@@ -35,23 +35,23 @@ from photomancy.orbit.model import build_model
 # ---------------------------------------------------------------------------
 
 
-def _pad_orbit_data(rv_data, astrom_data, null_data, imaging_data):
+def _pad_orbit_data(rv_data, relative_astrom_data, null_data, imaging_data):
     """Pad each present data container to its ``MAX_*`` size.
 
     The cached model is traced once at the ``MAX_*`` shapes, so runtime data must
     be padded to match for the JIT cache to hit. Containers already at ``MAX_*``
     (or ``None``) pass through unchanged.
     """
-    if astrom_data is not None and astrom_data.times.shape[0] != MAX_ASTROM:
-        n = astrom_data.times.shape[0]
-        astrom_data = AstromData.pad(
-            times=astrom_data.times[:n],
-            ra=astrom_data.ra[:n],
-            dec=astrom_data.dec[:n],
-            ra_err=astrom_data.ra_err[:n],
-            dec_err=astrom_data.dec_err[:n],
-            corr=astrom_data.corr[:n],
-            planet_id=astrom_data.planet_id[:n],
+    if relative_astrom_data is not None and relative_astrom_data.times.shape[0] != MAX_REL_ASTROM:
+        n = relative_astrom_data.times.shape[0]
+        relative_astrom_data = RelativeAstromData.pad(
+            times=relative_astrom_data.times[:n],
+            ra=relative_astrom_data.ra[:n],
+            dec=relative_astrom_data.dec[:n],
+            ra_err=relative_astrom_data.ra_err[:n],
+            dec_err=relative_astrom_data.dec_err[:n],
+            corr=relative_astrom_data.corr[:n],
+            planet_id=relative_astrom_data.planet_id[:n],
         )
     if rv_data is not None and rv_data.times.shape[0] != MAX_RV:
         n = rv_data.times.shape[0]
@@ -79,7 +79,7 @@ def _pad_orbit_data(rv_data, astrom_data, null_data, imaging_data):
             dmag_obs=imaging_data.dmag_obs[:n],
             dmag_err=imaging_data.dmag_err[:n],
         )
-    return rv_data, astrom_data, null_data, imaging_data
+    return rv_data, relative_astrom_data, null_data, imaging_data
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ _MODEL_CACHE: dict[tuple, dict] = {}
 
 def _cache_key(
     has_rv,
-    has_astrom,
+    has_relative_astrom,
     has_null,
     has_imaging,
     log_P_range,
@@ -105,7 +105,7 @@ def _cache_key(
     """Generate a hashable key for the model cache."""
     return (
         has_rv,
-        has_astrom,
+        has_relative_astrom,
         has_null,
         has_imaging,
         log_P_range,
@@ -121,7 +121,7 @@ def _cache_key(
 def _get_or_build_cached(
     *,
     has_rv,
-    has_astrom,
+    has_relative_astrom,
     has_null,
     has_imaging,
     log_P_range,
@@ -141,7 +141,7 @@ def _get_or_build_cached(
     """
     key = _cache_key(
         has_rv,
-        has_astrom,
+        has_relative_astrom,
         has_null,
         has_imaging,
         log_P_range,
@@ -160,7 +160,7 @@ def _get_or_build_cached(
     model = build_model(
         n_planets=n_planets,
         has_rv=has_rv,
-        has_astrom=has_astrom,
+        has_relative_astrom=has_relative_astrom,
         has_null=has_null,
         has_imaging=has_imaging,
         log_P_range=log_P_range,
@@ -175,7 +175,7 @@ def _get_or_build_cached(
     placeholder_Ms = 1.989e30
     placeholder_dist = 10.0
     placeholder_rv = RVData.zeros() if has_rv else None
-    placeholder_astrom = AstromData.zeros() if has_astrom else None
+    placeholder_relative_astrom = RelativeAstromData.zeros() if has_relative_astrom else None
     placeholder_null = NullData.zeros() if has_null else None
     placeholder_imaging = ImagingData.zeros() if has_imaging else None
 
@@ -183,7 +183,7 @@ def _get_or_build_cached(
         placeholder_Ms,
         placeholder_dist,
         placeholder_rv,
-        placeholder_astrom,
+        placeholder_relative_astrom,
         placeholder_null,
         placeholder_imaging,
     )

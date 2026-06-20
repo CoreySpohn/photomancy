@@ -29,7 +29,7 @@ def orbit_nested_sampling(
     dist_pc,
     *,
     rv_data=None,
-    astrom_data=None,
+    relative_astrom_data=None,
     null_data=None,
     imaging_data=None,
     log_P_range=(1.0, 4.0),
@@ -55,7 +55,7 @@ def orbit_nested_sampling(
         Ms: Stellar mass (kg).
         dist_pc: Distance to the system (parsec).
         rv_data: An :class:`~photomancy.orbit.data.RVData`, or ``None``.
-        astrom_data: An :class:`~photomancy.orbit.data.AstromData`, or ``None``.
+        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData`, or ``None``.
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
         log_P_range: ``(min, max)`` for the ``log10(period/days)`` prior.
@@ -85,7 +85,7 @@ def orbit_nested_sampling(
     model = build_model(
         n_planets=1,
         has_rv=rv_data is not None,
-        has_astrom=astrom_data is not None,
+        has_relative_astrom=relative_astrom_data is not None,
         has_null=null_data is not None,
         has_imaging=imaging_data is not None,
         log_P_range=log_P_range,
@@ -102,7 +102,7 @@ def orbit_nested_sampling(
 
     run_key, sample_key = jax.random.split(key)
     ns = NestedSampler(model, constructor_kwargs=constructor_kwargs)
-    ns.run(run_key, Ms, dist_pc, rv_data, astrom_data, null_data, imaging_data)
+    ns.run(run_key, Ms, dist_pc, rv_data, relative_astrom_data, null_data, imaging_data)
 
     draws = ns.get_samples(sample_key, num_samples=num_samples)
     # The model exposes the physical orbit parameters as deterministic sites, so the

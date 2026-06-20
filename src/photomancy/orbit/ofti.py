@@ -23,8 +23,8 @@ import jax.numpy as jnp
 from hwoutils.constants import G
 from orbix.equations.orbit import mean_motion
 
-from photomancy.orbit.forward import predict_astrometry
-from photomancy.orbit.likelihoods import loglike_astrom
+from photomancy.orbit.forward import predict_relative_astrometry
+from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.priors import ecc_distribution
 from photomancy.posterior import SamplePosterior
 
@@ -75,7 +75,7 @@ def _scale_rotate_score(
         m_ref: Mean anomaly at the reference epoch (radians). Scalar.
         tx: Target RA offset at the reference epoch (arcsec). Scalar.
         ty: Target DEC offset at the reference epoch (arcsec). Scalar.
-        data: AstromData (with is_valid).
+        data: RelativeAstromData (with is_valid).
         t_ref: Reference epoch time (days). Scalar.
         mu: Standard gravitational parameter G*Ms (AU^3/day^2). Scalar.
         Ms: Stellar mass (kg). Scalar.
@@ -93,7 +93,7 @@ def _scale_rotate_score(
     # equals m_ref, the eccentric anomaly there is independent of a.
     n1 = mean_motion(1.0, mu)
     tp1 = t_ref - m_ref / n1
-    x0, y0 = predict_astrometry(
+    x0, y0 = predict_relative_astrometry(
         jnp.atleast_1d(t_ref), 1.0, e, cos_i, 0.0, cos_w, sin_w, tp1, Ms, dist_pc
     )
     x0 = x0[0]
@@ -110,10 +110,10 @@ def _scale_rotate_score(
     log_P = jnp.log10(_TWO_PI / n_new)
 
     # Full-track likelihood over all valid epochs.
-    ra_p, dec_p = predict_astrometry(
+    ra_p, dec_p = predict_relative_astrometry(
         data.times, a_new, e, cos_i, W_new, cos_w, sin_w, tp_new, Ms, dist_pc
     )
-    ll = loglike_astrom(ra_p, dec_p, data)
+    ll = loglike_relative_astrom(ra_p, dec_p, data)
 
     # Truncate the induced log(a) == log(P) prior to the requested range, and e.
     in_support = (log_P >= log_P_lo) & (log_P <= log_P_hi) & (e < e_max)
@@ -151,7 +151,7 @@ class ScaleAndRotate(AbstractConditioner):
         Args:
             key: JAX PRNG key.
             n: Number of orbits to propose.
-            data: AstromData (with is_valid).
+            data: RelativeAstromData (with is_valid).
             ref_idx: Reference-epoch index for scale-and-rotate.
             Ms: Stellar mass (kg).
             dist_pc: Distance (parsec).
@@ -232,7 +232,7 @@ def ofti(
     accepted set is an unweighted posterior sample).
 
     Args:
-        data: AstromData (with is_valid) of relative astrometry.
+        data: RelativeAstromData (with is_valid) of relative astrometry.
         Ms: Stellar mass (kg).
         dist_pc: Distance (parsec).
         key: JAX PRNG key.

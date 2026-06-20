@@ -5,8 +5,8 @@ import jax.numpy as jnp
 import pytest
 from orbix.utils.quasi_random import roberts_sequence
 
-from photomancy.orbit.data import AstromData
-from photomancy.orbit.forward import predict_astrometry
+from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.grid_search import (
     AdaptiveImportanceSampler,
     EccVectorShape,
@@ -14,7 +14,7 @@ from photomancy.orbit.grid_search import (
     batched_loglike,
     build_evaluator,
 )
-from photomancy.orbit.likelihoods import loglike_astrom
+from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.posterior import SamplePosterior
 
 TWO_PI = 2.0 * jnp.pi
@@ -83,13 +83,13 @@ def test_ais_stage1_fills_unit_cube():
 
 
 def _toy_astrom():
-    """Build a small AstromData fixture from a known orbit."""
+    """Build a small RelativeAstromData fixture from a known orbit."""
     t = jnp.array([0.0, 120.0, 240.0])
     a, e, cos_i, W = 1.0, 0.1, 0.7, 0.5
     cos_w, sin_w, tp = 1.0, 0.0, 30.0
-    ra, dec = predict_astrometry(t, a, e, cos_i, W, cos_w, sin_w, tp, MSUN, 10.0)
+    ra, dec = predict_relative_astrometry(t, a, e, cos_i, W, cos_w, sin_w, tp, MSUN, 10.0)
     err = jnp.full(3, 1e-3)
-    return AstromData(
+    return RelativeAstromData(
         times=t,
         ra=ra,
         dec=dec,
@@ -102,7 +102,7 @@ def _toy_astrom():
 
 
 def test_evaluator_matches_direct_loglike():
-    """build_evaluator returns a function that matches loglike_astrom directly."""
+    """build_evaluator returns a function that matches loglike_relative_astrom directly."""
     from photomancy.orbit.grid_search import EccVectorShape, build_evaluator
 
     data = _toy_astrom()
@@ -117,7 +117,7 @@ def test_evaluator_matches_direct_loglike():
         "sin_w": jnp.array(0.0),
         "tp": jnp.array(30.0),
     }
-    ra, dec = predict_astrometry(
+    ra, dec = predict_relative_astrometry(
         data.times,
         phys["a"],
         phys["e"],
@@ -129,7 +129,7 @@ def test_evaluator_matches_direct_loglike():
         MSUN,
         10.0,
     )
-    assert jnp.allclose(ev(phys), loglike_astrom(ra, dec, data))
+    assert jnp.allclose(ev(phys), loglike_relative_astrom(ra, dec, data))
 
 
 def test_batched_loglike_matches_unfused():

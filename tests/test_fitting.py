@@ -6,10 +6,10 @@ import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg, Rearth2AU
 from orbix.kepler.core import diff_solve_trig
 
-from photomancy.orbit.data import AstromData, NullData, RVData
-from photomancy.orbit.forward import predict_astrometry, predict_photometry, predict_rv
+from photomancy.orbit.data import RelativeAstromData, NullData, RVData
+from photomancy.orbit.forward import predict_relative_astrometry, predict_photometry, predict_rv
 from photomancy.orbit.likelihoods import (
-    loglike_astrom,
+    loglike_relative_astrom,
     loglike_null,
     loglike_rv_marginalized,
 )
@@ -285,7 +285,7 @@ class TestPredictAstrometry:
     def test_output_shape(self, eccentric_orbit):
         """Should return (N,) shaped RA and DEC arrays."""
         times = jnp.linspace(0, 200.0, 50)
-        ra, dec = predict_astrometry(
+        ra, dec = predict_relative_astrometry(
             times,
             a=eccentric_orbit["a"],
             e=eccentric_orbit["e"],
@@ -305,7 +305,7 @@ class TestPredictAstrometry:
     def test_physical_scale(self, circular_orbit):
         """1 AU at 10 pc should give ~0.1 arcsec max separation."""
         times = jnp.linspace(0, 365.25, 100)
-        ra, dec = predict_astrometry(
+        ra, dec = predict_relative_astrometry(
             times,
             a=circular_orbit["a"],
             e=circular_orbit["e"],
@@ -326,7 +326,7 @@ class TestPredictAstrometry:
         times = jnp.array([10.0, 50.0])
 
         def loss(a):
-            ra, dec = predict_astrometry(
+            ra, dec = predict_relative_astrometry(
                 times,
                 a=a,
                 e=eccentric_orbit["e"],
@@ -471,7 +471,7 @@ class TestLoglikeAstrom:
 
     def test_perfect_match(self):
         """Zero residuals should give the maximum likelihood."""
-        data = AstromData(
+        data = RelativeAstromData(
             times=jnp.array([0.0]),
             ra=jnp.array([0.1]),
             dec=jnp.array([0.2]),
@@ -481,12 +481,12 @@ class TestLoglikeAstrom:
             planet_id=jnp.array([0]),
             is_valid=jnp.ones(1, dtype=bool),
         )
-        ll = loglike_astrom(jnp.array([0.1]), jnp.array([0.2]), data)
+        ll = loglike_relative_astrom(jnp.array([0.1]), jnp.array([0.2]), data)
         assert jnp.isfinite(ll)
 
     def test_worse_with_residual(self):
         """Larger residuals should give lower likelihood."""
-        data = AstromData(
+        data = RelativeAstromData(
             times=jnp.array([0.0]),
             ra=jnp.array([0.1]),
             dec=jnp.array([0.2]),
@@ -496,13 +496,13 @@ class TestLoglikeAstrom:
             planet_id=jnp.array([0]),
             is_valid=jnp.ones(1, dtype=bool),
         )
-        ll_good = loglike_astrom(jnp.array([0.1]), jnp.array([0.2]), data)
-        ll_bad = loglike_astrom(jnp.array([0.15]), jnp.array([0.25]), data)
+        ll_good = loglike_relative_astrom(jnp.array([0.1]), jnp.array([0.2]), data)
+        ll_bad = loglike_relative_astrom(jnp.array([0.15]), jnp.array([0.25]), data)
         assert ll_good > ll_bad
 
     def test_uncorrelated_reduces_to_chi2(self):
         """With rho=0, should reduce to independent Gaussian in RA and DEC."""
-        data = AstromData(
+        data = RelativeAstromData(
             times=jnp.array([0.0]),
             ra=jnp.array([1.0]),
             dec=jnp.array([2.0]),
@@ -515,7 +515,7 @@ class TestLoglikeAstrom:
         ra_pred = jnp.array([1.1])
         dec_pred = jnp.array([2.1])
 
-        ll = loglike_astrom(ra_pred, dec_pred, data)
+        ll = loglike_relative_astrom(ra_pred, dec_pred, data)
 
         # Manual chi^2: ((1-1.1)/0.5)^2 + ((2-2.1)/0.5)^2 = 0.04 + 0.04 = 0.08
         chi2 = (1.0 - 1.1) ** 2 / 0.5**2 + (2.0 - 2.1) ** 2 / 0.5**2
@@ -525,7 +525,7 @@ class TestLoglikeAstrom:
 
     def test_differentiable(self):
         """Should be differentiable w.r.t. predictions."""
-        data = AstromData(
+        data = RelativeAstromData(
             times=jnp.array([0.0]),
             ra=jnp.array([0.1]),
             dec=jnp.array([0.2]),
@@ -537,7 +537,7 @@ class TestLoglikeAstrom:
         )
 
         def loss(ra_pred):
-            return loglike_astrom(ra_pred, jnp.array([0.2]), data)
+            return loglike_relative_astrom(ra_pred, jnp.array([0.2]), data)
 
         g = jax.grad(loss)(jnp.array([0.1]))
         assert jnp.all(jnp.isfinite(g))
@@ -923,7 +923,7 @@ class TestThieleInnes:
         """Generate synthetic astrometry from known orbital parameters."""
         key = jax.random.PRNGKey(seed)
         times = jnp.linspace(0.0, params["T"] * 1.5, n_pts)
-        ra_true, dec_true = predict_astrometry(
+        ra_true, dec_true = predict_relative_astrometry(
             times=times,
             a=params["a"],
             e=params["e"],
@@ -939,7 +939,7 @@ class TestThieleInnes:
         ra = ra_true + noise_arcsec * jax.random.normal(k1, shape=ra_true.shape)
         dec = dec_true + noise_arcsec * jax.random.normal(k2, shape=dec_true.shape)
 
-        return AstromData(
+        return RelativeAstromData(
             times=times,
             ra=ra,
             dec=dec,
@@ -1124,7 +1124,7 @@ class TestInit:
         """Generate synthetic astrometry from known orbital parameters."""
         key = jax.random.PRNGKey(seed)
         times = jnp.linspace(0.0, params["T"] * 1.5, n_pts)
-        ra_true, dec_true = predict_astrometry(
+        ra_true, dec_true = predict_relative_astrometry(
             times=times,
             a=params["a"],
             e=params["e"],
@@ -1139,7 +1139,7 @@ class TestInit:
         k1, k2 = jax.random.split(key)
         ra = ra_true + noise_arcsec * jax.random.normal(k1, shape=ra_true.shape)
         dec = dec_true + noise_arcsec * jax.random.normal(k2, shape=dec_true.shape)
-        return AstromData(
+        return RelativeAstromData(
             times=times,
             ra=ra,
             dec=dec,

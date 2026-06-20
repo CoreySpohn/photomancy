@@ -10,9 +10,9 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from orbix.equations import period_to_sma  # noqa: E402
 
-from photomancy.orbit.data import AstromData  # noqa: E402
+from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.diagnostics import mode_summary, sample_physical  # noqa: E402
-from photomancy.orbit.forward import predict_astrometry  # noqa: E402
+from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.laplace import map_laplace_mixture_fit  # noqa: E402
 
@@ -28,7 +28,7 @@ def _make_astrom(n_obs=5, seed=42):
     rng = np.random.default_rng(seed)
     times = np.sort(rng.uniform(0.0, 3.0 * TRUE_T, n_obs))
     err = 5.0e-3
-    ra, dec = predict_astrometry(
+    ra, dec = predict_relative_astrometry(
         jnp.asarray(times),
         a,
         0.15,
@@ -40,7 +40,7 @@ def _make_astrom(n_obs=5, seed=42):
         MSUN_KG,
         DIST_PC,
     )
-    return AstromData(
+    return RelativeAstromData(
         times=jnp.asarray(times),
         ra=jnp.asarray(np.asarray(ra) + rng.normal(0.0, err, n_obs)),
         dec=jnp.asarray(np.asarray(dec) + rng.normal(0.0, err, n_obs)),
@@ -57,10 +57,10 @@ def _fit_posterior_and_problem():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         post = map_laplace_mixture_fit(
-            MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
+            MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
         )
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     return post, problem
 

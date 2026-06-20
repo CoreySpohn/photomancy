@@ -11,8 +11,8 @@ jax.config.update("jax_enable_x64", True)
 from orbix.equations import period_to_sma  # noqa: E402
 
 from photomancy.backends import LaplaceMixtureBackend  # noqa: E402
-from photomancy.orbit.data import AstromData  # noqa: E402
-from photomancy.orbit.forward import predict_astrometry  # noqa: E402
+from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init, find_init_top_k  # noqa: E402
 from photomancy.posterior import MixturePosterior  # noqa: E402
@@ -30,7 +30,7 @@ def _make_astrom(n_obs, seed=42):
     tp_true = -1.5 / (2.0 * jnp.pi / TRUE_T)
     np.random.seed(seed)
     times = np.sort(np.random.uniform(0, 3 * TRUE_T, 20))[:n_obs]
-    ra_true, dec_true = predict_astrometry(
+    ra_true, dec_true = predict_relative_astrometry(
         jnp.array(times),
         a_true,
         0.15,
@@ -44,7 +44,7 @@ def _make_astrom(n_obs, seed=42):
     )
     ra = jnp.array(np.array(ra_true) + np.random.randn(n_obs) * ASTROM_ERR)
     dec = jnp.array(np.array(dec_true) + np.random.randn(n_obs) * ASTROM_ERR)
-    return AstromData(
+    return RelativeAstromData(
         times=jnp.array(times),
         ra=ra,
         dec=dec,
@@ -64,7 +64,7 @@ def test_build_orbit_logdensity_maps_between_z_and_physical():
         init_dict = find_init(astrom, MSUN_KG, DIST_PC, log_T_range=LOG_P_RANGE)
 
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     z_init = problem.init_to_z(init_dict)
 
@@ -87,7 +87,7 @@ def test_orbit_fit_through_generic_backend_recovers_period():
     """
     astrom = _make_astrom(5)
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -110,7 +110,7 @@ def test_orbit_problem_exposes_unflatten_and_trace():
     """The problem exposes the model unflatten + trace for the EIG forward."""
     astrom = _make_astrom(6)
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -140,7 +140,7 @@ def test_to_unconstrained_round_trips_known_orbit():
         param_names=("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp"),
     )
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, astrom_data=_make_astrom(6), log_P_range=LOG_P_RANGE
+        MSUN_KG, DIST_PC, relative_astrom_data=_make_astrom(6), log_P_range=LOG_P_RANGE
     )
     zpost = to_unconstrained(phys_post, problem, MSUN_KG)
     assert zpost.samples.shape == (1, len(problem.param_names))
@@ -160,7 +160,7 @@ def test_orbit_nested_sampling_recovers_period_and_evidence():
     post = orbit_nested_sampling(
         MSUN_KG,
         DIST_PC,
-        astrom_data=astrom,
+        relative_astrom_data=astrom,
         log_P_range=LOG_P_RANGE,
         max_samples=30000,
         num_samples=1500,

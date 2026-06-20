@@ -20,12 +20,12 @@ from photomancy.backends import LaplaceMixtureBackend  # noqa: E402
 from photomancy.orbit.data import (  # noqa: E402
     MAX_CC_PTS,
     MAX_IMG,
-    AstromData,
+    RelativeAstromData,
     ImagingData,
     NullData,
 )
 from photomancy.orbit.forward import (  # noqa: E402
-    predict_astrometry,
+    predict_relative_astrometry,
     predict_photometry,
 )
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
@@ -142,10 +142,10 @@ def test_joint_astrom_imaging_fit_recovers_period():
     rng = np.random.default_rng(0)
     aerr = 5.0e-3
     t_ast = np.sort(rng.uniform(0.0, 3.0 * t_days, 6))
-    ra, dec = predict_astrometry(
+    ra, dec = predict_relative_astrometry(
         jnp.asarray(t_ast), a_au, e, cos_i, big_omega, cos_w, sin_w, tp, msun, dist
     )
-    astrom = AstromData(
+    astrom = RelativeAstromData(
         times=jnp.asarray(t_ast),
         ra=jnp.asarray(np.asarray(ra) + rng.normal(0.0, aerr, 6)),
         dec=jnp.asarray(np.asarray(dec) + rng.normal(0.0, aerr, 6)),
@@ -174,7 +174,7 @@ def test_joint_astrom_imaging_fit_recovers_period():
     )
 
     problem = build_orbit_logdensity(
-        msun, dist, astrom_data=astrom, imaging_data=img, log_P_range=log_p_range
+        msun, dist, relative_astrom_data=astrom, imaging_data=img, log_P_range=log_p_range
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

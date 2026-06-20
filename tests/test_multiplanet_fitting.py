@@ -16,8 +16,8 @@ import numpy as np  # noqa: E402
 from orbix.equations import period_to_sma  # noqa: E402
 
 from photomancy.backends import LaplaceBackend  # noqa: E402
-from photomancy.orbit.data import AstromData  # noqa: E402
-from photomancy.orbit.forward import predict_astrometry  # noqa: E402
+from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 
 MSUN_KG = 1.989e30
@@ -36,7 +36,7 @@ def _make_two_planet_astrom(seed=11):
         a = float(period_to_sma(t_days, MSUN_KG))
         tp = -1.0 / (2.0 * jnp.pi / t_days)
         t = np.sort(rng.uniform(0.0, 2.0 * t_days, 6))
-        r, d = predict_astrometry(
+        r, d = predict_relative_astrometry(
             jnp.asarray(t),
             a,
             0.1,
@@ -53,7 +53,7 @@ def _make_two_planet_astrom(seed=11):
         dec.append(np.asarray(d) + rng.normal(0.0, err, 6))
         pid.append(np.full(6, planet))
     n = 12
-    return AstromData(
+    return RelativeAstromData(
         times=jnp.asarray(np.concatenate(times)),
         ra=jnp.asarray(np.concatenate(ra)),
         dec=jnp.asarray(np.concatenate(dec)),
@@ -69,7 +69,7 @@ def test_build_orbit_logdensity_two_planets_builds_and_evaluates():
     """The API exposes n_planets and a 2-planet astrometry model evaluates finitely."""
     astrom = _make_two_planet_astrom()
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, astrom_data=astrom, n_planets=2, log_P_range=LOG_P_RANGE
+        MSUN_KG, DIST_PC, relative_astrom_data=astrom, n_planets=2, log_P_range=LOG_P_RANGE
     )
     z0 = problem.init_to_z({})
     assert jnp.isfinite(problem.logdensity(z0))
@@ -84,7 +84,7 @@ def test_two_planet_fit_recovers_both_periods_from_seed():
     """
     astrom = _make_two_planet_astrom()
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, astrom_data=astrom, n_planets=2, log_P_range=LOG_P_RANGE
+        MSUN_KG, DIST_PC, relative_astrom_data=astrom, n_planets=2, log_P_range=LOG_P_RANGE
     )
     z0 = problem.init_to_z(
         {
