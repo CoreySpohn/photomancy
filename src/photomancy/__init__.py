@@ -15,7 +15,10 @@ from photomancy.backends import (
     AbstractBackend,
     LaplaceBackend,
     LaplaceMixtureBackend,
+    MCLMCBackend,
     NUTSBackend,
+    PathfinderBackend,
+    PathfinderMixtureBackend,
     SMCBackend,
 )
 from photomancy.core import build_scene_logdensity
@@ -38,8 +41,11 @@ __all__ = [
     "GaussianPosterior",
     "LaplaceBackend",
     "LaplaceMixtureBackend",
+    "MCLMCBackend",
     "MixturePosterior",
     "NUTSBackend",
+    "PathfinderBackend",
+    "PathfinderMixtureBackend",
     "SMCBackend",
     "SamplePosterior",
     "__version__",
