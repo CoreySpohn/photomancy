@@ -186,3 +186,18 @@ def test_sample_posterior_to_prior_via_clustering():
     assert jnp.allclose(centers, jnp.array([0.0, 6.0]), atol=0.5)
     w = jax.nn.softmax(prior.log_weights)
     assert jnp.allclose(jnp.sort(w), jnp.array([0.5, 0.5]), atol=0.1)
+
+
+def test_mixture_n_modes_and_best_mode():
+    """MixturePosterior exposes its mode count and its highest-evidence mode."""
+    means = jnp.array([[0.0, 0.0], [3.0, 3.0]])
+    covs = jnp.stack([jnp.eye(2), 2.0 * jnp.eye(2)])
+    log_ev = jnp.array([0.0, 1.0])  # second mode dominates
+    post = MixturePosterior(means=means, covs=covs, log_evidences=log_ev)
+
+    assert post.n_modes == 2
+    best = post.best_mode()
+    assert isinstance(best, GaussianPosterior)
+    assert jnp.allclose(best.mean, means[1])
+    assert jnp.allclose(best.cov, covs[1])
+    assert jnp.allclose(best.evidence, log_ev[1])

@@ -118,6 +118,18 @@ class MixturePosterior(AbstractPosterior):
         """Normalized log mixture weights, ``log softmax(log Z_k)``. Shape ``(K,)``."""
         return self.log_evidences - logsumexp(self.log_evidences)
 
+    @property
+    def n_modes(self):
+        """Number of mixture modes ``K``."""
+        return self.means.shape[0]
+
+    def best_mode(self):
+        """The highest-evidence mode as a :class:`GaussianPosterior`."""
+        idx = jnp.argmax(self.log_evidences)
+        return GaussianPosterior(
+            mean=self.means[idx], cov=self.covs[idx], evidence=self.log_evidences[idx]
+        )
+
     def log_prob(self, z):
         """Mixture log-density at flat position ``z``."""
         comp_logp = jax.vmap(lambda m, c: multivariate_normal.logpdf(z, m, c))(
