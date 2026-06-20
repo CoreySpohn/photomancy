@@ -168,7 +168,7 @@ def test_mixture_posterior_to_prior_preserves_modes():
 
 
 def test_sample_posterior_to_prior_via_clustering():
-    """SamplePosterior.to_prior(k, key) clusters samples into a k-mode MixturePrior."""
+    """cluster_to_mixture(samples, k).to_prior() yields a k-mode MixturePrior."""
     from photomancy.priors import MixturePrior
 
     k0, k1 = jax.random.split(jax.random.key(3))
@@ -179,7 +179,7 @@ def test_sample_posterior_to_prior_via_clustering():
         samples=samples, log_weights=jnp.zeros(600), evidence=jnp.asarray(jnp.nan)
     )
 
-    prior = post.to_prior(2, key=jax.random.key(4))
+    prior = cluster_to_mixture(post, 2, key=jax.random.key(4)).to_prior()
     assert isinstance(prior, MixturePrior)
     # the two clusters survive as two modes with ~equal weight
     centers = jnp.sort(prior.means[:, 0])

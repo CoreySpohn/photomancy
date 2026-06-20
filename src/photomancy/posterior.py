@@ -50,14 +50,16 @@ class AbstractPosterior(eqx.Module):
     def to_prior(self):
         """Convert this posterior into an ``AbstractPrior`` over the same z-space.
 
-        Enables sequential Bayesian updating -- a fit's posterior becomes the next
-        fit's prior. Implemented for :class:`GaussianPosterior` in P1 (an exact MVN
-        :class:`~photomancy.priors.JointPrior`); the mixture / weighted-sample paths
-        (via ``cluster_to_mixture``) land in P2.
+        The exact "this fit's posterior becomes the next fit's prior" conversion for
+        sequential Bayesian updating, implemented where it is closed-form:
+        :class:`GaussianPosterior` -> MVN :class:`~photomancy.priors.JointPrior` and
+        :class:`MixturePosterior` -> :class:`~photomancy.priors.MixturePrior`. A
+        weighted-sample posterior has no exact prior -- cluster it first with
+        :func:`cluster_to_mixture` and call ``to_prior`` on the resulting mixture.
         """
         raise NotImplementedError(
-            "to_prior is implemented for GaussianPosterior in P1; the mixture / "
-            "sample paths (cluster_to_mixture) are P2."
+            "to_prior has no exact form for this posterior; use "
+            "cluster_to_mixture(posterior, k, key=key).to_prior() instead."
         )
 
 
@@ -195,15 +197,6 @@ class SamplePosterior(AbstractPosterior):
         raise NotImplementedError(
             "SamplePosterior has no closed-form density; cluster_to_mixture or a KDE."
         )
-
-    def to_prior(self, n_modes, *, key):
-        """Cluster the weighted samples into an ``n_modes``-mode ``MixturePrior``.
-
-        Runs ``cluster_to_mixture`` (weighted k-means -> Gaussian modes), then converts
-        the mixture to a prior -- so a NUTS / SMC / jaxns posterior (possibly
-        multimodal) becomes the next fit's prior. ``key`` seeds the k-means init.
-        """
-        return cluster_to_mixture(self, n_modes, key=key).to_prior()
 
 
 def cluster_to_mixture(posterior, k, *, key, iters=25, cov_floor=1e-6):

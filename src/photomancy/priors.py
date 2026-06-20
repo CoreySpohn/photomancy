@@ -190,8 +190,7 @@ class IndependentPrior(AbstractPrior):
     def log_prob(self, z):
         """Sum of the component log-densities."""
         return sum(
-            p.log_prob(b)
-            for p, b in zip(self.priors, self._blocks(z), strict=True)
+            p.log_prob(b) for p, b in zip(self.priors, self._blocks(z), strict=True)
         )
 
 
@@ -227,8 +226,8 @@ class JointPrior(AbstractPrior):
 class MixturePrior(AbstractPrior):
     """A Gaussian-mixture prior over ``z`` -- weighted modes, each an MVN.
 
-    What ``MixturePosterior.to_prior()`` (and ``SamplePosterior.to_prior`` via
-    ``cluster_to_mixture``) produce: it preserves multimodality across sequential epochs
+    What ``MixturePosterior.to_prior()`` (and ``cluster_to_mixture`` for weighted
+    samples) produce: it preserves multimodality across sequential epochs
     where a single Gaussian would collapse the modes. ``log_prob`` and ``sample`` are
     exact (serving the Laplace / NUTS / SMC family); ``forward`` / ``inverse`` -- the
     jaxns unit-cube transform -- are not implemented, as a multivariate mixture has no
