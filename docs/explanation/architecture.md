@@ -8,6 +8,10 @@ and the expected information gain of a candidate next observation. The engine is
 forward-model agnostic, so the same inference machinery serves orbit fitting today
 and disk, atmosphere, and image-domain fitting as those forward models come online.
 
+For the rigorous treatment behind this overview, the fit, the posterior
+approximations, the evidence, and the information gain, see
+[Mathematical foundations](mathematical-foundations).
+
 ## The core idea: a fit is a logdensity over a scene PyTree
 
 Every fit in photomancy reduces to a single scalar function, a `logdensity(z)` over a
@@ -16,7 +20,7 @@ model that maps a structured scene to predicted data, a likelihood that scores t
 prediction against the observation, and a prior over the fitted parameters.
 
 The scene is an Equinox module, for example a skyscapes `System` or an orbit parameter
-set, and the parameters being fit are a subset of its array leaves. `build_scene_logdensity`
+set, and the parameters being fit are a subset of its array leaves. {py:obj}`~photomancy.core.model.build_scene_logdensity`
 partitions the scene into the fitted leaves and a static remainder, ravels the fitted
 leaves into the flat vector `z` that a sampler manipulates, and wraps a `logdensity`
 that recombines `z` with the static remainder before calling the plug-ins on the full
@@ -24,7 +28,7 @@ structured scene. The forward model and likelihood therefore operate on the phys
 meaningful scene, while the backend sees only a flat vector. This partition is the
 central hinge of the library.
 
-Holding the plug-ins as fields of a `SceneLogDensity` module, rather than closing over
+Holding the plug-ins as fields of a {py:obj}`~photomancy.core.model.SceneLogDensity` module, rather than closing over
 them in a bare function, keeps any arrays they carry as leaves of the PyTree. When a
 forward model is itself a module that holds a large array, such as a coronagraph
 point-spread-function datacube, that array threads through the compiled kernel as a
@@ -38,34 +42,38 @@ code that adapts them into fits. The diagram below traces the data flow of a sin
 from the external physics, through a domain's plug-ins, into the engine, and out to the
 value-of-information layer.
 
-```
-  External physics     orbix (geometry)        skyscapes (scene + SEDs)
-                              |                          |
-                              +------------+-------------+
-                                           |
-  Domains (plug-ins)    orbit / disk / atmosphere / image (planned)
-                          forward + likelihood + prior
-                                           |
-                                           v
-  Engine (agnostic)     core: a logdensity over a partitioned scene PyTree
-                          priors  ->  backends (run)  ->  posterior
-                                                             |
-                                                             v
-                                              eig: value of information
+```mermaid
+flowchart TB
+    orbix["orbix<br/>geometry"]
+    skyscapes["skyscapes<br/>scene + SEDs"]
+    domains["Domains (plug-ins)<br/>orbit / disk / atmosphere / image (planned)<br/>forward + likelihood + prior"]
+    core["core<br/>logdensity over a partitioned scene PyTree"]
+    backends["priors + backends (run)"]
+    posterior["posterior (+ posterior_utils)"]
+    eig["eig (value of information)"]
+
+    orbix --> domains
+    skyscapes --> domains
+    domains --> core
+    core --> backends
+    backends --> posterior
+    posterior --> eig
 ```
 
-The engine layer knows no astrophysics. `core` assembles the logdensity, `priors`
-provides an owned family of distributions over the flat parameter vector, `backends`
-run inference, `posterior` and `posterior_utils` carry and manipulate the result behind
-one interface, and `eig` scores candidate observations. The domain layer supplies the
-physics-specific pieces and depends on the engine, never the reverse.
+The engine layer knows no astrophysics. {py:mod}`~photomancy.core` assembles the
+logdensity, {py:mod}`~photomancy.priors` provides an owned family of distributions over
+the flat parameter vector, {py:mod}`~photomancy.backends` run inference,
+{py:mod}`~photomancy.posterior` and {py:mod}`~photomancy.posterior_utils` carry and
+manipulate the result behind one interface, and {py:mod}`~photomancy.eig` scores candidate
+observations. The domain layer supplies the physics-specific pieces and depends on the
+engine, never the reverse.
 
 ## The plug-in contract
 
 A domain is a set of plug-ins on the generic engine rather than a parallel stack. To add
 a domain, provide a forward model with signature `scene -> predicted`, a likelihood with
 signature `predicted -> scalar`, and a prior over the fitted leaves, then hand them to
-`build_scene_logdensity`. The engine handles the partition, the flat-vector boundary, and
+{py:obj}`~photomancy.core.model.build_scene_logdensity`. The engine handles the partition, the flat-vector boundary, and
 the backend dispatch.
 
 The disk fit is the clearest example. photomancy reimplements no disk physics, so the
@@ -82,21 +90,23 @@ init, key) -> Posterior`. The backend sees only the flat logdensity, never the s
 the forward model, which keeps a new sampler useful to every domain at once. Five
 backends exist today:
 
-- `LaplaceBackend`: a MAP optimization followed by the eigenvalue-clamped inverse
+- {py:obj}`~photomancy.backends.laplace.LaplaceBackend`: a MAP optimization followed by the eigenvalue-clamped inverse
   Hessian, giving a Gaussian posterior. It is fast and serves as the substrate for the
   analytic value-of-information calculation.
-- `LaplaceMixtureBackend`: a multi-start Laplace fit assembled into an evidence-weighted
+- {py:obj}`~photomancy.backends.laplace.LaplaceMixtureBackend`: a multi-start Laplace fit assembled into an evidence-weighted
   mixture of Gaussians, which covers period aliases and other multimodality.
-- `NUTSBackend`: the No-U-Turn sampler with window adaptation, returning equally weighted
+- {py:obj}`~photomancy.backends.nuts.NUTSBackend`: the No-U-Turn sampler with window adaptation, returning equally weighted
   samples.
-- `SMCBackend`: adaptive-tempered sequential Monte Carlo, which returns a posterior and
+- {py:obj}`~photomancy.backends.smc.SMCBackend`: adaptive-tempered sequential Monte Carlo, which returns a posterior and
   the Bayesian evidence in one run.
-- `JaxnsBackend`: nested sampling, which returns a posterior and the evidence for model
+- {py:obj}`~photomancy.backends.nested.JaxnsBackend`: nested sampling, which returns a posterior and the evidence for model
   comparison and detection significance, the Bayes factor that answers a question such as
   whether a given molecule is present.
 
-Every backend returns one of three `Posterior` types, `GaussianPosterior`,
-`MixturePosterior`, or `SamplePosterior`, behind a uniform interface: `sample` draws
+Every backend returns one of three `Posterior` types,
+{py:obj}`~photomancy.posterior.GaussianPosterior`,
+{py:obj}`~photomancy.posterior.MixturePosterior`, or
+{py:obj}`~photomancy.posterior.SamplePosterior`, behind a uniform interface: `sample` draws
 positions, `log_prob` scores a position where a closed form exists, and `evidence`
 reports the log marginal likelihood. Consumers such as the value-of-information layer read
 this interface and stay agnostic to which backend produced the result. A posterior also
@@ -104,7 +114,7 @@ converts into a prior through `to_prior`, so a fit on one batch of data becomes 
 for the next, and information accumulates across observations.
 
 The two backends that integrate over the prior, nested sampling and SMC, consume a
-sampleable prior rather than a bare logdensity. `build_scene_nested_model` adapts a scene
+sampleable prior rather than a bare logdensity. {py:obj}`~photomancy.backends.nested.build_scene_nested_model` adapts a scene
 fit and photomancy's own prior layer into the form nested sampling expects, with no
 tensorflow-probability dependency. Orbit fitting additionally keeps a specialized
 high-throughput path built on a cached NumPyro model, which returns the same unified

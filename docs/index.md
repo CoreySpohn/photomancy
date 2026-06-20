@@ -12,14 +12,22 @@ The engine is forward-model agnostic. A fit is a `logdensity` over a partitioned
 PyTree, assembled from three plug-ins (a forward model, a likelihood, and a prior) and
 run through a uniform `Backend` that returns one `Posterior` exposing `.sample`,
 `.log_prob`, and `.evidence`. The [architecture overview](explanation/architecture)
-describes how the pieces fit together and where the library is headed.
+describes how the pieces fit together and where the library is headed. And if, like me,
+you get confused about all the Bayesian inference and JAX nomenclature take a look at
+[the glossary](explanation/glossary).
 
 ## Ecosystem position
 
-```text
-  orbix (geometry)  ---\
-                        >--->  photomancy  --->  posteriors + evidence + next-best obs
-  skyscapes (scene) ---/      logdensity -> backend -> posterior -> EIG
+```mermaid
+flowchart LR
+    orbix["orbix<br/>geometry"]
+    skyscapes["skyscapes<br/>scene + SEDs"]
+    photomancy["<b>photomancy</b><br/>logdensity -> backend -> posterior -> EIG"]
+    out["posteriors + evidence<br/>+ next observation"]
+
+    orbix --> photomancy
+    skyscapes --> photomancy
+    photomancy --> out
 ```
 
 ## Quick start
@@ -65,9 +73,18 @@ image-domain fitting against a coronagraph forward is the next major target. See
 :hidden:
 
 explanation/architecture
+explanation/mathematical-foundations
+explanation/glossary
 ```
 
-<!-- TODO: add how-to guides and runnable tutorials as the domains stabilize. -->
+```{toctree}
+:maxdepth: 1
+:caption: Examples
+:hidden:
+
+examples/walkthrough
+examples/orbit_fitting
+```
 
 ```{toctree}
 :maxdepth: 2
