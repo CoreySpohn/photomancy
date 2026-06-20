@@ -41,7 +41,7 @@ docs = [
     "sphinx_autodoc_typehints",
     "matplotlib",
 ]
-test = ["nox", "pytest", "hypothesis", "pytest-cov", "arviz"]
+test = ["nox", "pytest", "pytest-xdist", "hypothesis", "pytest-cov", "arviz"]
 # Optional extras (jaxns and numpyro are core deps, not extras):
 npe = ["flowjax"]       # amortized neural posterior estimation
 imaging = ["coronalyze"]  # differentiable detection/extraction likelihood helpers
@@ -73,3 +73,6 @@ select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.pytest.ini_options]
+addopts = "-n auto"
