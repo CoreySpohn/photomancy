@@ -6,11 +6,15 @@ import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg, Rearth2AU
 from orbix.kepler.core import diff_solve_trig
 
-from photomancy.orbit.data import RelativeAstromData, NullData, RVData
-from photomancy.orbit.forward import predict_relative_astrometry, predict_photometry, predict_rv
+from photomancy.orbit.data import NullData, RelativeAstromData, RVData
+from photomancy.orbit.forward import (
+    predict_photometry,
+    predict_relative_astrometry,
+    predict_rv,
+)
 from photomancy.orbit.likelihoods import (
-    loglike_relative_astrom,
     loglike_null,
+    loglike_relative_astrom,
     loglike_rv_marginalized,
 )
 
@@ -747,7 +751,7 @@ class TestNumPyroModel:
         # Execute with a seed to get a trace
         with handlers.seed(rng_seed=42):
             trace = handlers.trace(model).get_trace(
-                Msun2kg, 10.0, rv_data, None, None, None
+                Msun2kg, 10.0, rv_data, None, None, None, None
             )
 
         # Check essential sites exist (kipping13 default uses e_raw, w_raw)
@@ -782,7 +786,7 @@ class TestNumPyroModel:
 
         with handlers.seed(rng_seed=99):
             trace = handlers.trace(model).get_trace(
-                Msun2kg, 10.0, rv_data, None, None, None
+                Msun2kg, 10.0, rv_data, None, None, None, None
             )
 
         # All priors must produce deterministic e, cos_w, sin_w
@@ -814,7 +818,7 @@ class TestNumPyroModel:
         with pytest.raises(ValueError, match="Unknown ecc_prior"):
             with handlers.seed(rng_seed=0):
                 handlers.trace(model).get_trace(
-                    Msun2kg, 10.0, rv_data, None, None, None
+                    Msun2kg, 10.0, rv_data, None, None, None, None
                 )
 
     def test_mcmc_runs_rv(self):
@@ -872,6 +876,7 @@ class TestNumPyroModel:
             Msun2kg,
             10.0,
             rv_data,
+            None,
             None,
             None,
             None,

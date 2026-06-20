@@ -108,14 +108,18 @@ def ti_to_init(ti_result, Ms, n_planets=1):
     )
 
 
-def _grid_results(relative_astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp):
+def _grid_results(
+    relative_astrom_data, Ms, dist_pc, log_T_range, n_log_T, e_grid, n_tp
+):
     """Vmapped Thiele-Innes fit over the full ``(log_T, e, tp)`` grid."""
     log_T_grid = jnp.linspace(log_T_range[0], log_T_range[1], n_log_T)
     tp_fracs = jnp.linspace(0.0, 1.0, n_tp, endpoint=False)
 
     def _fit(log_T, e_val, tp_frac):
         T = 10.0**log_T
-        return thiele_innes_fit(relative_astrom_data, T, e_val, tp_frac * T, Ms, dist_pc)
+        return thiele_innes_fit(
+            relative_astrom_data, T, e_val, tp_frac * T, Ms, dist_pc
+        )
 
     log_T_flat = jnp.repeat(log_T_grid, len(e_grid) * n_tp)
     e_flat = jnp.tile(jnp.repeat(jnp.asarray(e_grid), n_tp), n_log_T)
@@ -171,7 +175,8 @@ def find_init(
     imply an orbit size inconsistent with the stellar mass.
 
     Args:
-        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
+        relative_astrom_data: An
+            :class:`~photomancy.orbit.data.RelativeAstromData` instance.
         Ms: Stellar mass (kg). Scalar.
         dist_pc: Distance to system (parsec). Scalar.
         log_T_range: (min, max) log10(T/days) for the period grid.
@@ -227,7 +232,8 @@ def find_init_top_k(
     candidate.
 
     Args:
-        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
+        relative_astrom_data: An
+            :class:`~photomancy.orbit.data.RelativeAstromData` instance.
         Ms: Stellar mass (kg). Scalar.
         dist_pc: Distance to system (parsec). Scalar.
         k: Number of top initializations to return. Default 5.

@@ -269,7 +269,12 @@ def test_ofti_matches_nuts():
 
     from numpyro.infer import MCMC, NUTS, init_to_value
 
-    from photomancy.orbit.data import ImagingData, NullData, RVData
+    from photomancy.orbit.data import (
+        ImagingData,
+        NullData,
+        RVData,
+        StellarAstromData,
+    )
     from photomancy.orbit.init import find_init
     from photomancy.orbit.model import build_model
 
@@ -304,6 +309,7 @@ def test_ofti_matches_nuts():
         DIST_PC,
         RVData.zeros(),
         padded,
+        StellarAstromData.zeros(),
         NullData.zeros(),
         ImagingData.zeros(),
     )

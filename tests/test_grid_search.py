@@ -87,7 +87,9 @@ def _toy_astrom():
     t = jnp.array([0.0, 120.0, 240.0])
     a, e, cos_i, W = 1.0, 0.1, 0.7, 0.5
     cos_w, sin_w, tp = 1.0, 0.0, 30.0
-    ra, dec = predict_relative_astrometry(t, a, e, cos_i, W, cos_w, sin_w, tp, MSUN, 10.0)
+    ra, dec = predict_relative_astrometry(
+        t, a, e, cos_i, W, cos_w, sin_w, tp, MSUN, 10.0
+    )
     err = jnp.full(3, 1e-3)
     return RelativeAstromData(
         times=t,
@@ -102,7 +104,7 @@ def _toy_astrom():
 
 
 def test_evaluator_matches_direct_loglike():
-    """build_evaluator returns a function that matches loglike_relative_astrom directly."""
+    """build_evaluator returns a function matching loglike_relative_astrom."""
     from photomancy.orbit.grid_search import EccVectorShape, build_evaluator
 
     data = _toy_astrom()

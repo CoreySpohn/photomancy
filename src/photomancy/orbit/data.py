@@ -18,6 +18,7 @@ import jax.numpy as jnp
 # Static shape limits (for JIT-cacheable fitting)
 # ---------------------------------------------------------------------------
 MAX_REL_ASTROM = 64
+MAX_STELLAR_ASTROM = 64
 MAX_IMG = 64
 MAX_CC_PTS = 200
 MAX_RV = 256
@@ -127,7 +128,9 @@ class RelativeAstromData(eqx.Module):
     is_valid: jnp.ndarray
 
     @classmethod
-    def pad(cls, *, times, ra, dec, ra_err, dec_err, corr, planet_id, max_n=MAX_REL_ASTROM):
+    def pad(
+        cls, *, times, ra, dec, ra_err, dec_err, corr, planet_id, max_n=MAX_REL_ASTROM
+    ):
         """Create a padded RelativeAstromData with ``is_valid`` mask."""
         n = jnp.asarray(times).shape[0]
         return cls(
@@ -152,6 +155,65 @@ class RelativeAstromData(eqx.Module):
             dec_err=jnp.ones(max_n),
             corr=jnp.zeros(max_n),
             planet_id=jnp.zeros(max_n, dtype=int),
+            is_valid=jnp.zeros(max_n, dtype=bool),
+        )
+
+
+# ---------------------------------------------------------------------------
+# StellarAstromData -- the star's reflex motion on the sky
+# ---------------------------------------------------------------------------
+
+
+class StellarAstromData(eqx.Module):
+    """Stellar-reflex astrometry observations.
+
+    The measured RA/DEC offsets of the *star* about the system barycenter (its
+    reflex wobble), in arcseconds. One position per epoch; for a multi-planet
+    system the model sums the per-planet reflex contributions. Unlike
+    :class:`RelativeAstromData` there is no ``planet_id`` (the star is one body).
+
+    Args:
+        times: Observation epochs (days). Shape ``(N,)``.
+        ra: Stellar reflex RA offset (arcsec). Shape ``(N,)``.
+        dec: Stellar reflex DEC offset (arcsec). Shape ``(N,)``.
+        ra_err: RA uncertainty (arcsec). Shape ``(N,)``.
+        dec_err: DEC uncertainty (arcsec). Shape ``(N,)``.
+        corr: RA/DEC correlation coefficient. Shape ``(N,)``.
+        is_valid: Boolean validity mask. Shape ``(N,)``.
+    """
+
+    times: jnp.ndarray
+    ra: jnp.ndarray
+    dec: jnp.ndarray
+    ra_err: jnp.ndarray
+    dec_err: jnp.ndarray
+    corr: jnp.ndarray
+    is_valid: jnp.ndarray
+
+    @classmethod
+    def pad(cls, *, times, ra, dec, ra_err, dec_err, corr, max_n=MAX_STELLAR_ASTROM):
+        """Create a padded StellarAstromData with ``is_valid`` mask."""
+        n = jnp.asarray(times).shape[0]
+        return cls(
+            times=_pad_1d(times, max_n),
+            ra=_pad_1d(ra, max_n),
+            dec=_pad_1d(dec, max_n),
+            ra_err=_pad_1d(ra_err, max_n, fill=1.0),
+            dec_err=_pad_1d(dec_err, max_n, fill=1.0),
+            corr=_pad_1d(corr, max_n),
+            is_valid=_valid_mask(n, max_n),
+        )
+
+    @classmethod
+    def zeros(cls, max_n=MAX_STELLAR_ASTROM):
+        """Create an all-invalid placeholder (for model tracing)."""
+        return cls(
+            times=jnp.zeros(max_n),
+            ra=jnp.zeros(max_n),
+            dec=jnp.zeros(max_n),
+            ra_err=jnp.ones(max_n),
+            dec_err=jnp.ones(max_n),
+            corr=jnp.zeros(max_n),
             is_valid=jnp.zeros(max_n, dtype=bool),
         )
 

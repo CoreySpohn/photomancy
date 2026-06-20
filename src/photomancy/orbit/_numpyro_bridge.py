@@ -20,13 +20,15 @@ from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import initialize_model
 
 from photomancy.orbit.data import (
-    MAX_REL_ASTROM,
     MAX_IMG,
+    MAX_REL_ASTROM,
     MAX_RV,
-    RelativeAstromData,
+    MAX_STELLAR_ASTROM,
     ImagingData,
     NullData,
+    RelativeAstromData,
     RVData,
+    StellarAstromData,
 )
 from photomancy.orbit.model import build_model
 
@@ -35,14 +37,19 @@ from photomancy.orbit.model import build_model
 # ---------------------------------------------------------------------------
 
 
-def _pad_orbit_data(rv_data, relative_astrom_data, null_data, imaging_data):
+def _pad_orbit_data(
+    rv_data, relative_astrom_data, stellar_astrom_data, null_data, imaging_data
+):
     """Pad each present data container to its ``MAX_*`` size.
 
     The cached model is traced once at the ``MAX_*`` shapes, so runtime data must
     be padded to match for the JIT cache to hit. Containers already at ``MAX_*``
     (or ``None``) pass through unchanged.
     """
-    if relative_astrom_data is not None and relative_astrom_data.times.shape[0] != MAX_REL_ASTROM:
+    if (
+        relative_astrom_data is not None
+        and relative_astrom_data.times.shape[0] != MAX_REL_ASTROM
+    ):
         n = relative_astrom_data.times.shape[0]
         relative_astrom_data = RelativeAstromData.pad(
             times=relative_astrom_data.times[:n],
@@ -52,6 +59,19 @@ def _pad_orbit_data(rv_data, relative_astrom_data, null_data, imaging_data):
             dec_err=relative_astrom_data.dec_err[:n],
             corr=relative_astrom_data.corr[:n],
             planet_id=relative_astrom_data.planet_id[:n],
+        )
+    if (
+        stellar_astrom_data is not None
+        and stellar_astrom_data.times.shape[0] != MAX_STELLAR_ASTROM
+    ):
+        n = stellar_astrom_data.times.shape[0]
+        stellar_astrom_data = StellarAstromData.pad(
+            times=stellar_astrom_data.times[:n],
+            ra=stellar_astrom_data.ra[:n],
+            dec=stellar_astrom_data.dec[:n],
+            ra_err=stellar_astrom_data.ra_err[:n],
+            dec_err=stellar_astrom_data.dec_err[:n],
+            corr=stellar_astrom_data.corr[:n],
         )
     if rv_data is not None and rv_data.times.shape[0] != MAX_RV:
         n = rv_data.times.shape[0]
@@ -79,7 +99,7 @@ def _pad_orbit_data(rv_data, relative_astrom_data, null_data, imaging_data):
             dmag_obs=imaging_data.dmag_obs[:n],
             dmag_err=imaging_data.dmag_err[:n],
         )
-    return rv_data, relative_astrom_data, null_data, imaging_data
+    return rv_data, relative_astrom_data, stellar_astrom_data, null_data, imaging_data
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +112,7 @@ _MODEL_CACHE: dict[tuple, dict] = {}
 def _cache_key(
     has_rv,
     has_relative_astrom,
+    has_stellar_astrom,
     has_null,
     has_imaging,
     log_P_range,
@@ -106,6 +127,7 @@ def _cache_key(
     return (
         has_rv,
         has_relative_astrom,
+        has_stellar_astrom,
         has_null,
         has_imaging,
         log_P_range,
@@ -122,6 +144,7 @@ def _get_or_build_cached(
     *,
     has_rv,
     has_relative_astrom,
+    has_stellar_astrom,
     has_null,
     has_imaging,
     log_P_range,
@@ -142,6 +165,7 @@ def _get_or_build_cached(
     key = _cache_key(
         has_rv,
         has_relative_astrom,
+        has_stellar_astrom,
         has_null,
         has_imaging,
         log_P_range,
@@ -161,6 +185,7 @@ def _get_or_build_cached(
         n_planets=n_planets,
         has_rv=has_rv,
         has_relative_astrom=has_relative_astrom,
+        has_stellar_astrom=has_stellar_astrom,
         has_null=has_null,
         has_imaging=has_imaging,
         log_P_range=log_P_range,
@@ -175,7 +200,12 @@ def _get_or_build_cached(
     placeholder_Ms = 1.989e30
     placeholder_dist = 10.0
     placeholder_rv = RVData.zeros() if has_rv else None
-    placeholder_relative_astrom = RelativeAstromData.zeros() if has_relative_astrom else None
+    placeholder_relative_astrom = (
+        RelativeAstromData.zeros() if has_relative_astrom else None
+    )
+    placeholder_stellar_astrom = (
+        StellarAstromData.zeros() if has_stellar_astrom else None
+    )
     placeholder_null = NullData.zeros() if has_null else None
     placeholder_imaging = ImagingData.zeros() if has_imaging else None
 
@@ -184,6 +214,7 @@ def _get_or_build_cached(
         placeholder_dist,
         placeholder_rv,
         placeholder_relative_astrom,
+        placeholder_stellar_astrom,
         placeholder_null,
         placeholder_imaging,
     )

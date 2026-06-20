@@ -21,10 +21,11 @@ from hwoutils.constants import Mearth2kg
 from orbix.equations import period_to_sma
 
 from photomancy.orbit.likelihoods import (
-    loglike_relative_astrom,
     loglike_imaging,
     loglike_null,
+    loglike_relative_astrom,
     loglike_rv_marginalized,
+    loglike_stellar_astrom,
 )
 from photomancy.orbit.priors import sample_ecc_prior
 
@@ -34,6 +35,7 @@ def build_model(
     n_planets=1,
     has_rv=False,
     has_relative_astrom=False,
+    has_stellar_astrom=False,
     has_null=False,
     has_imaging=False,
     log_P_range=(0.0, 5.0),
@@ -46,13 +48,15 @@ def build_model(
     """Build a NumPyro model function for orbit fitting.
 
     The returned function accepts ``(Ms, dist_pc, rv_data, relative_astrom_data,
-    null_data, imaging_data)`` as arguments (dynamic, for JIT caching).
-    Prior configuration is captured in the closure (static).
+    stellar_astrom_data, null_data, imaging_data)`` as arguments (dynamic, for JIT
+    caching). Prior configuration is captured in the closure (static).
 
     Args:
         n_planets: Number of planets to fit. Default 1.
         has_rv: Whether RV data will be provided.
-        has_relative_astrom: Whether astrometry data will be provided.
+        has_relative_astrom: Whether relative (planet-to-star) astrometry will be
+            provided.
+        has_stellar_astrom: Whether stellar-reflex astrometry will be provided.
         has_null: Whether null-detection data will be provided.
         has_imaging: Whether unified imaging data will be provided.
         log_P_range: (min, max) for log10(period/days) uniform prior.
@@ -64,23 +68,36 @@ def build_model(
         jitter_scale: Scale for HalfNormal jitter prior (AU/day).
 
     Returns:
-        A callable ``model(Ms, dist_pc, rv_data, relative_astrom_data, null_data,
-        imaging_data)`` suitable for ``numpyro.infer.MCMC`` and for use
-        with ``dynamic_args=True`` in ``initialize_model``.
+        A callable ``model(Ms, dist_pc, rv_data, relative_astrom_data,
+        stellar_astrom_data, null_data, imaging_data)`` suitable for
+        ``numpyro.infer.MCMC`` and for use with ``dynamic_args=True`` in
+        ``initialize_model``.
     """
     has_photometry = has_null or has_imaging
 
-    if not any([has_rv, has_relative_astrom, has_null, has_imaging]):
+    if not any(
+        [has_rv, has_relative_astrom, has_stellar_astrom, has_null, has_imaging]
+    ):
         raise ValueError(
-            "At least one of has_rv, has_relative_astrom, has_null, or has_imaging must be True."
+            "At least one of has_rv, has_relative_astrom, has_stellar_astrom, "
+            "has_null, or has_imaging must be True."
         )
 
-    def model(Ms, dist_pc, rv_data, relative_astrom_data, null_data, imaging_data):
+    def model(
+        Ms,
+        dist_pc,
+        rv_data,
+        relative_astrom_data,
+        stellar_astrom_data,
+        null_data,
+        imaging_data,
+    ):
         # CIRCULAR IMPORT: photomancy.orbit.forward -> photomancy.orbit.model
         from photomancy.orbit.forward import (
-            predict_relative_astrometry,
             predict_photometry,
+            predict_relative_astrometry,
             predict_rv,
+            predict_stellar_astrometry,
         )
 
         # ----------------------------------------------------------------
@@ -128,9 +145,10 @@ def build_model(
                 Lambda = numpyro.deterministic("Lambda", Ag * Rp**2)
 
         # ----------------------------------------------------------------
-        # Mass parameters (if RV data present)
+        # Mass parameters (planet mass is shared by RV, which sees Mp*sin i, and
+        # stellar astrometry, which resolves i and so yields the dynamical mass)
         # ----------------------------------------------------------------
-        if has_rv:
+        if has_rv or has_stellar_astrom:
             with numpyro.plate("planet_masses", n_planets):
                 log_Mp = numpyro.sample(
                     "log_Mp",
@@ -140,6 +158,7 @@ def build_model(
                 sin_i = jnp.sqrt(1.0 - cos_i**2)
                 Mp_sini = numpyro.deterministic("Mp_sini", Mp * sin_i)
 
+        if has_rv:
             with numpyro.plate("instruments", rv_data.n_inst):
                 jitter = numpyro.sample("jitter", dist.HalfNormal(jitter_scale))
 
@@ -197,9 +216,33 @@ def build_model(
                     Ms,
                     dist_pc,
                 )
-                ll_relative_astrom_val = loglike_relative_astrom(ra_pred, dec_pred, relative_astrom_data)
+                ll_relative_astrom_val = loglike_relative_astrom(
+                    ra_pred, dec_pred, relative_astrom_data
+                )
                 numpyro.factor("ll_relative_astrom", ll_relative_astrom_val)
                 ll_total = ll_total + ll_relative_astrom_val
+
+            # --- Stellar-reflex astrometry ---
+            if has_stellar_astrom:
+                Mp_s = jnp.squeeze(Mp)
+                ra_star, dec_star = predict_stellar_astrometry(
+                    stellar_astrom_data.times,
+                    a_s,
+                    e_s,
+                    cos_i_s,
+                    W_s,
+                    cos_w_s,
+                    sin_w_s,
+                    tp_s,
+                    Ms,
+                    Mp_s,
+                    dist_pc,
+                )
+                ll_stellar_astrom_val = loglike_stellar_astrom(
+                    ra_star, dec_star, stellar_astrom_data
+                )
+                numpyro.factor("ll_stellar_astrom", ll_stellar_astrom_val)
+                ll_total = ll_total + ll_stellar_astrom_val
 
             # --- Null detections ---
             if has_null:
@@ -250,6 +293,7 @@ def build_model(
             # CIRCULAR IMPORT: photomancy.orbit.forward -> photomancy.orbit.model
             from photomancy.orbit.forward import predict_relative_astrometry as _pa
             from photomancy.orbit.forward import predict_rv as _prv
+            from photomancy.orbit.forward import predict_stellar_astrometry as _psa
 
             def _single_planet_rv(T_p, Mp_sini_p, e_p, cos_w_p, sin_w_p, tp_p):
                 return _prv(
@@ -274,6 +318,23 @@ def build_model(
                     sin_w_p,
                     tp_p,
                     Ms,
+                    dist_pc,
+                )
+
+            def _single_planet_stellar(
+                a_p, e_p, cos_i_p, W_p, cos_w_p, sin_w_p, tp_p, Mp_p
+            ):
+                return _psa(
+                    stellar_astrom_data.times,
+                    a_p,
+                    e_p,
+                    cos_i_p,
+                    W_p,
+                    cos_w_p,
+                    sin_w_p,
+                    tp_p,
+                    Ms,
+                    Mp_p,
                     dist_pc,
                 )
 
@@ -305,7 +366,21 @@ def build_model(
                     relative_astrom_data.planet_id,
                     jnp.arange(relative_astrom_data.times.shape[0]),
                 ]
-                ll_relative_astrom = loglike_relative_astrom(ra_pred, dec_pred, relative_astrom_data)
+                ll_relative_astrom = loglike_relative_astrom(
+                    ra_pred, dec_pred, relative_astrom_data
+                )
                 numpyro.factor("ll_relative_astrom", ll_relative_astrom)
+
+            if has_stellar_astrom:
+                ra_pp, dec_pp = jax.vmap(_single_planet_stellar)(
+                    a, e, cos_i, W, cos_w, sin_w, tp, Mp
+                )
+                # the star's reflex is the sum of the per-planet contributions
+                ra_star = jnp.sum(ra_pp, axis=0)
+                dec_star = jnp.sum(dec_pp, axis=0)
+                ll_stellar_astrom = loglike_stellar_astrom(
+                    ra_star, dec_star, stellar_astrom_data
+                )
+                numpyro.factor("ll_stellar_astrom", ll_stellar_astrom)
 
     return model

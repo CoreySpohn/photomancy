@@ -59,6 +59,7 @@ def build_orbit_logdensity(
     *,
     rv_data=None,
     relative_astrom_data=None,
+    stellar_astrom_data=None,
     null_data=None,
     imaging_data=None,
     log_P_range=(1.0, 4.0),
@@ -82,7 +83,10 @@ def build_orbit_logdensity(
         Ms: Stellar mass (kg).
         dist_pc: Distance to the system (parsec).
         rv_data: An :class:`~photomancy.orbit.data.RVData`, or ``None``.
-        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData`, or ``None``.
+        relative_astrom_data: A
+            :class:`~photomancy.orbit.data.RelativeAstromData`, or ``None``.
+        stellar_astrom_data: A
+            :class:`~photomancy.orbit.data.StellarAstromData`, or ``None``.
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
         log_P_range: ``(min, max)`` for the ``log10(period/days)`` prior.
@@ -102,6 +106,7 @@ def build_orbit_logdensity(
     cached = _get_or_build_cached(
         has_rv=rv_data is not None,
         has_relative_astrom=relative_astrom_data is not None,
+        has_stellar_astrom=stellar_astrom_data is not None,
         has_null=null_data is not None,
         has_imaging=imaging_data is not None,
         log_P_range=log_P_range,
@@ -113,10 +118,20 @@ def build_orbit_logdensity(
         n_planets=n_planets,
         seed=seed,
     )
-    rv_data, relative_astrom_data, null_data, imaging_data = _pad_orbit_data(
-        rv_data, relative_astrom_data, null_data, imaging_data
+    rv_data, relative_astrom_data, stellar_astrom_data, null_data, imaging_data = (
+        _pad_orbit_data(
+            rv_data, relative_astrom_data, stellar_astrom_data, null_data, imaging_data
+        )
     )
-    model_args = (Ms, dist_pc, rv_data, relative_astrom_data, null_data, imaging_data)
+    model_args = (
+        Ms,
+        dist_pc,
+        rv_data,
+        relative_astrom_data,
+        stellar_astrom_data,
+        null_data,
+        imaging_data,
+    )
 
     unflatten = cached["unflatten"]
     potential_fn = cached["potential_fn_factory"](*model_args)

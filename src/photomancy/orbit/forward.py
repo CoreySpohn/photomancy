@@ -110,6 +110,41 @@ def predict_relative_astrometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dis
     return ra_pred, dec_pred
 
 
+def predict_stellar_astrometry(
+    times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
+):
+    """Predict stellar-reflex astrometry (RA, DEC offsets of the star).
+
+    The star orbits the system barycenter on a scaled, sign-flipped copy of the
+    planet's relative orbit: its offset is the relative astrometry times the mass
+    fraction ``Mp / (Ms + Mp)``, in the opposite direction. Unlike relative
+    astrometry this depends on the planet mass, so RV (which constrains ``Mp sin i``)
+    and stellar astrometry (which resolves ``i``) together yield the dynamical mass.
+
+    Args:
+        times: Observation epochs (days). Shape ``(N,)``.
+        a: Semi-major axis of the relative orbit (AU). Scalar.
+        e: Eccentricity. Scalar.
+        cos_i: Cosine of inclination. Scalar.
+        W: Longitude of ascending node (radians). Scalar.
+        cos_w: Cosine of argument of periapsis. Scalar.
+        sin_w: Sine of argument of periapsis. Scalar.
+        tp: Time of periapsis passage (days). Scalar.
+        Ms: Stellar mass (kg). Scalar.
+        Mp: Planet mass (kg). Scalar.
+        dist_pc: Distance to system (parsec). Scalar.
+
+    Returns:
+        Tuple of ``(ra_pred, dec_pred)``, the star's reflex offset, each shape
+        ``(N,)`` in arcsec.
+    """
+    ra_rel, dec_rel = predict_relative_astrometry(
+        times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc
+    )
+    frac = Mp / (Ms + Mp)
+    return -frac * ra_rel, -frac * dec_rel
+
+
 def predict_photometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Lambda, dist_pc):
     """Predict angular separation and delta-magnitude for a single planet.
 

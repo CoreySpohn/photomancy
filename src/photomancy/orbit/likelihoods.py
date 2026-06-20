@@ -105,16 +105,12 @@ def loglike_rv_marginalized(
     )
 
 
-def loglike_relative_astrom(ra_pred, dec_pred, data):
-    """Relative astrometry log-likelihood (bivariate Gaussian with correlation).
+def _radec_bivariate_loglike(ra_pred, dec_pred, data):
+    """Bivariate-Gaussian (with correlation) log-likelihood over RA/DEC offsets.
 
-    Args:
-        ra_pred: Predicted RA offsets (arcsec). Shape ``(N,)``.
-        dec_pred: Predicted DEC offsets (arcsec). Shape ``(N,)``.
-        data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
-
-    Returns:
-        Scalar log-likelihood value.
+    Shared by relative and stellar astrometry: both compare predicted ``(ra, dec)``
+    offsets to measured ones with per-epoch errors ``ra_err``/``dec_err`` and
+    correlation ``corr``, masked by ``is_valid``.
     """
     mask = data.is_valid  # boolean
 
@@ -137,6 +133,38 @@ def loglike_relative_astrom(ra_pred, dec_pred, data):
     z_safe = jnp.where(mask, z, 0.0)
     log_norm_safe = jnp.where(mask, log_norm, 0.0)
     return -0.5 * jnp.sum(z_safe) - jnp.sum(log_norm_safe)
+
+
+def loglike_relative_astrom(ra_pred, dec_pred, data):
+    """Relative astrometry log-likelihood (bivariate Gaussian with correlation).
+
+    Args:
+        ra_pred: Predicted RA offsets (arcsec). Shape ``(N,)``.
+        dec_pred: Predicted DEC offsets (arcsec). Shape ``(N,)``.
+        data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
+
+    Returns:
+        Scalar log-likelihood value.
+    """
+    return _radec_bivariate_loglike(ra_pred, dec_pred, data)
+
+
+def loglike_stellar_astrom(ra_pred, dec_pred, data):
+    """Stellar-reflex astrometry log-likelihood (bivariate Gaussian).
+
+    Identical bivariate-Gaussian form as :func:`loglike_relative_astrom`, but the
+    predictions and data are the star's reflex offsets rather than the planet's
+    relative position.
+
+    Args:
+        ra_pred: Predicted stellar RA offsets (arcsec). Shape ``(N,)``.
+        dec_pred: Predicted stellar DEC offsets (arcsec). Shape ``(N,)``.
+        data: A :class:`~photomancy.orbit.data.StellarAstromData` instance.
+
+    Returns:
+        Scalar log-likelihood value.
+    """
+    return _radec_bivariate_loglike(ra_pred, dec_pred, data)
 
 
 def loglike_null(alpha_pred, dMag_pred, data):

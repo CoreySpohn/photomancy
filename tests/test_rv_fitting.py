@@ -12,7 +12,10 @@ from orbix.equations import period_to_sma  # noqa: E402
 
 from photomancy.backends import LaplaceBackend, LaplaceMixtureBackend  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData, RVData  # noqa: E402
-from photomancy.orbit.forward import predict_relative_astrometry, predict_rv  # noqa: E402
+from photomancy.orbit.forward import (  # noqa: E402
+    predict_relative_astrometry,
+    predict_rv,
+)
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init_top_k  # noqa: E402
 from photomancy.posterior import MixturePosterior  # noqa: E402
@@ -88,7 +91,11 @@ def test_joint_rv_astrometry_recovers_period_and_mass():
     rv = _make_rv()
     astrom = _make_astrom()
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, rv_data=rv, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
+        MSUN_KG,
+        DIST_PC,
+        rv_data=rv,
+        relative_astrom_data=astrom,
+        log_P_range=LOG_P_RANGE,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

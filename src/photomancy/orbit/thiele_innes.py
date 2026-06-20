@@ -358,7 +358,8 @@ def thiele_innes_fit(relative_astrom_data, T, e, tp, Ms, dist_pc):
     the model is linear in these constants for fixed ``(T, e, tp)``.
 
     Args:
-        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
+        relative_astrom_data: An
+            :class:`~photomancy.orbit.data.RelativeAstromData` instance.
         T: Trial orbital period (days). Scalar.
         e: Trial eccentricity. Scalar.
         tp: Trial time of periapsis passage (days). Scalar.
@@ -434,7 +435,9 @@ def thiele_innes_fit(relative_astrom_data, T, e, tp, Ms, dist_pc):
     )
 
 
-def thiele_innes_grid_search(relative_astrom_data, Ms, dist_pc, log_T_grid, e_grid, n_tp=30):
+def thiele_innes_grid_search(
+    relative_astrom_data, Ms, dist_pc, log_T_grid, e_grid, n_tp=30
+):
     """Search over (T, e, tp) grid with Thiele-Innes linearization.
 
     For each ``(T, e)`` pair, evaluates ``n_tp`` uniformly spaced
@@ -445,7 +448,8 @@ def thiele_innes_grid_search(relative_astrom_data, Ms, dist_pc, log_T_grid, e_gr
     acceleration.
 
     Args:
-        relative_astrom_data: An :class:`~photomancy.orbit.data.RelativeAstromData` instance.
+        relative_astrom_data: An
+            :class:`~photomancy.orbit.data.RelativeAstromData` instance.
         Ms: Stellar mass (kg). Scalar.
         dist_pc: Distance to system (parsec). Scalar.
         log_T_grid: Array of log10(T/days) values to search.

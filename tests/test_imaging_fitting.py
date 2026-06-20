@@ -20,13 +20,13 @@ from photomancy.backends import LaplaceMixtureBackend  # noqa: E402
 from photomancy.orbit.data import (  # noqa: E402
     MAX_CC_PTS,
     MAX_IMG,
-    RelativeAstromData,
     ImagingData,
     NullData,
+    RelativeAstromData,
 )
 from photomancy.orbit.forward import (  # noqa: E402
-    predict_relative_astrometry,
     predict_photometry,
+    predict_relative_astrometry,
 )
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init_top_k  # noqa: E402
@@ -120,7 +120,7 @@ def test_pad_orbit_data_handles_non_max_null_container():
         dmag0_grid=jnp.full((2, 40), 25.0),
         is_valid=jnp.ones(2, dtype=bool),
     )
-    _, _, padded_null, _ = _pad_orbit_data(None, None, small, None)
+    _, _, _, padded_null, _ = _pad_orbit_data(None, None, None, small, None)
     assert padded_null.epochs.shape[0] == MAX_IMG
     assert int(padded_null.is_valid.sum()) == 2
 
@@ -174,7 +174,11 @@ def test_joint_astrom_imaging_fit_recovers_period():
     )
 
     problem = build_orbit_logdensity(
-        msun, dist, relative_astrom_data=astrom, imaging_data=img, log_P_range=log_p_range
+        msun,
+        dist,
+        relative_astrom_data=astrom,
+        imaging_data=img,
+        log_P_range=log_p_range,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

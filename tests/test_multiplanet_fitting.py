@@ -69,7 +69,11 @@ def test_build_orbit_logdensity_two_planets_builds_and_evaluates():
     """The API exposes n_planets and a 2-planet astrometry model evaluates finitely."""
     astrom = _make_two_planet_astrom()
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, relative_astrom_data=astrom, n_planets=2, log_P_range=LOG_P_RANGE
+        MSUN_KG,
+        DIST_PC,
+        relative_astrom_data=astrom,
+        n_planets=2,
+        log_P_range=LOG_P_RANGE,
     )
     z0 = problem.init_to_z({})
     assert jnp.isfinite(problem.logdensity(z0))
@@ -84,7 +88,11 @@ def test_two_planet_fit_recovers_both_periods_from_seed():
     """
     astrom = _make_two_planet_astrom()
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, relative_astrom_data=astrom, n_planets=2, log_P_range=LOG_P_RANGE
+        MSUN_KG,
+        DIST_PC,
+        relative_astrom_data=astrom,
+        n_planets=2,
+        log_P_range=LOG_P_RANGE,
     )
     z0 = problem.init_to_z(
         {
