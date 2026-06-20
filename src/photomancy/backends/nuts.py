@@ -26,10 +26,16 @@ class NUTSBackend(AbstractBackend):
     Args:
         n_warmup: Window-adaptation steps (tunes the step size + mass matrix).
         n_samples: Post-warmup samples drawn from the tuned kernel.
+        dense_mass_matrix: If ``True`` (default), adapt a full (dense) mass matrix
+            rather than a diagonal one. The orbit and disk posteriors are strongly
+            correlated and low-dimensional, where a dense matrix converges much
+            faster; set ``False`` for high-dimensional targets where the ``O(d^2)``
+            mass matrix is too costly.
     """
 
     n_warmup: int = 500
     n_samples: int = 2000
+    dense_mass_matrix: bool = True
 
     @eqx.filter_jit
     def run(self, logdensity, init, key=None):
@@ -38,7 +44,11 @@ class NUTSBackend(AbstractBackend):
             raise ValueError("NUTSBackend.run requires a PRNG key.")
         key_warmup, key_sample = jax.random.split(key)
 
-        warmup = blackjax.window_adaptation(blackjax.nuts, logdensity)
+        warmup = blackjax.window_adaptation(
+            blackjax.nuts,
+            logdensity,
+            is_mass_matrix_diagonal=not self.dense_mass_matrix,
+        )
         (state, params), _ = warmup.run(key_warmup, init, num_steps=self.n_warmup)
         kernel = blackjax.nuts(logdensity, **params)
 
