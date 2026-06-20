@@ -151,12 +151,38 @@ def test_gaussian_posterior_to_prior_is_matching_jointprior():
     assert jnp.allclose(prior.log_prob(z), post.log_prob(z), atol=1e-4)
 
 
-def test_mixture_to_prior_deferred_to_p2():
-    """Mixture / sample to_prior raises in P1 (the cluster_to_mixture path is P2)."""
-    post = MixturePosterior(
-        means=jnp.zeros((2, 1)),
-        covs=jnp.ones((2, 1, 1)),
-        log_evidences=jnp.zeros(2),
+def test_mixture_posterior_to_prior_preserves_modes():
+    """MixturePosterior.to_prior() is a MixturePrior with matching density."""
+    from photomancy.priors import MixturePrior
+
+    means = jnp.array([[0.0, 0.0], [4.0, -3.0]])
+    covs = jnp.stack([jnp.eye(2), 0.5 * jnp.eye(2)])
+    log_ev = jnp.log(jnp.array([0.6, 0.4]))
+    post = MixturePosterior(means=means, covs=covs, log_evidences=log_ev)
+
+    prior = post.to_prior()
+    assert isinstance(prior, MixturePrior)
+    assert prior.ndim == 2
+    z = jnp.array([0.5, -0.5])
+    assert jnp.allclose(prior.log_prob(z), post.log_prob(z), atol=1e-4)
+
+
+def test_sample_posterior_to_prior_via_clustering():
+    """SamplePosterior.to_prior(k, key) clusters samples into a k-mode MixturePrior."""
+    from photomancy.priors import MixturePrior
+
+    k0, k1 = jax.random.split(jax.random.key(3))
+    a = jax.random.normal(k0, (300, 2)) * 0.2
+    b = jax.random.normal(k1, (300, 2)) * 0.2 + jnp.array([6.0, 6.0])
+    samples = jnp.concatenate([a, b], axis=0)
+    post = SamplePosterior(
+        samples=samples, log_weights=jnp.zeros(600), evidence=jnp.asarray(jnp.nan)
     )
-    with pytest.raises(NotImplementedError):
-        post.to_prior()
+
+    prior = post.to_prior(2, key=jax.random.key(4))
+    assert isinstance(prior, MixturePrior)
+    # the two clusters survive as two modes with ~equal weight
+    centers = jnp.sort(prior.means[:, 0])
+    assert jnp.allclose(centers, jnp.array([0.0, 6.0]), atol=0.5)
+    w = jax.nn.softmax(prior.log_weights)
+    assert jnp.allclose(jnp.sort(w), jnp.array([0.5, 0.5]), atol=0.1)

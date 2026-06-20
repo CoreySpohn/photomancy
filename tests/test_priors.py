@@ -2,8 +2,18 @@
 
 import jax
 import jax.numpy as jnp
+import pytest
+from jax.scipy.special import logsumexp
+from jax.scipy.stats import multivariate_normal
 
-from photomancy.priors import IndependentPrior, JointPrior, LogNormal, Normal, Uniform
+from photomancy.priors import (
+    IndependentPrior,
+    JointPrior,
+    LogNormal,
+    MixturePrior,
+    Normal,
+    Uniform,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -76,3 +86,37 @@ def test_joint_mvn():
     assert jnp.allclose(jnp.cov(s.T), cov, atol=0.1)
     U = jnp.array([0.2, 0.7])
     assert jnp.allclose(p.inverse(p.forward(U)), U, atol=1e-8)
+
+
+def test_mixture_prior():
+    """MixturePrior: exact mixture log_prob + sample; no unit-cube transform."""
+    means = jnp.array([[0.0, 0.0], [5.0, 5.0]])
+    covs = jnp.array([[[1.0, 0.0], [0.0, 1.0]], [[0.5, 0.0], [0.0, 0.5]]])
+    log_w = jnp.log(jnp.array([0.7, 0.3]))
+    p = MixturePrior(
+        means=means, choleskys=jnp.linalg.cholesky(covs), log_weights=log_w
+    )
+    assert p.ndim == 2
+
+    # log_prob matches an analytic 2-component Gaussian mixture
+    z = jnp.array([0.3, -0.2])
+    comp = jnp.array(
+        [
+            multivariate_normal.logpdf(z, means[0], covs[0]),
+            multivariate_normal.logpdf(z, means[1], covs[1]),
+        ]
+    )
+    expect = logsumexp(jnp.log(jnp.array([0.7, 0.3])) + comp)
+    assert jnp.allclose(p.log_prob(z), expect, atol=1e-8)
+
+    # sample assigns mass to the modes in proportion to the weights
+    s = p.sample(jax.random.key(0), 40000)
+    d0 = jnp.linalg.norm(s - means[0], axis=1)
+    d1 = jnp.linalg.norm(s - means[1], axis=1)
+    assert jnp.allclose(jnp.mean(d0 < d1), 0.7, atol=0.03)
+
+    # a multivariate mixture has no closed-form unit-cube transform
+    with pytest.raises(NotImplementedError):
+        p.forward(jnp.array([0.5, 0.5]))
+    with pytest.raises(NotImplementedError):
+        p.inverse(z)

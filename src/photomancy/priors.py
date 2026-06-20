@@ -16,9 +16,14 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import solve_triangular
-from jax.scipy.special import erf, erfinv
+from jax.scipy.special import erf, erfinv, logsumexp
 
 _SQRT2 = 1.4142135623730951  # plain float: no import-time array, no precision lock
+
+_MIXTURE_NO_CUBE = (
+    "MixturePrior has no closed-form unit-cube transform; use it with a gradient / "
+    "sample backend (Laplace / NUTS / SMC), not jaxns."
+)
 
 
 def _std_normal_quantile(u):
@@ -29,6 +34,14 @@ def _std_normal_quantile(u):
 def _std_normal_cdf(x):
     """Standard-normal CDF."""
     return 0.5 * (1.0 + erf(x / _SQRT2))
+
+
+def _mvn_logpdf(z, mean, cholesky):
+    """Multivariate-Normal log-density at ``z`` for ``mean`` + lower-Cholesky ``L``."""
+    d = mean.shape[0]
+    w = solve_triangular(cholesky, z - mean, lower=True)
+    logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(cholesky)))
+    return -0.5 * (jnp.sum(w**2) + d * jnp.log(2.0 * jnp.pi) + logdet)
 
 
 class AbstractPrior(eqx.Module):
@@ -208,6 +221,51 @@ class JointPrior(AbstractPrior):
 
     def log_prob(self, z):
         """Multivariate-Normal log-density via the triangular solve."""
-        w = solve_triangular(self.cholesky, z - self.mean, lower=True)
-        logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(self.cholesky)))
-        return -0.5 * (jnp.sum(w**2) + self.ndim * jnp.log(2.0 * jnp.pi) + logdet)
+        return _mvn_logpdf(z, self.mean, self.cholesky)
+
+
+class MixturePrior(AbstractPrior):
+    """A Gaussian-mixture prior over ``z`` -- weighted modes, each an MVN.
+
+    What ``MixturePosterior.to_prior()`` (and ``SamplePosterior.to_prior`` via
+    ``cluster_to_mixture``) produce: it preserves multimodality across sequential epochs
+    where a single Gaussian would collapse the modes. ``log_prob`` and ``sample`` are
+    exact (serving the Laplace / NUTS / SMC family); ``forward`` / ``inverse`` -- the
+    jaxns unit-cube transform -- are not implemented, as a multivariate mixture has no
+    closed-form inverse-CDF (use a gradient / sample backend with a mixture prior).
+    """
+
+    means: jnp.ndarray  # (K, d)
+    choleskys: jnp.ndarray  # (K, d, d), each lower-triangular
+    log_weights: jnp.ndarray  # (K,), unnormalized log mixture weights
+
+    @property
+    def ndim(self):
+        """Number of dimensions ``d``."""
+        return self.means.shape[1]
+
+    def log_prob(self, z):
+        """Mixture log-density: ``logsumexp_k(log w_k + N(z | mode_k))``."""
+        logw = self.log_weights - logsumexp(self.log_weights)
+        comp = jax.vmap(lambda m, L: _mvn_logpdf(z, m, L))(self.means, self.choleskys)
+        return logsumexp(logw + comp)
+
+    def sample(self, key, n):
+        """Draw ``n`` samples: pick a mode by weight, then sample its Gaussian."""
+        k_comp, k_draw = jax.random.split(key)
+        comp = jax.random.categorical(k_comp, self.log_weights, shape=(n,))
+        keys = jax.random.split(k_draw, n)
+
+        def draw(k, idx):
+            std = jax.random.normal(k, (self.ndim,))
+            return self.means[idx] + self.choleskys[idx] @ std
+
+        return jax.vmap(draw)(keys, comp)
+
+    def forward(self, U):
+        """Not implemented -- a multivariate mixture has no closed-form inverse-CDF."""
+        raise NotImplementedError(_MIXTURE_NO_CUBE)
+
+    def inverse(self, z):
+        """Not implemented -- a multivariate mixture has no closed-form inverse-CDF."""
+        raise NotImplementedError(_MIXTURE_NO_CUBE)

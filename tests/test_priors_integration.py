@@ -89,3 +89,30 @@ def test_sequential_updating_tightens_posterior():
     assert v_seq < v2
     # and its mean sits between the two batch estimates.
     assert d1[0] - 0.05 < float(p_seq.mean[0]) < d2[0] + 0.05
+
+
+def test_mixture_prior_from_samples_drives_a_scene_fit():
+    """A bimodal SamplePosterior -> to_prior() -> MixturePrior drives a scene fit."""
+    from photomancy.posterior import SamplePosterior
+
+    k0, k1 = jax.random.split(jax.random.key(7))
+    a = jax.random.normal(k0, (300, 1)) * 0.3 - 3.0
+    b = jax.random.normal(k1, (300, 1)) * 0.3 + 3.0
+    samples = jnp.concatenate([a, b], axis=0)
+    post = SamplePosterior(
+        samples=samples, log_weights=jnp.zeros(600), evidence=jnp.asarray(jnp.nan)
+    )
+    prior = post.to_prior(2, key=jax.random.key(8))  # bimodal MixturePrior over z
+
+    scene = _Toy(theta=jnp.zeros(1), label="t")
+
+    def forward(s):
+        return s.theta
+
+    def flat_likelihood(pred):
+        return 0.0  # isolate the prior's bimodality in the logdensity
+
+    logdensity, _z0, _ = build_scene_logdensity(scene, forward, flat_likelihood, prior)
+    # the two prior modes survive into the logdensity (mode > between-modes).
+    assert float(logdensity(jnp.array([3.0]))) > float(logdensity(jnp.array([0.0])))
+    assert float(logdensity(jnp.array([-3.0]))) > float(logdensity(jnp.array([0.0])))

@@ -15,7 +15,7 @@ from equinox import AbstractVar
 from jax.scipy.special import logsumexp
 from jax.scipy.stats import multivariate_normal
 
-from photomancy.priors import JointPrior
+from photomancy.priors import JointPrior, MixturePrior
 
 
 class AbstractPosterior(eqx.Module):
@@ -134,6 +134,13 @@ class MixturePosterior(AbstractPosterior):
             keys, self.means[comp], self.covs[comp]
         )
 
+    def to_prior(self):
+        """Exact ``MixturePrior`` over z -- carries the modes into the next prior."""
+        choleskys = jax.vmap(jnp.linalg.cholesky)(self.covs)
+        return MixturePrior(
+            means=self.means, choleskys=choleskys, log_weights=self.log_evidences
+        )
+
 
 class SamplePosterior(AbstractPosterior):
     """A posterior represented by weighted samples (OFTI, grid_search, NUTS, SMC).
@@ -176,6 +183,15 @@ class SamplePosterior(AbstractPosterior):
         raise NotImplementedError(
             "SamplePosterior has no closed-form density; cluster_to_mixture or a KDE."
         )
+
+    def to_prior(self, n_modes, *, key):
+        """Cluster the weighted samples into an ``n_modes``-mode ``MixturePrior``.
+
+        Runs ``cluster_to_mixture`` (weighted k-means -> Gaussian modes), then converts
+        the mixture to a prior -- so a NUTS / SMC / jaxns posterior (possibly
+        multimodal) becomes the next fit's prior. ``key`` seeds the k-means init.
+        """
+        return cluster_to_mixture(self, n_modes, key=key).to_prior()
 
 
 def cluster_to_mixture(posterior, k, *, key, iters=25, cov_floor=1e-6):
