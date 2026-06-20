@@ -149,3 +149,27 @@ def test_to_unconstrained_round_trips_known_orbit():
     assert abs(float(phys["T"][0]) - T) / T < 0.02
     assert abs(float(phys["e"][0]) - 0.2) < 0.02
     assert abs(float(phys["cos_i"][0]) - 0.4) < 0.02
+
+
+def test_orbit_nested_sampling_recovers_period_and_evidence():
+    """NumPyro NestedSampler on the orbit model -> SamplePosterior + finite log Z."""
+    from photomancy.orbit.nested import orbit_nested_sampling
+    from photomancy.posterior import SamplePosterior
+
+    astrom = _make_astrom(6)
+    post = orbit_nested_sampling(
+        MSUN_KG,
+        DIST_PC,
+        astrom_data=astrom,
+        log_P_range=LOG_P_RANGE,
+        max_samples=30000,
+        num_samples=1500,
+        key=jax.random.key(0),
+    )
+    assert isinstance(post, SamplePosterior)
+    assert post.param_names == ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
+    assert post.samples.shape == (1500, 7)
+    assert bool(jnp.isfinite(post.evidence))
+    # the period (via a) is recovered: median a near the truth.
+    a_true = float(period_to_sma(TRUE_T, MSUN_KG))
+    assert abs(float(jnp.median(post.samples[:, 0])) - a_true) / a_true < 0.1

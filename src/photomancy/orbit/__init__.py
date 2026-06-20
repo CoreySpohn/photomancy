@@ -43,6 +43,7 @@ from photomancy.orbit.likelihoods import (
     loglike_null,
     loglike_rv_marginalized,
 )
+from photomancy.orbit.nested import orbit_nested_sampling
 from photomancy.orbit.ofti import AbstractConditioner, ScaleAndRotate, ofti
 from photomancy.orbit.priors import (
     ECC_PRIOR_NAMES,
@@ -100,6 +101,8 @@ __all__ = [
     "map_laplace_fit",
     "map_laplace_mixture_fit",
     "ofti",
+    # Nested sampling (NumPyro/jaxns) -> evidence / model comparison
+    "orbit_nested_sampling",
     "period_to_sma",
     "predict_astrometry",
     "predict_photometry",
