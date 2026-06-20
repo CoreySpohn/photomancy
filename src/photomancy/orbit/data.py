@@ -219,6 +219,52 @@ class StellarAstromData(eqx.Module):
 
 
 # ---------------------------------------------------------------------------
+# PMAnomalyData -- Hipparcos-Gaia proper-motion anomaly (one 2-vector)
+# ---------------------------------------------------------------------------
+
+
+class PMAnomalyData(eqx.Module):
+    """Hipparcos-Gaia proper-motion-anomaly (PMa) observation.
+
+    The anomaly is a single ``(RA, DEC)`` proper-motion difference (the Gaia
+    instantaneous proper motion minus the long-baseline Hipparcos-to-Gaia mean), in
+    arcsec/day, with a 2x2 covariance. Epochs are in the orbit's day frame. There is
+    no padding (the observable is a fixed 2-vector); the mission windows feed the
+    25-epoch path-fit forward.
+
+    Args:
+        t_hip: Hipparcos mean epoch (days). Scalar.
+        t_gaia: Gaia mean epoch (days). Scalar.
+        gaia_window: Gaia mission duration (days) for the proper-motion fit. Scalar.
+        pm_anomaly: Observed anomaly ``(pm_ra, pm_dec)`` (arcsec/day). Shape ``(2,)``.
+        pm_anomaly_cov: Anomaly covariance (arcsec/day)^2. Shape ``(2, 2)``.
+        is_valid: Boolean validity flag. Scalar.
+        n_epochs: Epochs sampled per mission window (static). Default 25.
+    """
+
+    t_hip: jnp.ndarray
+    t_gaia: jnp.ndarray
+    gaia_window: jnp.ndarray
+    pm_anomaly: jnp.ndarray
+    pm_anomaly_cov: jnp.ndarray
+    is_valid: jnp.ndarray
+    n_epochs: int = eqx.field(static=True, default=25)
+
+    @classmethod
+    def zeros(cls, n_epochs=25):
+        """Create an all-invalid placeholder (for model tracing)."""
+        return cls(
+            t_hip=jnp.array(0.0),
+            t_gaia=jnp.array(9041.0),  # ~24.75 yr, nonzero baseline
+            gaia_window=jnp.array(1023.0),
+            pm_anomaly=jnp.zeros(2),
+            pm_anomaly_cov=jnp.eye(2),
+            is_valid=jnp.array(False),
+            n_epochs=n_epochs,
+        )
+
+
+# ---------------------------------------------------------------------------
 # NullData -- non-detection (null) epochs (orbit constraints without a dMag)
 # ---------------------------------------------------------------------------
 

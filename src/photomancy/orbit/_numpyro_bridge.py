@@ -26,6 +26,7 @@ from photomancy.orbit.data import (
     MAX_STELLAR_ASTROM,
     ImagingData,
     NullData,
+    PMAnomalyData,
     RelativeAstromData,
     RVData,
     StellarAstromData,
@@ -38,9 +39,17 @@ from photomancy.orbit.model import build_model
 
 
 def _pad_orbit_data(
-    rv_data, relative_astrom_data, stellar_astrom_data, null_data, imaging_data
+    rv_data,
+    relative_astrom_data,
+    stellar_astrom_data,
+    pm_anomaly_data,
+    null_data,
+    imaging_data,
 ):
     """Pad each present data container to its ``MAX_*`` size.
+
+    The proper-motion anomaly is a fixed-shape 2-vector with no padding, so it passes
+    through unchanged.
 
     The cached model is traced once at the ``MAX_*`` shapes, so runtime data must
     be padded to match for the JIT cache to hit. Containers already at ``MAX_*``
@@ -99,7 +108,14 @@ def _pad_orbit_data(
             dmag_obs=imaging_data.dmag_obs[:n],
             dmag_err=imaging_data.dmag_err[:n],
         )
-    return rv_data, relative_astrom_data, stellar_astrom_data, null_data, imaging_data
+    return (
+        rv_data,
+        relative_astrom_data,
+        stellar_astrom_data,
+        pm_anomaly_data,
+        null_data,
+        imaging_data,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +129,7 @@ def _cache_key(
     has_rv,
     has_relative_astrom,
     has_stellar_astrom,
+    has_pm_anomaly,
     has_null,
     has_imaging,
     log_P_range,
@@ -128,6 +145,7 @@ def _cache_key(
         has_rv,
         has_relative_astrom,
         has_stellar_astrom,
+        has_pm_anomaly,
         has_null,
         has_imaging,
         log_P_range,
@@ -145,6 +163,7 @@ def _get_or_build_cached(
     has_rv,
     has_relative_astrom,
     has_stellar_astrom,
+    has_pm_anomaly,
     has_null,
     has_imaging,
     log_P_range,
@@ -166,6 +185,7 @@ def _get_or_build_cached(
         has_rv,
         has_relative_astrom,
         has_stellar_astrom,
+        has_pm_anomaly,
         has_null,
         has_imaging,
         log_P_range,
@@ -186,6 +206,7 @@ def _get_or_build_cached(
         has_rv=has_rv,
         has_relative_astrom=has_relative_astrom,
         has_stellar_astrom=has_stellar_astrom,
+        has_pm_anomaly=has_pm_anomaly,
         has_null=has_null,
         has_imaging=has_imaging,
         log_P_range=log_P_range,
@@ -206,6 +227,7 @@ def _get_or_build_cached(
     placeholder_stellar_astrom = (
         StellarAstromData.zeros() if has_stellar_astrom else None
     )
+    placeholder_pm_anomaly = PMAnomalyData.zeros() if has_pm_anomaly else None
     placeholder_null = NullData.zeros() if has_null else None
     placeholder_imaging = ImagingData.zeros() if has_imaging else None
 
@@ -215,6 +237,7 @@ def _get_or_build_cached(
         placeholder_rv,
         placeholder_relative_astrom,
         placeholder_stellar_astrom,
+        placeholder_pm_anomaly,
         placeholder_null,
         placeholder_imaging,
     )

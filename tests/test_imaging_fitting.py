@@ -120,7 +120,7 @@ def test_pad_orbit_data_handles_non_max_null_container():
         dmag0_grid=jnp.full((2, 40), 25.0),
         is_valid=jnp.ones(2, dtype=bool),
     )
-    _, _, _, padded_null, _ = _pad_orbit_data(None, None, None, small, None)
+    _, _, _, _, padded_null, _ = _pad_orbit_data(None, None, None, None, small, None)
     assert padded_null.epochs.shape[0] == MAX_IMG
     assert int(padded_null.is_valid.sum()) == 2
 

@@ -167,6 +167,24 @@ def loglike_stellar_astrom(ra_pred, dec_pred, data):
     return _radec_bivariate_loglike(ra_pred, dec_pred, data)
 
 
+def loglike_pm_anomaly(anom_pred, data):
+    """Proper-motion-anomaly log-likelihood (2D Gaussian with full covariance).
+
+    Args:
+        anom_pred: Predicted anomaly ``(pm_ra, pm_dec)`` (arcsec/day). Shape ``(2,)``.
+        data: A :class:`~photomancy.orbit.data.PMAnomalyData` instance.
+
+    Returns:
+        Scalar log-likelihood (zero when ``data.is_valid`` is False, for the
+        placeholder channel during model tracing).
+    """
+    resid = data.pm_anomaly - anom_pred
+    prec = jnp.linalg.inv(data.pm_anomaly_cov)
+    _, logdet = jnp.linalg.slogdet(data.pm_anomaly_cov)
+    ll = -0.5 * resid @ prec @ resid - 0.5 * logdet - jnp.log(2.0 * jnp.pi)
+    return jnp.where(data.is_valid, ll, 0.0)
+
+
 def loglike_null(alpha_pred, dMag_pred, data):
     """Non-detection log-likelihood via exact flux-space z-score.
 

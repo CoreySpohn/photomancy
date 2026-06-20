@@ -23,6 +23,7 @@ from orbix.equations import period_to_sma
 from photomancy.orbit.likelihoods import (
     loglike_imaging,
     loglike_null,
+    loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
     loglike_stellar_astrom,
@@ -36,6 +37,7 @@ def build_model(
     has_rv=False,
     has_relative_astrom=False,
     has_stellar_astrom=False,
+    has_pm_anomaly=False,
     has_null=False,
     has_imaging=False,
     log_P_range=(0.0, 5.0),
@@ -48,8 +50,8 @@ def build_model(
     """Build a NumPyro model function for orbit fitting.
 
     The returned function accepts ``(Ms, dist_pc, rv_data, relative_astrom_data,
-    stellar_astrom_data, null_data, imaging_data)`` as arguments (dynamic, for JIT
-    caching). Prior configuration is captured in the closure (static).
+    stellar_astrom_data, pm_anomaly_data, null_data, imaging_data)`` as arguments
+    (dynamic, for JIT caching). Prior configuration is captured in the closure (static).
 
     Args:
         n_planets: Number of planets to fit. Default 1.
@@ -57,6 +59,7 @@ def build_model(
         has_relative_astrom: Whether relative (planet-to-star) astrometry will be
             provided.
         has_stellar_astrom: Whether stellar-reflex astrometry will be provided.
+        has_pm_anomaly: Whether a Hipparcos-Gaia proper-motion anomaly will be provided.
         has_null: Whether null-detection data will be provided.
         has_imaging: Whether unified imaging data will be provided.
         log_P_range: (min, max) for log10(period/days) uniform prior.
@@ -69,18 +72,25 @@ def build_model(
 
     Returns:
         A callable ``model(Ms, dist_pc, rv_data, relative_astrom_data,
-        stellar_astrom_data, null_data, imaging_data)`` suitable for
+        stellar_astrom_data, pm_anomaly_data, null_data, imaging_data)`` suitable for
         ``numpyro.infer.MCMC`` and for use with ``dynamic_args=True`` in
         ``initialize_model``.
     """
     has_photometry = has_null or has_imaging
 
     if not any(
-        [has_rv, has_relative_astrom, has_stellar_astrom, has_null, has_imaging]
+        [
+            has_rv,
+            has_relative_astrom,
+            has_stellar_astrom,
+            has_pm_anomaly,
+            has_null,
+            has_imaging,
+        ]
     ):
         raise ValueError(
             "At least one of has_rv, has_relative_astrom, has_stellar_astrom, "
-            "has_null, or has_imaging must be True."
+            "has_pm_anomaly, has_null, or has_imaging must be True."
         )
 
     def model(
@@ -89,12 +99,14 @@ def build_model(
         rv_data,
         relative_astrom_data,
         stellar_astrom_data,
+        pm_anomaly_data,
         null_data,
         imaging_data,
     ):
         # CIRCULAR IMPORT: photomancy.orbit.forward -> photomancy.orbit.model
         from photomancy.orbit.forward import (
             predict_photometry,
+            predict_pm_anomaly,
             predict_relative_astrometry,
             predict_rv,
             predict_stellar_astrometry,
@@ -145,10 +157,11 @@ def build_model(
                 Lambda = numpyro.deterministic("Lambda", Ag * Rp**2)
 
         # ----------------------------------------------------------------
-        # Mass parameters (planet mass is shared by RV, which sees Mp*sin i, and
-        # stellar astrometry, which resolves i and so yields the dynamical mass)
+        # Mass parameters (planet mass is shared by RV, which sees Mp*sin i, and the
+        # stellar reflex channels -- astrometry and the proper-motion anomaly -- which
+        # resolve i and so yield the dynamical mass)
         # ----------------------------------------------------------------
-        if has_rv or has_stellar_astrom:
+        if has_rv or has_stellar_astrom or has_pm_anomaly:
             with numpyro.plate("planet_masses", n_planets):
                 log_Mp = numpyro.sample(
                     "log_Mp",
@@ -244,6 +257,29 @@ def build_model(
                 numpyro.factor("ll_stellar_astrom", ll_stellar_astrom_val)
                 ll_total = ll_total + ll_stellar_astrom_val
 
+            # --- Hipparcos-Gaia proper-motion anomaly ---
+            if has_pm_anomaly:
+                Mp_s = jnp.squeeze(Mp)
+                anom_pred = predict_pm_anomaly(
+                    pm_anomaly_data.t_hip,
+                    pm_anomaly_data.t_gaia,
+                    pm_anomaly_data.gaia_window,
+                    pm_anomaly_data.n_epochs,
+                    a_s,
+                    e_s,
+                    cos_i_s,
+                    W_s,
+                    cos_w_s,
+                    sin_w_s,
+                    tp_s,
+                    Ms,
+                    Mp_s,
+                    dist_pc,
+                )
+                ll_pm_anomaly_val = loglike_pm_anomaly(anom_pred, pm_anomaly_data)
+                numpyro.factor("ll_pm_anomaly", ll_pm_anomaly_val)
+                ll_total = ll_total + ll_pm_anomaly_val
+
             # --- Null detections ---
             if has_null:
                 Lambda_s = jnp.squeeze(Lambda)
@@ -291,6 +327,7 @@ def build_model(
         else:
             # Multi-planet: vmap forward models over planet axis
             # CIRCULAR IMPORT: photomancy.orbit.forward -> photomancy.orbit.model
+            from photomancy.orbit.forward import predict_pm_anomaly as _ppma
             from photomancy.orbit.forward import predict_relative_astrometry as _pa
             from photomancy.orbit.forward import predict_rv as _prv
             from photomancy.orbit.forward import predict_stellar_astrometry as _psa
@@ -326,6 +363,26 @@ def build_model(
             ):
                 return _psa(
                     stellar_astrom_data.times,
+                    a_p,
+                    e_p,
+                    cos_i_p,
+                    W_p,
+                    cos_w_p,
+                    sin_w_p,
+                    tp_p,
+                    Ms,
+                    Mp_p,
+                    dist_pc,
+                )
+
+            def _single_planet_pm_anomaly(
+                a_p, e_p, cos_i_p, W_p, cos_w_p, sin_w_p, tp_p, Mp_p
+            ):
+                return _ppma(
+                    pm_anomaly_data.t_hip,
+                    pm_anomaly_data.t_gaia,
+                    pm_anomaly_data.gaia_window,
+                    pm_anomaly_data.n_epochs,
                     a_p,
                     e_p,
                     cos_i_p,
@@ -382,5 +439,14 @@ def build_model(
                     ra_star, dec_star, stellar_astrom_data
                 )
                 numpyro.factor("ll_stellar_astrom", ll_stellar_astrom)
+
+            if has_pm_anomaly:
+                anom_pp = jax.vmap(_single_planet_pm_anomaly)(
+                    a, e, cos_i, W, cos_w, sin_w, tp, Mp
+                )
+                # the star's total proper-motion anomaly sums over planets
+                anom = jnp.sum(anom_pp, axis=0)
+                ll_pm_anomaly = loglike_pm_anomaly(anom, pm_anomaly_data)
+                numpyro.factor("ll_pm_anomaly", ll_pm_anomaly)
 
     return model

@@ -31,6 +31,7 @@ def orbit_nested_sampling(
     rv_data=None,
     relative_astrom_data=None,
     stellar_astrom_data=None,
+    pm_anomaly_data=None,
     null_data=None,
     imaging_data=None,
     log_P_range=(1.0, 4.0),
@@ -60,6 +61,8 @@ def orbit_nested_sampling(
             :class:`~photomancy.orbit.data.RelativeAstromData`, or ``None``.
         stellar_astrom_data: A
             :class:`~photomancy.orbit.data.StellarAstromData`, or ``None``.
+        pm_anomaly_data: A
+            :class:`~photomancy.orbit.data.PMAnomalyData`, or ``None``.
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
         log_P_range: ``(min, max)`` for the ``log10(period/days)`` prior.
@@ -91,6 +94,7 @@ def orbit_nested_sampling(
         has_rv=rv_data is not None,
         has_relative_astrom=relative_astrom_data is not None,
         has_stellar_astrom=stellar_astrom_data is not None,
+        has_pm_anomaly=pm_anomaly_data is not None,
         has_null=null_data is not None,
         has_imaging=imaging_data is not None,
         log_P_range=log_P_range,
@@ -114,6 +118,7 @@ def orbit_nested_sampling(
         rv_data,
         relative_astrom_data,
         stellar_astrom_data,
+        pm_anomaly_data,
         null_data,
         imaging_data,
     )

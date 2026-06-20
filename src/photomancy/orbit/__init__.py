@@ -13,6 +13,7 @@ from orbix.kepler.core import diff_solve_trig
 from photomancy.orbit.data import (
     ImagingData,
     NullData,
+    PMAnomalyData,
     RelativeAstromData,
     RVData,
     StellarAstromData,
@@ -25,6 +26,7 @@ from photomancy.orbit.eig import (
 )
 from photomancy.orbit.forward import (
     predict_photometry,
+    predict_pm_anomaly,
     predict_relative_astrometry,
     predict_rv,
     predict_stellar_astrometry,
@@ -43,6 +45,7 @@ from photomancy.orbit.laplace import map_laplace_fit, map_laplace_mixture_fit
 from photomancy.orbit.likelihoods import (
     loglike_imaging,
     loglike_null,
+    loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
     loglike_stellar_astrom,
@@ -74,6 +77,7 @@ __all__ = [
     "NullData",
     # Orbit -> generic-backend bridge
     "OrbitProblem",
+    "PMAnomalyData",
     "ParamBounds",
     # Data containers
     "RVData",
@@ -97,6 +101,7 @@ __all__ = [
     "grid_search",
     "loglike_imaging",
     "loglike_null",
+    "loglike_pm_anomaly",
     "loglike_relative_astrom",
     # Likelihoods
     "loglike_rv_marginalized",
@@ -109,6 +114,7 @@ __all__ = [
     "orbit_nested_sampling",
     "period_to_sma",
     "predict_photometry",
+    "predict_pm_anomaly",
     "predict_relative_astrometry",
     # Forward models
     "predict_rv",

@@ -272,6 +272,7 @@ def test_ofti_matches_nuts():
     from photomancy.orbit.data import (
         ImagingData,
         NullData,
+        PMAnomalyData,
         RVData,
         StellarAstromData,
     )
@@ -310,6 +311,7 @@ def test_ofti_matches_nuts():
         RVData.zeros(),
         padded,
         StellarAstromData.zeros(),
+        PMAnomalyData.zeros(),
         NullData.zeros(),
         ImagingData.zeros(),
     )

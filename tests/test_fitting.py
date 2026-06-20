@@ -751,7 +751,7 @@ class TestNumPyroModel:
         # Execute with a seed to get a trace
         with handlers.seed(rng_seed=42):
             trace = handlers.trace(model).get_trace(
-                Msun2kg, 10.0, rv_data, None, None, None, None
+                Msun2kg, 10.0, rv_data, None, None, None, None, None
             )
 
         # Check essential sites exist (kipping13 default uses e_raw, w_raw)
@@ -786,7 +786,7 @@ class TestNumPyroModel:
 
         with handlers.seed(rng_seed=99):
             trace = handlers.trace(model).get_trace(
-                Msun2kg, 10.0, rv_data, None, None, None, None
+                Msun2kg, 10.0, rv_data, None, None, None, None, None
             )
 
         # All priors must produce deterministic e, cos_w, sin_w
@@ -818,7 +818,7 @@ class TestNumPyroModel:
         with pytest.raises(ValueError, match="Unknown ecc_prior"):
             with handlers.seed(rng_seed=0):
                 handlers.trace(model).get_trace(
-                    Msun2kg, 10.0, rv_data, None, None, None, None
+                    Msun2kg, 10.0, rv_data, None, None, None, None, None
                 )
 
     def test_mcmc_runs_rv(self):
@@ -876,6 +876,7 @@ class TestNumPyroModel:
             Msun2kg,
             10.0,
             rv_data,
+            None,
             None,
             None,
             None,

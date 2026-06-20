@@ -145,6 +145,86 @@ def predict_stellar_astrometry(
     return -frac * ra_rel, -frac * dec_rel
 
 
+def _reflex_proper_motion(
+    t_center, window, n_epochs, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
+):
+    """Least-squares proper motion of the stellar reflex over a mission window.
+
+    Samples ``n_epochs`` epochs across ``[t_center - window/2, t_center + window/2]``,
+    evaluates the reflex sky-path, and returns the linear slope (the proper motion a
+    mission would report by fitting a moving photocenter). Octofitter's 25-epoch
+    approximation to the smearing of the photocenter, without htof.
+    """
+    ts = jnp.linspace(t_center - 0.5 * window, t_center + 0.5 * window, n_epochs)
+    ra, dec = predict_stellar_astrometry(
+        ts, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
+    )
+    dt = ts - jnp.mean(ts)
+    denom = jnp.sum(dt**2)
+    pm_ra = jnp.sum(dt * (ra - jnp.mean(ra))) / denom
+    pm_dec = jnp.sum(dt * (dec - jnp.mean(dec))) / denom
+    return jnp.stack([pm_ra, pm_dec])
+
+
+def predict_pm_anomaly(
+    t_hip,
+    t_gaia,
+    gaia_window,
+    n_epochs,
+    a,
+    e,
+    cos_i,
+    W,
+    cos_w,
+    sin_w,
+    tp,
+    Ms,
+    Mp,
+    dist_pc,
+):
+    """Predict the Hipparcos-Gaia proper-motion anomaly of the star (RA, DEC).
+
+    The anomaly is the difference between the instantaneous Gaia proper motion (the
+    slope of the reflex sky-path over the Gaia window) and the long-baseline
+    Hipparcos-to-Gaia mean proper motion (the scaled positional difference). The
+    barycenter proper motion cancels in the difference, so the anomaly is a pure
+    reflex signal. Combined with the orbit shape (from relative astrometry or imaging),
+    it constrains the planet mass. Uses Octofitter's 25-epoch path-fit approximation.
+
+    Args:
+        t_hip: Hipparcos mean epoch (days, in the orbit's time frame). Scalar.
+        t_gaia: Gaia mean epoch (days, same frame). Scalar.
+        gaia_window: Gaia mission duration (days) for the proper-motion fit. Scalar.
+        n_epochs: Number of epochs to sample per mission window (static int).
+        a: Semi-major axis of the relative orbit (AU). Scalar.
+        e: Eccentricity. Scalar.
+        cos_i: Cosine of inclination. Scalar.
+        W: Longitude of ascending node (radians). Scalar.
+        cos_w: Cosine of argument of periapsis. Scalar.
+        sin_w: Sine of argument of periapsis. Scalar.
+        tp: Time of periapsis passage (days). Scalar.
+        Ms: Stellar mass (kg). Scalar.
+        Mp: Planet mass (kg). Scalar.
+        dist_pc: Distance to system (parsec). Scalar.
+
+    Returns:
+        The proper-motion anomaly ``(pm_ra, pm_dec)``, shape ``(2,)`` in arcsec/day.
+    """
+    mu_gaia = _reflex_proper_motion(
+        t_gaia, gaia_window, n_epochs, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
+    )
+    ra_hip, dec_hip = predict_stellar_astrometry(
+        jnp.atleast_1d(t_hip), a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
+    )
+    ra_gaia, dec_gaia = predict_stellar_astrometry(
+        jnp.atleast_1d(t_gaia), a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
+    )
+    p_hip = jnp.stack([ra_hip[0], dec_hip[0]])
+    p_gaia = jnp.stack([ra_gaia[0], dec_gaia[0]])
+    mu_hg = (p_gaia - p_hip) / (t_gaia - t_hip)
+    return mu_gaia - mu_hg
+
+
 def predict_photometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Lambda, dist_pc):
     """Predict angular separation and delta-magnitude for a single planet.
 
