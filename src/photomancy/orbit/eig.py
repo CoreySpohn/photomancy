@@ -4,7 +4,7 @@ Supplies the orbit forward model (unconstrained ``z`` -> sky position via Kepler
 the contrast-curve detectability, then delegates the analytic EIG to
 :mod:`photomancy.eig`. The geometric / alias-breaking / detectability primitives are
 re-exported from there. ``evaluate_candidates`` (a Laplace mixture) and
-``evaluate_candidates_mixture`` (any z-space MixturePosterior + an OrbitProblem) both
+``evaluate_orbit_candidates`` (any z-space MixturePosterior + an OrbitProblem) both
 schedule through this layer.
 """
 
@@ -35,7 +35,7 @@ __all__ = [
     "alias_breaking_eig",
     "detectability_eig",
     "evaluate_candidates",
-    "evaluate_candidates_mixture",
+    "evaluate_orbit_candidates",
     "geometric_eig",
 ]
 
@@ -268,7 +268,7 @@ def evaluate_candidates(
     )
 
 
-def evaluate_candidates_mixture(
+def evaluate_orbit_candidates(
     posterior,
     problem,
     candidate_epochs,

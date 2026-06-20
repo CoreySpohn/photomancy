@@ -100,8 +100,8 @@ def test_evaluate_candidates_returns_finite_nonnegative_eig():
 
 
 def test_mixture_path_matches_laplace_path():
-    """evaluate_candidates_mixture on a generic mixture matches the Laplace path."""
-    from photomancy.orbit.eig import evaluate_candidates_mixture
+    """evaluate_orbit_candidates on a generic mixture matches the Laplace path."""
+    from photomancy.orbit.eig import evaluate_orbit_candidates
     from photomancy.orbit.inference import build_orbit_logdensity
     from photomancy.posterior import MixturePosterior
 
@@ -122,7 +122,7 @@ def test_mixture_path_matches_laplace_path():
         covs=mixture.covariances,
         log_evidences=mixture.log_evidence,
     )
-    res_b = evaluate_candidates_mixture(
+    res_b = evaluate_orbit_candidates(
         post, problem, epochs, (5.0e-3) ** 2, MSUN_KG, DIST_PC
     )
     assert jnp.allclose(res_a["total_eig"], res_b["total_eig"], atol=1e-6)
@@ -130,7 +130,7 @@ def test_mixture_path_matches_laplace_path():
 
 def test_ofti_to_eig_end_to_end():
     """OFTI -> to_unconstrained -> cluster_to_mixture -> EIG runs and is finite."""
-    from photomancy.orbit.eig import evaluate_candidates_mixture
+    from photomancy.orbit.eig import evaluate_orbit_candidates
     from photomancy.orbit.inference import build_orbit_logdensity, to_unconstrained
     from photomancy.orbit.ofti import ofti
     from photomancy.posterior import cluster_to_mixture
@@ -169,7 +169,7 @@ def test_ofti_to_eig_end_to_end():
     zpost = to_unconstrained(samp, problem, MSUN_KG)
     mix = cluster_to_mixture(zpost, 4, key=jax.random.key(1))
     epochs = jnp.linspace(0.0, 3.0 * TRUE_T, 12)
-    res = evaluate_candidates_mixture(
+    res = evaluate_orbit_candidates(
         mix, problem, epochs, (5.0e-3) ** 2, MSUN_KG, DIST_PC
     )
     assert res["total_eig"].shape == (12,)
