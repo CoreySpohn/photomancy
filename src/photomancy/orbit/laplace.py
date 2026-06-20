@@ -24,6 +24,7 @@ from typing import Any
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
+import optax
 
 from photomancy.backends.laplace import laplace_covariance
 from photomancy.orbit._numpyro_bridge import (
@@ -70,44 +71,26 @@ def optimize_map_static(
     Returns:
         (z_map, trajectory): Final parameters and optimization trajectory.
     """
-    # 1. Reconstruct the potential function from factory + args
-    # This setup overhead is traced away by XLA
     potential_fn_constrained = potential_factory(*model_args)
 
     def loss_fn(z):
         return potential_fn_constrained(unflatten(z))
 
     grad_fn = jax.grad(loss_fn)
+    opt = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(lr))
 
-    # 2. Adam optimizer state
-    beta1, beta2, eps = 0.9, 0.999, 1e-8
-    m0 = jnp.zeros_like(z_init)
-    v0 = jnp.zeros_like(z_init)
+    def step(carry, _):
+        z, state = carry
+        g = grad_fn(z)
+        g = jnp.where(jnp.isnan(g), 0.0, g)  # guard boundary NaNs before the update
+        updates, state = opt.update(g, state, z)
+        z = optax.apply_updates(z, updates)
+        return (z, state), z
 
-    # 3. Scan step function
-    def step(state, i):
-        p, m, v = state
-        g = grad_fn(p)
-        g = jnp.where(jnp.isnan(g), 0.0, g)
-
-        # Gradient clipping
-        g_norm = jnp.linalg.norm(g)
-        g = jnp.where(g_norm > max_grad_norm, g * max_grad_norm / g_norm, g)
-
-        m_new = beta1 * m + (1 - beta1) * g
-        v_new = beta2 * v + (1 - beta2) * g**2
-        m_hat = m_new / (1 - beta1 ** (i + 1))
-        v_hat = v_new / (1 - beta2 ** (i + 1))
-        p_new = p - lr * m_hat / (jnp.sqrt(v_hat) + eps)
-
-        # Return state and trajectory (p_new)
-        return (p_new, m_new, v_new), p_new
-
-    # 4. Run scan
-    xs = jnp.arange(n_steps)
-    (p_opt, _, _), trajectory = jax.lax.scan(step, (z_init, m0, v0), xs)
-
-    return p_opt, trajectory
+    (z_map, _), trajectory = jax.lax.scan(
+        step, (z_init, opt.init(z_init)), None, length=n_steps
+    )
+    return z_map, trajectory
 
 
 # ---------------------------------------------------------------------------
