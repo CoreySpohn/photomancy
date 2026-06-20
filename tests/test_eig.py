@@ -14,10 +14,11 @@ from photomancy.orbit.data import AstromData  # noqa: E402
 from photomancy.orbit.eig import (  # noqa: E402
     alias_breaking_eig,
     detectability_eig,
-    evaluate_candidates,
+    evaluate_orbit_candidates,
     geometric_eig,
 )
 from photomancy.orbit.forward import predict_astrometry  # noqa: E402
+from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.laplace import map_laplace_mixture_fit  # noqa: E402
 
 MSUN_KG = 1.989e30
@@ -83,49 +84,25 @@ def test_detectability_eig_zero_when_modes_agree():
     assert detectability_eig(weights, jnp.array([1.0, 0.0])) > 0.0
 
 
-def test_evaluate_candidates_returns_finite_nonnegative_eig():
-    """evaluate_candidates scores a batch of epochs against a real mixture posterior."""
+def test_evaluate_orbit_candidates_returns_finite_nonnegative_eig():
+    """evaluate_orbit_candidates scores epochs against a fitted mixture posterior."""
     astrom = _make_astrom(5)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        mixture = map_laplace_mixture_fit(
+        post = map_laplace_mixture_fit(
             MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
         )
+    problem = build_orbit_logdensity(
+        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+    )
     candidates = jnp.linspace(0.0, 3.0 * TRUE_T, 8)
-    result = evaluate_candidates(mixture, candidates, (5.0e-3) ** 2, MSUN_KG, DIST_PC)
+    result = evaluate_orbit_candidates(
+        post, problem, candidates, (5.0e-3) ** 2, MSUN_KG, DIST_PC
+    )
 
     assert result["total_eig"].shape == (8,)
     assert jnp.all(jnp.isfinite(result["total_eig"]))
     assert jnp.all(result["total_eig"] >= -1e-6)
-
-
-def test_mixture_path_matches_laplace_path():
-    """evaluate_orbit_candidates on a generic mixture matches the Laplace path."""
-    from photomancy.orbit.eig import evaluate_orbit_candidates
-    from photomancy.orbit.inference import build_orbit_logdensity
-    from photomancy.posterior import MixturePosterior
-
-    astrom = _make_astrom(5)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        mixture = map_laplace_mixture_fit(
-            MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
-        )
-    epochs = jnp.linspace(0.0, 3.0 * TRUE_T, 12)
-    res_a = evaluate_candidates(mixture, epochs, (5.0e-3) ** 2, MSUN_KG, DIST_PC)
-
-    problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
-    )
-    post = MixturePosterior(
-        means=mixture.z_maps,
-        covs=mixture.covariances,
-        log_evidences=mixture.log_evidence,
-    )
-    res_b = evaluate_orbit_candidates(
-        post, problem, epochs, (5.0e-3) ** 2, MSUN_KG, DIST_PC
-    )
-    assert jnp.allclose(res_a["total_eig"], res_b["total_eig"], atol=1e-6)
 
 
 def test_ofti_to_eig_end_to_end():

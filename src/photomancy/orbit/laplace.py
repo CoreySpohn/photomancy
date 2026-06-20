@@ -21,7 +21,6 @@ import functools
 from collections.abc import Callable
 from typing import Any
 
-import equinox as eqx
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
@@ -32,110 +31,7 @@ from photomancy.orbit._numpyro_bridge import (
     _pad_orbit_data,
 )
 from photomancy.orbit.init import find_init, find_init_top_k
-
-# ---------------------------------------------------------------------------
-# LaplaceResult -- equinox container
-# ---------------------------------------------------------------------------
-
-
-class LaplaceResult(eqx.Module):
-    """Result of a MAP + Laplace approximation.
-
-    Stores the MAP point and regularized covariance in NumPyro's internal
-    unconstrained space.  Provides methods to draw posterior samples
-    (via the reparametrization trick) and to evaluate the Gaussian
-    log-probability (for sequential observation planning).
-    """
-
-    z_map: jnp.ndarray
-    covariance: jnp.ndarray
-    cholesky: jnp.ndarray
-    _unflatten: Callable = eqx.field(static=True)
-    _postprocess_fn: Callable = eqx.field(static=True)
-    param_names: tuple[str, ...] = eqx.field(static=True)
-    n_params: int = eqx.field(static=True)
-
-    def sample(
-        self,
-        key: jax.Array,
-        n: int = 2000,
-    ) -> dict[str, jnp.ndarray]:
-        """Draw posterior samples and return physical orbital parameters.
-
-        Args:
-            key: JAX PRNG key.
-            n: Number of samples to draw.  Default 2000.
-
-        Returns:
-            Dict mapping physical parameter names (``T``, ``e``, ``cos_i``,
-            ``W``, ``tp``, ``a``, etc.) to arrays of shape ``(n,)``.
-        """
-        z_samples = _draw_samples(self.z_map, self.cholesky, key, n)
-        return _postprocess_samples(z_samples, self._unflatten, self._postprocess_fn)
-
-    def log_prob(self, z_flat: jnp.ndarray) -> jnp.ndarray:
-        """Evaluate the Gaussian log-probability at a point.
-
-        Useful as a prior term for the next observation in a sequential
-        observation-planning loop.
-
-        Args:
-            z_flat: Parameter vector in unconstrained space.
-                Shape ``(D,)``.
-
-        Returns:
-            Scalar log-probability.
-        """
-        return _mvn_log_prob(z_flat, self.z_map, self.covariance, self.cholesky)
-
-
-# ---------------------------------------------------------------------------
-# Internal JIT-compiled helpers
-# ---------------------------------------------------------------------------
-
-
-@functools.partial(jax.jit, static_argnums=(3,))
-def _draw_samples(
-    z_map: jnp.ndarray,
-    chol: jnp.ndarray,
-    key: jax.Array,
-    n: int,
-) -> jnp.ndarray:
-    """Draw *n* MVN samples: z_map + L @ z, z ~ N(0, I)."""
-    z = jax.random.normal(key, (n, z_map.shape[0]))
-    return z_map + z @ chol.T
-
-
-@jax.jit
-def _mvn_log_prob(
-    x: jnp.ndarray,
-    mu: jnp.ndarray,
-    cov: jnp.ndarray,
-    chol: jnp.ndarray,
-) -> jnp.ndarray:
-    """Multivariate normal log-probability."""
-    d = mu.shape[0]
-    diff = x - mu
-    # Solve L y = diff for y, then ||y||^2 = diff^T Sigma^{-1} diff
-    y = jax.scipy.linalg.solve_triangular(chol, diff, lower=True)
-    maha = jnp.dot(y, y)
-    log_det = 2.0 * jnp.sum(jnp.log(jnp.diag(chol)))
-    return -0.5 * (maha + log_det + d * jnp.log(2.0 * jnp.pi))
-
-
-def _postprocess_samples(
-    z_samples: jnp.ndarray,
-    unflatten: Callable,
-    postprocess_fn: Callable,
-) -> dict[str, jnp.ndarray]:
-    """Convert unconstrained flat samples -> physical parameter dicts."""
-
-    def _single(z_flat):
-        z_dict = unflatten(z_flat)
-        return postprocess_fn(z_dict)
-
-    return jax.vmap(_single)(z_samples)
-
+from photomancy.posterior import GaussianPosterior, MixturePosterior
 
 # ---------------------------------------------------------------------------
 # MAP optimizer (Static-Arg JIT)
@@ -285,7 +181,7 @@ def map_laplace_fit(
     seed: int = 0,
     n_steps: int = 500,
     min_eigenvalue: float = 1.0,
-) -> LaplaceResult:
+) -> GaussianPosterior:
     """One-call MAP + Laplace fit for a single planet.
 
     Uses the model cache for JIT-compilation reuse. On first call,
@@ -314,8 +210,8 @@ def map_laplace_fit(
         min_eigenvalue: Eigenvalue floor for Hessian regularisation.
 
     Returns:
-        A :class:`LaplaceResult` with MAP point, covariance, and methods
-        for sampling and log-probability evaluation.
+        A :class:`~photomancy.posterior.GaussianPosterior` with the MAP mean, the
+        Laplace covariance, and the Laplace log-evidence.
     """
     has_rv = rv_data is not None
     has_astrom = astrom_data is not None
@@ -370,218 +266,14 @@ def map_laplace_fit(
         min_eigenvalue=min_eigenvalue,
     )
 
-    # 6. Reconstruct helpers for result object
-    # Postprocess factory might need args or not, handle both
-    try:
-        raw_pp = cached["postprocess_fn_factory"](*model_args)
-    except TypeError:
-        raw_pp = cached["postprocess_fn_factory"]
+    # Laplace log-evidence at the MAP (same convention as the mixture fit).
+    p_fn = cached["potential_fn_factory"](*model_args)
+    loss = p_fn(cached["unflatten"](z_map))
+    d = z_map.shape[0]
+    _, logdet = jnp.linalg.slogdet(cov)
+    log_z = -loss + 0.5 * d * jnp.log(2.0 * jnp.pi) + 0.5 * logdet
 
-    def postprocess_fn(z_dict):
-        phys = raw_pp(z_dict)
-        return {k: jnp.squeeze(v) for k, v in phys.items()}
-
-    # Compute Cholesky of precision or covariance?
-    # LaplaceResult expects cholesky of *covariance* (L L^T = Sigma)
-    # fisher_covariance_jvp returns Covariance.
-    chol = jnp.linalg.cholesky(cov)
-
-    return LaplaceResult(
-        z_map=z_map,
-        covariance=cov,
-        cholesky=chol,
-        _unflatten=cached["unflatten"],
-        _postprocess_fn=postprocess_fn,
-        param_names=cached["param_names"],
-        n_params=z_map.shape[0],
-    )
-
-
-# ---------------------------------------------------------------------------
-# LaplaceMixtureResult --- evidence-weighted mixture of Gaussians
-# ---------------------------------------------------------------------------
-
-
-class LaplaceMixtureResult(eqx.Module):
-    """Mixture of Laplace approximations from multi-start MAP.
-
-    Combines K MAP modes into a Gaussian Mixture Model weighted by
-    the Laplace approximation of the marginal likelihood (Bayesian
-    evidence) at each mode.
-
-    Attributes:
-        weights: Normalised evidence weights.  Shape ``(K,)``.
-        z_maps: MAP estimates for each mode.  Shape ``(K, D)``.
-        covariances: Regularised covariances.  Shape ``(K, D, D)``.
-        choleskys: Cholesky factors.  Shape ``(K, D, D)``.
-        losses: Final negative log-posterior at each MAP.  Shape ``(K,)``.
-        log_evidence: Unnormalised log-evidence per mode.  Shape ``(K,)``.
-        _unflatten: Callable = eqx.field(static=True)
-        _postprocess_fn: Callable = eqx.field(static=True)
-        param_names: tuple[str, ...] = eqx.field(static=True)
-        n_params: int = eqx.field(static=True)
-        n_modes: int = eqx.field(static=True)
-    """
-
-    weights: jnp.ndarray
-    z_maps: jnp.ndarray
-    covariances: jnp.ndarray
-    choleskys: jnp.ndarray
-    losses: jnp.ndarray
-    log_evidence: jnp.ndarray
-    _unflatten: Callable = eqx.field(static=True)
-    _postprocess_fn: Callable = eqx.field(static=True)
-    _model_trace: dict = eqx.field(static=True)
-    _potential_fn_factory: Callable = eqx.field(static=True)
-    param_names: tuple[str, ...] = eqx.field(static=True)
-    n_params: int = eqx.field(static=True)
-    n_modes: int = eqx.field(static=True)
-
-    def sample(
-        self,
-        key: jax.Array,
-        n: int = 2000,
-    ) -> dict[str, jnp.ndarray]:
-        """Draw posterior samples from the evidence-weighted mixture.
-
-        Args:
-            key: JAX PRNG key.
-            n: Number of samples.  Default 2000.
-
-        Returns:
-            Dict mapping physical parameter names to arrays of shape
-            ``(n,)``.
-        """
-        key_cat, key_z = jax.random.split(key)
-
-        # 1. Sample mode indices from Categorical(weights)
-        mode_indices = jax.random.categorical(
-            key_cat, jnp.log(self.weights), shape=(n,)
-        )
-
-        # 2. Draw from the selected MVN per sample
-        z_noise = jax.random.normal(key_z, (n, self.n_params))
-
-        # Gather the MAP and Cholesky for each sample's mode
-        z_map_selected = self.z_maps[mode_indices]  # (n, D)
-        chol_selected = self.choleskys[mode_indices]  # (n, D, D)
-
-        # z_map + L @ noise  (batched matmul)
-        z_samples = z_map_selected + jnp.einsum("nij,nj->ni", chol_selected, z_noise)
-
-        # 3. Postprocess to physical space
-        return _postprocess_samples(z_samples, self._unflatten, self._postprocess_fn)
-
-    def best_mode(self) -> LaplaceResult:
-        """Return the single highest-weight mode as a LaplaceResult."""
-        idx = int(jnp.argmax(self.weights))
-        return LaplaceResult(
-            z_map=self.z_maps[idx],
-            covariance=self.covariances[idx],
-            cholesky=self.choleskys[idx],
-            _unflatten=self._unflatten,
-            _postprocess_fn=self._postprocess_fn,
-            param_names=self.param_names,
-            n_params=self.n_params,
-        )
-
-    def mode_summary(self) -> list[dict]:
-        """Return a summary of each mode (for diagnostics)."""
-        summaries = []
-        for k in range(self.n_modes):
-            z_dict = self._unflatten(self.z_maps[k])
-            phys = self._postprocess_fn(z_dict)
-            summaries.append(
-                {
-                    "weight": float(self.weights[k]),
-                    "loss": float(self.losses[k]),
-                    "log_evidence": float(self.log_evidence[k]),
-                    "params": {kk: float(jnp.squeeze(v)) for kk, v in phys.items()},
-                }
-            )
-        return summaries
-
-    def sample_visual_z(
-        self,
-        key: jax.Array,
-        n: int = 25,
-        max_variance: float = 10.0,
-    ) -> jnp.ndarray:
-        """Draw z-space samples with capped covariance for visualization.
-
-        Caps eigenvalues of the covariance to ``max_variance`` to prevent
-        samples from saturating at prior boundaries through sigmoid
-        transforms, which creates pathological orbits.
-
-        Args:
-            key: JAX PRNG key.
-            n: Number of samples.  Default 25.
-            max_variance: Maximum eigenvalue allowed in the covariance.
-                Default 10.0 (SD ~= 3.2 in unconstrained space).
-
-        Returns:
-            Raw z-space samples, shape ``(n, D)``.
-        """
-
-        # Cap covariance eigenvalues to prevent boundary saturation
-        def _cap_cov(cov):
-            eigvals, eigvecs = jnp.linalg.eigh(cov)
-            eigvals_capped = jnp.minimum(eigvals, max_variance)
-            cov_capped = eigvecs @ jnp.diag(eigvals_capped) @ eigvecs.T
-            return cov_capped
-
-        capped_covs = jax.vmap(_cap_cov)(self.covariances)
-        capped_chols = jax.vmap(jnp.linalg.cholesky)(capped_covs)
-
-        key_cat, key_z = jax.random.split(key)
-        mode_indices = jax.random.categorical(
-            key_cat, jnp.log(self.weights), shape=(n,)
-        )
-        z_noise = jax.random.normal(key_z, (n, self.n_params))
-        z_map_selected = self.z_maps[mode_indices]
-        chol_selected = capped_chols[mode_indices]
-        z_samples = z_map_selected + jnp.einsum("nij,nj->ni", chol_selected, z_noise)
-        return z_samples
-
-    def project_samples(
-        self,
-        z_samples: jnp.ndarray,
-        model_args: tuple,
-        n_steps: int = 150,
-        lr: float = 0.005,
-    ) -> dict[str, jnp.ndarray]:
-        """Project z-space samples onto the data-consistent manifold.
-
-        Re-optimizes each sample with a short MAP run, snapping it
-        back from the Gaussian tangent plane onto the curved valley
-        of valid orbits that pass through the observed data.
-
-        Args:
-            z_samples: Raw z-space samples, shape ``(n, D)``.
-            model_args: Tuple of data arguments for the potential.
-            n_steps: Optimization steps per sample.  Default 150.
-            lr: Learning rate for projection.  Default 0.005.
-
-        Returns:
-            Dict mapping physical parameter names to arrays of shape
-            ``(n,)``.
-        """
-        potential_factory = self._potential_fn_factory
-        unflatten = self._unflatten
-
-        def _project_single(z_init):
-            z_opt, _ = optimize_map_static(
-                potential_factory,
-                unflatten,
-                z_init,
-                model_args,
-                n_steps=n_steps,
-                lr=lr,
-            )
-            return z_opt
-
-        z_projected = jax.vmap(_project_single)(z_samples)
-        return _postprocess_samples(z_projected, self._unflatten, self._postprocess_fn)
+    return GaussianPosterior(mean=z_map, cov=cov, evidence=log_z)
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +301,7 @@ def map_laplace_mixture_fit(
     seed: int = 0,
     n_steps: int = 500,
     min_eigenvalue: float = 1.0,
-) -> LaplaceMixtureResult:
+) -> MixturePosterior:
     """Multi-start MAP + Laplace fit returning an evidence-weighted mixture.
 
     Uses the model cache for JIT-compilation reuse.
@@ -639,7 +331,8 @@ def map_laplace_mixture_fit(
         min_eigenvalue: Eigenvalue floor for Hessian regularisation.
 
     Returns:
-        A :class:`LaplaceMixtureResult` with evidence-weighted modes.
+        A :class:`~photomancy.posterior.MixturePosterior` with one Gaussian mode per
+        start, weighted by per-mode Laplace log-evidence.
     """
     has_rv = rv_data is not None
     has_astrom = astrom_data is not None
@@ -700,8 +393,6 @@ def map_laplace_mixture_fit(
                     )
                 )
 
-    actual_k = len(init_list)
-
     # 4. Convert init dicts -> z-vectors
     z_inits = [
         _init_dict_to_z_flat(d, cached["z_template"], cached["inv_transforms"])
@@ -739,37 +430,10 @@ def map_laplace_mixture_fit(
     # MAP over the batch of initial conditions
     z_maps, covs, losses = jax.vmap(fit_single)(z_init_batch)
 
-    # Compute Choleskys for storage/sampling
-    chols = jax.vmap(jnp.linalg.cholesky)(covs)
-
-    # 6. Compute Laplace evidence weights
+    # Per-mode Laplace log-evidence (unnormalized log Z_k); MixturePosterior
+    # derives the mode weights from these.
     d = z_maps.shape[-1]
     _, log_dets = jax.vmap(jnp.linalg.slogdet)(covs)
     log_ev = -losses + 0.5 * d * jnp.log(2.0 * jnp.pi) + 0.5 * log_dets
-    weights = jax.nn.softmax(log_ev)
 
-    # 7. Postprocess function
-    try:
-        raw_pp = cached["postprocess_fn_factory"](*model_args)
-    except TypeError:
-        raw_pp = cached["postprocess_fn_factory"]
-
-    def postprocess_fn(z_dict):
-        phys = raw_pp(z_dict)
-        return {k: jnp.squeeze(v) for k, v in phys.items()}
-
-    return LaplaceMixtureResult(
-        weights=weights,
-        z_maps=z_maps,
-        covariances=covs,
-        choleskys=chols,
-        losses=losses,
-        log_evidence=log_ev,
-        _unflatten=cached["unflatten"],
-        _postprocess_fn=postprocess_fn,
-        _model_trace=cached["model_trace"],
-        _potential_fn_factory=cached["potential_fn_factory"],
-        param_names=cached["param_names"],
-        n_params=int(z_maps.shape[-1]),
-        n_modes=actual_k,
-    )
+    return MixturePosterior(means=z_maps, covs=covs, log_evidences=log_ev)

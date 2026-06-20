@@ -11,9 +11,10 @@ from orbix.equations import period_to_sma
 from orbix.kepler.core import diff_solve_trig
 
 from photomancy.orbit.data import AstromData, ImagingData, NullData, RVData
+from photomancy.orbit.diagnostics import mode_summary, sample_physical
 from photomancy.orbit.eig import (
     alias_breaking_eig,
-    evaluate_candidates,
+    evaluate_orbit_candidates,
     geometric_eig,
 )
 from photomancy.orbit.forward import (
@@ -31,12 +32,7 @@ from photomancy.orbit.grid_search import (
 )
 from photomancy.orbit.inference import OrbitProblem, build_orbit_logdensity
 from photomancy.orbit.init import find_init, find_init_top_k, ti_to_init
-from photomancy.orbit.laplace import (
-    LaplaceMixtureResult,
-    LaplaceResult,
-    map_laplace_fit,
-    map_laplace_mixture_fit,
-)
+from photomancy.orbit.laplace import map_laplace_fit, map_laplace_mixture_fit
 from photomancy.orbit.likelihoods import (
     loglike_astrom,
     loglike_imaging,
@@ -68,9 +64,6 @@ __all__ = [
     "AstromData",
     "EccVectorShape",
     "ImagingData",
-    "LaplaceMixtureResult",
-    # MAP + Laplace
-    "LaplaceResult",
     "NullData",
     # Orbit -> generic-backend bridge
     "OrbitProblem",
@@ -87,7 +80,7 @@ __all__ = [
     "ecc_distribution",
     # Priors
     "eccentricity_disk_transform",
-    "evaluate_candidates",
+    "evaluate_orbit_candidates",
     "find_init",
     "find_init_top_k",
     # Bayesian experimental design
@@ -100,6 +93,7 @@ __all__ = [
     "loglike_rv_marginalized",
     "map_laplace_fit",
     "map_laplace_mixture_fit",
+    "mode_summary",
     "ofti",
     # Nested sampling (NumPyro/jaxns) -> evidence / model comparison
     "orbit_nested_sampling",
@@ -109,6 +103,7 @@ __all__ = [
     # Forward models
     "predict_rv",
     "sample_ecc_prior",
+    "sample_physical",
     "thiele_innes_fit",
     "thiele_innes_grid_search",
     # Initialization

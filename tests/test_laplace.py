@@ -11,12 +11,12 @@ jax.config.update("jax_enable_x64", True)
 from orbix.equations import period_to_sma  # noqa: E402
 
 from photomancy.orbit.data import AstromData  # noqa: E402
+from photomancy.orbit.diagnostics import sample_physical  # noqa: E402
 from photomancy.orbit.forward import predict_astrometry  # noqa: E402
+from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init  # noqa: E402
-from photomancy.orbit.laplace import (  # noqa: E402
-    LaplaceResult,
-    map_laplace_fit,
-)
+from photomancy.orbit.laplace import map_laplace_fit  # noqa: E402
+from photomancy.posterior import GaussianPosterior  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -67,7 +67,7 @@ def _make_astrom(n_obs, seed=42):
 
 
 def test_map_laplace_fit_smoke():
-    """map_laplace_fit returns a LaplaceResult with correct fields."""
+    """map_laplace_fit returns a GaussianPosterior with consistent shapes."""
     astrom = _make_astrom(5)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -80,11 +80,10 @@ def test_map_laplace_fit_smoke():
             init_vals=init_vals,
             n_steps=200,
         )
-    assert isinstance(result, LaplaceResult)
-    assert result.z_map.shape[0] == result.n_params
-    assert result.covariance.shape == (result.n_params, result.n_params)
-    assert result.cholesky.shape == (result.n_params, result.n_params)
-    assert len(result.param_names) > 0
+    assert isinstance(result, GaussianPosterior)
+    d = result.mean.shape[0]
+    assert result.cov.shape == (d, d)
+    assert jnp.isfinite(result.evidence)
 
 
 def test_map_converges():
@@ -100,7 +99,10 @@ def test_map_converges():
             log_P_range=LOG_P_RANGE,
             init_vals=init_vals,
         )
-    samples = result.sample(jax.random.PRNGKey(0), n=500)
+    problem = build_orbit_logdensity(
+        Msun2kg, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
+    )
+    samples = sample_physical(result, problem, jax.random.PRNGKey(0), 500)
     T_median = float(jnp.median(samples["T"]))
     assert abs(T_median - TRUE_T) / TRUE_T < 0.10, (
         f"T_median={T_median:.1f} vs truth={TRUE_T:.1f}"
@@ -122,12 +124,12 @@ def test_covariance_positive_definite():
                 init_vals=init_vals,
                 n_steps=100,
             )
-        eigvals = jnp.linalg.eigvalsh(result.covariance)
+        eigvals = jnp.linalg.eigvalsh(result.cov)
         assert jnp.all(eigvals > 0), f"n={n_obs}: eigenvalues={eigvals}"
 
 
 def test_samples_shape():
-    """sample() returns arrays with the correct number of samples."""
+    """The fitted GaussianPosterior samples flat z-space with the right shape."""
     astrom = _make_astrom(5)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -140,10 +142,8 @@ def test_samples_shape():
             init_vals=init_vals,
             n_steps=100,
         )
-    samples = result.sample(jax.random.PRNGKey(1), n=100)
-    # Physical params should include T at minimum
-    assert "T" in samples
-    assert samples["T"].shape == (100,)
+    samples = result.sample(jax.random.PRNGKey(1), 100)
+    assert samples.shape == (100, result.mean.shape[0])
 
 
 def test_log_prob_finite():
@@ -160,12 +160,11 @@ def test_log_prob_finite():
             init_vals=init_vals,
             n_steps=100,
         )
-    lp = result.log_prob(result.z_map)
+    lp = result.log_prob(result.mean)
     assert jnp.isfinite(lp), f"log_prob at MAP = {lp}"
-    # log_prob at MAP should be the maximum (zero Mahalanobis distance)
-    # so only the normalisation constant remains
-    d = result.n_params
-    expected = -0.5 * d * jnp.log(2 * jnp.pi) - jnp.sum(
-        jnp.log(jnp.diag(result.cholesky))
-    )
-    assert jnp.allclose(lp, expected, atol=1e-6)
+    # log_prob at the mean is the maximum (zero Mahalanobis distance),
+    # so only the normalisation constant remains.
+    d = result.mean.shape[0]
+    chol = jnp.linalg.cholesky(result.cov)
+    expected = -0.5 * d * jnp.log(2 * jnp.pi) - jnp.sum(jnp.log(jnp.diag(chol)))
+    assert jnp.allclose(lp, expected, atol=1e-5)

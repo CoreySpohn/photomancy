@@ -15,7 +15,6 @@ from photomancy.orbit.diagnostics import mode_summary, sample_physical  # noqa: 
 from photomancy.orbit.forward import predict_astrometry  # noqa: E402
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.laplace import map_laplace_mixture_fit  # noqa: E402
-from photomancy.posterior import MixturePosterior  # noqa: E402
 
 MSUN_KG = 1.989e30
 DIST_PC = 10.0
@@ -57,19 +56,9 @@ def _fit_posterior_and_problem():
     astrom = _make_astrom(5)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        result = map_laplace_mixture_fit(
+        post = map_laplace_mixture_fit(
             MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
         )
-    # Forward-compatible: Task 5 makes map_laplace_mixture_fit return this directly.
-    post = (
-        result
-        if isinstance(result, MixturePosterior)
-        else MixturePosterior(
-            means=result.z_maps,
-            covs=result.covariances,
-            log_evidences=result.log_evidence,
-        )
-    )
     problem = build_orbit_logdensity(
         MSUN_KG, DIST_PC, astrom_data=astrom, log_P_range=LOG_P_RANGE
     )

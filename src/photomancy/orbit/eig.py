@@ -3,9 +3,8 @@
 Supplies the orbit forward model (unconstrained ``z`` -> sky position via Kepler) and
 the contrast-curve detectability, then delegates the analytic EIG to
 :mod:`photomancy.eig`. The geometric / alias-breaking / detectability primitives are
-re-exported from there. ``evaluate_candidates`` (a Laplace mixture) and
-``evaluate_orbit_candidates`` (any z-space MixturePosterior + an OrbitProblem) both
-schedule through this layer.
+re-exported from there. ``evaluate_orbit_candidates`` (a z-space MixturePosterior + an
+OrbitProblem) schedules through this layer.
 """
 
 from collections.abc import Callable
@@ -28,13 +27,11 @@ from photomancy.eig import (
     geometric_eig,
 )
 from photomancy.eig import evaluate_candidates as _eval_candidates
-from photomancy.orbit._numpyro_bridge import _fwd_from_trace, make_constrain
 from photomancy.posterior import MixturePosterior
 
 __all__ = [
     "alias_breaking_eig",
     "detectability_eig",
-    "evaluate_candidates",
     "evaluate_orbit_candidates",
     "geometric_eig",
 ]
@@ -221,53 +218,6 @@ def _orbit_evaluate(
     return res
 
 
-def evaluate_candidates(
-    mixture,
-    candidate_epochs,
-    obs_variance,
-    Ms,
-    dist_pc,
-    *,
-    Lambda=None,
-    contrast_curve=None,
-    iwa=0.0,
-):
-    """Imaging-aware EIG over candidate epochs for an orbit Laplace mixture.
-
-    Builds the orbit forward + contrast-curve detectability from the
-    ``LaplaceMixtureResult`` and delegates to the shared core.
-
-    Args:
-        mixture: A fitted ``LaplaceMixtureResult``.
-        candidate_epochs: Candidate observation times (days). Shape ``(N,)``.
-        obs_variance: Measurement variance per observable (scalar or ``(n_obs,)``).
-        Ms: Stellar mass (kg).
-        dist_pc: Distance (parsec).
-        Lambda: Planet photometric area ``Ag * Rp^2`` (AU^2); with ``contrast_curve``
-            enables imaging-aware EIG.
-        contrast_curve: ``(sep_arcsec, dmag_limit)`` arrays for the detection threshold.
-        iwa: Inner working angle (arcsec); planets inside are not detectable.
-
-    Returns:
-        Dict with ``total_eig``, ``geometric_eig``, ``alias_eig``, ``predictions``,
-        ``detectability`` (per candidate), plus orbit ``separation`` / ``dMag``.
-    """
-    return _orbit_evaluate(
-        mixture.z_maps,
-        mixture.covariances,
-        mixture.log_evidence,
-        mixture._unflatten,
-        make_constrain(_fwd_from_trace(mixture._model_trace)),
-        candidate_epochs,
-        obs_variance,
-        Ms,
-        dist_pc,
-        Lambda=Lambda,
-        contrast_curve=contrast_curve,
-        iwa=iwa,
-    )
-
-
 def evaluate_orbit_candidates(
     posterior,
     problem,
@@ -284,7 +234,7 @@ def evaluate_orbit_candidates(
 
     Lets OFTI / grid_search (via ``to_unconstrained`` -> ``cluster_to_mixture``) drive
     the same analytic EIG as the Laplace mixture. ``problem`` supplies the model
-    ``unflatten`` and ``constrain``. Same return as :func:`evaluate_candidates`.
+    ``unflatten`` and ``constrain``. Returns the per-candidate EIG dict.
     """
     return _orbit_evaluate(
         posterior.means,
