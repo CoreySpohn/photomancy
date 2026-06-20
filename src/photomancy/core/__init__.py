@@ -5,10 +5,6 @@ models, likelihoods, and priors. The partition / ravel boundary helpers and the
 Backend protocol + unified Posterior build on top of this.
 """
 
-from photomancy.core.model import (
-    build_gaussian_fit,
-    build_logdensity,
-    build_scene_logdensity,
-)
+from photomancy.core.model import build_gaussian_fit, build_scene_logdensity
 
-__all__ = ["build_gaussian_fit", "build_logdensity", "build_scene_logdensity"]
+__all__ = ["build_gaussian_fit", "build_scene_logdensity"]

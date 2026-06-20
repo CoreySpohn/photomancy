@@ -52,30 +52,6 @@ class SceneLogDensity(eqx.Module):
         return log_prior + self.likelihood(self.forward_model(scene))
 
 
-def build_logdensity(
-    forward_model: Callable,
-    likelihood: Callable,
-    prior: Callable,
-) -> Callable:
-    """Compose a logdensity from a forward model, a likelihood, and a prior.
-
-    Args:
-        forward_model: Maps a parameter PyTree to predicted data.
-        likelihood: Maps predicted data to a scalar log-likelihood (the observed
-            data is closed over by the caller).
-        prior: Maps a parameter PyTree to a scalar log-prior.
-
-    Returns:
-        A function ``logdensity(params) -> scalar`` equal to
-        ``prior(params) + likelihood(forward_model(params))``.
-    """
-
-    def logdensity(params):
-        return prior(params) + likelihood(forward_model(params))
-
-    return logdensity
-
-
 def build_scene_logdensity(
     scene,
     forward_model: Callable,

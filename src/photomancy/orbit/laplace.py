@@ -159,7 +159,6 @@ def map_laplace_fit(
     ecc_prior: str = "kipping13",
     jitter_scale: float = 1e-10,
     init_vals: dict | None = None,
-    n_samples: int = 2000,
     seed: int = 0,
     n_steps: int = 500,
     min_eigenvalue: float = 1.0,
@@ -186,7 +185,6 @@ def map_laplace_fit(
         jitter_scale: Scale for HalfNormal jitter prior.
         init_vals: Init dict from :func:`find_init`. If ``None``,
             NumPyro's default random init is used.
-        n_samples: Number of posterior samples.  Default 2000.
         seed: PRNG seed for sampling.
         n_steps: Number of Adam optimiser steps.  Default 500.
         min_eigenvalue: Eigenvalue floor for Hessian regularisation.

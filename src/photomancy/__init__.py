@@ -18,7 +18,7 @@ from photomancy.backends import (
     NUTSBackend,
     SMCBackend,
 )
-from photomancy.core import build_logdensity, build_scene_logdensity
+from photomancy.core import build_scene_logdensity
 from photomancy.posterior import (
     AbstractPosterior,
     GaussianPosterior,
@@ -43,7 +43,6 @@ __all__ = [
     "SMCBackend",
     "SamplePosterior",
     "__version__",
-    "build_logdensity",
     "build_scene_logdensity",
     "project_samples",
     "sample_capped",
