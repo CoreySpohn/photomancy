@@ -36,7 +36,7 @@ def _map_optimize(neg_logdensity, init, n_steps):
     return z_map
 
 
-def _laplace_covariance(neg_logdensity, z_map, min_eigenvalue):
+def laplace_covariance(neg_logdensity, z_map, min_eigenvalue):
     """Eigenvalue-clamped inverse Hessian of ``neg_logdensity`` at ``z_map``."""
     grad_fn = jax.grad(neg_logdensity)
 
@@ -75,7 +75,7 @@ def laplace_fit(logdensity, init, n_steps, min_eigenvalue):
         return -logdensity(z)
 
     z_map = _map_optimize(neg, init, n_steps)
-    cov = _laplace_covariance(neg, z_map, min_eigenvalue)
+    cov = laplace_covariance(neg, z_map, min_eigenvalue)
     d = z_map.shape[0]
     _, logdet_cov = jnp.linalg.slogdet(cov)
     log_z = logdensity(z_map) + 0.5 * d * jnp.log(2.0 * jnp.pi) + 0.5 * logdet_cov

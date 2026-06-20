@@ -25,6 +25,7 @@ import jax
 import jax.flatten_util
 import jax.numpy as jnp
 
+from photomancy.backends.laplace import laplace_covariance
 from photomancy.orbit._numpyro_bridge import (
     _get_or_build_cached,
     _init_dict_to_z_flat,
@@ -123,38 +124,19 @@ def fisher_covariance_jvp(
     *,
     min_eigenvalue: float = 1.0,
 ) -> jnp.ndarray:
-    """Compute covariance via Fisher information (outer product of gradients).
+    """Eigenvalue-clamped inverse Hessian of the orbit potential at ``z_map``.
 
-    Uses forward-over-reverse AD (JVP of Grad) to compute the Hessian of the
-    log-likelihood. This is O(D) instead of O(D^2) for exact Hessian, and
-    takes ~7ms warm (vs 2.4s for exact Hessian).
+    Reconstructs the constrained potential from the cached factory, then delegates the
+    HVP -> eigh -> clamp -> inverse to the shared engine helper
+    :func:`photomancy.backends.laplace.laplace_covariance` (forward-over-reverse AD,
+    O(D) Hessian-vector products).
     """
-    # Reconstruct potential
     potential_fn_constrained = potential_factory(*model_args)
 
-    def loss_fn(z):
+    def neg_logdensity(z):
         return potential_fn_constrained(unflatten(z))
 
-    grad_fn = jax.grad(loss_fn)
-    D = z_map.shape[0]
-
-    def hvp(v):
-        """Hessian-vector product via forward-over-reverse AD."""
-        return jax.jvp(grad_fn, (z_map,), (v,))[1]
-
-    # Build Hessian column-by-column
-    basis = jnp.eye(D)
-    H = jax.vmap(hvp)(basis)
-
-    # Symmetrise
-    H = 0.5 * (H + H.T)
-
-    # Regularize
-    eigvals, eigvecs = jnp.linalg.eigh(H)
-    eigvals = jnp.maximum(eigvals, min_eigenvalue)
-    prec = eigvecs @ jnp.diag(eigvals) @ eigvecs.T
-    cov = jnp.linalg.inv(prec)
-    return cov
+    return laplace_covariance(neg_logdensity, z_map, min_eigenvalue)
 
 
 # ---------------------------------------------------------------------------
