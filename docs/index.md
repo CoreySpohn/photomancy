@@ -84,6 +84,7 @@ explanation/glossary
 
 examples/walkthrough
 examples/orbit_fitting
+examples/eig_scheduling
 ```
 
 ```{toctree}

@@ -87,7 +87,7 @@ render later without modification.
 
 A backend is an Equinox configuration object with one pure method, `run(logdensity,
 init, key) -> Posterior`. The backend sees only the flat logdensity, never the scene or
-the forward model, which keeps a new sampler useful to every domain at once. Five
+the forward model, which keeps a new sampler useful to every domain at once. Eight
 backends exist today:
 
 - {py:obj}`~photomancy.backends.laplace.LaplaceBackend`: a MAP optimization followed by the eigenvalue-clamped inverse
@@ -95,8 +95,18 @@ backends exist today:
   analytic value-of-information calculation.
 - {py:obj}`~photomancy.backends.laplace.LaplaceMixtureBackend`: a multi-start Laplace fit assembled into an evidence-weighted
   mixture of Gaussians, which covers period aliases and other multimodality.
+- {py:obj}`~photomancy.backends.pathfinder.PathfinderBackend`: quasi-Newton variational inference, a Gaussian fit from the
+  L-BFGS trajectory toward the mode. It is more robust than a single-Hessian Laplace fit and
+  a fast initializer for the samplers; its evidence is the ELBO, a lower bound on the log
+  marginal likelihood.
+- {py:obj}`~photomancy.backends.pathfinder.PathfinderMixtureBackend`: a multi-start Pathfinder assembled into an
+  ELBO-weighted mixture, an EIG substrate like the Laplace mixture but steadier when a mode
+  is poorly conditioned.
 - {py:obj}`~photomancy.backends.nuts.NUTSBackend`: the No-U-Turn sampler with window adaptation, returning equally weighted
   samples.
+- {py:obj}`~photomancy.backends.mclmc.MCLMCBackend`: microcanonical Langevin Monte Carlo, a
+  gradient-based sampler often cheaper per effective sample than NUTS in high dimension,
+  returning equally weighted samples.
 - {py:obj}`~photomancy.backends.smc.SMCBackend`: adaptive-tempered sequential Monte Carlo, which returns a posterior and
   the Bayesian evidence in one run.
 - {py:obj}`~photomancy.backends.nested.JaxnsBackend`: nested sampling, which returns a posterior and the evidence for model
@@ -165,11 +175,9 @@ imaging data, disk fitting rides the scene engine, atmospheric retrieval is in p
 and image-domain fitting against a coronagraph forward is the next major target. Each
 arrives as plug-ins on the existing engine.
 
-On the backend side, the priorities are a stochastic variational backend with a flow
-guide for fast approximate posteriors over degenerate atmospheric parameter spaces,
-microcanonical Langevin Monte Carlo for cheap gradient-based sampling in high dimension,
-and Pathfinder for fast variational initialization that can seed the multi-start and
-Markov-chain backends. Many-chain GPU samplers follow once the workloads move to GPU.
+On the backend side, the remaining priority is a stochastic variational backend with a
+flow guide for fast approximate posteriors over degenerate atmospheric parameter spaces.
+Many-chain GPU samplers follow once the workloads move to GPU.
 
 The evidence-bearing backends turn the engine toward model comparison and detection:
 quantifying whether a planet is present against a null, resolving period aliases, and

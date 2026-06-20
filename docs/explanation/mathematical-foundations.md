@@ -35,7 +35,10 @@ $$ p(z \mid D) \approx \mathcal{N}(z_\star, \Sigma), \qquad \Sigma = H^{-1}, \qu
 H = -\nabla^2 \ell(z_\star), $$
 
 where $H$ is the curvature of the logdensity at the mode, equal to the precision of the
-Gaussian. The engine forms $H$ by Hessian-vector products (forward-over-reverse automatic
+Gaussian. For a Gaussian likelihood this curvature is the prior precision plus the observed
+information the data carry about $z$, so $\Sigma$ is an inverse-information matrix, the
+Bayesian analogue of the Cramer-Rao bound. The engine forms $H$ by Hessian-vector products
+(forward-over-reverse automatic
 differentiation), symmetrizes it, and floors its eigenvalues before inverting,
 
 $$ H = Q \Lambda Q^\top, \qquad
@@ -69,8 +72,8 @@ uncertainty across modes, such as period aliases).
 
 The sampling backends reach the same posterior and evidence by other routes. Sequential
 Monte Carlo accumulates the evidence from its tempering normalizers, nested sampling
-integrates the likelihood over prior mass, and the No-U-Turn sampler returns samples
-without an evidence. Each returns the same `Posterior` interface, so nothing downstream
+integrates the likelihood over prior mass, and the No-U-Turn and microcanonical Langevin
+samplers return samples without an evidence. Each returns the same `Posterior` interface, so nothing downstream
 depends on which route produced it.
 
 ## Sequential updating
@@ -96,17 +99,25 @@ $$ \mathrm{EIG}(Y) = \mathbb{E}_{Y}\big[\, D_{\mathrm{KL}}\!\big(p(z \mid Y) \,\
 
 **Continuous-parameter gain.** For an observation linearized about a mode,
 $y = J z + \varepsilon$ with Jacobian $J = \partial y / \partial z$ and measurement
-covariance $R$, the posterior precision updates additively,
+covariance $R$, the matrix $\mathcal{I} = J^\top R^{-1} J$ is the Fisher information the
+observation carries about $z$, and the posterior precision updates by adding it to the prior
+precision,
 
-$$ \Sigma_{\mathrm{new}}^{-1} = \Sigma_{\mathrm{old}}^{-1} + J^\top R^{-1} J, $$
+$$ \Sigma_{\mathrm{new}}^{-1} = \Sigma_{\mathrm{old}}^{-1} + J^\top R^{-1} J. $$
 
-and the information gain is the resulting log-volume contraction of the covariance,
+The information gain is the resulting log-volume contraction of the covariance,
 
 $$ \mathrm{EIG}_{\mathrm{geom}} = \tfrac{1}{2}\big(\log|\Sigma_{\mathrm{old}}|
 - \log|\Sigma_{\mathrm{new}}|\big) = \tfrac{1}{2}\log\big|\, I
-+ \Sigma_{\mathrm{old}} J^\top R^{-1} J \,\big|. $$
++ \Sigma_{\mathrm{old}} \mathcal{I} \,\big|. $$
 
-This term is evaluated per mode and dominates once a single mode is well isolated.
+Maximizing this gain over candidate observations is Bayesian D-optimal design, the choice
+that maximizes the determinant of the posterior information $\Sigma_{\mathrm{new}}^{-1}$. The
+Fisher form $J^\top R^{-1} J$, rather than the full Hessian used at the mode, is the right
+curvature here because the gain is scored before the data exist, so the residual term the
+observed information carries averages to zero under the model and leaves the expected Fisher
+information. This term is evaluated per mode and dominates once a single mode is well
+isolated.
 
 **Alias-breaking gain.** When several modes survive, they predict different observations,
 and an observation that separates them sharpens the weights. With per-mode predictions
@@ -117,7 +128,10 @@ which mode is correct is
 $$ \mathrm{EIG}_{\mathrm{alias}} = \tfrac{1}{2} \sum_{\text{obs}}
 \log\!\Big(1 + \frac{\mathrm{Var}(y)}{R}\Big). $$
 
-An epoch where the modes disagree strongly relative to the noise is worth the most.
+An epoch where the modes disagree strongly relative to the noise is worth the most. This is
+the part of the gain that the Fisher information cannot describe, a property of the discrete
+spread across modes rather than the local curvature within one, so the two terms partition
+the total into a within-mode Fisher part and a between-mode part.
 
 **Detectability.** When detection is itself uncertain, each mode carries a detection
 probability $d_k \in [0, 1]$. With $\bar{d} = \sum_k w_k d_k$ and
