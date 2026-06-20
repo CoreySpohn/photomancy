@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from photomancy.core import build_scene_logdensity
+from photomancy.core import build_gaussian_fit
 from photomancy.priors import IndependentPrior, LogNormal, Normal
 
 
@@ -68,22 +68,14 @@ def build_disk_logdensity(
         scores a flat position over the fitted leaves, ``z0`` is the scene's initial
         position; ``unravel(z)`` rebuilds the fitted-leaf PyTree.
     """
-    n_fit = len(fit_leaves(system))
-    mask = jax.tree_util.tree_map(lambda _: False, system)
-    mask = eqx.tree_at(fit_leaves, mask, [True] * n_fit)
-
-    image = jnp.asarray(image)
-    inv_var = 1.0 / jnp.asarray(noise_sigma) ** 2
-
-    def likelihood(predicted):
-        return -0.5 * jnp.sum((predicted - image) ** 2 * inv_var)
-
-    if prior is None:
-
-        def prior(_system):
-            return 0.0
-
-    return build_scene_logdensity(system, forward, likelihood, prior, filter_spec=mask)
+    return build_gaussian_fit(
+        system,
+        image,
+        fit_leaves=fit_leaves,
+        noise_sigma=noise_sigma,
+        forward=forward,
+        prior=prior,
+    )
 
 
 # The canonical disk fit-leaf prior specs, aligned to ``disk_fit_leaves`` order:

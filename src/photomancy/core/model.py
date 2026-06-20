@@ -10,6 +10,8 @@ from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
+import jax
+import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
 from photomancy.priors import AbstractPrior
@@ -115,3 +117,51 @@ def build_scene_logdensity(
         unravel=unravel,
     )
     return logdensity, z0, unravel
+
+
+def build_gaussian_fit(
+    scene,
+    data,
+    *,
+    fit_leaves: Callable,
+    noise_sigma,
+    forward: Callable,
+    prior: Callable | AbstractPrior | None = None,
+):
+    """Fit selected scene leaves to ``data`` under iid Gaussian noise.
+
+    The shared shape of the disk / atmosphere (and any image- or spectrum-) fit: select
+    the leaves ``fit_leaves(scene)``, form a Gaussian likelihood
+    ``-0.5 * sum((forward(scene) - data)**2 / noise_sigma**2)``, and delegate to
+    :func:`build_scene_logdensity`. The forward is injected, so the physics (a skyscapes
+    render) stays out of photomancy and a coronagraph forward drops in unchanged.
+
+    Args:
+        scene: The scene ``eqx.Module`` (its selected leaves are the parameters).
+        data: Observed data array (image, spectrum, ...), broadcastable to the forward.
+        fit_leaves: ``scene -> list[leaf]`` selecting the leaves to fit.
+        noise_sigma: Per-element Gaussian noise sigma (scalar or broadcastable).
+        forward: ``scene -> predicted`` (the injected, swappable physics).
+        prior: Optional prior forwarded to :func:`build_scene_logdensity` -- an
+            ``AbstractPrior`` (scored in z-space) or a ``scene -> scalar`` callable.
+            ``None`` is flat (improper).
+
+    Returns:
+        ``(logdensity, z0, unravel)`` from :func:`build_scene_logdensity`.
+    """
+    n_fit = len(fit_leaves(scene))
+    mask = jax.tree_util.tree_map(lambda _: False, scene)
+    mask = eqx.tree_at(fit_leaves, mask, [True] * n_fit)
+
+    data = jnp.asarray(data)
+    inv_var = 1.0 / jnp.asarray(noise_sigma) ** 2
+
+    def likelihood(predicted):
+        return -0.5 * jnp.sum((predicted - data) ** 2 * inv_var)
+
+    if prior is None:
+
+        def prior(_scene):
+            return 0.0
+
+    return build_scene_logdensity(scene, forward, likelihood, prior, filter_spec=mask)

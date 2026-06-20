@@ -79,6 +79,39 @@ def test_forward_module_arrays_are_traced_not_baked():
     assert all(s < 32 * 32 for s in constvar_sizes), "kernel was baked as a constant"
 
 
+def test_build_gaussian_fit_selects_leaves_and_bakes_gaussian_likelihood():
+    """build_gaussian_fit masks fit_leaves + bakes a Gaussian data likelihood."""
+    from photomancy.core import build_gaussian_fit
+    from photomancy.priors import Normal
+
+    obs = jnp.array([1.0, 2.0, 3.0])
+    scene = _ToyScene(mu=jnp.zeros(3), label="t")
+
+    def forward(s):
+        return s.mu
+
+    def fit_leaves(s):
+        return [s.mu]
+
+    ld, z0, unravel = build_gaussian_fit(
+        scene, obs, fit_leaves=fit_leaves, noise_sigma=0.1, forward=forward
+    )
+    assert z0.shape == (3,)
+    # flat prior: the Gaussian likelihood peaks at the data
+    assert ld(obs) > ld(jnp.zeros(3))
+    assert jnp.allclose(unravel(obs).mu, obs)
+    # an AbstractPrior threads through: a tight prior at 0 penalizes the data point
+    ld2, _, _ = build_gaussian_fit(
+        scene,
+        obs,
+        fit_leaves=fit_leaves,
+        noise_sigma=0.1,
+        forward=forward,
+        prior=Normal(loc=jnp.zeros(3), scale=jnp.full(3, 0.1)),
+    )
+    assert float(ld2(obs)) < float(ld(obs))
+
+
 def test_scene_logdensity_accepts_abstract_prior_over_z():
     """An AbstractPrior is scored in z-space (prior.log_prob(z)), not as a callable."""
     from photomancy.priors import Normal
