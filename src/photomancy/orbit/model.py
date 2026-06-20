@@ -49,8 +49,8 @@ def build_model(
 ):
     """Build a NumPyro model function for orbit fitting.
 
-    The returned function accepts ``(Ms, dist_pc, rv_data, relative_astrom_data,
-    stellar_astrom_data, pm_anomaly_data, null_data, imaging_data)`` as arguments
+    The returned function accepts ``(Ms, dist_pc, data)`` where ``data`` is an
+    :class:`~photomancy.orbit.data.OrbitData` holding the observation channels
     (dynamic, for JIT caching). Prior configuration is captured in the closure (static).
 
     Args:
@@ -71,10 +71,8 @@ def build_model(
         jitter_scale: Scale for HalfNormal jitter prior (AU/day).
 
     Returns:
-        A callable ``model(Ms, dist_pc, rv_data, relative_astrom_data,
-        stellar_astrom_data, pm_anomaly_data, null_data, imaging_data)`` suitable for
-        ``numpyro.infer.MCMC`` and for use with ``dynamic_args=True`` in
-        ``initialize_model``.
+        A callable ``model(Ms, dist_pc, data)`` suitable for ``numpyro.infer.MCMC``
+        and for use with ``dynamic_args=True`` in ``initialize_model``.
     """
     has_photometry = has_null or has_imaging
 
@@ -93,16 +91,14 @@ def build_model(
             "has_pm_anomaly, has_null, or has_imaging must be True."
         )
 
-    def model(
-        Ms,
-        dist_pc,
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    ):
+    def model(Ms, dist_pc, data):
+        rv_data = data.rv
+        relative_astrom_data = data.relative_astrom
+        stellar_astrom_data = data.stellar_astrom
+        pm_anomaly_data = data.pm_anomaly
+        null_data = data.null
+        imaging_data = data.imaging
+
         # CIRCULAR IMPORT: photomancy.orbit.forward -> photomancy.orbit.model
         from photomancy.orbit.forward import (
             predict_photometry,

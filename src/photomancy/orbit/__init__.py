@@ -13,6 +13,7 @@ from orbix.kepler.core import diff_solve_trig
 from photomancy.orbit.data import (
     ImagingData,
     NullData,
+    OrbitData,
     PMAnomalyData,
     RelativeAstromData,
     RVData,
@@ -76,6 +77,7 @@ __all__ = [
     "ImagingData",
     "NullData",
     # Orbit -> generic-backend bridge
+    "OrbitData",
     "OrbitProblem",
     "PMAnomalyData",
     "ParamBounds",

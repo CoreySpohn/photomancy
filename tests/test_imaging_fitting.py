@@ -22,6 +22,7 @@ from photomancy.orbit.data import (  # noqa: E402
     MAX_IMG,
     ImagingData,
     NullData,
+    OrbitData,
     RelativeAstromData,
 )
 from photomancy.orbit.forward import (  # noqa: E402
@@ -30,7 +31,6 @@ from photomancy.orbit.forward import (  # noqa: E402
 )
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init_top_k  # noqa: E402
-from photomancy.orbit.laplace import _pad_orbit_data  # noqa: E402
 from photomancy.orbit.likelihoods import (  # noqa: E402
     loglike_imaging,
     loglike_null,
@@ -112,15 +112,15 @@ def test_imagingdata_pad_produces_max_sized_valid_container():
     assert bool(padded.is_detected[0]) and not bool(padded.is_detected[1])
 
 
-def test_pad_orbit_data_handles_non_max_null_container():
-    """_pad_orbit_data pads a non-MAX null container instead of crashing."""
+def test_orbit_data_padded_handles_non_max_null_container():
+    """OrbitData.padded() pads a non-MAX null container instead of crashing."""
     small = NullData(
         epochs=jnp.array([100.0, 500.0]),
         sep_grid=jnp.broadcast_to(jnp.linspace(0.05, 0.5, 40), (2, 40)),
         dmag0_grid=jnp.full((2, 40), 25.0),
         is_valid=jnp.ones(2, dtype=bool),
     )
-    _, _, _, _, padded_null, _ = _pad_orbit_data(None, None, None, None, small, None)
+    padded_null = OrbitData(null=small).padded().null
     assert padded_null.epochs.shape[0] == MAX_IMG
     assert int(padded_null.is_valid.sum()) == 2
 

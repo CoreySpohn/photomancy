@@ -20,103 +20,15 @@ from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import initialize_model
 
 from photomancy.orbit.data import (
-    MAX_IMG,
-    MAX_REL_ASTROM,
-    MAX_RV,
-    MAX_STELLAR_ASTROM,
     ImagingData,
     NullData,
+    OrbitData,
     PMAnomalyData,
     RelativeAstromData,
     RVData,
     StellarAstromData,
 )
 from photomancy.orbit.model import build_model
-
-# ---------------------------------------------------------------------------
-# Data padding -- match runtime data to the cached model's MAX_* shapes
-# ---------------------------------------------------------------------------
-
-
-def _pad_orbit_data(
-    rv_data,
-    relative_astrom_data,
-    stellar_astrom_data,
-    pm_anomaly_data,
-    null_data,
-    imaging_data,
-):
-    """Pad each present data container to its ``MAX_*`` size.
-
-    The proper-motion anomaly is a fixed-shape 2-vector with no padding, so it passes
-    through unchanged.
-
-    The cached model is traced once at the ``MAX_*`` shapes, so runtime data must
-    be padded to match for the JIT cache to hit. Containers already at ``MAX_*``
-    (or ``None``) pass through unchanged.
-    """
-    if (
-        relative_astrom_data is not None
-        and relative_astrom_data.times.shape[0] != MAX_REL_ASTROM
-    ):
-        n = relative_astrom_data.times.shape[0]
-        relative_astrom_data = RelativeAstromData.pad(
-            times=relative_astrom_data.times[:n],
-            ra=relative_astrom_data.ra[:n],
-            dec=relative_astrom_data.dec[:n],
-            ra_err=relative_astrom_data.ra_err[:n],
-            dec_err=relative_astrom_data.dec_err[:n],
-            corr=relative_astrom_data.corr[:n],
-            planet_id=relative_astrom_data.planet_id[:n],
-        )
-    if (
-        stellar_astrom_data is not None
-        and stellar_astrom_data.times.shape[0] != MAX_STELLAR_ASTROM
-    ):
-        n = stellar_astrom_data.times.shape[0]
-        stellar_astrom_data = StellarAstromData.pad(
-            times=stellar_astrom_data.times[:n],
-            ra=stellar_astrom_data.ra[:n],
-            dec=stellar_astrom_data.dec[:n],
-            ra_err=stellar_astrom_data.ra_err[:n],
-            dec_err=stellar_astrom_data.dec_err[:n],
-            corr=stellar_astrom_data.corr[:n],
-        )
-    if rv_data is not None and rv_data.times.shape[0] != MAX_RV:
-        n = rv_data.times.shape[0]
-        rv_data = RVData.pad(
-            times=rv_data.times[:n],
-            rv=rv_data.rv[:n],
-            rv_err=rv_data.rv_err[:n],
-            inst_ids=rv_data.inst_ids[:n],
-            n_inst=rv_data.n_inst,
-        )
-    if null_data is not None and null_data.epochs.shape[0] != MAX_IMG:
-        n = null_data.epochs.shape[0]
-        null_data = NullData.pad(
-            epochs=null_data.epochs[:n],
-            sep_grid=null_data.sep_grid[:n],
-            dmag0_grid=null_data.dmag0_grid[:n],
-        )
-    if imaging_data is not None and imaging_data.epochs.shape[0] != MAX_IMG:
-        n = imaging_data.epochs.shape[0]
-        imaging_data = ImagingData.pad(
-            epochs=imaging_data.epochs[:n],
-            sep_grid=imaging_data.sep_grid[:n],
-            dmag0_grid=imaging_data.dmag0_grid[:n],
-            is_detected=imaging_data.is_detected[:n],
-            dmag_obs=imaging_data.dmag_obs[:n],
-            dmag_err=imaging_data.dmag_err[:n],
-        )
-    return (
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    )
-
 
 # ---------------------------------------------------------------------------
 # Model cache -- trace once, reuse across calls
@@ -217,30 +129,19 @@ def _get_or_build_cached(
         jitter_scale=jitter_scale,
     )
 
-    # Build placeholder data at MAX sizes (for tracing)
+    # Build a placeholder OrbitData at MAX sizes (for tracing the active channels)
     placeholder_Ms = 1.989e30
     placeholder_dist = 10.0
-    placeholder_rv = RVData.zeros() if has_rv else None
-    placeholder_relative_astrom = (
-        RelativeAstromData.zeros() if has_relative_astrom else None
+    placeholder_data = OrbitData(
+        rv=RVData.zeros() if has_rv else None,
+        relative_astrom=RelativeAstromData.zeros() if has_relative_astrom else None,
+        stellar_astrom=StellarAstromData.zeros() if has_stellar_astrom else None,
+        pm_anomaly=PMAnomalyData.zeros() if has_pm_anomaly else None,
+        null=NullData.zeros() if has_null else None,
+        imaging=ImagingData.zeros() if has_imaging else None,
     )
-    placeholder_stellar_astrom = (
-        StellarAstromData.zeros() if has_stellar_astrom else None
-    )
-    placeholder_pm_anomaly = PMAnomalyData.zeros() if has_pm_anomaly else None
-    placeholder_null = NullData.zeros() if has_null else None
-    placeholder_imaging = ImagingData.zeros() if has_imaging else None
 
-    model_args = (
-        placeholder_Ms,
-        placeholder_dist,
-        placeholder_rv,
-        placeholder_relative_astrom,
-        placeholder_stellar_astrom,
-        placeholder_pm_anomaly,
-        placeholder_null,
-        placeholder_imaging,
-    )
+    model_args = (placeholder_Ms, placeholder_dist, placeholder_data)
 
     # Trace the model ONCE with dynamic_args
     rng = jax.random.PRNGKey(seed)

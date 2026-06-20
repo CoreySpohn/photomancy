@@ -6,7 +6,7 @@ import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg, Rearth2AU
 from orbix.kepler.core import diff_solve_trig
 
-from photomancy.orbit.data import NullData, RelativeAstromData, RVData
+from photomancy.orbit.data import NullData, OrbitData, RelativeAstromData, RVData
 from photomancy.orbit.forward import (
     predict_photometry,
     predict_relative_astrometry,
@@ -751,7 +751,7 @@ class TestNumPyroModel:
         # Execute with a seed to get a trace
         with handlers.seed(rng_seed=42):
             trace = handlers.trace(model).get_trace(
-                Msun2kg, 10.0, rv_data, None, None, None, None, None
+                Msun2kg, 10.0, OrbitData(rv=rv_data)
             )
 
         # Check essential sites exist (kipping13 default uses e_raw, w_raw)
@@ -786,7 +786,7 @@ class TestNumPyroModel:
 
         with handlers.seed(rng_seed=99):
             trace = handlers.trace(model).get_trace(
-                Msun2kg, 10.0, rv_data, None, None, None, None, None
+                Msun2kg, 10.0, OrbitData(rv=rv_data)
             )
 
         # All priors must produce deterministic e, cos_w, sin_w
@@ -818,7 +818,7 @@ class TestNumPyroModel:
         with pytest.raises(ValueError, match="Unknown ecc_prior"):
             with handlers.seed(rng_seed=0):
                 handlers.trace(model).get_trace(
-                    Msun2kg, 10.0, rv_data, None, None, None, None, None
+                    Msun2kg, 10.0, OrbitData(rv=rv_data)
                 )
 
     def test_mcmc_runs_rv(self):
@@ -871,17 +871,7 @@ class TestNumPyroModel:
         # Run a very short chain (just testing execution, not convergence)
         kernel = NUTS(model)
         mcmc = MCMC(kernel, num_warmup=50, num_samples=20, progress_bar=False)
-        mcmc.run(
-            jax.random.PRNGKey(0),
-            Msun2kg,
-            10.0,
-            rv_data,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        mcmc.run(jax.random.PRNGKey(0), Msun2kg, 10.0, OrbitData(rv=rv_data))
 
         samples = mcmc.get_samples()
 

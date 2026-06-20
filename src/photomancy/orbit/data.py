@@ -516,3 +516,96 @@ class ImagingData(eqx.Module):
             is_valid=jnp.zeros(max_n, dtype=bool),
             snr_thresh=snr_thresh,
         )
+
+
+# ---------------------------------------------------------------------------
+# OrbitData -- all observation channels in one PyTree
+# ---------------------------------------------------------------------------
+
+
+class OrbitData(eqx.Module):
+    """All observation channels for an orbit fit; absent channels are ``None``.
+
+    A single PyTree container passed to the NumPyro orbit model in place of a long
+    positional argument list. The public fit helpers keep their per-channel keyword
+    arguments and wrap them here internally, so adding a channel does not ripple
+    through every call site.
+
+    Args:
+        rv: An :class:`RVData`, or ``None``.
+        relative_astrom: A :class:`RelativeAstromData`, or ``None``.
+        stellar_astrom: A :class:`StellarAstromData`, or ``None``.
+        pm_anomaly: A :class:`PMAnomalyData`, or ``None``.
+        null: A :class:`NullData`, or ``None``.
+        imaging: An :class:`ImagingData`, or ``None``.
+    """
+
+    rv: RVData | None = None
+    relative_astrom: RelativeAstromData | None = None
+    stellar_astrom: StellarAstromData | None = None
+    pm_anomaly: PMAnomalyData | None = None
+    null: NullData | None = None
+    imaging: ImagingData | None = None
+
+    def padded(self):
+        """Pad each present channel to its ``MAX_*`` size for JIT-cache stability.
+
+        Channels already at ``MAX_*`` (or ``None``) pass through unchanged -- re-padding
+        an already-padded container would reset its ``is_valid`` mask. The proper-motion
+        anomaly is a fixed-shape 2-vector and never needs padding.
+        """
+        rv = self.rv
+        if rv is not None and rv.times.shape[0] != MAX_RV:
+            rv = RVData.pad(
+                times=rv.times,
+                rv=rv.rv,
+                rv_err=rv.rv_err,
+                inst_ids=rv.inst_ids,
+                n_inst=rv.n_inst,
+            )
+        rel = self.relative_astrom
+        if rel is not None and rel.times.shape[0] != MAX_REL_ASTROM:
+            rel = RelativeAstromData.pad(
+                times=rel.times,
+                ra=rel.ra,
+                dec=rel.dec,
+                ra_err=rel.ra_err,
+                dec_err=rel.dec_err,
+                corr=rel.corr,
+                planet_id=rel.planet_id,
+            )
+        stellar = self.stellar_astrom
+        if stellar is not None and stellar.times.shape[0] != MAX_STELLAR_ASTROM:
+            stellar = StellarAstromData.pad(
+                times=stellar.times,
+                ra=stellar.ra,
+                dec=stellar.dec,
+                ra_err=stellar.ra_err,
+                dec_err=stellar.dec_err,
+                corr=stellar.corr,
+            )
+        null = self.null
+        if null is not None and null.epochs.shape[0] != MAX_IMG:
+            null = NullData.pad(
+                epochs=null.epochs,
+                sep_grid=null.sep_grid,
+                dmag0_grid=null.dmag0_grid,
+            )
+        imaging = self.imaging
+        if imaging is not None and imaging.epochs.shape[0] != MAX_IMG:
+            imaging = ImagingData.pad(
+                epochs=imaging.epochs,
+                sep_grid=imaging.sep_grid,
+                dmag0_grid=imaging.dmag0_grid,
+                is_detected=imaging.is_detected,
+                dmag_obs=imaging.dmag_obs,
+                dmag_err=imaging.dmag_err,
+            )
+        return OrbitData(
+            rv=rv,
+            relative_astrom=rel,
+            stellar_astrom=stellar,
+            pm_anomaly=self.pm_anomaly,
+            null=null,
+            imaging=imaging,
+        )

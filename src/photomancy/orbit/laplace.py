@@ -30,8 +30,8 @@ from photomancy.backends.laplace import laplace_covariance
 from photomancy.orbit._numpyro_bridge import (
     _get_or_build_cached,
     _init_dict_to_z_flat,
-    _pad_orbit_data,
 )
+from photomancy.orbit.data import OrbitData
 from photomancy.orbit.init import find_init, find_init_top_k
 from photomancy.posterior import GaussianPosterior, MixturePosterior
 
@@ -207,32 +207,16 @@ def map_laplace_fit(
         seed=seed,
     )
 
-    (
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    ) = _pad_orbit_data(
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    )
+    data = OrbitData(
+        rv=rv_data,
+        relative_astrom=relative_astrom_data,
+        stellar_astrom=stellar_astrom_data,
+        pm_anomaly=pm_anomaly_data,
+        null=null_data,
+        imaging=imaging_data,
+    ).padded()
 
-    model_args = (
-        Ms,
-        dist_pc,
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    )
+    model_args = (Ms, dist_pc, data)
 
     # 3. Get initial z-vector
     if init_vals is not None:
@@ -360,37 +344,21 @@ def map_laplace_mixture_fit(
         seed=seed,
     )
 
-    (
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    ) = _pad_orbit_data(
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    )
+    data = OrbitData(
+        rv=rv_data,
+        relative_astrom=relative_astrom_data,
+        stellar_astrom=stellar_astrom_data,
+        pm_anomaly=pm_anomaly_data,
+        null=null_data,
+        imaging=imaging_data,
+    ).padded()
 
     # 3. Build model args
-    model_args = (
-        Ms,
-        dist_pc,
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    )
+    model_args = (Ms, dist_pc, data)
 
-    # 3. Get K initial conditions
+    # 3. Get K initial conditions (the automatic TI init uses the padded astrometry)
     if init_list is None:
-        if relative_astrom_data is None:
+        if data.relative_astrom is None:
             raise ValueError(
                 "relative_astrom_data is required for automatic init; "
                 "pass init_list explicitly for non-astrometry fits."
@@ -398,7 +366,7 @@ def map_laplace_mixture_fit(
 
         if use_top_k_init:
             init_list = find_init_top_k(
-                relative_astrom_data,
+                data.relative_astrom,
                 Ms,
                 dist_pc,
                 k=k,
@@ -412,7 +380,7 @@ def map_laplace_mixture_fit(
                 sub_range = (float(edges[j]), float(edges[j + 1]))
                 init_list.append(
                     find_init(
-                        relative_astrom_data,
+                        data.relative_astrom,
                         Ms,
                         dist_pc,
                         log_T_range=sub_range,

@@ -16,6 +16,7 @@ light.
 import jax
 import jax.numpy as jnp
 
+from photomancy.orbit.data import OrbitData
 from photomancy.orbit.model import build_model
 from photomancy.posterior import SamplePosterior
 
@@ -111,17 +112,15 @@ def orbit_nested_sampling(
 
     run_key, sample_key = jax.random.split(key)
     ns = NestedSampler(model, constructor_kwargs=constructor_kwargs)
-    ns.run(
-        run_key,
-        Ms,
-        dist_pc,
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
+    data = OrbitData(
+        rv=rv_data,
+        relative_astrom=relative_astrom_data,
+        stellar_astrom=stellar_astrom_data,
+        pm_anomaly=pm_anomaly_data,
+        null=null_data,
+        imaging=imaging_data,
     )
+    ns.run(run_key, Ms, dist_pc, data)
 
     draws = ns.get_samples(sample_key, num_samples=num_samples)
     # The model exposes the physical orbit parameters as deterministic sites, so the

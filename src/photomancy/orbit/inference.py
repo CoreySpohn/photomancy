@@ -23,9 +23,9 @@ from hwoutils.constants import G
 from photomancy.orbit._numpyro_bridge import (
     _get_or_build_cached,
     _init_dict_to_z_flat,
-    _pad_orbit_data,
     make_constrain,
 )
+from photomancy.orbit.data import OrbitData
 from photomancy.orbit.init import elements_to_sites
 from photomancy.posterior import SamplePosterior
 
@@ -106,13 +106,21 @@ def build_orbit_logdensity(
     Returns:
         An :class:`OrbitProblem`.
     """
+    data = OrbitData(
+        rv=rv_data,
+        relative_astrom=relative_astrom_data,
+        stellar_astrom=stellar_astrom_data,
+        pm_anomaly=pm_anomaly_data,
+        null=null_data,
+        imaging=imaging_data,
+    )
     cached = _get_or_build_cached(
-        has_rv=rv_data is not None,
-        has_relative_astrom=relative_astrom_data is not None,
-        has_stellar_astrom=stellar_astrom_data is not None,
-        has_pm_anomaly=pm_anomaly_data is not None,
-        has_null=null_data is not None,
-        has_imaging=imaging_data is not None,
+        has_rv=data.rv is not None,
+        has_relative_astrom=data.relative_astrom is not None,
+        has_stellar_astrom=data.stellar_astrom is not None,
+        has_pm_anomaly=data.pm_anomaly is not None,
+        has_null=data.null is not None,
+        has_imaging=data.imaging is not None,
         log_P_range=log_P_range,
         log_Mp_range=log_Mp_range,
         log_Rp_range=log_Rp_range,
@@ -122,31 +130,7 @@ def build_orbit_logdensity(
         n_planets=n_planets,
         seed=seed,
     )
-    (
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    ) = _pad_orbit_data(
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    )
-    model_args = (
-        Ms,
-        dist_pc,
-        rv_data,
-        relative_astrom_data,
-        stellar_astrom_data,
-        pm_anomaly_data,
-        null_data,
-        imaging_data,
-    )
+    model_args = (Ms, dist_pc, data.padded())
 
     unflatten = cached["unflatten"]
     potential_fn = cached["potential_fn_factory"](*model_args)
