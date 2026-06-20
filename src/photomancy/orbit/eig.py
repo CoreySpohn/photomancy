@@ -28,7 +28,7 @@ from photomancy.eig import (
     geometric_eig,
 )
 from photomancy.eig import evaluate_candidates as _eval_candidates
-from photomancy.orbit.inference import make_constrain
+from photomancy.orbit._numpyro_bridge import _fwd_from_trace, make_constrain
 from photomancy.posterior import MixturePosterior
 
 __all__ = [
@@ -158,17 +158,6 @@ def _predict_sep_dmag_pure(
 # ---------------------------------------------------------------------------
 # High-level batch evaluation (delegates to photomancy.eig)
 # ---------------------------------------------------------------------------
-
-
-def _fwd_from_trace(model_trace):
-    """Forward constraint bijectors per unobserved sample site, from a model trace."""
-    from numpyro.distributions.transforms import biject_to
-
-    return {
-        name: biject_to(site["fn"].support)
-        for name, site in model_trace.items()
-        if site["type"] == "sample" and not site.get("is_observed", False)
-    }
 
 
 def _orbit_evaluate(

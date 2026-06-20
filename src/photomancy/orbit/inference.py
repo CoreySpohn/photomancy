@@ -20,12 +20,13 @@ import jax
 import jax.numpy as jnp
 from hwoutils.constants import G
 
-from photomancy.orbit.init import elements_to_sites
-from photomancy.orbit.laplace import (
+from photomancy.orbit._numpyro_bridge import (
     _get_or_build_cached,
     _init_dict_to_z_flat,
     _pad_orbit_data,
+    make_constrain,
 )
+from photomancy.orbit.init import elements_to_sites
 from photomancy.posterior import SamplePosterior
 
 
@@ -50,25 +51,6 @@ class OrbitProblem(eqx.Module):
     unflatten: Callable = eqx.field(static=True)
     constrain: Callable = eqx.field(static=True)
     param_names: tuple[str, ...] = eqx.field(static=True)
-
-
-def make_constrain(fwd_transforms):
-    """Build a ``raw-site dict -> physical-site dict`` closure from forward bijectors.
-
-    Each named transform maps an unconstrained value to physical; sites without a
-    transform pass through (squeezed). Shared by the orbit problem and the EIG Laplace
-    path so both apply identical constraints.
-    """
-
-    def constrain(z_dict):
-        return {
-            name: jnp.squeeze(fwd_transforms[name](v))
-            if name in fwd_transforms
-            else jnp.squeeze(v)
-            for name, v in z_dict.items()
-        }
-
-    return constrain
 
 
 def build_orbit_logdensity(
