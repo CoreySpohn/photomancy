@@ -1,16 +1,29 @@
 """Tests for the domain-agnostic EIG layer."""
 
 import jax
-import jax.numpy as jnp
-from nmc_reference import class_mi_mc, mixture_mode_mi_mc
 
-from photomancy.eig import (
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp  # noqa: E402
+from jax.scipy.stats import norm  # noqa: E402
+from nmc_reference import (  # noqa: E402
+    class_mi_mc,
+    detection_channel_mi_mc,
+    mixture_mode_mi_mc,
+    probit_site_moments_mc,
+)
+
+from photomancy.eig import (  # noqa: E402
     alias_breaking_eig,
     class_eig,
     detectability_eig,
+    detection_channel_eig,
     detection_class_eig,
+    ep_probit_update,
     evaluate_candidates,
     geometric_eig,
+    null_update,
+    probit_gaussian_mass,
 )
 from photomancy.posterior import MixturePosterior
 
@@ -358,3 +371,153 @@ def test_class_eig_wider_separation_more_informative():
         for sep in (0.5, 2.0, 8.0)
     ]
     assert vals[0] < vals[1] < vals[2]
+
+
+# ---------------------------------------------------------------------------
+# EP null tier: probit-Gaussian mass, site moment update, detection-channel EIG
+# ---------------------------------------------------------------------------
+
+
+def test_probit_gaussian_mass_matches_mc():
+    """The closed-form probit-Gaussian integral equals the MC expectation."""
+    mean = jnp.array([0.4, -0.2])
+    cov = jnp.array([[0.8, 0.3], [0.3, 0.6]])
+    a, b = 0.3, jnp.array([1.2, -0.7])
+    mass = probit_gaussian_mass(mean, cov, a, b)
+    mc_mass, _, _ = probit_site_moments_mc(jax.random.PRNGKey(0), mean, cov, a, b)
+    assert jnp.abs(mass - mc_mass) < 5.0e-3
+
+
+def test_ep_probit_update_matches_mc_tilted_moments():
+    """The EP site update returns the exact tilted mean and covariance."""
+    mean = jnp.array([0.4, -0.2])
+    cov = jnp.array([[0.8, 0.3], [0.3, 0.6]])
+    a, b = -0.5, jnp.array([1.5, 0.4])
+    log_mass, mean_new, cov_new = ep_probit_update(mean, cov, a, b)
+    mc_mass, mc_mean, mc_cov = probit_site_moments_mc(
+        jax.random.PRNGKey(0), mean, cov, a, b, n_samples=400000
+    )
+    assert jnp.abs(jnp.exp(log_mass) - mc_mass) < 5.0e-3
+    assert jnp.all(jnp.abs(mean_new - mc_mean) < 2.0e-2)
+    assert jnp.all(jnp.abs(cov_new - mc_cov) < 2.0e-2)
+
+
+def test_ep_probit_update_hard_truncation_limit():
+    """A steep site reproduces the truncated-Gaussian Mills-ratio moments.
+
+    For X ~ N(mu, sigma^2) truncated to X <= c: with alpha = (c - mu)/sigma and
+    lam = phi(alpha)/Phi(alpha), E[X] = mu - sigma*lam and
+    Var[X] = sigma^2 (1 - alpha*lam - lam^2).
+    """
+    mu, sigma, c = 1.0, 0.7, 1.3
+    steep = 400.0  # site Phi(steep * (c - x)) -> indicator{x <= c}
+    log_mass, mean_new, cov_new = ep_probit_update(
+        jnp.array([mu]), jnp.array([[sigma**2]]), steep * c, jnp.array([-steep])
+    )
+    alpha = (c - mu) / sigma
+    lam = jnp.exp(norm.logpdf(alpha) - norm.logcdf(alpha))
+    assert jnp.allclose(mean_new[0], mu - sigma * lam, rtol=1.0e-3)
+    assert jnp.allclose(
+        cov_new[0, 0], sigma**2 * (1.0 - alpha * lam - lam**2), rtol=5.0e-3
+    )
+    assert jnp.allclose(jnp.exp(log_mass), norm.cdf(alpha), rtol=1.0e-3)
+
+
+def test_ep_probit_update_flat_site_is_identity():
+    """A site that is ~1 over the bulk leaves mass and moments unchanged."""
+    mean = jnp.array([0.0])
+    cov = jnp.array([[1.0]])
+    log_mass, mean_new, cov_new = ep_probit_update(mean, cov, 30.0, jnp.array([0.1]))
+    assert jnp.exp(log_mass) > 0.999
+    assert jnp.allclose(mean_new, mean, atol=1.0e-4)
+    assert jnp.allclose(cov_new, cov, rtol=1.0e-3)
+
+
+def test_null_update_kills_the_detectable_mode():
+    """After an observed null, the solidly detectable mode loses its weight.
+
+    Detection site p_det = Phi(a + b theta): mode at theta = +3 is deep in the
+    detectable regime, mode at theta = -3 is deep in the undetectable regime.
+    """
+    weights = jnp.array([0.5, 0.5])
+    means = jnp.array([[3.0], [-3.0]])
+    covs = jnp.array([[[0.2]], [[0.2]]])
+    a, b = 0.0, jnp.array([3.0])
+    w_new, m_new, c_new = null_update(weights, means, covs, a, b)
+    assert w_new[1] > 0.999
+    assert jnp.allclose(jnp.sum(w_new), 1.0, rtol=1.0e-9)
+    # The surviving mode was never near the boundary: moments unchanged.
+    assert jnp.allclose(m_new[1], means[1], atol=1.0e-3)
+
+
+def test_null_update_shaves_a_mode_cut_by_the_limit():
+    """A mode straddling the detection boundary is shifted and narrowed."""
+    weights = jnp.array([1.0])
+    means = jnp.array([[0.0]])
+    covs = jnp.array([[[1.0]]])
+    a, b = 0.0, jnp.array([2.0])  # boundary right through the mode
+    w_new, m_new, c_new = null_update(weights, means, covs, a, b)
+    assert m_new[0, 0] < -0.3  # pushed toward the undetectable side
+    assert c_new[0, 0, 0] < 1.0  # tail shaved
+
+
+def test_detection_channel_eig_reduces_to_detectability_eig_at_zero_width():
+    """With vanishing within-mode spread the channel MI is the discrete I(D; M)."""
+    weights = jnp.array([0.4, 0.6])
+    means = jnp.array([[1.0], [-1.5]])
+    covs = jnp.array([[[1.0e-8]], [[1.0e-8]]])
+    a, b = 0.2, jnp.array([1.3])
+    val = detection_channel_eig(weights, means, covs, a, b)
+    d_k = norm.cdf(a + means @ b)
+    assert jnp.allclose(val, detectability_eig(weights, d_k), atol=1.0e-6)
+
+
+def test_detection_channel_eig_adds_within_mode_information():
+    """The chain rule adds a nonnegative within-mode term to the smeared I(D; M)."""
+    weights = jnp.array([0.5, 0.5])
+    means = jnp.array([[0.5], [-0.5]])
+    covs = jnp.array([[[1.5]], [[1.5]]])
+    a, b = 0.0, jnp.array([2.0])
+    val = detection_channel_eig(weights, means, covs, a, b)
+    d_smeared = jax.vmap(lambda m, c: probit_gaussian_mass(m, c, a, b))(means, covs)
+    discrete_only = detectability_eig(weights, d_smeared)
+    assert val >= discrete_only - 1.0e-12
+    assert val > discrete_only + 1.0e-3  # boundary cuts both modes: strictly more
+
+
+def test_detection_channel_eig_matches_nmc():
+    """The Gauss-Hermite channel MI agrees with brute-force nested MC."""
+    weights = jnp.array([0.35, 0.65])
+    means = jnp.array([[0.8, 0.0], [-0.6, 0.5]])
+    covs = jnp.array([[[0.7, 0.2], [0.2, 0.5]], [[1.1, -0.3], [-0.3, 0.9]]])
+    a_arr = jnp.array([0.3, -0.2])
+    b_arr = jnp.array([[1.4, -0.5], [0.9, 1.1]])
+    val = detection_channel_eig(weights, means, covs, a_arr, b_arr)
+    mc, se = detection_channel_mi_mc(
+        jax.random.PRNGKey(0), weights, means, covs, a_arr, b_arr
+    )
+    assert jnp.abs(val - mc) < 4.0 * se + 2.0e-3
+
+
+def test_fisher_is_blind_to_the_null_but_the_channel_mi_is_not():
+    """The sec-8.1 counterexample: Bernoulli FIM ~ 0 at both modes, MI = ln 2.
+
+    One mode solidly detectable, one solidly not: the detection outcome resolves
+    the mode with probability ~1 (ln 2 nats) while the per-mode Fisher information
+    of the Bernoulli channel is numerically zero at both mode means.
+    """
+    weights = jnp.array([0.5, 0.5])
+    means = jnp.array([[6.0], [-6.0]])
+    covs = jnp.array([[[0.3]], [[0.3]]])
+    a, b = 0.0, jnp.array([2.0])
+
+    val = detection_channel_eig(weights, means, covs, a, b)
+    assert jnp.abs(val - LN2) < 1.0e-3
+
+    def bernoulli_fim(theta):
+        z = a + b[0] * theta
+        dp = b[0] * norm.pdf(z)
+        return dp**2 / (norm.cdf(z) * norm.cdf(-z))  # p(1-p), saturation-stable
+
+    assert bernoulli_fim(6.0) < 1.0e-20
+    assert bernoulli_fim(-6.0) < 1.0e-20

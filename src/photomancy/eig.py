@@ -12,6 +12,7 @@ knows no domain.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.special import xlogy
 from jax.scipy.stats import norm
 
@@ -181,6 +182,133 @@ def class_eig(weights, class_probs, y_preds, obs_variance, *, key, n_samples=64)
     expected_h = jnp.sum(weights * jnp.mean(h_post, axis=0))
     h_prior = _categorical_entropy(weights @ class_probs)
     return jnp.maximum(h_prior - expected_h, 0.0)
+
+
+def probit_gaussian_mass(mean, cov, a, b):
+    """Gaussian expectation of a probit site, ``E[Phi(a + b @ theta)]`` (closed form).
+
+    The probit-Gaussian integral ``Phi((a + b @ mean) / sqrt(1 + b @ cov @ b))`` --
+    the posterior-smeared probability of a linearized detection (or null) event,
+    exact for a Gaussian mode. This is the honest per-mode detection probability
+    ``d_k`` for the discrete detection channel; point-evaluating the site at the
+    mode mean ignores the within-mode spread.
+
+    Args:
+        mean: Mode mean. Shape ``(d,)``.
+        cov: Mode covariance. Shape ``(d, d)``.
+        a: Site offset (scalar).
+        b: Site direction. Shape ``(d,)``.
+
+    Returns:
+        Scalar probability in ``[0, 1]``.
+    """
+    return norm.cdf((a + b @ mean) / jnp.sqrt(1.0 + b @ cov @ b))
+
+
+def ep_probit_update(mean, cov, a, b):
+    """Mass and moments of the tilted density ``N(theta; mean, cov) Phi(a + b theta)``.
+
+    The expectation-propagation probit-site update in closed form (Mills-ratio
+    moments): with ``t = sqrt(1 + b Sigma b)``, ``z = (a + b mu) / t`` and
+    ``lam = phi(z) / Phi(z)``,
+
+    ``mass = Phi(z)``, ``mu' = mu + Sigma b lam / t``,
+    ``Sigma' = Sigma - (Sigma b)(Sigma b)^T lam (lam + z) / t^2``.
+
+    The mixture stays Gaussian and analytic while carrying the within-mode
+    information a soft truncation induces; a steep site recovers the classical
+    truncated-Gaussian moments. An observed null is the site with the detection
+    sign flipped (see :func:`null_update`).
+
+    Args:
+        mean: Mode mean. Shape ``(d,)``.
+        cov: Mode covariance. Shape ``(d, d)``.
+        a: Site offset (scalar).
+        b: Site direction. Shape ``(d,)``.
+
+    Returns:
+        ``(log_mass, mean_new, cov_new)``.
+    """
+    cov_b = cov @ b
+    t2 = 1.0 + b @ cov_b
+    t = jnp.sqrt(t2)
+    z = (a + b @ mean) / t
+    log_mass = norm.logcdf(z)
+    lam = jnp.exp(norm.logpdf(z) - log_mass)
+    mean_new = mean + cov_b * (lam / t)
+    cov_new = cov - jnp.outer(cov_b, cov_b) * (lam * (lam + z) / t2)
+    return log_mass, mean_new, cov_new
+
+
+def null_update(weights, means, covs, a, b):
+    """Mixture belief update under an observed null (non-detection).
+
+    Each mode's detection probability is the linearized probit site
+    ``p_det(theta) = Phi(a + b @ theta)``; an observed null multiplies each mode by
+    ``1 - p_det``, the flipped site. Applies :func:`ep_probit_update` per mode and
+    renormalizes: the mode reweighting by the null mass plus the within-mode
+    tail-shave, the two null effects the Fisher tier cannot represent.
+
+    Args:
+        weights: Mode weights. Shape ``(K,)``.
+        means: Mode means. Shape ``(K, d)``.
+        covs: Mode covariances. Shape ``(K, d, d)``.
+        a: Detection-site offsets, scalar or ``(K,)``.
+        b: Detection-site directions, ``(d,)`` or ``(K, d)``.
+
+    Returns:
+        ``(weights_new, means_new, covs_new)``.
+    """
+    a_arr = jnp.broadcast_to(jnp.asarray(a), weights.shape)
+    b_arr = jnp.broadcast_to(jnp.asarray(b), means.shape)
+    log_mass, means_new, covs_new = jax.vmap(ep_probit_update)(
+        means, covs, -a_arr, -b_arr
+    )
+    log_w = jnp.where(
+        weights > 0.0, jnp.log(jnp.where(weights > 0.0, weights, 1.0)), -jnp.inf
+    )
+    weights_new = jax.nn.softmax(log_w + log_mass)
+    return weights_new, means_new, covs_new
+
+
+def detection_channel_eig(weights, means, covs, a, b, n_nodes=32):
+    """Exact detection-channel EIG ``I((M, theta); D)`` for linearized sites (nats).
+
+    With per-mode detection probability ``p_det(theta) = Phi(a_k + b_k @ theta)``,
+    the site depends on ``theta`` only through ``u = a + b @ theta``, so the channel
+    mutual information is exactly
+
+    ``I = H_b(sum_k w_k d_k) - sum_k w_k E_{u ~ N(m_k, s_k^2)}[H_b(Phi(u))]``,
+
+    with ``d_k`` the smeared per-mode mass (:func:`probit_gaussian_mass`) and the
+    within-mode expectation evaluated by 1-D Gauss-Hermite quadrature. The chain
+    rule splits this into the discrete mode term plus a nonnegative within-mode
+    term -- the information a detection boundary crossing the posterior bulk
+    carries, which the per-mode Fisher information is structurally blind to.
+
+    Args:
+        weights: Mode weights. Shape ``(K,)``.
+        means: Mode means. Shape ``(K, d)``.
+        covs: Mode covariances. Shape ``(K, d, d)``.
+        a: Site offsets, scalar or ``(K,)``.
+        b: Site directions, ``(d,)`` or ``(K, d)``.
+        n_nodes: Gauss-Hermite node count for the within-mode expectation.
+
+    Returns:
+        Scalar detection-channel EIG.
+    """
+    a_arr = jnp.broadcast_to(jnp.asarray(a), weights.shape)
+    b_arr = jnp.broadcast_to(jnp.asarray(b), means.shape)
+    m_u = a_arr + jnp.einsum("kd,kd->k", b_arr, means)
+    s2_u = jnp.einsum("kd,kde,ke->k", b_arr, covs, b_arr)
+
+    d_k = norm.cdf(m_u / jnp.sqrt(1.0 + s2_u))
+    h_marginal = _binary_entropy(jnp.sum(weights * d_k))
+
+    nodes, gh_weights = np.polynomial.hermite.hermgauss(n_nodes)
+    u = m_u[:, None] + jnp.sqrt(2.0 * s2_u)[:, None] * nodes[None, :]
+    h_cond = jnp.sum(gh_weights[None, :] * _binary_entropy(norm.cdf(u)), axis=1)
+    return h_marginal - jnp.sum(weights * h_cond) / jnp.sqrt(jnp.pi)
 
 
 _EIG_JIT_CACHE: dict = {}
