@@ -19,6 +19,7 @@ extensions = [
     "myst_nb",
     "autoapi.extension",
     "sphinx.ext.autodoc",
+    "sphinx.ext.napoleon",
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
     "sphinx.ext.mathjax",

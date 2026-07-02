@@ -65,7 +65,10 @@ logdensity, {py:mod}`~photomancy.priors` provides an owned family of distributio
 the flat parameter vector, {py:mod}`~photomancy.backends` run inference,
 {py:mod}`~photomancy.posterior` and {py:mod}`~photomancy.posterior_utils` carry and
 manipulate the result behind one interface, and {py:mod}`~photomancy.eig` scores candidate
-observations. The domain layer supplies the physics-specific pieces and depends on the
+observations as expected information gain about a declared quantity of interest, from
+per-mode Gaussian gains through the exact discrete terms for mode discrimination,
+detection, and classification. The domain layer supplies the physics-specific pieces,
+such as the per-mode class weights a classification gain needs, and depends on the
 engine, never the reverse.
 
 ## The plug-in contract
@@ -157,9 +160,13 @@ grows its own copy of the inference machinery, that copy drifts from the engine 
 two diverge, so a domain should instead supply plug-ins and consume the shared backends,
 posteriors, and value-of-information layer.
 
-The engine produces value of information alongside the posterior and the evidence. It
-scores candidate observations analytically, turning a fit into a schedule for the next
-observation.
+The engine produces value of information alongside the posterior and the evidence. Every
+candidate observation is scored as the expected information gain about a declared
+quantity of interest, assembled from analytic per-mode Gaussian gains and exact discrete
+terms, and each term saturates as its question settles, which is what lets the score
+allocate a finite observing budget. The evidence is the complementary certificate: scores
+saturate and rank the next observation, certificates harden and decide when to stop and
+announce, and the two roles never swap.
 
 The library is Equinox-first and respects JAX discipline. Stateful objects are
 `eqx.Module` subclasses, functions are pure, and float64 is used where the inference
@@ -167,17 +174,25 @@ precision requires it.
 
 ## Roadmap
 
-The near-term direction extends the engine across more of the scene and deepens the
-backend menu, without changing the core contract.
+The near-term direction extends the engine across more of the scene and scales up its
+throughput, without changing the core contract.
 
 On the domain side, orbit fitting is implemented across radial-velocity, astrometry, and
 imaging data, disk fitting rides the scene engine, atmospheric retrieval is in progress,
 and image-domain fitting against a coronagraph forward is the next major target. Each
 arrives as plug-ins on the existing engine.
 
-On the backend side, the remaining priority is a stochastic variational backend with a
-flow guide for fast approximate posteriors over degenerate atmospheric parameter spaces.
-Many-chain GPU samplers follow once the workloads move to GPU.
+On the backend side the menu is already broad enough that the gradient and nested samplers
+recover the curved, degenerate posteriors that arise in atmospheric retrieval, so the
+near-term work is throughput rather than new samplers, with many-chain GPU sampling once the
+workloads move to GPU.
+
+A separate, longer-term direction is amortized inference. Where a full sampler is too slow to
+run across a large simulated target list, a conditional normalizing flow trained once over
+simulated scene-and-data pairs gives an instant posterior for each new dataset. This is
+simulation-based rather than likelihood-based, so it does not fit the backend contract, which
+takes a logdensity; it enters as a separate inference modality alongside the backends, feeding
+the same posterior interface and the same value-of-information layer.
 
 The evidence-bearing backends turn the engine toward model comparison and detection:
 quantifying whether a planet is present against a null, resolving period aliases, and
