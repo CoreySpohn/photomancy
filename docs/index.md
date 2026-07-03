@@ -74,6 +74,7 @@ image-domain fitting against a coronagraph forward is the next major target. See
 
 explanation/architecture
 explanation/mathematical-foundations
+explanation/orbital-parameterizations
 explanation/glossary
 ```
 
