@@ -95,10 +95,52 @@ singular for exactly retrograde orbits ($i = 180^\circ$), and the quaternion
 elements of Cohen and Hubbard (1962) are the principled remedy should
 face-on retrograde populations become a target.
 
+## Element sets as charts
+
+Established orbit-fitting codes such as radvel (Fulton et al. 2018) and
+orbitize! (Blunt et al. 2020) let the user choose among several element
+bases, which is valuable because no single basis serves every task. The
+maintenance cost of that flexibility depends entirely on where the basis
+concept lives in the architecture. photomancy's position:
+
+- **One hub, thin spokes.** The forward model exists in a single internal
+  representation, with per-orbit constants precomputed at construction.
+  A basis is a *chart*: a bijection onto the hub plus a prior density
+  expressed in its own coordinates. Charts convert into the hub, never into
+  each other, so there is no quadratic growth of conversion paths.
+- **Charts end at the problem seam.** A chart is a small builder that
+  assembles the fit problem (logdensity, unflattening, constraints,
+  parameter names). Every sampler backend downstream is chart-blind: it
+  sees a flat vector and a logdensity. Adding a chart therefore touches no
+  backend, no likelihood, and no reporting code.
+- **Charts are compiled away.** Because problems are assembled at trace
+  time and JIT-compiled, a chart adds no runtime dispatch and no per-call
+  conversion cost; the coordinate change fuses into the model graph.
+- **Priors bind to charts explicitly.** Where an exact correspondence
+  exists it is used directly (a Rayleigh eccentricity prior is a pair of
+  independent Gaussians on the eccentricity vector); otherwise the density
+  is reweighted with Jacobians obtained by automatic differentiation, never
+  by hand.
+- **A closed menu.** The supported charts are the ones with a task behind
+  them: classical elements, the eccentricity vector, Thiele-Innes
+  constants, and the discovery-scan box. Preferences about units, epochs,
+  or which parameters to hold fixed are handled by the prior layer and by
+  deterministic transforms, not by new bases.
+
+Each chart ships with the same small test contract: an exact round trip
+against the hub, forward-model gradient checks at the degenerate loci
+($e = 0$, $i = 0$, near-retrograde), and prior-equivalence checks against
+the classical chart.
+
 ## References
 
+- Blunt, S. et al. (2020), "orbitize!: A comprehensive orbit-fitting
+  software package for the high-contrast imaging community",
+  *Astronomical Journal* 159, 89.
 - Broucke, R. A. and Cefola, P. J. (1972), "On the equinoctial orbit
   elements", *Celestial Mechanics* 5, 303.
+- Fulton, B. J. et al. (2018), "RadVel: the radial velocity modeling
+  toolkit", *PASP* 130, 044504.
 - Cohen, C. J. and Hubbard, E. C. (1962), "A nonsingular set of orbit
   elements", *Astronomical Journal* 67, 10.
 - Ford, E. B. (2006), "Improving the efficiency of Markov chain Monte Carlo
