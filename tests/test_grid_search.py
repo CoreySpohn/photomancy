@@ -3,7 +3,6 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from orbix.utils.quasi_random import roberts_sequence
 
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.forward import predict_relative_astrometry
@@ -15,6 +14,7 @@ from photomancy.orbit.grid_search import (
     build_evaluator,
 )
 from photomancy.orbit.likelihoods import loglike_relative_astrom
+from photomancy.orbit.quasi_random import roberts_sequence
 from photomancy.posterior import SamplePosterior
 
 TWO_PI = 2.0 * jnp.pi
@@ -300,3 +300,13 @@ def test_sample_scales_to_large_particle_count():
     )
     draws = pp.sample_dict(jax.random.PRNGKey(0), n=5000)
     assert draws["x"].shape == (5000,)
+
+
+def test_roberts_sequence_in_unit_cube_and_low_discrepancy():
+    """roberts_sequence points lie in [0,1)^d with each axis mean near 0.5."""
+    from photomancy.orbit.quasi_random import roberts_sequence
+
+    pts = roberts_sequence(4096, 3)
+    assert pts.shape == (4096, 3)
+    assert (pts >= 0).all() and (pts < 1).all()
+    assert jnp.abs(pts.mean(axis=0) - 0.5).max() < 0.01

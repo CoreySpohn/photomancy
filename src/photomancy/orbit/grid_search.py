@@ -10,11 +10,11 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from orbix.equations import period_to_sma
-from orbix.utils.quasi_random import roberts_sequence
 
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.likelihoods import loglike_relative_astrom
+from photomancy.orbit.quasi_random import roberts_sequence
 from photomancy.posterior import SamplePosterior
 
 

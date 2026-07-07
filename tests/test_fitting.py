@@ -817,9 +817,7 @@ class TestNumPyroModel:
 
         with pytest.raises(ValueError, match="Unknown ecc_prior"):
             with handlers.seed(rng_seed=0):
-                handlers.trace(model).get_trace(
-                    Msun2kg, 10.0, OrbitData(rv=rv_data)
-                )
+                handlers.trace(model).get_trace(Msun2kg, 10.0, OrbitData(rv=rv_data))
 
     def test_mcmc_runs_rv(self):
         """End-to-end: generate synthetic RV data and run a short NUTS chain.
