@@ -25,6 +25,13 @@ from photomancy.orbit.eig import (
     evaluate_orbit_candidates,
     geometric_eig,
 )
+from photomancy.orbit.few_epoch import (
+    TIBasisModel,
+    admissible_region_fit,
+    lambert_depth_fit,
+    state_to_theta,
+    ti_semimajor_axis,
+)
 from photomancy.orbit.forward import (
     predict_photometry,
     predict_pm_anomaly,
@@ -86,8 +93,12 @@ __all__ = [
     "RelativeAstromData",
     "ScaleAndRotate",
     "StellarAstromData",
+    "TIBasisModel",
     # Thiele-Innes fitter
     "TIFitResult",
+    # Bayesian experimental design
+    # Exact few-epoch fitters
+    "admissible_region_fit",
     "alias_breaking_eig",
     "build_orbit_logdensity",
     # Orbital-mechanics primitives (re-exported from orbix)
@@ -98,9 +109,9 @@ __all__ = [
     "evaluate_orbit_candidates",
     "find_init",
     "find_init_top_k",
-    # Bayesian experimental design
     "geometric_eig",
     "grid_search",
+    "lambert_depth_fit",
     "loglike_imaging",
     "loglike_null",
     "loglike_pm_anomaly",
@@ -123,8 +134,10 @@ __all__ = [
     "predict_stellar_astrometry",
     "sample_ecc_prior",
     "sample_physical",
+    "state_to_theta",
     "thiele_innes_fit",
     "thiele_innes_grid_search",
     # Initialization
+    "ti_semimajor_axis",
     "ti_to_init",
 ]
