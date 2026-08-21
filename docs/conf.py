@@ -59,5 +59,6 @@ source_suffix = {
     ".rst": "restructuredtext",
     ".md": "myst-nb",
 }
-nb_execution_mode = "off"
+# Pages are stored output-free and execute at build (each runs in ~10 s).
+nb_execution_mode = "auto"
 nb_execution_timeout = 300

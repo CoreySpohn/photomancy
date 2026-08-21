@@ -74,6 +74,11 @@ packages = ["src/photomancy"]
 [tool.hatch.build.targets.sdist]
 exclude = ["/scripts", "/docs", "/tests", "/.github"]
 
+[tool.ruff.lint.per-file-ignores]
+# Tutorial notebooks: docstring rules and import-position rules are noise in
+# cell-structured code.
+"docs/**" = ["D", "E402"]
+
 [tool.ruff.lint]
 select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 
