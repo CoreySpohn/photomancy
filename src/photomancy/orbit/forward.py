@@ -270,8 +270,11 @@ def predict_photometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Lambda, dist
     sky_sep_AU = jnp.sqrt(r[0] ** 2 + r[1] ** 2)
     alpha_arcsec = sky_sep_AU / dist_pc
 
-    # Phase angle: cos(beta) = -z/|r| (z toward observer, so phase angle is
-    # angle between star-planet and star-observer vectors)
+    # Phase angle: cos(beta) = -z/|r| (z toward observer). This is the
+    # planet-centered angle between the planet-to-star and planet-to-observer
+    # directions, so beta = 0 is superior conjunction at full phase. Note
+    # orbix's propagate returns the supplement (measured from the observer
+    # axis); the two must not be mixed.
     r_mag = jnp.sqrt(r[0] ** 2 + r[1] ** 2 + r[2] ** 2)
     r_mag_safe = jnp.maximum(r_mag, 1e-30)
     cos_beta = -r[2] / r_mag_safe

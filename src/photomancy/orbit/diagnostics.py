@@ -30,6 +30,63 @@ def sample_physical(posterior, problem, key, n):
     return jax.vmap(problem.to_physical)(z)
 
 
+def orbits_from_samples(samples, Ms_kg):
+    """Turn a physical-sample dict into a ``(K,)``-batched ``KeplerianOrbit``.
+
+    The bridge from a fitted posterior to orbit-track visualization and any
+    other propagation consumer: ``sample_physical`` output (or any dict with
+    the ``T``/``e``/``cos_i``/``W``/``cos_w``/``sin_w``/``tp`` keys the
+    forward models use) goes straight into
+    ``orbix.KeplerianOrbit.from_period``, so a fan of posterior draws becomes
+    one batched orbit object in a single call.
+
+    Args:
+        samples: Dict of physical parameters keyed as ``to_physical`` emits
+            them, each value scalar or ``(K,)``.
+        Ms_kg: Stellar mass in kg (the fit argument, not a fitted parameter).
+
+    Returns:
+        A ``(K,)``-batched :class:`orbix.KeplerianOrbit`.
+    """
+    from orbix import KeplerianOrbit
+
+    return KeplerianOrbit.from_period(
+        T_d=samples["T"],
+        e=samples["e"],
+        cos_i=samples["cos_i"],
+        W_rad=samples["W"],
+        cos_w=samples["cos_w"],
+        sin_w=samples["sin_w"],
+        tp_d=samples["tp"],
+        Ms_kg=Ms_kg,
+    )
+
+
+def mode_scalars(posterior, problem, name):
+    """One physical scalar per mixture mode, with the mode weights.
+
+    The recurring "period per mode against its posterior weight" extraction,
+    generalized to any physical parameter: evaluate ``to_physical`` at each
+    mode mean and pull one named entry.
+
+    Args:
+        posterior: A :class:`~photomancy.posterior.MixturePosterior`.
+        problem: The :class:`~photomancy.orbit.inference.OrbitProblem`
+            supplying ``to_physical``.
+        name: Physical parameter name (``"T"``, ``"e"``, ...).
+
+    Returns:
+        Tuple ``(values, weights)``, each shape ``(n_modes,)``.
+    """
+    values = jnp.stack(
+        [
+            jnp.squeeze(problem.to_physical(posterior.means[k])[name])
+            for k in range(posterior.n_modes)
+        ]
+    )
+    return values, jnp.exp(posterior.log_weights)
+
+
 def mode_summary(posterior, problem):
     """Per-mode ``weight``, ``log_evidence``, and physical MAP ``params`` (diagnostics).
 

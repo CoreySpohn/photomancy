@@ -19,7 +19,12 @@ from photomancy.orbit.data import (
     RVData,
     StellarAstromData,
 )
-from photomancy.orbit.diagnostics import mode_summary, sample_physical
+from photomancy.orbit.diagnostics import (
+    mode_scalars,
+    mode_summary,
+    orbits_from_samples,
+    sample_physical,
+)
 from photomancy.orbit.eig import (
     alias_breaking_eig,
     evaluate_orbit_candidates,
@@ -121,10 +126,12 @@ __all__ = [
     "loglike_stellar_astrom",
     "map_laplace_fit",
     "map_laplace_mixture_fit",
+    "mode_scalars",
     "mode_summary",
     "ofti",
     # Nested sampling (NumPyro/jaxns) -> evidence / model comparison
     "orbit_nested_sampling",
+    "orbits_from_samples",
     "period_to_sma",
     "predict_photometry",
     "predict_pm_anomaly",
