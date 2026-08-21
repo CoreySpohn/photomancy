@@ -41,11 +41,16 @@ docs = [
     "sphinxcontrib-mermaid",
     "sphinx_autodoc_typehints",
     "matplotlib",
+    "eyepiece>=0.1.0",
 ]
 test = ["nox", "pytest", "pytest-xdist", "hypothesis", "pytest-cov", "arviz"]
 # Optional extras (jaxns and numpyro are core deps, not extras):
 npe = ["flowjax"]       # amortized neural posterior estimation
 imaging = ["coronalyze"]  # differentiable detection/extraction likelihood helpers
+# eyepiece>=0.1.0 carries every interface photomancy.viz calls (corner,
+# corner_overlay, sky_fan, cov_ellipse, save_fig, PlotResult); checked by
+# interface in the test suite rather than by version string.
+viz = ["eyepiece>=0.1.0"]
 
 [project.urls]
 Homepage = "https://github.com/CoreySpohn/photomancy"
