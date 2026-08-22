@@ -27,6 +27,7 @@ def plot_eig(
     mark_best=True,
     ax=None,
     line_kw=None,
+    legend_loc="upper right",
 ):
     """EIG decomposition against candidate observation epoch.
 
@@ -44,6 +45,9 @@ def plot_eig(
         ax: Axes to draw into. None creates a new figure.
         line_kw: Extra kwargs for each component's ``ax.plot``, applied
             last.
+        legend_loc: Legend corner. Defaults to a pinned corner rather than
+            ``"best"``, which matplotlib re-solves per draw and which
+            therefore makes the legend jump between animation frames.
 
     Returns:
         An ``eyepiece.PlotResult`` whose ``"lines"`` holds the component
@@ -87,7 +91,10 @@ def plot_eig(
         best = t[int(np.argmax(np.asarray(result["total_eig"])))]
         lines.append(ax.axvline(best, color=styles["total"]["color"], ls="--", lw=1.2))
 
-    ax.set_xlabel("candidate epoch (days)")
-    ax.set_ylabel("expected information gain (nats)")
-    ax.legend()
+    ax.set_xlabel("candidate epoch [days]")
+    ax.set_ylabel("expected information gain [nats]")
+    # A pinned corner, not the default "best": matplotlib re-solves "best"
+    # on every draw, so an animated panel's legend hops between frames as
+    # the curves move under it.
+    ax.legend(loc=legend_loc)
     return ep.PlotResult(ax=ax, artists=artists)

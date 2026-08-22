@@ -39,7 +39,7 @@ def test_plot_rv_converts_au_per_day_to_m_per_s():
     result = plot_rv(t, rv, data=data)
     drawn = result.artists["lines"][0].get_ydata()
     np.testing.assert_allclose(drawn, rv * AU2m / d2s, rtol=1e-12)
-    assert result.ax.get_ylabel() == "radial velocity (m/s)"
+    assert result.ax.get_ylabel() == "radial velocity [m/s]"
 
     errbar_line = [line for line in result.ax.lines if len(line.get_xdata()) == 3]
     assert errbar_line, "exactly the 3 valid epochs are drawn, no pad rows"

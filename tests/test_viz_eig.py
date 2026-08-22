@@ -42,7 +42,7 @@ def test_plot_eig_draws_components_and_marks_best():
     best_line = result.artists["lines"][-1]
     expected = t[int(np.argmax(result_dict["total_eig"]))]
     assert best_line.get_xdata()[0] == pytest.approx(expected)
-    assert result.ax.get_ylabel() == "expected information gain (nats)"
+    assert result.ax.get_ylabel() == "expected information gain [nats]"
 
 
 def test_plot_eig_tolerates_missing_components():
@@ -65,3 +65,16 @@ def test_plot_eig_reuses_handed_axes():
     w0 = axes[0].get_position(original=True).width
     w1 = axes[1].get_position(original=True).width
     assert w0 == pytest.approx(w1)
+
+
+def test_plot_eig_legend_is_pinned_not_best():
+    """A "best" legend re-solves per draw, so it hops between frames."""
+    from photomancy.viz import plot_eig
+
+    t, result_dict = _result()
+    panel = plot_eig(t, result_dict)
+    # matplotlib stores the resolved code; "best" is 0, a pinned corner is not
+    assert panel.ax.get_legend()._loc != 0
+
+    moved = plot_eig(t, result_dict, legend_loc="lower left")
+    assert moved.ax.get_legend()._loc != panel.ax.get_legend()._loc

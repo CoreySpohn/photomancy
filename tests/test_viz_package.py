@@ -28,7 +28,7 @@ def test_labels_work_without_eyepiece():
     result = _run(
         BLOCK_EYEPIECE
         + "import photomancy.viz; "
-        + "assert 'T (days)' == photomancy.viz.PARAM_LABELS['T']; "
+        + "assert 'T [days]' == photomancy.viz.PARAM_LABELS['T']; "
         + "assert photomancy.viz.default_corner_params({'T': [1.0], 'e': [0.1]})"
     )
     assert result.returncode == 0, result.stderr

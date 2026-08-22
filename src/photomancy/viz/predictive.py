@@ -100,8 +100,8 @@ def plot_rv(
         )
         artists["collection"] = errbar.lines[2][0]
 
-    ax.set_xlabel("time (days)")
-    ax.set_ylabel("radial velocity (m/s)")
+    ax.set_xlabel("time [days]")
+    ax.set_ylabel("radial velocity [m/s]")
     return ep.PlotResult(ax=ax, artists=artists)
 
 
@@ -183,7 +183,7 @@ def plot_dmag(
 
     if not ax.yaxis_inverted():
         ax.invert_yaxis()
-    ax.set_xlabel("time (days)")
+    ax.set_xlabel("time [days]")
     ax.set_ylabel("delta-magnitude (fainter downward)")
     return ep.PlotResult(ax=ax, artists=artists)
 
@@ -239,6 +239,6 @@ def plot_detectability(
     if iwa_arcsec is not None:
         artists["fill"] = ax.axvspan(0.0, iwa_arcsec, color=neutral, alpha=0.12, lw=0)
 
-    ax.set_xlabel("separation (arcsec)")
+    ax.set_xlabel("separation [arcsec]")
     ax.set_ylabel("dMag")
     return ep.PlotResult(ax=ax, artists=artists)

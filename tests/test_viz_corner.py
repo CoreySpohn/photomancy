@@ -52,7 +52,7 @@ def test_plot_corner_samples_door_excludes_ll_total():
     assert isinstance(result, ep.MosaicResult)
     assert result.axes.shape == (3, 3)
     labels = [result.axes[2, j].get_xlabel() for j in range(3)]
-    assert labels == ["T (days)", "e", "cos i"]
+    assert labels == ["T [days]", "e", "cos i"]
 
 
 def test_plot_corner_posterior_door_requires_problem_and_key():
