@@ -78,3 +78,32 @@ def test_plot_eig_legend_is_pinned_not_best():
 
     moved = plot_eig(t, result_dict, legend_loc="lower left")
     assert moved.ax.get_legend()._loc != panel.ax.get_legend()._loc
+
+
+def test_plot_eig_draws_total_as_an_envelope_under_its_components():
+    """Total is the sum of the components, so it must not overprint them.
+
+    Once the aliases resolve, total and geometric coincide. Drawn as equal
+    peer lines the later one wins and the summary curve vanishes under its
+    own component, in a color belonging to neither.
+    """
+    from photomancy.viz import plot_eig
+
+    t, result_dict = _result()
+    panel = plot_eig(t, result_dict)
+    total, alias, geometric = panel.artists["lines"][:3]
+
+    assert total.get_zorder() < alias.get_zorder()
+    assert total.get_zorder() < geometric.get_zorder()
+    assert total.get_linewidth() > geometric.get_linewidth()
+    assert total.get_alpha() < 1.0
+
+
+def test_plot_eig_total_really_is_the_sum_of_the_parts():
+    """The encoding claims additivity; check the library actually delivers it."""
+    _, result_dict = _result()
+    total = np.asarray(result_dict["total_eig"])
+    parts = np.asarray(result_dict["alias_eig"]) + np.asarray(
+        result_dict["geometric_eig"]
+    )
+    np.testing.assert_allclose(total, parts, rtol=1e-12)

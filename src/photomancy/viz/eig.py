@@ -64,13 +64,24 @@ def plot_eig(
 
     styles = ep.SourceStyles([name for _, name in _COMPONENTS])
     lines = []
+    # Total is the SUM of the two components, not a third peer measurement
+    # (evaluate_candidates returns weighted_geom + alias_val, weighted_geom,
+    # alias_val). Drawn as three equal lines it reads as three independent
+    # metrics, and once alias goes to zero the total and geometric curves
+    # land on each other and overprint into a color belonging to neither.
+    # So the total is a wide, pale envelope UNDER its own components: the
+    # components stay legible on top, and a component sitting inside the
+    # envelope is the additive identity made visible.
     for key, name in _COMPONENTS:
         if key not in result:
             continue
         values = np.asarray(result[key], float).reshape(-1)
+        is_total = key == "total_eig"
         kw = {
             "color": styles[name]["color"],
-            "lw": 1.8 if key == "total_eig" else 1.2,
+            "lw": 4.0 if is_total else 1.4,
+            "alpha": 0.35 if is_total else 1.0,
+            "zorder": 1.5 if is_total else 2.5,
             "label": name,
             **(line_kw or {}),
         }
