@@ -204,10 +204,14 @@ def plot_detectability(
         dmag: Delta-magnitudes, same shape.
         contrast_curve: Optional ``(sep_arcsec, dmag_limit)`` pair of
             arrays, drawn as the detection-limit curve; points fainter than
-            the curve (larger dMag) are undetectable.
+            the curve (larger dMag) are undetectable, and with the y axis
+            inverted those points sit visually below it.
         iwa_arcsec: Optional inner working angle; the region inside it is
             shaded as unobservable.
-        ax: Axes to draw into. None creates a new figure.
+        ax: Axes to draw into. None creates a new figure. The y axis is
+            inverted so fainter is downward, matching ``plot_dmag`` and the
+            direct-imaging contrast-curve convention; an already-inverted
+            axis is left alone, so overplotting does not flip it back.
         scatter_kw: Extra kwargs for the ``ax.scatter`` call, applied last.
 
     Returns:
@@ -239,6 +243,8 @@ def plot_detectability(
     if iwa_arcsec is not None:
         artists["fill"] = ax.axvspan(0.0, iwa_arcsec, color=neutral, alpha=0.12, lw=0)
 
+    if not ax.yaxis_inverted():
+        ax.invert_yaxis()
     ax.set_xlabel("separation [arcsec]")
-    ax.set_ylabel("dMag")
+    ax.set_ylabel("delta-magnitude (fainter downward)")
     return ep.PlotResult(ax=ax, artists=artists)

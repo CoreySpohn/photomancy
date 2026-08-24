@@ -110,3 +110,35 @@ def test_plot_detectability_masks_nonfinite_limit():
     assert len(result.artists["line"].get_xdata()) == 8
     assert "fill" in result.artists
     assert result.artists["scatter"].get_offsets().shape == (3, 2)
+
+
+def test_dmag_polarity_is_the_same_in_both_predictive_panels():
+    """Fainter is downward in plot_dmag AND plot_detectability.
+
+    The two functions put the same quantity on the same axis, so a reader
+    moving between them must not have to relearn which way is fainter.
+    plot_detectability used to leave the axis un-inverted, making down mean
+    brighter there and fainter in plot_dmag.
+    """
+    from photomancy.viz import plot_detectability, plot_dmag
+
+    t = np.linspace(0.0, 300.0, 60)
+    dmag = 23.0 + np.sin(2.0 * np.pi * t / 300.0)
+    tracks = plot_dmag(t, dmag)
+    plane = plot_detectability(np.array([0.1, 0.2, 0.3]), np.array([22.0, 24.5, 23.0]))
+
+    assert tracks.ax.yaxis_inverted()
+    assert plane.ax.yaxis_inverted()
+    assert tracks.ax.get_ylabel() == plane.ax.get_ylabel()
+
+
+def test_plot_detectability_inverts_idempotently():
+    """Overplotting onto an inverted axis does not flip it back."""
+    from photomancy.viz import plot_detectability
+
+    sep = np.array([0.1, 0.2, 0.3])
+    dmag = np.array([22.0, 24.5, 23.0])
+    result = plot_detectability(sep, dmag)
+    plot_detectability(sep, dmag + 0.5, ax=result.ax)
+    assert result.ax.yaxis_inverted()
+    assert result.ax.get_ylim()[0] >= result.ax.get_ylim()[1]
