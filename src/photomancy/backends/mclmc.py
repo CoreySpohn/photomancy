@@ -11,6 +11,10 @@ need ``log Z``.
 ``run`` is ``filter_jit``-wrapped, so when ``logdensity`` is a ``SceneLogDensity``
 Module its forward's array leaves (e.g. a coronagraph PSF datacube) thread as traced
 inputs to BlackJAX rather than being baked into the compiled kernel as constants.
+
+BlackJAX 1.6 made ``logdensity_fn`` a required argument of the tuner (it raises when
+left at its ``None`` default) and renamed ``Lfactor`` to ``l_factor``; the pinned floor
+is 1.6 because 1.5 does not accept the keyword at all.
 """
 
 import blackjax
@@ -46,18 +50,17 @@ class MCLMCBackend(AbstractBackend):
 
         state = mclmc_init(position=init, logdensity_fn=logdensity, rng_key=key_init)
 
-        def kernel(inverse_mass_matrix):
-            return build_kernel(
-                logdensity_fn=logdensity,
-                integrator=isokinetic_mclachlan,
-                inverse_mass_matrix=inverse_mass_matrix,
-            )
+        # From BlackJAX 1.6 build_kernel takes only the integrator and returns a
+        # kernel that is handed logdensity_fn, inverse_mass_matrix, L and step_size
+        # per call by the tuner; before 1.6 it was a factory closing over them.
+        kernel = build_kernel(integrator=isokinetic_mclachlan)
 
         tuned_state, params, *_ = blackjax.mclmc_find_L_and_step_size(
             mclmc_kernel=kernel,
             num_steps=self.n_tune,
             state=state,
             rng_key=key_tune,
+            logdensity_fn=logdensity,
         )
 
         sampler = blackjax.mclmc(
