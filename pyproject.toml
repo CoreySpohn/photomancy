@@ -17,7 +17,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dependencies = [
-    "blackjax>=1.2",
+    # >=1.6: the MCLMC tuner requires logdensity_fn from 1.6 on, and 1.5 does
+    # not accept the keyword, so the two cannot be supported by one call.
+    "blackjax>=1.6",
     "equinox",
     "hwoutils",
     "jax>=0.8.1",
@@ -27,7 +29,9 @@ dependencies = [
     "numpy",
     "numpyro>=0.15.0",
     "optax>=0.2.3",
-    "orbix",
+    # >=1.1.0: KeplerianOrbit.from_period, used by orbit.diagnostics, first
+    # ships in 1.1.0; an unpinned orbix resolves to 1.0.0 and fails there.
+    "orbix>=1.1.0",
     "skyscapes",
 ]
 
@@ -43,7 +47,17 @@ docs = [
     "matplotlib",
     "eyepiece>=0.1.0",
 ]
-test = ["nox", "pytest", "pytest-xdist", "hypothesis", "pytest-cov", "arviz"]
+# photomancy[viz] so the viz tests actually run: without it they all die on the
+# eyepiece import and the suite goes green having tested nothing.
+test = [
+    "nox",
+    "pytest",
+    "pytest-xdist",
+    "hypothesis",
+    "pytest-cov",
+    "arviz",
+    "photomancy[viz]",
+]
 # Optional extras (jaxns and numpyro are core deps, not extras):
 npe = ["flowjax"]       # amortized neural posterior estimation
 imaging = ["coronalyze"]  # differentiable detection/extraction likelihood helpers
