@@ -1,0 +1,34 @@
+name: Docs
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  docs:
+    name: Build docs
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+
+    - name: Create venv
+      run: uv venv .venv --python 3.12
+
+    - name: Install package with docs dependencies
+      run: uv pip install -e ".[docs]"
+      env:
+        VIRTUAL_ENV: ${{ github.workspace }}/.venv
+
+    # Every page executes at build time, and conf.py sets
+    # nb_execution_raise_on_error, so a cell that stops working fails here
+    # rather than on the documentation host.
+    - name: Build the documentation
+      run: .venv/bin/sphinx-build -b html docs docs/_build/html

@@ -89,6 +89,14 @@ examples/eig_scheduling
 ```
 
 ```{toctree}
+:maxdepth: 1
+:caption: Visualization
+:hidden:
+
+gallery
+```
+
+```{toctree}
 :maxdepth: 2
 :caption: API Reference
 :hidden:

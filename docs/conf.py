@@ -33,7 +33,9 @@ intersphinx_mapping = {
     "jax": ("https://docs.jax.dev/en/latest/", None),
 }
 
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+# jupyter_execute holds myst-nb's executed intermediates. Sphinx otherwise
+# picks them up as documents of their own and warns that each is in no toctree.
+exclude_patterns = ["_build", "jupyter_execute", "Thumbs.db", ".DS_Store"]
 
 autoapi_dirs = ["../src"]
 autoapi_ignore = ["**/_version.py"]
@@ -62,3 +64,15 @@ source_suffix = {
 # Pages are stored output-free and execute at build (each runs in ~10 s).
 nb_execution_mode = "auto"
 nb_execution_timeout = 300
+# Every page executes at build time; a cell that stops working fails the build
+# here rather than rendering a broken page on the documentation host.
+nb_execution_raise_on_error = True
+# ... and prints the failing cell's traceback. Without this the build fails
+# naming only the page, which is not enough to fix it from a CI log.
+nb_execution_show_tb = True
+
+# Warnings belong in the build log, not stamped across the page. hwostyle asks
+# for Inter/Helvetica/Arial and a docs builder has none of them, which emits a
+# findfont warning per figure and pushes stderr blocks onto the rendered pages.
+# "remove-warn" drops them from the page and still reports them here.
+nb_output_stderr = "remove-warn"
