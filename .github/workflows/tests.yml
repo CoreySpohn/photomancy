@@ -28,5 +28,15 @@ jobs:
     - name: Install package with test dependencies
       run: uv pip install -e ".[test]"
 
+    # radis, a transitive dependency through skyscapes, creates ~/radis.json on
+    # first import and is not multi-process safe about it: it guards against
+    # reading the file while it is empty, but not while it is half written. On a
+    # runner with no config yet, xdist workers race there, the loser dies during
+    # collection, and xdist reports the symptom as "Different tests were
+    # collected between gw0 and gw1". Import the chain once, in one process,
+    # before the workers fork.
+    - name: Warm the radis user config
+      run: uv run python -c "import skyscapes.disk, skyscapes.scene"
+
     - name: Run tests
       run: uv run pytest tests/ -v --tb=short
