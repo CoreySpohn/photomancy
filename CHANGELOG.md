@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.0](https://github.com/CoreySpohn/photomancy/compare/v0.1.0...v0.2.0) (2026-08-29)
+
+
+### Features
+
+* **orbit:** add orbits_from_samples and mode_scalars diagnostics ([3870b48](https://github.com/CoreySpohn/photomancy/commit/3870b48b8d38d51ab534be1dc784e0c92ec131d8))
+* **viz:** add corner, EIG, and predictive panels on eyepiece ([22c491d](https://github.com/CoreySpohn/photomancy/commit/22c491d513ea2150f45d4b95fcbe36669ad5c2d9))
+
+
+### Bug Fixes
+
+* **backends:** adapt MCLMC to the BlackJAX 1.6 tuner and kernel API ([554b4de](https://github.com/CoreySpohn/photomancy/commit/554b4de012956b88ab7a480a4b752d5a6f700e81))
+* **deps:** pin the orbix floor and carry viz into the test extra ([d089792](https://github.com/CoreySpohn/photomancy/commit/d0897921a5095ad99e2d63855e865b59b28f0222))
+* **viz:** draw total eig as an envelope under its own components ([48304eb](https://github.com/CoreySpohn/photomancy/commit/48304ebe4e91050d163f9cbf1eb8d9caa4a9fd5e))
+* **viz:** invert the detectability plane so fainter is downward in both panels ([30c5bac](https://github.com/CoreySpohn/photomancy/commit/30c5bacd5c2ceedf061febabc882248a04b959a6))
+* **viz:** pin the eig legend and use bracketed units throughout ([29d42f9](https://github.com/CoreySpohn/photomancy/commit/29d42f91562735e5b166aaa27d988d1d7191db2c))
+
 ## [0.1.0](https://github.com/CoreySpohn/photomancy/compare/v0.0.1...v0.1.0) (2026-07-18)
 
 
