@@ -3,8 +3,9 @@
 Scores candidate observations from a ``MixturePosterior`` (per-mode Gaussians) as
 estimator tiers of one mutual information ``I((M, D, theta); Y)``: the Gaussian tier is
 the analytic Laplace covariance update (``Sigma^-1 += J^T R^-1 J``), the discrete tier
-carries the exact detection-channel MI, the ``H(w)``-capped alias bound, and the class
-information ``I(C; Y)`` over caller-supplied per-mode class weights. The forward model
+carries the exact detection-channel MI, an ``H(w)``-capped upper bound on the mode
+information built from full per-mode predictive covariances, and the class information
+``I(C; Y)`` over caller-supplied per-mode class weights. The forward model
 is a caller-supplied ``forward(z, candidate) -> observables`` (differentiable in the
 flat position ``z``); the orbit / disk / imaging layers supply their own. This core
 knows no domain.
@@ -59,32 +60,111 @@ def geometric_eig(cov_old, jacobian, obs_variance, qoi_projection=None):
     return eig, cov_new
 
 
-def alias_breaking_eig(weights, y_preds, obs_variance):
-    """Mode-discrimination information from the continuous channel (nats).
+def _logdet_positive_definite(cov):
+    """Log determinant through a Cholesky factor, plus a positive-definite flag.
 
-    A per-dimension moment-matched upper bound on ``I(M; Y)`` intersected with the
-    exact bound ``I(M; Y) <= H(w)`` -- two well-separated 50/50 modes are worth
-    ``ln 2``, not ``log(separation)``.
+    Returns ``(logdet, ok)``. ``ok`` is false when the factor has a nonpositive or
+    nonfinite diagonal, i.e. when ``cov`` is not numerically positive definite; the
+    returned ``logdet`` is then a placeholder the caller must discard.
+    """
+    diag = jnp.diagonal(jnp.linalg.cholesky(cov))
+    ok = jnp.all(jnp.isfinite(diag) & (diag > 0.0))
+    return 2.0 * jnp.sum(jnp.log(jnp.where(ok, diag, 1.0))), ok
+
+
+def alias_breaking_eig_from_covariances(weights, y_preds, predictive_covariances):
+    """Upper bound on the mode information ``I(M; Y)`` of a Gaussian mixture (nats).
+
+    Each mode ``k`` predicts the observation as ``N(y_k, S_k)`` with a full
+    predictive covariance ``S_k`` (for a linearized forward model,
+    ``S_k = J_k Sigma_k J_k^T + R``). Because ``I(M; Y) = H(Y) - sum_k w_k H(Y | k)``,
+    the Gaussian maximum-entropy bound on ``H(Y)`` gives
+
+    ``I(M; Y) <= 0.5 * [logdet(S_mix) - sum_k w_k logdet(S_k)]``,
+
+    with ``S_mix = sum_k w_k [S_k + (y_k - ybar)(y_k - ybar)^T]`` the moment-matched
+    mixture covariance. The result is then capped by the exact bound
+    ``I(M; Y) <= H(w)``, so two resolved 50/50 modes are worth ``ln 2``. The value is
+    an upper bound, not an estimate: it is exact only when the mixture predictive is
+    itself Gaussian and it can exceed the true mutual information when modes overlap.
+    It is invariant under any invertible linear change of observable basis, so
+    components that differ only in their correlations are distinguished.
+
+    Log determinants come from Cholesky factors. Every component with positive
+    weight must have a symmetric positive-definite covariance; if any such
+    covariance (or the mixture covariance) is not numerically positive definite,
+    the result is NaN rather than a clipped number. Components with zero weight are
+    treated as absent, and their means and covariances are not read.
 
     Args:
-        weights: Mode weights. Shape ``(K,)``.
-        y_preds: Predictions at each mode. Shape ``(K, n_obs)``.
-        obs_variance: Measurement variance ``R`` as a scalar or ``(n_obs,)``, or the
-            per-mode predictive variances ``diag(J_k Sigma_k J_k^T) + R`` as
-            ``(K, n_obs)`` so within-mode posterior spread widens the predictive
-            instead of being ignored.
+        weights: Mode weights, nonnegative and summing to one. Shape ``(K,)``.
+        y_preds: Predictive means at each mode. Shape ``(K, n_obs)``.
+        predictive_covariances: Full per-mode predictive covariances ``S_k``.
+            Shape ``(K, n_obs, n_obs)``.
 
     Returns:
-        Scalar alias-breaking EIG.
+        Scalar upper bound on the mode information, in nats.
+
+    Raises:
+        ValueError: If the shapes are not ``(K,)``, ``(K, n_obs)`` and
+            ``(K, n_obs, n_obs)``.
+    """
+    weights = jnp.asarray(weights)
+    y_preds = jnp.asarray(y_preds)
+    covs = jnp.asarray(predictive_covariances)
+    n_modes = weights.shape[0]
+    if y_preds.ndim != 2 or y_preds.shape[0] != n_modes:
+        raise ValueError(
+            f"y_preds must have shape (K, n_obs) with K={n_modes}, got {y_preds.shape}"
+        )
+    n_obs = y_preds.shape[1]
+    if covs.shape != (n_modes, n_obs, n_obs):
+        raise ValueError(
+            "predictive_covariances must have shape (K, n_obs, n_obs) = "
+            f"{(n_modes, n_obs, n_obs)}, got {covs.shape}"
+        )
+    present = weights > 0.0
+    covs = jnp.where(present[:, None, None], covs, jnp.eye(n_obs, dtype=covs.dtype))
+    y_preds = jnp.where(present[:, None], y_preds, 0.0)
+
+    y_mean = weights @ y_preds
+    centered = y_preds - y_mean[None, :]
+    mixture_cov = jnp.einsum("k,kij->ij", weights, covs) + jnp.einsum(
+        "k,ki,kj->ij", weights, centered, centered
+    )
+    comp_logdet, comp_ok = jax.vmap(_logdet_positive_definite)(covs)
+    mix_logdet, mix_ok = _logdet_positive_definite(mixture_cov)
+    bound = 0.5 * (mix_logdet - jnp.sum(weights * comp_logdet))
+    capped = jnp.minimum(bound, _categorical_entropy(weights))
+    return jnp.where(jnp.all(comp_ok) & mix_ok, capped, jnp.nan)
+
+
+def alias_breaking_eig(weights, y_preds, obs_variance):
+    """Upper bound on the mode information ``I(M; Y)`` for diagonal predictives (nats).
+
+    The diagonal-covariance case of :func:`alias_breaking_eig_from_covariances`:
+    each mode's predictive covariance is ``diag(obs_variance)``. The between-mode
+    spread of the predictions still enters with its full outer product, so in more
+    than one dimension the bound is tighter than a per-observable sum. Components
+    whose predictive covariances have off-diagonal terms must use
+    :func:`alias_breaking_eig_from_covariances`; dropping those terms can report zero
+    mode information for modes that the joint observation distinguishes.
+
+    Args:
+        weights: Mode weights, nonnegative and summing to one. Shape ``(K,)``.
+        y_preds: Predictions at each mode. Shape ``(K, n_obs)``.
+        obs_variance: Positive predictive variances, as a scalar or ``(n_obs,)``
+            shared by every mode, or ``(K, n_obs)`` per mode (for instance
+            ``diag(J_k Sigma_k J_k^T) + R`` when the within-mode correlations are
+            known to vanish).
+
+    Returns:
+        Scalar upper bound on the mode information, in nats.
     """
     y_preds = jnp.asarray(y_preds)
     pred_var = jnp.broadcast_to(jnp.asarray(obs_variance), y_preds.shape)
-    y_mean = jnp.sum(weights[:, None] * y_preds, axis=0)
-    y_var = jnp.sum(weights[:, None] * (y_preds - y_mean[None, :]) ** 2, axis=0)
-    within = jnp.sum(weights[:, None] * pred_var, axis=0)
-    log_within = jnp.sum(weights[:, None] * jnp.log(pred_var), axis=0)
-    bound = 0.5 * jnp.sum(jnp.log(y_var + within) - log_within)
-    return jnp.minimum(bound, _categorical_entropy(weights))
+    diag_covs = pred_var[:, :, None] * jnp.eye(y_preds.shape[1], dtype=pred_var.dtype)
+    return alias_breaking_eig_from_covariances(weights, y_preds, diag_covs)
 
 
 def detectability_eig(weights, det_weights):
@@ -327,22 +407,18 @@ def _build_eig_batch_fn(forward, detectable=None):
         geom_eigs = jax.vmap(lambda cov, jac: geometric_eig(cov, jac, obs_var)[0])(
             covs, jacobians
         )
-        # Posterior-width-aware per-mode predictive: diag(J_k Sigma_k J_k^T) + R.
-        pred_var = (
-            jax.vmap(lambda jac, cov: jnp.einsum("ij,jk,ik->i", jac, cov, jac))(
-                jacobians, covs
-            )
-            + obs_var
-        )
+        # Full per-mode predictive covariance S_k = J_k Sigma_k J_k^T + R.
+        noise = jnp.diag(jnp.broadcast_to(obs_var, (y_preds.shape[1],)))
+        pred_cov = jax.vmap(lambda jac, cov: jac @ cov @ jac.T)(jacobians, covs) + noise
         if detectable is None:
             det_w = jnp.ones(means.shape[0])
             weighted_geom = jnp.sum(weights * geom_eigs)
-            alias_val = alias_breaking_eig(weights, y_preds, pred_var)
+            alias_val = alias_breaking_eig_from_covariances(weights, y_preds, pred_cov)
         else:
             det_w = jax.vmap(lambda z: detectable(z, candidate))(means)
             weighted_geom = jnp.sum(weights * det_w * geom_eigs)
-            alias_val = alias_breaking_eig(
-                weights, y_preds, pred_var
+            alias_val = alias_breaking_eig_from_covariances(
+                weights, y_preds, pred_cov
             ) + detectability_eig(weights, det_w)
         return weighted_geom + alias_val, weighted_geom, alias_val, y_preds, det_w
 
@@ -374,7 +450,12 @@ def evaluate_candidates(
 
     Returns:
         Dict with ``total_eig (N,)``, ``geometric_eig (N,)``, ``alias_eig (N,)``,
-        ``predictions (N, K, n_obs)``, ``detectability (N, K)``.
+        ``predictions (N, K, n_obs)``, ``detectability (N, K)``. ``geometric_eig`` is
+        the weighted within-mode gain under local linearization, ``alias_eig`` is the
+        upper bound of :func:`alias_breaking_eig_from_covariances` on the mode
+        information (plus the exact detection-channel term when ``detectable`` is
+        given), and ``total_eig`` is their sum, so it is an approximate score that
+        inherits the bound rather than an exact expected information gain.
     """
     obs_var = jnp.atleast_1d(jnp.asarray(obs_variance))
     batch_fn = None

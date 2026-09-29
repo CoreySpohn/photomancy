@@ -9,7 +9,7 @@ exactness and upper-bound properties on small toys. Each estimator returns
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
-from jax.scipy.stats import norm
+from jax.scipy.stats import multivariate_normal, norm
 
 
 def _mode_loglik(y, means, sds):
@@ -137,4 +137,55 @@ def class_mi_mc(key, weights, class_probs, means, variances, n_samples=20000):
         return log_joint_c - log_p_class[c] - log_marg
 
     vals = jax.vmap(one)(ys, cs)
+    return jnp.mean(vals), jnp.std(vals) / jnp.sqrt(n_samples)
+
+
+def reported_mixture_mode_mi_mc(
+    key, weights, means, covs, det_probs=None, n_samples=200000
+):
+    """MC estimate of I(M; (D, Y)) for a full-covariance Gaussian mixture.
+
+    The reporting model: given mode ``k`` the observation is reported with
+    probability ``d_k`` (``D = 1``), and a reported value is drawn from the full
+    Gaussian ``N(means[k], covs[k])`` independently of the reporting event; an
+    unreported record carries no value. Averages ``log p(D, y | k) - log pbar(D, y)``
+    over joint draws with every density exact. ``det_probs=None`` means every
+    observation is reported, which gives the continuous-channel ``I(M; Y)``.
+
+    Args:
+        key: PRNG key.
+        weights: Mode weights. Shape ``(K,)``.
+        means: Per-mode predictive means. Shape ``(K, n_obs)``.
+        covs: Per-mode full predictive covariances. Shape ``(K, n_obs, n_obs)``.
+        det_probs: Per-mode reporting probabilities. Shape ``(K,)``.
+        n_samples: Number of joint draws.
+
+    Returns:
+        ``(estimate, standard_error)`` in nats.
+    """
+    n_modes = weights.shape[0]
+    if det_probs is None:
+        det_probs = jnp.ones(n_modes)
+    k_key, d_key, y_key = jax.random.split(key, 3)
+    ks = jax.random.choice(k_key, n_modes, (n_samples,), p=weights)
+    ds = jax.random.bernoulli(d_key, det_probs[ks])
+    chols = jnp.linalg.cholesky(covs)
+    eps = jax.random.normal(y_key, (n_samples, means.shape[1]))
+    ys = means[ks] + jnp.einsum("nij,nj->ni", chols[ks], eps)
+
+    def _safe_log(p):
+        return jnp.where(p > 0.0, jnp.log(jnp.where(p > 0.0, p, 1.0)), -jnp.inf)
+
+    log_w = _safe_log(weights)
+    log_d = _safe_log(det_probs)
+    log_nd = _safe_log(1.0 - det_probs)
+
+    def one(y, k, d):
+        comp = jax.vmap(lambda m, c: multivariate_normal.logpdf(y, m, c))(means, covs)
+        log_joint_det = log_d + comp
+        own = jnp.where(d, log_joint_det[k], log_nd[k])
+        marg = jnp.where(d, logsumexp(log_w + log_joint_det), logsumexp(log_w + log_nd))
+        return own - marg
+
+    vals = jax.vmap(one)(ys, ks, ds)
     return jnp.mean(vals), jnp.std(vals) / jnp.sqrt(n_samples)

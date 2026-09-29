@@ -23,6 +23,7 @@ from orbix.kepler.core import diff_solve_trig
 
 from photomancy.eig import (
     alias_breaking_eig,
+    alias_breaking_eig_from_covariances,
     detectability_eig,
     geometric_eig,
 )
@@ -31,6 +32,7 @@ from photomancy.posterior import MixturePosterior
 
 __all__ = [
     "alias_breaking_eig",
+    "alias_breaking_eig_from_covariances",
     "detectability_eig",
     "evaluate_orbit_candidates",
     "geometric_eig",

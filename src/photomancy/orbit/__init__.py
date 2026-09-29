@@ -27,6 +27,7 @@ from photomancy.orbit.diagnostics import (
 )
 from photomancy.orbit.eig import (
     alias_breaking_eig,
+    alias_breaking_eig_from_covariances,
     evaluate_orbit_candidates,
     geometric_eig,
 )
@@ -105,6 +106,7 @@ __all__ = [
     # Exact few-epoch fitters
     "admissible_region_fit",
     "alias_breaking_eig",
+    "alias_breaking_eig_from_covariances",
     "build_orbit_logdensity",
     # Orbital-mechanics primitives (re-exported from orbix)
     "diff_solve_trig",

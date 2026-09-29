@@ -141,23 +141,35 @@ so an observation that only sharpens a nuisance parameter books no gain (the
 nuisance shrinkage indiscriminately.
 
 **Mode-discrimination gain.** When several modes survive, they predict different
-observations, and an observation that separates them sharpens the weights. That
-information is bounded in two ways, and `alias_breaking_eig` returns the intersection of
-the bounds. Per observable, with per-mode predictions $y_k$ and per-mode predictive
-variances $s_k^2 = \mathrm{diag}(J_k \Sigma_k J_k^\top) + R$, the maximum-entropy
-(moment-matched) bound on the discrete information is
+observations, and an observation that separates them sharpens the weights. The mode
+information $I(M; Y)$ has no closed form for a Gaussian mixture, so the library reports an
+upper bound on it, the intersection of two bounds, which `alias_breaking_eig_from_covariances`
+returns. Each mode predicts the observation as $\mathcal{N}(y_k, S_k)$, where the full
+predictive covariance $S_k = J_k \Sigma_k J_k^\top + R$ carries the within-mode spread and its
+correlations as well as the measurement noise. Because $I(M; Y) = H(Y) - \sum_k w_k H(Y \mid k)$
+and a Gaussian has the largest entropy for a given covariance, the moment-matched bound is
 
-$$ I(M; Y) \;\le\; \tfrac{1}{2} \sum_{\text{obs}} \Big[
-\log\!\Big(\mathrm{Var}_w(y) + \sum_k w_k s_k^2\Big) - \sum_k w_k \log s_k^2 \Big], $$
+$$ I(M; Y) \;\le\; \tfrac{1}{2} \Big[ \log\big|S_{\mathrm{mix}}\big|
+- \sum_k w_k \log|S_k| \Big], \qquad
+S_{\mathrm{mix}} = \sum_k w_k \big[ S_k + (y_k - \bar y)(y_k - \bar y)^\top \big], $$
 
-with $\mathrm{Var}_w(y)$ the weighted variance of the predictions; and globally the
-information about the mode label cannot exceed the mode entropy, $I(M; Y) \le H(w)$. Two
-perfectly resolved 50/50 modes are worth $\ln 2$ nats, however far apart their
-predictions sit. Using the predictive widths $s_k^2$ rather than the bare measurement
-variance matters whenever the within-mode spread swallows the mode separation. This is
-the part of the gain that the Fisher information cannot describe, a property of the
-discrete spread across modes rather than the local curvature within one, so the chain
-rule above partitions the total into a within-mode Fisher part and a between-mode part.
+with $\bar y = \sum_k w_k y_k$; and globally the information about the mode label cannot
+exceed the mode entropy, $I(M; Y) \le H(w)$, which is applied after the Gaussian bound. Two
+perfectly resolved 50/50 modes are worth $\ln 2$ nats, however far apart their predictions
+sit. The determinants must be taken over the full covariances, because two modes can share
+their means and marginal variances and differ only in their correlations: with
+$S_{1,2} = \begin{pmatrix} 1.1 & \pm 0.9 \\ \pm 0.9 & 1.1 \end{pmatrix}$ the bound is
+$\tfrac{1}{2}\log(1.21/0.4) \approx 0.553$ nats, a Monte Carlo evaluation of the exact mode
+information gives about $0.331$ nats, and a per-observable (diagonal) evaluation would report
+zero in these coordinates and $0.553$ after a $45^\circ$ rotation of the same experiment. The
+full-determinant form is invariant under any invertible linear change of observable basis.
+The result is an upper bound rather than an estimate: it is tight when the modes are resolved
+(the $H(w)$ cap) or identical (zero), and it overstates the information of partially
+overlapping modes. The variance interface `alias_breaking_eig` is the diagonal special case,
+for predictive covariances known to be diagonal. This is the part of the gain that the Fisher
+information cannot describe, a property of the discrete spread across modes rather than the
+local curvature within one, so the chain rule above partitions the total into a within-mode
+Fisher part and a between-mode part.
 
 **Detection-channel gain.** When detection is itself uncertain, each mode carries a
 detection probability $d_k \in [0, 1]$, and the binary outcome $D$ carries exactly

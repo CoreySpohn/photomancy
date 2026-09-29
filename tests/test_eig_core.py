@@ -1,6 +1,7 @@
 """Tests for the domain-agnostic EIG layer."""
 
 import jax
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -11,10 +12,12 @@ from nmc_reference import (  # noqa: E402
     detection_channel_mi_mc,
     mixture_mode_mi_mc,
     probit_site_moments_mc,
+    reported_mixture_mode_mi_mc,
 )
 
 from photomancy.eig import (  # noqa: E402
     alias_breaking_eig,
+    alias_breaking_eig_from_covariances,
     class_eig,
     detectability_eig,
     detection_channel_eig,
@@ -25,7 +28,7 @@ from photomancy.eig import (  # noqa: E402
     null_update,
     probit_gaussian_mass,
 )
-from photomancy.posterior import MixturePosterior
+from photomancy.posterior import MixturePosterior  # noqa: E402
 
 
 def _two_mode_posterior():
@@ -443,7 +446,7 @@ def test_null_update_kills_the_detectable_mode():
     means = jnp.array([[3.0], [-3.0]])
     covs = jnp.array([[[0.2]], [[0.2]]])
     a, b = 0.0, jnp.array([3.0])
-    w_new, m_new, c_new = null_update(weights, means, covs, a, b)
+    w_new, m_new, _c_new = null_update(weights, means, covs, a, b)
     assert w_new[1] > 0.999
     assert jnp.allclose(jnp.sum(w_new), 1.0, rtol=1.0e-9)
     # The surviving mode was never near the boundary: moments unchanged.
@@ -456,7 +459,7 @@ def test_null_update_shaves_a_mode_cut_by_the_limit():
     means = jnp.array([[0.0]])
     covs = jnp.array([[[1.0]]])
     a, b = 0.0, jnp.array([2.0])  # boundary right through the mode
-    w_new, m_new, c_new = null_update(weights, means, covs, a, b)
+    _w_new, m_new, c_new = null_update(weights, means, covs, a, b)
     assert m_new[0, 0] < -0.3  # pushed toward the undetectable side
     assert c_new[0, 0, 0] < 1.0  # tail shaved
 
@@ -521,3 +524,201 @@ def test_fisher_is_blind_to_the_null_but_the_channel_mi_is_not():
 
     assert bernoulli_fim(6.0) < 1.0e-20
     assert bernoulli_fim(-6.0) < 1.0e-20
+
+
+# ---------------------------------------------------------------------------
+# Full predictive covariance: correlated components and observable rotations
+# ---------------------------------------------------------------------------
+
+# Equal-weight, zero-mean components with identical marginal variances and
+# opposite correlations, observed through the identity with isotropic noise.
+# Only the joint observation can tell them apart.
+OPPOSITE_COVS = jnp.array([[[1.0, 0.9], [0.9, 1.0]], [[1.0, -0.9], [-0.9, 1.0]]])
+OPPOSITE_NOISE = 0.1
+ROTATION_45 = jnp.array([[1.0, 1.0], [-1.0, 1.0]]) / jnp.sqrt(2.0)
+
+
+def _opposite_correlation_posterior():
+    return MixturePosterior(
+        means=jnp.zeros((2, 2)),
+        covs=OPPOSITE_COVS,
+        log_evidences=jnp.log(jnp.array([0.5, 0.5])),
+    )
+
+
+def test_mode_information_invariant_under_observable_rotation():
+    """Rotating the observables of one physical experiment preserves every term.
+
+    An orthogonal rotation of the observation with isotropic noise is the same
+    experiment, so the mode-information bound must not change, and it must sit
+    above a full-covariance Monte Carlo estimate of I(M; Y), which is positive
+    here. Tolerance: floating-point for the invariance; monte-carlo (4 sigma,
+    200000 draws, seed 0) for the bound.
+    """
+    posterior = _opposite_correlation_posterior()
+    original = evaluate_candidates(
+        posterior, jnp.array([0.0]), lambda z, c: z, OPPOSITE_NOISE
+    )
+    rotated = evaluate_candidates(
+        posterior, jnp.array([0.0]), lambda z, c: ROTATION_45 @ z, OPPOSITE_NOISE
+    )
+    for name in ("total_eig", "geometric_eig", "alias_eig"):
+        assert jnp.allclose(original[name], rotated[name], rtol=0.0, atol=1e-12), name
+
+    predictive = OPPOSITE_COVS + OPPOSITE_NOISE * jnp.eye(2)
+    mc, se = reported_mixture_mode_mi_mc(
+        jax.random.PRNGKey(0), jnp.array([0.5, 0.5]), jnp.zeros((2, 2)), predictive
+    )
+    assert mc > 0.2
+    assert original["alias_eig"][0] >= mc - 4.0 * se
+
+
+def test_covariance_bound_closed_form_for_opposite_correlations():
+    """The moment-matched bound uses full determinants.
+
+    The mixture covariance is ``1.1 I`` and each component determinant is
+    ``1.1**2 - 0.9**2 = 0.4``, so the bound is ``0.5*log(1.21 / 0.4)``. The
+    per-observable (diagonal) form reports zero here. Tolerance: exact-algebra.
+    """
+    predictive = OPPOSITE_COVS + OPPOSITE_NOISE * jnp.eye(2)
+    val = alias_breaking_eig_from_covariances(
+        jnp.array([0.5, 0.5]), jnp.zeros((2, 2)), predictive
+    )
+    assert jnp.allclose(val, 0.5 * jnp.log(1.21 / 0.4), rtol=1e-12)
+
+
+def test_covariance_bound_rotation_invariant_with_offset_means():
+    """An orthogonal change of observable basis leaves the bound unchanged."""
+    weights = jnp.array([0.2, 0.5, 0.3])
+    means = jnp.array([[0.3, -0.4], [1.0, 0.2], [-0.5, 0.7]])
+    covs = jnp.array(
+        [
+            [[0.8, 0.3], [0.3, 0.5]],
+            [[1.2, -0.6], [-0.6, 0.9]],
+            [[0.4, 0.1], [0.1, 1.5]],
+        ]
+    )
+    rot = jnp.array([[jnp.cos(0.7), -jnp.sin(0.7)], [jnp.sin(0.7), jnp.cos(0.7)]])
+    base = alias_breaking_eig_from_covariances(weights, means, covs)
+    turned = alias_breaking_eig_from_covariances(
+        weights, means @ rot.T, jnp.einsum("ij,kjl,ml->kim", rot, covs, rot)
+    )
+    assert base > 0.0
+    assert jnp.allclose(base, turned, rtol=1e-12)
+
+
+def test_covariance_bound_upper_bounds_full_covariance_mc():
+    """The bound sits above the exact I(M; Y) and is not equal to it.
+
+    Reference: a full-covariance Monte Carlo of the mixture mutual information
+    (200000 draws, seed 0). Tolerance: monte-carlo, 4 sigma on each side.
+    """
+    weights = jnp.array([0.5, 0.5])
+    predictive = OPPOSITE_COVS + OPPOSITE_NOISE * jnp.eye(2)
+    bound = alias_breaking_eig_from_covariances(weights, jnp.zeros((2, 2)), predictive)
+    mc, se = reported_mixture_mode_mi_mc(
+        jax.random.PRNGKey(0), weights, jnp.zeros((2, 2)), predictive
+    )
+    assert mc > 0.2  # the correlation difference is informative
+    assert bound >= mc - 4.0 * se
+    assert bound > mc + 4.0 * se  # an upper bound here, not the exact value
+
+
+def test_covariance_bound_zero_for_identical_distributions():
+    """Identical means and full covariances carry no mode information."""
+    cov = jnp.array([[1.0, 0.7], [0.7, 2.0]])
+    val = alias_breaking_eig_from_covariances(
+        jnp.array([0.2, 0.3, 0.5]),
+        jnp.tile(jnp.array([[0.4, -1.0]]), (3, 1)),
+        jnp.tile(cov[None], (3, 1, 1)),
+    )
+    assert jnp.allclose(val, 0.0, atol=1e-12)
+
+
+def test_covariance_bound_matches_variance_interface_in_one_dimension():
+    """In one dimension the covariance form equals the variance form and closed form."""
+    weights = jnp.array([0.5, 0.5])
+    y_preds = jnp.array([[0.0], [0.5]])
+    variances = jnp.array([[1.0], [1.3]])
+    from_cov = alias_breaking_eig_from_covariances(
+        weights, y_preds, variances[:, :, None]
+    )
+    from_var = alias_breaking_eig(weights, y_preds, variances)
+    expected = 0.5 * (jnp.log(0.0625 + 1.15) - 0.5 * jnp.log(1.3))
+    assert jnp.allclose(from_cov, from_var, rtol=1e-12)
+    assert jnp.allclose(from_cov, expected, rtol=1e-12)
+
+
+def test_variance_interface_is_the_diagonal_covariance_case():
+    """Per-mode variances mean diagonal predictive covariances, in any dimension.
+
+    The between-mode spread still enters with its full outer product, so for
+    diagonal inputs in two dimensions the result is not the per-observable sum.
+    """
+    weights = jnp.array([0.3, 0.7])
+    y_preds = jnp.array([[0.0, 0.0], [1.0, 1.0]])
+    variances = jnp.array([[1.0, 2.0], [0.5, 1.5]])
+    diag_covs = jax.vmap(jnp.diag)(variances)
+    assert jnp.allclose(
+        alias_breaking_eig(weights, y_preds, variances),
+        alias_breaking_eig_from_covariances(weights, y_preds, diag_covs),
+        rtol=1e-12,
+    )
+    # Scalar and (n_obs,) measurement variances broadcast to every mode.
+    assert jnp.allclose(
+        alias_breaking_eig(weights, y_preds, jnp.array([0.5, 2.0])),
+        alias_breaking_eig_from_covariances(
+            weights, y_preds, jnp.tile(jnp.diag(jnp.array([0.5, 2.0]))[None], (2, 1, 1))
+        ),
+        rtol=1e-12,
+    )
+
+
+def test_covariance_bound_capped_at_mode_entropy():
+    """Resolved correlated components are worth H(w), not the Gaussian bound."""
+    weights = jnp.array([0.2, 0.3, 0.5])
+    means = jnp.array([[0.0, 0.0], [80.0, 0.0], [0.0, 80.0]])
+    covs = jnp.tile(OPPOSITE_COVS[:1] + OPPOSITE_NOISE * jnp.eye(2), (3, 1, 1))
+    val = alias_breaking_eig_from_covariances(weights, means, covs)
+    h_w = -jnp.sum(weights * jnp.log(weights))
+    assert jnp.allclose(val, h_w, rtol=1e-12)
+
+
+def test_covariance_bound_ignores_zero_mass_components():
+    """A zero-weight component is absent: adding one leaves the bound unchanged."""
+    weights = jnp.array([0.4, 0.6])
+    means = jnp.array([[0.0, 0.0], [0.8, -0.3]])
+    covs = OPPOSITE_COVS + OPPOSITE_NOISE * jnp.eye(2)
+    base = alias_breaking_eig_from_covariances(weights, means, covs)
+    padded = alias_breaking_eig_from_covariances(
+        jnp.array([0.4, 0.0, 0.6]),
+        jnp.array([[0.0, 0.0], [1.0e6, -1.0e6], [0.8, -0.3]]),
+        jnp.stack([covs[0], 1.0e-6 * jnp.eye(2), covs[1]]),
+    )
+    assert jnp.allclose(base, padded, rtol=1e-12)
+
+
+def test_covariance_bound_rejects_non_positive_definite_input():
+    """Indefinite, singular, or nonfinite covariances give NaN, not a clipped number."""
+    weights = jnp.array([0.5, 0.5])
+    means = jnp.zeros((2, 2))
+    good = jnp.eye(2)
+    for bad in (
+        jnp.array([[1.0, 2.0], [2.0, 1.0]]),  # indefinite
+        jnp.array([[1.0, 1.0], [1.0, 1.0]]),  # singular
+        jnp.array([[jnp.nan, 0.0], [0.0, 1.0]]),
+    ):
+        val = alias_breaking_eig_from_covariances(
+            weights, means, jnp.stack([good, bad])
+        )
+        assert jnp.isnan(val)
+
+
+def test_covariance_bound_rejects_mismatched_shapes():
+    """Shapes must be (K,), (K, n_obs), (K, n_obs, n_obs); no 2-D covariance guess."""
+    weights = jnp.array([0.5, 0.5])
+    means = jnp.zeros((2, 2))
+    with pytest.raises(ValueError, match="predictive_covariances"):
+        alias_breaking_eig_from_covariances(weights, means, jnp.ones((2, 2)))
+    with pytest.raises(ValueError, match="predictive_covariances"):
+        alias_breaking_eig_from_covariances(weights, means, jnp.ones((2, 3, 3)))
