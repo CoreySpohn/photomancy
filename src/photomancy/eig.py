@@ -64,12 +64,18 @@ def _logdet_positive_definite(cov):
     """Log determinant through a Cholesky factor, plus a positive-definite flag.
 
     Returns ``(logdet, ok)``. ``ok`` is false when the factor has a nonpositive or
-    nonfinite diagonal, i.e. when ``cov`` is not numerically positive definite; the
+    nonfinite diagonal, or when the squared ratio of its smallest to largest
+    diagonal entry is within a factor of 100 of the working precision: ``cov`` is
+    then not positive definite to the accuracy its dtype can carry, and its
+    smallest eigenvalues (which set the log determinant) are rounding noise. The
     returned ``logdet`` is then a placeholder the caller must discard.
     """
     diag = jnp.diagonal(jnp.linalg.cholesky(cov))
     ok = jnp.all(jnp.isfinite(diag) & (diag > 0.0))
-    return 2.0 * jnp.sum(jnp.log(jnp.where(ok, diag, 1.0))), ok
+    safe = jnp.where(ok, diag, 1.0)
+    eps = jnp.finfo(safe.dtype).eps
+    ok = ok & ((jnp.min(safe) / jnp.max(safe)) ** 2 > 100.0 * eps)
+    return 2.0 * jnp.sum(jnp.log(safe)), ok
 
 
 def alias_breaking_eig_from_covariances(weights, y_preds, predictive_covariances):
@@ -90,11 +96,16 @@ def alias_breaking_eig_from_covariances(weights, y_preds, predictive_covariances
     It is invariant under any invertible linear change of observable basis, so
     components that differ only in their correlations are distinguished.
 
-    Log determinants come from Cholesky factors. Every component with positive
-    weight must have a symmetric positive-definite covariance; if any such
-    covariance (or the mixture covariance) is not numerically positive definite,
-    the result is NaN rather than a clipped number. Components with zero weight are
-    treated as absent, and their means and covariances are not read.
+    Log determinants come from Cholesky factors of the covariances rescaled by the
+    mixture's standard deviations, so observables in different units do not
+    matter. Every component with positive weight must have a symmetric
+    positive-definite covariance; if any such covariance (or the mixture
+    covariance) is not positive definite to the accuracy of its dtype (a rescaled
+    condition number within a factor of 100 of ``1 / eps``, about ``1e5`` in
+    float32), the result is NaN rather than a wrong number. Rank candidates with a
+    NaN-aware reduction such as ``jnp.nanargmax``, and use 64-bit precision for
+    predictives that are this elongated. Components with zero weight are treated
+    as absent, and their means and covariances are not read.
 
     Args:
         weights: Mode weights, nonnegative and summing to one. Shape ``(K,)``.
@@ -132,10 +143,18 @@ def alias_breaking_eig_from_covariances(weights, y_preds, predictive_covariances
     mixture_cov = jnp.einsum("k,kij->ij", weights, covs) + jnp.einsum(
         "k,ki,kj->ij", weights, centered, centered
     )
-    comp_logdet, comp_ok = jax.vmap(_logdet_positive_definite)(covs)
-    mix_logdet, mix_ok = _logdet_positive_definite(mixture_cov)
+    # Rescale every covariance by the mixture's standard deviations. The shift
+    # of each log determinant is the same and cancels because the weights sum
+    # to one; observables in very different units then do not read as
+    # ill-conditioned.
+    scale = jnp.sqrt(jnp.abs(jnp.diagonal(mixture_cov)))
+    scale = jnp.where(scale > 0.0, scale, 1.0)
+    inv_outer = 1.0 / (scale[:, None] * scale[None, :])
+    comp_logdet, comp_ok = jax.vmap(_logdet_positive_definite)(covs * inv_outer)
+    mix_logdet, mix_ok = _logdet_positive_definite(mixture_cov * inv_outer)
     bound = 0.5 * (mix_logdet - jnp.sum(weights * comp_logdet))
-    capped = jnp.minimum(bound, _categorical_entropy(weights))
+    # The bound is nonnegative (log det is concave); clip residual rounding.
+    capped = jnp.clip(bound, 0.0, _categorical_entropy(weights))
     return jnp.where(jnp.all(comp_ok) & mix_ok, capped, jnp.nan)
 
 
@@ -496,7 +515,9 @@ def evaluate_candidates(
         mode-information term (with ``detectable``, the exact reporting term plus
         ``p_det`` times the bound on the reported mixture), and ``total_eig`` is
         their sum, so it is an approximate score that inherits the bound rather than
-        an exact expected information gain.
+        an exact expected information gain. A candidate whose predictive covariance
+        is not positive definite at the working precision scores NaN (see
+        :func:`alias_breaking_eig_from_covariances`); rank with ``jnp.nanargmax``.
     """
     obs_var = jnp.atleast_1d(jnp.asarray(obs_variance))
     batch_fn = None

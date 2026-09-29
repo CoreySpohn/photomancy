@@ -1,6 +1,7 @@
 """Tests for the domain-agnostic EIG layer."""
 
 import jax
+import numpy as np
 import pytest
 
 jax.config.update("jax_enable_x64", True)
@@ -620,6 +621,8 @@ def test_covariance_bound_upper_bounds_full_covariance_mc():
         jax.random.PRNGKey(0), weights, jnp.zeros((2, 2)), predictive
     )
     assert mc > 0.2  # the correlation difference is informative
+    # The value quoted in the mathematical-foundations explanation page.
+    assert abs(mc - 0.331) < 4.0 * se + 5e-4
     assert bound >= mc - 4.0 * se
     assert bound > mc + 4.0 * se  # an upper bound here, not the exact value
 
@@ -722,6 +725,80 @@ def test_covariance_bound_rejects_mismatched_shapes():
         alias_breaking_eig_from_covariances(weights, means, jnp.ones((2, 2)))
     with pytest.raises(ValueError, match="predictive_covariances"):
         alias_breaking_eig_from_covariances(weights, means, jnp.ones((2, 3, 3)))
+
+
+def _float64_covariance_bound(weights, means, covs):
+    """Independent NumPy float64 evaluation of the moment-matched Gaussian bound."""
+    weights = np.asarray(weights, float)
+    means = np.asarray(means, float)
+    covs = np.asarray(covs, float)
+    centered = means - weights @ means
+    mixture = np.einsum("k,kij->ij", weights, covs) + np.einsum(
+        "k,ki,kj->ij", weights, centered, centered
+    )
+    logdets = np.array([np.linalg.slogdet(c)[1] for c in covs])
+    bound = 0.5 * (np.linalg.slogdet(mixture)[1] - weights @ logdets)
+    entropy = -np.sum(weights[weights > 0] * np.log(weights[weights > 0]))
+    return min(bound, entropy)
+
+
+def test_covariance_bound_never_returns_a_wrong_finite_value_in_float32():
+    """Near-singular float32 predictives give NaN or the float64 value.
+
+    Never a negative or otherwise wrong upper bound. Each component is a
+    strongly elongated Gaussian (condition number up to about 1e9), which
+    float32 cannot factor faithfully.
+    """
+    rng = np.random.default_rng(3)
+    weights = np.array([0.5, 0.5])
+    finite = 0
+    for trial in range(200):
+        scale = 10.0 ** rng.uniform(1.0, 4.5)
+        # Half the components share one elongation axis, where the float32
+        # rounding of the dominant direction swamps the unit noise floor.
+        v = rng.normal(size=(2, 2))
+        v /= np.linalg.norm(v, axis=1, keepdims=True)
+        if trial % 2:
+            v[1] = v[0]
+        covs = scale**2 * np.einsum("ki,kj->kij", v, v) + np.eye(2)
+        means = rng.normal(size=(2, 2)) * (trial % 3 > 0)
+        val = float(
+            alias_breaking_eig_from_covariances(
+                jnp.asarray(weights, jnp.float32),
+                jnp.asarray(means, jnp.float32),
+                jnp.asarray(covs, jnp.float32),
+            )
+        )
+        if np.isnan(val):
+            continue
+        finite += 1
+        # Compare against float64 on the float32-rounded inputs the function saw.
+        ref = _float64_covariance_bound(
+            weights,
+            np.asarray(means, np.float32),
+            np.asarray(covs, np.float32),
+        )
+        assert 0.0 <= val <= np.log(2.0) + 1e-6
+        assert val == pytest.approx(ref, abs=1e-2), (scale, val, ref)
+    # The well-conditioned half of the ensemble must still be scored.
+    assert finite >= 50
+
+
+def test_covariance_bound_is_exact_for_mixed_units_in_float32():
+    """Observables in very different units are not an ill-conditioning problem."""
+    scales = np.array([1e-4, 1e3])  # e.g. arcsec astrometry beside m/s RV
+    base = np.array([[[1.0, 0.6], [0.6, 1.0]], [[1.0, -0.6], [-0.6, 1.0]]])
+    covs = base * np.outer(scales, scales)
+    means = np.zeros((2, 2))
+    weights = np.array([0.5, 0.5])
+    val = alias_breaking_eig_from_covariances(
+        jnp.asarray(weights, jnp.float32),
+        jnp.asarray(means, jnp.float32),
+        jnp.asarray(covs, jnp.float32),
+    )
+    ref = _float64_covariance_bound(weights, means, base)
+    assert jnp.isfinite(val)
+    assert float(val) == pytest.approx(ref, rel=1e-4)
 
 
 # ---------------------------------------------------------------------------

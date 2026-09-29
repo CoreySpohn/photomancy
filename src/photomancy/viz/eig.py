@@ -40,7 +40,7 @@ def plot_eig(
             call, so the components keep their colors across figures).
         epochs_d: Optional existing observation epochs, drawn as faint
             vertical reference lines.
-        mark_best: Mark ``argmax(total_eig)`` with a dashed vertical line
+        mark_best: Mark ``nanargmax(total_eig)`` with a dashed vertical line
             in the total component's color.
         ax: Axes to draw into. None creates a new figure.
         line_kw: Extra kwargs for each component's ``ax.plot``, applied
@@ -99,7 +99,7 @@ def plot_eig(
         ]
 
     if mark_best and "total_eig" in result:
-        best = t[int(np.argmax(np.asarray(result["total_eig"])))]
+        best = t[int(np.nanargmax(np.asarray(result["total_eig"])))]
         lines.append(ax.axvline(best, color=styles["total"]["color"], ls="--", lw=1.2))
 
     ax.set_xlabel("candidate epoch [days]")

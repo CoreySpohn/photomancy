@@ -45,6 +45,18 @@ def test_plot_eig_draws_components_and_marks_best():
     assert result.ax.get_ylabel() == "expected information gain [nats]"
 
 
+def test_plot_eig_best_marker_skips_unscored_candidates():
+    """A NaN (unscorable) candidate never becomes the marked best epoch."""
+    from photomancy.viz import plot_eig
+
+    t, result_dict = _result()
+    total = np.array(result_dict["total_eig"])
+    total[3] = np.nan
+    result = plot_eig(t, {"total_eig": total})
+    best_line = result.artists["lines"][-1]
+    assert best_line.get_xdata()[0] == pytest.approx(t[int(np.nanargmax(total))])
+
+
 def test_plot_eig_tolerates_missing_components():
     """A result with only total_eig still draws."""
     from photomancy.viz import plot_eig
