@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.1](https://github.com/CoreySpohn/photomancy/compare/v0.2.0...v0.2.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **eig:** bound mode information with full predictive covariances ([9e880f2](https://github.com/CoreySpohn/photomancy/commit/9e880f222da6b232aa80933ee3dca983d4f00248))
+* **eig:** return NaN instead of a wrong bound for predictives beyond working precision, and rank with nanargmax ([7529b3e](https://github.com/CoreySpohn/photomancy/commit/7529b3e13b1034cb7fe94c8ea9e2569593fb9175))
+* **eig:** score reports by the chain rule so an always-null record carries no information ([59a9715](https://github.com/CoreySpohn/photomancy/commit/59a9715a002ecdddd19ec7f4a94c0a2afb5c51ad))
+
 ## [0.2.0](https://github.com/CoreySpohn/photomancy/compare/v0.1.0...v0.2.0) (2026-08-29)
 
 
