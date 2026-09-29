@@ -415,11 +415,22 @@ def _build_eig_batch_fn(forward, detectable=None):
             weighted_geom = jnp.sum(weights * geom_eigs)
             alias_val = alias_breaking_eig_from_covariances(weights, y_preds, pred_cov)
         else:
+            # Restricted reporting model (see evaluate_candidates):
+            # I(M; D, Y) = I(M; D) + p_det I(M; Y | D=1), with the reported
+            # modes weighted by w_k d_k, and the within-mode gain accruing only
+            # to reported records.
             det_w = jax.vmap(lambda z: detectable(z, candidate))(means)
+            p_det = jnp.sum(weights * det_w)
+            reported = p_det > 0.0
+            det_weights = jnp.where(
+                reported, weights * det_w / jnp.where(reported, p_det, 1.0), weights
+            )
             weighted_geom = jnp.sum(weights * det_w * geom_eigs)
-            alias_val = alias_breaking_eig_from_covariances(
-                weights, y_preds, pred_cov
-            ) + detectability_eig(weights, det_w)
+            alias_val = detectability_eig(
+                weights, det_w
+            ) + p_det * alias_breaking_eig_from_covariances(
+                det_weights, y_preds, pred_cov
+            )
         return weighted_geom + alias_val, weighted_geom, alias_val, y_preds, det_w
 
     @jax.jit
@@ -434,7 +445,36 @@ def _build_eig_batch_fn(forward, detectable=None):
 def evaluate_candidates(
     posterior, candidates, forward, obs_variance, *, detectable=None, cache_key=None
 ):
-    """Analytic EIG for a batch of candidate observations against a mixture posterior.
+    """Approximate EIG of a batch of candidate observations for a mixture posterior.
+
+    The score approximates ``I((M, theta); (D, Y))`` for the record a candidate
+    produces, a reporting outcome ``D`` and, when reported, a value ``Y``. Each mode
+    ``k`` is linearized about its mean, so given the mode the reported value is
+    Gaussian, ``N(y_k, S_k)`` with ``S_k = J_k Sigma_k J_k^T + R``, and the
+    within-mode gain is the conjugate Gaussian (Fisher) gain of
+    :func:`geometric_eig`. The mode information uses the upper bound of
+    :func:`alias_breaking_eig_from_covariances`.
+
+    Reporting model. Without ``detectable`` every observation is reported. With
+    ``detectable``, the supported model is restricted: mode ``k`` produces a report
+    (``D = 1``) with probability ``d_k = detectable(mean_k, candidate)``, and the
+    reporting event is conditionally independent of the continuous Gaussian
+    observation within each mode. A report carries the value ``Y``, and a
+    nondetection carries no value. Under this model the chain rule gives
+
+    ``I(M; D, Y) = I(M; D) + p_det * I(M; Y | D = 1)``,
+
+    with ``p_det = sum_k w_k d_k``, the exact reporting term ``I(M; D)`` of
+    :func:`detectability_eig`, and ``I(M; Y | D = 1)`` bounded over the reported
+    mixture, whose weights are proportional to ``w_k d_k``. The within-mode gain of
+    mode ``k`` is weighted by ``w_k d_k``, since only reported records carry it. A
+    record that is never reported (``p_det = 0``) therefore scores zero, a record
+    that is always reported recovers the score without ``detectable``, and a
+    nondetection is informative whenever the ``d_k`` differ. The model does not
+    describe selection on the observed value itself, such as a flux or contrast
+    threshold that cuts through a mode's predictive distribution: that selection
+    changes the conditional distribution of the reported value, which this score
+    does not represent.
 
     Args:
         posterior: A ``MixturePosterior`` (``means (K, d)``, ``covs (K, d, d)``,
@@ -442,9 +482,10 @@ def evaluate_candidates(
         candidates: Batch of candidate designs (opaque to the core). Shape ``(N, ...)``.
         forward: ``forward(z, candidate) -> y (n_obs,)``, differentiable in flat ``z``.
         obs_variance: Scalar or ``(n_obs,)`` measurement variance.
-        detectable: Optional ``detectable(z, candidate) -> float`` in ``[0, 1]``;
-            non-detectable modes contribute no astrometric information and the exact
-            detection-channel MI is added. When omitted, all modes detectable.
+        detectable: Optional ``detectable(z, candidate) -> float`` in ``[0, 1]``,
+            evaluated at each mode mean to give the per-mode reporting probability
+            ``d_k`` of the restricted reporting model above. When omitted, every
+            observation is reported.
         cache_key: Optional hashable key; when given, the compiled batch function is
             cached and reused (so the warm path stays fast).
 
@@ -452,10 +493,10 @@ def evaluate_candidates(
         Dict with ``total_eig (N,)``, ``geometric_eig (N,)``, ``alias_eig (N,)``,
         ``predictions (N, K, n_obs)``, ``detectability (N, K)``. ``geometric_eig`` is
         the weighted within-mode gain under local linearization, ``alias_eig`` is the
-        upper bound of :func:`alias_breaking_eig_from_covariances` on the mode
-        information (plus the exact detection-channel term when ``detectable`` is
-        given), and ``total_eig`` is their sum, so it is an approximate score that
-        inherits the bound rather than an exact expected information gain.
+        mode-information term (with ``detectable``, the exact reporting term plus
+        ``p_det`` times the bound on the reported mixture), and ``total_eig`` is
+        their sum, so it is an approximate score that inherits the bound rather than
+        an exact expected information gain.
     """
     obs_var = jnp.atleast_1d(jnp.asarray(obs_variance))
     batch_fn = None

@@ -240,7 +240,16 @@ def evaluate_orbit_candidates(
 
     Lets OFTI / grid_search (via ``to_unconstrained`` -> ``cluster_to_mixture``) drive
     the same analytic EIG as the Laplace mixture. ``problem`` supplies the model
-    ``unflatten`` and ``constrain``. Returns the per-candidate EIG dict.
+    ``unflatten`` and ``constrain``. Returns the per-candidate EIG dict of
+    :func:`photomancy.eig.evaluate_candidates`, an approximate score.
+
+    Without ``Lambda`` and ``contrast_curve`` every epoch is assumed to yield
+    reported relative astrometry with fixed measurement noise. With both, each mode
+    is reported or not according to its mean orbit (outside ``iwa`` and brighter
+    than the contrast curve), which is the per-mode reporting probability of the
+    restricted reporting model in :func:`photomancy.eig.evaluate_candidates`. The
+    threshold is not applied within a mode, so selection that cuts through a mode's
+    predicted position or brightness is not represented.
     """
     return _orbit_evaluate(
         posterior.means,

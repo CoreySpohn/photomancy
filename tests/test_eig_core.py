@@ -722,3 +722,193 @@ def test_covariance_bound_rejects_mismatched_shapes():
         alias_breaking_eig_from_covariances(weights, means, jnp.ones((2, 2)))
     with pytest.raises(ValueError, match="predictive_covariances"):
         alias_breaking_eig_from_covariances(weights, means, jnp.ones((2, 3, 3)))
+
+
+# ---------------------------------------------------------------------------
+# Reporting model: mode-dependent Bernoulli reporting of a Gaussian observation
+# ---------------------------------------------------------------------------
+
+
+def _separated_null_posterior():
+    return MixturePosterior(
+        means=jnp.array([[-10.0], [10.0]]),
+        covs=jnp.ones((2, 1, 1)),
+        log_evidences=jnp.log(jnp.array([0.5, 0.5])),
+    )
+
+
+def _entropy(p):
+    p = jnp.asarray(p)
+    return -jnp.sum(jnp.where(p > 0.0, p * jnp.log(jnp.where(p > 0.0, p, 1.0)), 0.0))
+
+
+def test_always_null_record_carries_no_information():
+    """A record that is never reported is identical under every mode: zero gain.
+
+    Two resolved modes would be worth ln 2 if observed, but a detection
+    probability of zero for both means the only possible record is the same
+    null. Tolerance: floating-point.
+    """
+    res = evaluate_candidates(
+        _separated_null_posterior(),
+        jnp.array([0.0]),
+        lambda z, c: z,
+        1.0,
+        detectable=lambda z, c: jnp.array(0.0),
+    )
+    for name in ("total_eig", "geometric_eig", "alias_eig"):
+        assert jnp.allclose(res[name], 0.0, rtol=0.0, atol=1e-12), name
+
+
+def test_always_reported_record_recovers_the_continuous_score():
+    """Detection probability one everywhere reproduces the score without reporting."""
+    posterior = _opposite_correlation_posterior()
+    plain = evaluate_candidates(
+        posterior, jnp.array([0.0]), lambda z, c: z, OPPOSITE_NOISE
+    )
+    reported = evaluate_candidates(
+        posterior,
+        jnp.array([0.0]),
+        lambda z, c: z,
+        OPPOSITE_NOISE,
+        detectable=lambda z, c: jnp.array(1.0),
+    )
+    for name in ("total_eig", "geometric_eig", "alias_eig"):
+        assert jnp.allclose(plain[name], reported[name], rtol=1e-12, atol=1e-14), name
+
+
+def test_deterministic_binary_split_is_worth_ln2_of_mode_information():
+    """One mode always reported, the other never: the report alone names the mode.
+
+    The modes overlap in the observable, but the reporting bit already carries
+    all ``H(w) = ln 2`` of mode information, and the reported value cannot add
+    more. The within-mode gain accrues only for the reported mode:
+    ``0.5 * 0.5*log(1 + c**2 var / R)``. Tolerance: exact-algebra.
+    """
+    posterior = _two_mode_posterior()  # modes at 1 and 2, unit variance
+    c = 1.5
+    res = evaluate_candidates(
+        posterior,
+        jnp.array([c]),
+        lambda z, cand: jnp.array([cand * z[0]]),
+        1.0,
+        detectable=lambda z, cand: jnp.where(z[0] < 1.5, 1.0, 0.0),
+    )
+    assert jnp.allclose(res["alias_eig"][0], LN2, rtol=1e-12)
+    assert jnp.allclose(
+        res["geometric_eig"][0], 0.5 * 0.5 * jnp.log1p(c**2), rtol=1e-12
+    )
+
+
+def _reporting_posterior(x_means, x_vars, det_probs, weights):
+    """Modes over ``z = (x, s)``: ``x`` is observed, ``s`` sets the report chance."""
+    n_modes = len(weights)
+    means = jnp.stack([jnp.asarray(x_means), jnp.asarray(det_probs)], axis=1)
+    covs = jnp.zeros((n_modes, 2, 2))
+    covs = covs.at[:, 0, 0].set(jnp.asarray(x_vars))
+    covs = covs.at[:, 1, 1].set(1.0e-4)
+    posterior = MixturePosterior(
+        means=means, covs=covs, log_evidences=jnp.log(jnp.asarray(weights))
+    )
+    return posterior
+
+
+def _score_reporting(posterior, obs_var):
+    return evaluate_candidates(
+        posterior,
+        jnp.array([0.0]),
+        lambda z, c: z[:1],
+        obs_var,
+        detectable=lambda z, c: z[1],
+    )
+
+
+def test_informative_nondetection_matches_direct_enumeration():
+    """With an uninformative value, the mode gain is exactly the report bit I(M; D).
+
+    Every mode predicts the same observable distribution, so a reported value
+    says nothing further and the nondetections carry real information. The
+    reference enumerates the joint table ``p(k, D)`` directly; the restricted
+    reporting model is also checked by Monte Carlo (200000 draws, seed 0).
+    Tolerance: exact-algebra; monte-carlo at 4 sigma.
+    """
+    weights = jnp.array([0.3, 0.3, 0.4])
+    det = jnp.array([0.9, 0.2, 0.5])
+    posterior = _reporting_posterior([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], det, weights)
+    res = _score_reporting(posterior, 0.5)
+
+    p_bar = jnp.sum(weights * det)
+    enumerated = 0.0
+    for k in range(3):
+        for p_given_k, p_marginal in ((det[k], p_bar), (1.0 - det[k], 1.0 - p_bar)):
+            enumerated += weights[k] * p_given_k * jnp.log(p_given_k / p_marginal)
+    assert enumerated > 0.05
+    assert jnp.allclose(res["alias_eig"][0], enumerated, rtol=1e-10)
+
+    mc, se = reported_mixture_mode_mi_mc(
+        jax.random.PRNGKey(0),
+        weights,
+        jnp.zeros((3, 1)),
+        jnp.full((3, 1, 1), 1.5),
+        det_probs=det,
+    )
+    assert jnp.abs(res["alias_eig"][0] - mc) < 4.0 * se
+
+
+def test_resolved_reports_match_direct_enumeration():
+    """Resolved modes: a report names its mode, a null leaves the null posterior.
+
+    Enumeration gives ``I(M; D, Y) = H(w) - (1 - p_det) H(w0)`` with
+    ``w0_k`` proportional to ``w_k (1 - d_k)``: the value is worth ``H(w)`` only
+    when it is seen. Tolerance: exact-algebra; monte-carlo at 4 sigma
+    (200000 draws, seed 0).
+    """
+    weights = jnp.array([0.3, 0.3, 0.4])
+    det = jnp.array([0.9, 0.2, 0.5])
+    x_means = jnp.array([0.0, 60.0, 120.0])
+    posterior = _reporting_posterior(x_means, [1.0, 1.0, 1.0], det, weights)
+    res = _score_reporting(posterior, 0.5)
+
+    p_bar = jnp.sum(weights * det)
+    w_null = weights * (1.0 - det) / (1.0 - p_bar)
+    enumerated = _entropy(weights) - (1.0 - p_bar) * _entropy(w_null)
+    assert jnp.allclose(res["alias_eig"][0], enumerated, rtol=1e-10)
+    assert res["alias_eig"][0] < _entropy(weights)
+
+    mc, se = reported_mixture_mode_mi_mc(
+        jax.random.PRNGKey(0),
+        weights,
+        x_means[:, None],
+        jnp.full((3, 1, 1), 1.5),
+        det_probs=det,
+    )
+    assert jnp.abs(res["alias_eig"][0] - mc) < 4.0 * se
+
+
+def test_mixed_reporting_bounds_the_monte_carlo_mode_information():
+    """Overlapping modes with mixed reporting: the score bounds the exact MI.
+
+    Reference: a Monte Carlo of ``I(M; D, Y)`` under the restricted reporting
+    model (200000 draws, seed 0). The within-mode gain is the reporting-weighted
+    conjugate Gaussian gain ``sum_k w_k d_k 0.5*log(1 + var_k / R)``.
+    Tolerance: monte-carlo at 4 sigma; exact-algebra for the within-mode term.
+    """
+    weights = jnp.array([0.25, 0.45, 0.3])
+    det = jnp.array([0.85, 0.15, 0.6])
+    x_means = jnp.array([0.0, 1.0, 2.5])
+    x_vars = jnp.array([0.4, 1.2, 0.7])
+    obs_var = 0.3
+    posterior = _reporting_posterior(x_means, x_vars, det, weights)
+    res = _score_reporting(posterior, obs_var)
+
+    mc, se = reported_mixture_mode_mi_mc(
+        jax.random.PRNGKey(0),
+        weights,
+        x_means[:, None],
+        (x_vars + obs_var)[:, None, None],
+        det_probs=det,
+    )
+    assert res["alias_eig"][0] >= mc - 4.0 * se
+    assert res["alias_eig"][0] <= _entropy(weights) + 1e-12
+    within = jnp.sum(weights * det * 0.5 * jnp.log1p(x_vars / obs_var))
+    assert jnp.allclose(res["geometric_eig"][0], within, rtol=1e-8)

@@ -179,9 +179,21 @@ $$ \mathrm{EIG}_{\mathrm{det}} = I(D; M) = H_b\Big(\sum_k w_k d_k\Big) - \sum_k 
 
 the closed-form mutual information of the detection channel (`detectability_eig`). It
 saturates at $\min\big(H_b(\bar d),\, H(w)\big)$: once every mode agrees on
-detectability, the detection bit teaches nothing more. The continuous-parameter term is
-weighted by detectability, so a mode that cannot be seen contributes no parameter
-information.
+detectability, the detection bit teaches nothing more. `evaluate_candidates` combines this
+bit with the continuous value under a restricted reporting model, in which mode $k$ is
+reported with probability $d_k$ independently of the Gaussian value within that mode, and a
+nondetection carries no value. The chain rule then gives
+
+$$ I(M; D, Y) = I(M; D) + p_{\mathrm{det}}\, I(M; Y \mid D = 1), \qquad
+p_{\mathrm{det}} = \sum_k w_k d_k, $$
+
+where the reported mixture has weights proportional to $w_k d_k$ and its mode information
+takes the bound above. The within-mode gain of mode $k$ is weighted by $w_k d_k$, because only
+a reported value sharpens the parameters. A record that is never reported scores zero, a
+record that is always reported recovers the continuous score, and a nondetection is
+informative whenever the $d_k$ differ. The model does not describe selection on the value
+itself, such as a flux or contrast threshold that cuts through the predictive distribution of
+one mode, because that selection changes the conditional distribution of the reported value.
 
 **Classification gain.** The science question is often a discrete classification $C$ of
 the state, such as which class of atmosphere is present. The caller supplies per-mode
