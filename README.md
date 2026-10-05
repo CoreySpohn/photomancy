@@ -87,7 +87,7 @@ The full documentation lives in
 once the `docs` extra is installed:
 
 ```bash
-sphinx-build -b html docs docs/_build/html
+sphinx-build -b html docs docs/.build/html
 ```
 
 It covers the
