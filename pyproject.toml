@@ -29,9 +29,10 @@ dependencies = [
     "numpy",
     "numpyro>=0.15.0",
     "optax>=0.2.3",
-    # >=1.1.0: KeplerianOrbit.from_period, used by orbit.diagnostics, first
-    # ships in 1.1.0; an unpinned orbix resolves to 1.0.0 and fails there.
-    "orbix>=1.1.0",
+    # >=2.0.0: orbix.kepler.markley_solve_trig, the default solver of
+    # orbit.projected, first ships in 2.0.0 (KeplerianOrbit.from_period, used by
+    # orbit.diagnostics, needs >=1.1.0).
+    "orbix>=2.0.0",
     "skyscapes",
 ]
 

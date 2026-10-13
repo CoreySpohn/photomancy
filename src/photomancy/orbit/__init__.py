@@ -72,6 +72,7 @@ from photomancy.orbit.priors import (
     eccentricity_disk_transform,
     sample_ecc_prior,
 )
+from photomancy.orbit.projected import astrometric_loss, make_astrometric_evaluator
 from photomancy.orbit.thiele_innes import (
     TIFitResult,
     thiele_innes_fit,
@@ -107,6 +108,7 @@ __all__ = [
     "admissible_region_fit",
     "alias_breaking_eig",
     "alias_breaking_eig_from_covariances",
+    "astrometric_loss",
     "build_orbit_logdensity",
     # Orbital-mechanics primitives (re-exported from orbix)
     "diff_solve_trig",
@@ -126,6 +128,7 @@ __all__ = [
     # Likelihoods
     "loglike_rv_marginalized",
     "loglike_stellar_astrom",
+    "make_astrometric_evaluator",
     "map_laplace_fit",
     "map_laplace_mixture_fit",
     "mode_scalars",
