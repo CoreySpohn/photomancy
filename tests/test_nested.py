@@ -17,21 +17,18 @@ class _Toy(eqx.Module):
 
 def test_jaxns_recovers_analytic_evidence():
     """JaxnsBackend computes the conjugate-Gaussian log Z (mirrors SMC-vs-analytic)."""
-    from jaxns.framework.model import Model
-    from jaxns.framework.prior import Prior
+    from jaxns.model import Model
+    from jaxns.priors import Prior
 
     data, lik_s, pri_s = 2.0, 0.5, 1.0
     # data = x + noise -> data ~ N(0, sqrt(pri_s^2 + lik_s^2)); analytic evidence below
     analytic = float(tfpd.Normal(0.0, jnp.sqrt(pri_s**2 + lik_s**2)).log_prob(data))
 
     def prior_model():
-        x = yield Prior(tfpd.Normal(0.0, pri_s), name="x")
-        return x
-
-    def log_likelihood(x):
+        x = Prior(tfpd.Normal(0.0, pri_s), name="x").realise()
         return tfpd.Normal(data, lik_s).log_prob(x)
 
-    model = Model(prior_model=prior_model, log_likelihood=log_likelihood)
+    model = Model(prior_model=prior_model)
     post = JaxnsBackend(max_samples=2e4).run(model, key=jax.random.key(0))
 
     assert bool(jnp.isfinite(post.evidence))

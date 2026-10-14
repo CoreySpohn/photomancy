@@ -24,7 +24,9 @@ dependencies = [
     "hwoutils",
     "jax>=0.8.1",
     "jaxlib>=0.8.1",
-    "jaxns>=2.6.9",
+    # jaxctx supplies the prior interface the jaxns 3 adapter subclasses.
+    "jaxctx>=1.2.0",
+    "jaxns>=3.0.0",
     "jaxtyping",
     "numpy",
     "numpyro>=0.15.0",

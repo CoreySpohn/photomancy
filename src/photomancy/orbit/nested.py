@@ -1,28 +1,63 @@
-"""Nested sampling for the orbit model via NumPyro's jaxns wrapper.
+"""Nested sampling for the orbit model via jaxns.
 
-The orbit fit is already a NumPyro model, so it gets nested-sampling evidence directly
-from ``numpyro.contrib.nested_sampling`` (a thin jaxns wrapper) -- no model rewrite, no
-hand-rolled prior layer. The headline output is the Bayesian evidence (``log Z``), which
-turns an orbit fit into model comparison (planet count, period-alias resolution). The
-result is returned as a photomancy :class:`~photomancy.posterior.SamplePosterior` in the
-same physical columns OFTI / grid_search emit, so it drops into the EIG / clustering
-machinery (``cluster_to_mixture``, ``to_unconstrained``).
+The orbit fit is already a NumPyro model, so it gets nested-sampling evidence without a
+model rewrite: every latent site is reparametrized onto the unit cube (its inverse CDF
+applied to a unit-cube variable), the unit-cube variables become jaxns priors, and the
+NumPyro log-density of the reparametrized model is the jaxns log-likelihood. The
+headline output is the Bayesian evidence (``log Z``), which turns an orbit fit into
+model comparison (planet count, period-alias resolution). The result is returned as a
+photomancy :class:`~photomancy.posterior.SamplePosterior` in the same physical columns
+OFTI / grid_search emit, so it drops into the EIG / clustering machinery
+(``cluster_to_mixture``, ``to_unconstrained``).
 
-NumPyro + jaxns are imported lazily inside the function: importing the wrapper pulls in
-jaxns (which enables JAX x64 globally as a side effect), so ``import photomancy`` stays
-light.
+jaxns is imported lazily inside the function: importing it enables JAX x64 globally as
+a side effect, so ``import photomancy`` stays light.
 """
+
+import math
 
 import jax
 import jax.numpy as jnp
+import numpyro
+import numpyro.distributions as dist
+from numpyro.handlers import reparam, seed, trace
+from numpyro.infer import Predictive
+from numpyro.infer.reparam import Reparam
+from numpyro.infer.util import log_density
 
+from photomancy.backends.nested import _to_jaxns_prior
 from photomancy.orbit.data import OrbitData
 from photomancy.orbit.model import build_model
 from photomancy.posterior import SamplePosterior
+from photomancy.priors import Uniform
 
 # Physical columns, matching the OFTI / grid_search SamplePosterior convention so an
 # orbit nested-sampling posterior is interchangeable with them downstream.
 _ORBIT_PHYS_NAMES = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
+
+
+class _UnitCubeReparam(Reparam):
+    """Reparametrize a latent site as its inverse CDF of a unit-cube variable.
+
+    The site ``name`` becomes a deterministic function of a new ``{name}_base`` site
+    whose (masked) Uniform(0, 1) density contributes nothing to the log-density, so
+    the reparametrized model's log-density is the likelihood alone and the prior lives
+    entirely in the unit-cube push-forward that nested sampling integrates over. Every
+    latent distribution in the orbit model (Uniform, Beta, Weibull, HalfNormal) has
+    an ``icdf``.
+    """
+
+    def __call__(self, name, fn, obs):
+        """Replace site ``name`` by ``fn.icdf`` of a unit-cube ``{name}_base`` site."""
+        if obs is not None:
+            raise ValueError(f"Cannot reparametrize the observed site {name!r}.")
+        shape = fn.shape()
+        base_fn, _expand_shape, event_dim = self._unwrap(fn)
+        u = numpyro.sample(
+            f"{name}_base",
+            dist.Uniform(0.0, 1.0).expand(shape).to_event(event_dim).mask(False),
+        )
+        return None, base_fn.icdf(u)
 
 
 def orbit_nested_sampling(
@@ -48,11 +83,13 @@ def orbit_nested_sampling(
 ):
     """Nested-sample the orbit model -> ``SamplePosterior`` + evidence (``log Z``).
 
-    Builds the NumPyro orbit model for the supplied data channels and runs it through
-    ``numpyro.contrib.nested_sampling.NestedSampler`` (jaxns). The returned posterior
-    carries equally-weighted physical samples (``a, e, cos_i, W, cos_w, sin_w, tp``) and
-    the evidence; the evidence is the point of nested sampling -- a Bayes factor between
-    two fits is orbit model comparison (e.g. planet present vs absent, alias A vs B).
+    Builds the NumPyro orbit model for the supplied data channels, reparametrizes its
+    latent sites onto the unit cube, and runs it through the jaxns ``NestedSampler``
+    with the default jaxns stopping condition (remaining evidence below
+    ``log(1 + 1e-3)``). The returned posterior carries equally-weighted physical
+    samples (``a, e, cos_i, W, cos_w, sin_w, tp``) and the evidence; the evidence is
+    the point of nested sampling -- a Bayes factor between two fits is orbit model
+    comparison (e.g. planet present vs absent, alias A vs B).
 
     Args:
         Ms: Stellar mass (kg).
@@ -73,22 +110,27 @@ def orbit_nested_sampling(
         ecc_prior: Eccentricity prior name (``"kipping13"``, ``"rayleigh"``,
             ``"vaneylen19"``, ``"disk"``).
         jitter_scale: Scale for the HalfNormal RV-jitter prior.
-        num_live_points: jaxns live points; ``None`` uses the jaxns default.
-        max_samples: Termination cap on total nested-sampling samples.
+        num_live_points: Number of independent root chains (jaxns
+            ``root_allocation_degree``); ``None`` uses the jaxns default, ``30 * D``
+            for ``D`` latent parameters.
+        max_samples: Hard cap on stored nested-sampling samples; jaxns stops early if
+            the buffer fills before its evidence-convergence condition is met.
         num_samples: Number of equally-weighted posterior samples to return.
         key: PRNG key (required).
 
     Returns:
         A :class:`~photomancy.posterior.SamplePosterior` with ``samples`` of shape
         ``(num_samples, 7)`` over ``_ORBIT_PHYS_NAMES``, uniform ``log_weights``, and
-        ``evidence`` set to the nested-sampling ``log Z``.
+        ``evidence`` set to the nested-sampling ``log Z`` (the jaxns classic
+        expectation estimate, ``log_Z_mean``).
 
     Raises:
         ValueError: If ``key`` is ``None``.
     """
     if key is None:
         raise ValueError("orbit_nested_sampling requires a PRNG key.")
-    from numpyro.contrib.nested_sampling import NestedSampler
+    from jaxns.core import NestedSampler
+    from jaxns.model import Model
 
     model = build_model(
         n_planets=1,
@@ -105,13 +147,6 @@ def orbit_nested_sampling(
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
     )
-
-    constructor_kwargs = {"max_samples": max_samples}
-    if num_live_points is not None:
-        constructor_kwargs["num_live_points"] = num_live_points
-
-    run_key, sample_key = jax.random.split(key)
-    ns = NestedSampler(model, constructor_kwargs=constructor_kwargs)
     data = OrbitData(
         rv=rv_data,
         relative_astrom=relative_astrom_data,
@@ -120,21 +155,58 @@ def orbit_nested_sampling(
         null=null_data,
         imaging=imaging_data,
     )
-    ns.run(run_key, Ms, dist_pc, data)
+    model_args = (Ms, dist_pc, data)
 
-    draws = ns.get_samples(sample_key, num_samples=num_samples)
+    trace_key, run_key, sample_key, predict_key = jax.random.split(key, 4)
+    prototype = trace(seed(model, trace_key)).get_trace(*model_args)
+    latent_shapes = {
+        name: site["fn"].shape()
+        for name, site in prototype.items()
+        if site["type"] == "sample" and not site["is_observed"]
+    }
+    unit_model = reparam(
+        model, config={name: _UnitCubeReparam() for name in latent_shapes}
+    )
+    unit_priors = {
+        name: _to_jaxns_prior(
+            Uniform(low=jnp.zeros(math.prod(shape)), high=jnp.ones(math.prod(shape))),
+            name=f"{name}_base",
+        )
+        for name, shape in latent_shapes.items()
+    }
+
+    def prior_model(Ms, dist_pc, data):
+        unit = {
+            f"{name}_base": unit_priors[name].realise().reshape(shape)
+            for name, shape in latent_shapes.items()
+        }
+        return log_density(unit_model, (Ms, dist_pc, data), {}, unit)[0]
+
+    ns = NestedSampler(
+        model=Model(prior_model=prior_model),
+        max_samples=int(max_samples),
+        root_allocation_degree=num_live_points,
+    )
+    results = ns.run(key=run_key, args=model_args).to_result().trim()
+    unit_draws = results.resample(num_samples, key=sample_key).X_samples
+    unit_draws = {
+        f"{name}_base": jnp.reshape(unit_draws[f"{name}_base"], (num_samples, *shape))
+        for name, shape in latent_shapes.items()
+    }
     # The model exposes the physical orbit parameters as deterministic sites, so the
-    # equally-weighted draws give physical columns directly (squeeze the planet axis).
+    # equally-weighted unit-cube draws map to physical columns through the model
+    # (squeeze the planet axis).
+    draws = Predictive(
+        unit_model, posterior_samples=unit_draws, return_sites=list(_ORBIT_PHYS_NAMES)
+    )(predict_key, *model_args)
     samples = jnp.stack(
         [jnp.reshape(draws[name], (num_samples,)) for name in _ORBIT_PHYS_NAMES],
         axis=1,
     )
-    # ``_results`` is the jaxns Results object; ``log_Z_mean`` is the evidence estimate.
-    evidence = jnp.asarray(ns._results.log_Z_mean)
 
     return SamplePosterior(
         samples=samples,
         log_weights=jnp.zeros(num_samples),
-        evidence=evidence,
+        evidence=jnp.asarray(results.log_Z_mean),
         param_names=_ORBIT_PHYS_NAMES,
     )

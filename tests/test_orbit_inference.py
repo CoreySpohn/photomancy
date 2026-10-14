@@ -152,7 +152,7 @@ def test_to_unconstrained_round_trips_known_orbit():
 
 
 def test_orbit_nested_sampling_recovers_period_and_evidence():
-    """NumPyro NestedSampler on the orbit model -> SamplePosterior + finite log Z."""
+    """Nested sampling (jaxns) on the NumPyro orbit model -> SamplePosterior + log Z."""
     from photomancy.orbit.nested import orbit_nested_sampling
     from photomancy.posterior import SamplePosterior
 
