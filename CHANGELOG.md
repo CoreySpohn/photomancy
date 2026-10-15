@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.0](https://github.com/CoreySpohn/photomancy/compare/v0.2.0...v0.3.0) (2026-10-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* **deps:** JaxnsBackend drops gradient_guided and parameter_estimation, which jaxns 3 removed; build_scene_nested_model and JaxnsBackend.run now use the jaxns 3 Model (a prior model that realises its priors and returns the log-likelihood).
+
+### Features
+
+* **orbit:** add projected astrometric loss with analytic partials ([9d40832](https://github.com/CoreySpohn/photomancy/commit/9d408328c33ccde7edb59c61dbb1dd1b9ef7f639))
+
+
+### Bug Fixes
+
+* **deps:** port nested sampling to the jaxns 3 api ([6b0928d](https://github.com/CoreySpohn/photomancy/commit/6b0928d718972e2c4c3457d90f630286ca2e0395))
+* **eig:** bound mode information with full predictive covariances ([9e880f2](https://github.com/CoreySpohn/photomancy/commit/9e880f222da6b232aa80933ee3dca983d4f00248))
+* **eig:** return NaN instead of a wrong bound for predictives beyond working precision, and rank with nanargmax ([7529b3e](https://github.com/CoreySpohn/photomancy/commit/7529b3e13b1034cb7fe94c8ea9e2569593fb9175))
+* **eig:** score reports by the chain rule so an always-null record carries no information ([59a9715](https://github.com/CoreySpohn/photomancy/commit/59a9715a002ecdddd19ec7f4a94c0a2afb5c51ad))
+
+
+### Miscellaneous Chores
+
+* release 0.3.0 ([8633a1e](https://github.com/CoreySpohn/photomancy/commit/8633a1e1ac84344e2818bbe5f0e473cd9e7206ef))
+
 ## [0.2.0](https://github.com/CoreySpohn/photomancy/compare/v0.1.0...v0.2.0) (2026-08-29)
 
 
