@@ -32,6 +32,8 @@ def astrometric_loss(
             Prediction is A*(cos(E)-e) + B*sqrt(1-e**2)*sin(E).
             A and B include semimajor axis and projection, with the eccentricity
             factor removed from B. They can be in AU or angular units.
+            The x/y components must follow the same order as observed; for
+            (RA, Dec) data use (east, north), i.e. raw orbix rows (1, 0).
         times_d: Nonempty (T,) observation times, in the same day origin as tp_d.
         observed: (N, 2, T) astrometry in the same units as A and B.
         sigma: Positive scalar standard deviation in those units.

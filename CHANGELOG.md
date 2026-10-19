@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+* **orbit:** Relative and stellar astrometry, Thiele-Innes fits, OFTI and EIG now
+  use (Delta alpha*, Delta Dec) = (east, north) and the standard phase angle.
+  Fits made with earlier releases carry mirrored elements
+  (i' = 180 deg - i, Omega' = 90 deg - Omega) and must be refit or converted.
+  EIG and forward-model photometry phases were inverted.
+
 ## [0.3.0](https://github.com/CoreySpohn/photomancy/compare/v0.2.0...v0.3.0) (2026-10-14)
 
 

@@ -19,7 +19,7 @@ argument of periapsis) and the semi-major axis:
 
     G = a\\sqrt{1-e^2} (-\\sin\\Omega\\sin\\omega + \\cos\\Omega\\cos\\omega\\cos i)
 
-These are the (x, y) components of the orbit's A and B position matrices
+These are the (north, east) components of the orbit's A and B position matrices
 from :func:`orbix.equations.orbit.AB_matrices_reduced`.
 """
 
@@ -81,14 +81,14 @@ def _solve_abfg(X, Y, ra, dec, ra_err, dec_err, corr):
 
     The astrometric model (in arcsec) is:
 
-        RA(t)  = (A*X(t) + F*Y(t)) / dist_pc
-        DEC(t) = (B*X(t) + G*Y(t)) / dist_pc
+        DEC(t) = (A*X(t) + F*Y(t)) / dist_pc
+        RA(t)  = (B*X(t) + G*Y(t)) / dist_pc
 
     After absorbing dist_pc into (A, B, F, G), we can write this as two
     independent 2-parameter weighted linear regressions:
 
-        RA(t)  = A'*X(t) + F'*Y(t)
-        DEC(t) = B'*X(t) + G'*Y(t)
+        DEC(t) = A'*X(t) + F'*Y(t)
+        RA(t)  = B'*X(t) + G'*Y(t)
 
     where A' = A/dist_pc, etc. We solve for (A', F') and (B', G')
     separately, then multiply by dist_pc to recover (A, B, F, G) in AU.
@@ -123,25 +123,25 @@ def _solve_abfg(X, Y, ra, dec, ra_err, dec_err, corr):
     one_minus_rho2 = jnp.maximum(1.0 - corr**2, 1e-30)
 
     # Weights for the normal equations (block-diagonal structure)
-    w_xx = 1.0 / (ra_err**2 * one_minus_rho2)  # RA self-weight
-    w_yy = 1.0 / (dec_err**2 * one_minus_rho2)  # DEC self-weight
+    w_xx = 1.0 / (dec_err**2 * one_minus_rho2)  # North self-weight
+    w_yy = 1.0 / (ra_err**2 * one_minus_rho2)  # East self-weight
     w_xy = -corr / (ra_err * dec_err * one_minus_rho2)  # Cross-weight
 
     # Normal equation: D^T W D (4x4)
     # The (i,j) element is sum_k D_ki * W_kk' * D_k'j
     # With the block structure, we can compute this efficiently.
 
-    # RA-RA block (weighted by w_xx)
+    # North-north block (weighted by w_xx)
     XwX = jnp.sum(w_xx * X * X)
     XwY = jnp.sum(w_xx * X * Y)
     YwY = jnp.sum(w_xx * Y * Y)
 
-    # DEC-DEC block (weighted by w_yy)
+    # East-east block (weighted by w_yy)
     XvX = jnp.sum(w_yy * X * X)
     XvY = jnp.sum(w_yy * X * Y)
     YvY = jnp.sum(w_yy * Y * Y)
 
-    # RA-DEC cross block (weighted by w_xy)
+    # North-east cross block (weighted by w_xy)
     XcX = jnp.sum(w_xy * X * X)
     XcY = jnp.sum(w_xy * X * Y)
     YcX = jnp.sum(w_xy * Y * X)
@@ -161,10 +161,10 @@ def _solve_abfg(X, Y, ra, dec, ra_err, dec_err, corr):
     # Right-hand side: D^T W d (4,)
     rhs = jnp.array(
         [
-            jnp.sum(w_xx * X * ra) + jnp.sum(w_xy * X * dec),
-            jnp.sum(w_xx * Y * ra) + jnp.sum(w_xy * Y * dec),
-            jnp.sum(w_xy * X * ra) + jnp.sum(w_yy * X * dec),
-            jnp.sum(w_xy * Y * ra) + jnp.sum(w_yy * Y * dec),
+            jnp.sum(w_xx * X * dec) + jnp.sum(w_xy * X * ra),
+            jnp.sum(w_xx * Y * dec) + jnp.sum(w_xy * Y * ra),
+            jnp.sum(w_xy * X * dec) + jnp.sum(w_yy * X * ra),
+            jnp.sum(w_xy * Y * dec) + jnp.sum(w_yy * Y * ra),
         ]
     )
 
@@ -324,8 +324,8 @@ def _compute_chi2_and_ll(X, Y, A_s, F_s, B_s, G_s, ra, dec, ra_err, dec_err, cor
     Returns:
         Tuple of (chi2, log_likelihood).
     """
-    ra_pred = A_s * X + F_s * Y
-    dec_pred = B_s * X + G_s * Y
+    dec_pred = A_s * X + F_s * Y
+    ra_pred = B_s * X + G_s * Y
 
     dx = ra - ra_pred
     dy = dec - dec_pred

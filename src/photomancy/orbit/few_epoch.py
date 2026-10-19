@@ -27,7 +27,10 @@ cf. Octofitter and O'Neil et al. 2019), restricted by an explicit
 implied-mass window: without the mass restriction the TI basis has
 unbounded-mass tails that no state-space sampler can cover. The basis is
 self-consistent within this module (``TIBasisModel.forward_au`` defines it);
-no element-space conversion is provided here.
+no element-space conversion is provided here. Its coefficient names are local:
+(A, F) multiply the first supplied sky axis (east for RA/Dec data), and
+(B, G) the second (north). They are not the north-first constants
+returned by ``thiele_innes_fit``; F and G here also exclude sqrt(1-e^2).
 
 The state -> theta map is two-to-one (reflection through the sky plane gives
 the classic Thiele-Innes degeneracy); the multiplicity is constant almost
