@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+* **orbit:** Rename `TIBasisModel` parameters `(A, F, B, G)` -> `(east_X, east_Y, north_X, north_Y)`; coefficient values and order are unchanged.
+* **deps:** Require `orbix>=3.0.0`, whose raw position and velocity rows are right-handed (east, north, away), with dz/dt positive when receding.
 * **orbit:** Relative and stellar astrometry, Thiele-Innes fits, OFTI and EIG now
-  use (Delta alpha*, Delta Dec) = (east, north) and the standard phase angle.
+  use (Delta alpha*, Delta Dec) = (east, north) and the standard phase angle
+  beta, with cos(beta) = z/r (z away).
   Astrometry-only fits made with earlier releases carry mirrored elements and
   convert by i' = 180 deg - i, Omega' = (90 deg - Omega) mod 360, with a, e,
   omega and the epoch terms unchanged. EIG and forward-model photometry

@@ -27,10 +27,11 @@ cf. Octofitter and O'Neil et al. 2019), restricted by an explicit
 implied-mass window: without the mass restriction the TI basis has
 unbounded-mass tails that no state-space sampler can cover. The basis is
 self-consistent within this module (``TIBasisModel.forward_au`` defines it);
-no element-space conversion is provided here. Its coefficient names are local:
-(A, F) multiply the first supplied sky axis (east for RA/Dec data), and
-(B, G) the second (north). They are not the north-first constants
-returned by ``thiele_innes_fit``; F and G here also exclude sqrt(1-e^2).
+no element-space conversion is provided here. The coefficients
+(east_X, east_Y) multiply the east axis, and (north_X, north_Y) the north
+axis, with X = cos(E) - e and Y = sqrt(1-e^2) sin(E). Unlike the scaled
+F and G returned by ``thiele_innes_fit``, the Y coefficients here exclude
+sqrt(1-e^2).
 
 The state -> theta map is two-to-one (reflection through the sky plane gives
 the classic Thiele-Innes degeneracy); the multiplicity is constant almost
@@ -53,18 +54,19 @@ from photomancy.posterior import SamplePosterior
 
 MU_SUN = G * Msun2kg  # AU^3 / day^2
 
-TI_PARAM_NAMES = ("e", "lnP", "tau", "A", "F", "B", "G")
+TI_PARAM_NAMES = ("e", "lnP", "tau", "east_X", "east_Y", "north_X", "north_Y")
 
 
-def ti_semimajor_axis(A, F, B, Gc):
+def ti_semimajor_axis(east_X, east_Y, north_X, north_Y):
     """Semi-major axis implied by the TI constants (Campbell relations).
 
-    Solves ``a^4 - u a^2 + v^2 = 0`` with ``u = A^2 + B^2 + F^2 + G^2 =
-    a^2 (1 + cos^2 i)`` and ``v = A G - B F = a^2 cos i``; the plus root is
-    ``a^2``.
+    Solves ``a^4 - u a^2 + v^2 = 0``, where u is the sum of squared
+    coefficients, ``a^2 (1 + cos^2 i)``. The east-first determinant is
+    ``v = east_X * north_Y - north_X * east_Y = -a^2 cos i``.
+    Only its square enters the plus root, so the axis order does not affect a.
     """
-    u = A**2 + B**2 + F**2 + Gc**2
-    v = A * Gc - B * F
+    u = east_X**2 + north_X**2 + east_Y**2 + north_Y**2
+    v = east_X * north_Y - north_X * east_Y
     disc = jnp.sqrt(jnp.maximum(u**2 - 4.0 * v**2, 0.0))
     return jnp.sqrt((u + disc) / 2.0)
 
@@ -72,8 +74,8 @@ def ti_semimajor_axis(A, F, B, Gc):
 class TIBasisModel(eqx.Module):
     """Independent Thiele-Innes orbit model with an implied-mass window.
 
-    Parameters are ``theta = (e, lnP, tau, A, F, B, G)`` with priors
-    ``e ~ U(0, e_max)``, ``lnP ~ U(lnP_lo, lnP_hi)`` (P in days),
+    Parameters are ``theta = (e, lnP, tau, east_X, east_Y, north_X, north_Y)``
+    with priors ``e ~ U(0, e_max)``, ``lnP ~ U(lnP_lo, lnP_hi)`` (P in days),
     ``tau ~ U(0, 1)`` (periastron phase relative to ``t_ref``), and each TI
     constant ``~ N(0, s_ti^2)`` (AU), restricted to
     ``mu_lo <= (2 pi / P)^2 a(TI)^3 <= mu_hi``.
@@ -97,16 +99,21 @@ class TIBasisModel(eqx.Module):
     t_ref: float = 0.0
 
     def forward_au(self, theta, times):
-        """Sky positions (x, y) in AU at ``times`` (days), each shape (N,)."""
+        """Return (east, north) in AU at ``times`` (days), each shape (N,).
+
+        East = east_X * X + east_Y * Y; north = north_X * X + north_Y * Y,
+        with X = cos(E) - e and Y = sqrt(1-e^2) sin(E).
+        """
         e, lnP, tau = theta[0], theta[1], theta[2]
         P = jnp.exp(lnP)
         M = two_pi * ((times - self.t_ref) / P - tau)
         sinE, cosE = diff_solve_trig(jnp.mod(M, two_pi), e)
         X = cosE - e
         Y = jnp.sqrt(1.0 - e**2) * sinE
-        x = theta[3] * X + theta[4] * Y
-        y = theta[5] * X + theta[6] * Y
-        return x, y
+        east_X, east_Y, north_X, north_Y = theta[3:]
+        east = east_X * X + east_Y * Y
+        north = north_X * X + north_Y * Y
+        return east, north
 
     def log_prior_ti(self, theta):
         """Log prior density up to a constant (the Gaussian TI block)."""
@@ -151,12 +158,13 @@ class TIBasisModel(eqx.Module):
 
 
 def state_to_theta(r, v, mu, t, t_ref):
-    """Convert a bound state to TI-basis parameters, convention free.
+    """Convert a bound (east, north, away) state to TI-basis parameters.
 
     The perifocal unit vectors come from the Laplace (eccentricity) vector
     and the angular momentum, so no node/periapsis angle conventions enter;
-    ``r[0]`` is the x (RA-like) axis and ``r[1]`` the y (DEC-like) axis,
-    matching ``TIBasisModel.forward_au``. Unbound or circular states produce
+    ``r[0]`` is east and ``r[1]`` north, matching ``TIBasisModel.forward_au``.
+    Positions and velocities use the right-handed (east, north, away) frame;
+    dz/dt is positive when receding. Unbound or circular states produce
     non-finite outputs, to be masked by the caller.
 
     Args:
@@ -167,7 +175,7 @@ def state_to_theta(r, v, mu, t, t_ref):
         t_ref: Reference epoch for the periastron phase.
 
     Returns:
-        theta = (e, lnP, tau, A, F, B, G), shape (7,).
+        theta = (e, lnP, tau, east_X, east_Y, north_X, north_Y), shape (7,).
     """
     rn = jnp.linalg.norm(r)
     a = 1.0 / (2.0 / rn - jnp.dot(v, v) / mu)
@@ -387,8 +395,8 @@ def lambert_depth_fit(
             components (e.g. for calibration ablations).
 
     Returns:
-        A ``SamplePosterior`` over ``(e, lnP, tau, A, F, B, G)``; with
-        ``return_parts``, a ``(posterior, parts)`` tuple.
+        A ``SamplePosterior`` over ``(e, lnP, tau, east_X, east_Y, north_X, north_Y)``;
+        with ``return_parts``, a ``(posterior, parts)`` tuple.
     """
     i1, i2 = _conditioned_pair(data, idx)
     obs4 = jnp.array([data.ra[i1], data.dec[i1], data.ra[i2], data.dec[i2]]) * dist_pc
@@ -441,8 +449,8 @@ def admissible_region_fit(
         (default: first valid) and ``n_particles`` the total particle count.
 
     Returns:
-        A ``SamplePosterior`` over ``(e, lnP, tau, A, F, B, G)``; with
-        ``return_parts``, a ``(posterior, parts)`` tuple.
+        A ``SamplePosterior`` over ``(e, lnP, tau, east_X, east_Y, north_X, north_Y)``;
+        with ``return_parts``, a ``(posterior, parts)`` tuple.
     """
     valid = np.flatnonzero(np.asarray(data.is_valid, dtype=bool))
     i1 = int(valid[0]) if idx is None else int(idx)

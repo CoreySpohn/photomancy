@@ -88,9 +88,9 @@ def _predict_astrom_pure(
     A, B = AB_matrices_reduced(a, sqrt_1me2, sin_i, cos_i, sinW, cosW, sin_w, cos_w)
     r = single_r(A, B, e, sinE, cosE)
 
-    # Raw rows are (north, east, away).
-    ra = r[1, 0] / dist_pc
-    dec = r[0, 0] / dist_pc
+    # Raw rows are (east, north, away).
+    ra = r[0, 0] / dist_pc
+    dec = r[1, 0] / dist_pc
     return jnp.array([ra, dec])
 
 
@@ -141,12 +141,12 @@ def _predict_sep_dmag_pure(
     sky_sep_AU = jnp.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2)
     sep_arcsec = sky_sep_AU / dist_pc
 
-    # Standard star-planet-observer phase: cos(alpha) = z/|r|, z away.
+    # Standard star-planet-observer phase: cos(beta) = z/|r|, z away.
     r_mag = jnp.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2 + r[2, 0] ** 2)
     r_mag_safe = jnp.maximum(r_mag, 1e-30)
-    cos_alpha = r[2, 0] / r_mag_safe
-    sin_alpha = jnp.sqrt(jnp.maximum(1.0 - cos_alpha**2, 0.0))
-    phase = lambert_phase_exact(cos_alpha, sin_alpha)
+    cos_beta = r[2, 0] / r_mag_safe
+    sin_beta = jnp.sqrt(jnp.maximum(1.0 - cos_beta**2, 0.0))
+    phase = lambert_phase_exact(cos_beta, sin_beta)
 
     # Contrast and dMag
     contrast = Lambda * phase / jnp.maximum(r_mag**2, 1e-60)

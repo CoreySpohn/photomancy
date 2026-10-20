@@ -4,7 +4,17 @@ import numpy as np
 
 
 def sky_position(times, *, T, a, e, cos_i, W, cos_w, sin_w, tp, dist_pc):
-    """Return (east, north) arcsec using a Newton solve of Kepler's equation.
+    """Return (east, north) arcsec from the independent 3D position."""
+    return (
+        position_au(
+            times, T=T, a=a, e=e, cos_i=cos_i, W=W, cos_w=cos_w, sin_w=sin_w, tp=tp
+        )[:2]
+        / dist_pc
+    )
+
+
+def position_au(times, *, T, a, e, cos_i, W, cos_w, sin_w, tp):
+    """Return right-handed (east, north, away) rows in AU.
 
     Green (1985), Spherical Astronomy, ch. 17; Brandt et al. (2021),
     AJ 162, 186, Eqs. 6-9. Here Y includes sqrt(1-e^2), so F and G
@@ -26,4 +36,10 @@ def sky_position(times, *, T, a, e, cos_i, W, cos_w, sin_w, tp, dist_pc):
     B = a * (sW * cos_w + cW * sin_w * cos_i)
     F = a * (-cW * sin_w - sW * cos_w * cos_i)
     G = a * (-sW * sin_w + cW * cos_w * cos_i)
-    return np.array([(B * X + G * Y) / dist_pc, (A * X + F * Y) / dist_pc])
+    sin_i = np.sqrt(1 - cos_i**2)
+    C = a * sin_w * sin_i
+    H = a * cos_w * sin_i
+    x_north = A * X + F * Y
+    y_east = B * X + G * Y
+    z = C * X + H * Y
+    return np.array([y_east, x_north, z])

@@ -11,10 +11,12 @@ import pytest  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import (  # noqa: E402
     MU_SUN,
+    TI_PARAM_NAMES,
     TIBasisModel,
     admissible_region_fit,
     lambert_depth_fit,
     state_to_theta,
+    ti_semimajor_axis,
 )
 
 DIST_PC = 10.0
@@ -121,16 +123,16 @@ def _grid_reference(data, n_e=24, n_lnP=48, n_tau=32, n_mc=64):
         L = jnp.linalg.cholesky(V + 1e-14 * jnp.eye(4))
         ti = m[None, :] + eps @ L.T
         a = jnp.vectorize(
-            lambda A, F, B, Gc: jnp.sqrt(
+            lambda east_X, east_Y, north_X, north_Y: jnp.sqrt(
                 (
-                    A**2
-                    + B**2
-                    + F**2
-                    + Gc**2
+                    east_X**2
+                    + north_X**2
+                    + east_Y**2
+                    + north_Y**2
                     + jnp.sqrt(
                         jnp.maximum(
-                            (A**2 + B**2 + F**2 + Gc**2) ** 2
-                            - 4.0 * (A * Gc - B * F) ** 2,
+                            (east_X**2 + north_X**2 + east_Y**2 + north_Y**2) ** 2
+                            - 4.0 * (east_X * north_Y - north_X * east_Y) ** 2,
                             0.0,
                         )
                     )
@@ -172,6 +174,48 @@ def _weighted_stats(post, col):
     mean = float((w * th[finite]).sum())
     std = float(np.sqrt((w * (th[finite] - mean) ** 2).sum()))
     return mean, std, float(1.0 / (w**2).sum())
+
+
+def test_ti_parameter_names_multiply_declared_axes():
+    """Named coefficients multiply X and Y on their declared sky axes."""
+    names = ("e", "lnP", "tau", "east_X", "east_Y", "north_X", "north_Y")
+    assert TI_PARAM_NAMES == names
+    params = dict(
+        zip(names, [0.3, np.log(300.0), 0.2, 1.7, -0.4, 0.6, 2.1], strict=True)
+    )
+    theta = jnp.array([params[name] for name in TI_PARAM_NAMES])
+    M = 2 * np.pi * ((TIMES - MODEL.t_ref) / np.exp(params["lnP"]) - params["tau"])
+    E = np.asarray(_newton_E(M, params["e"]))
+    X = np.cos(E) - params["e"]
+    Y = np.sqrt(1 - params["e"] ** 2) * np.sin(E)
+    east, north = MODEL.forward_au(theta, TIMES)
+    np.testing.assert_allclose(
+        east, params["east_X"] * X + params["east_Y"] * Y, atol=1e-12, rtol=0
+    )
+    np.testing.assert_allclose(
+        north, params["north_X"] * X + params["north_Y"] * Y, atol=1e-12, rtol=0
+    )
+
+
+@pytest.mark.parametrize("cos_i", [0.7, -0.7])
+def test_ti_semimajor_axis_east_first(cos_i):
+    """East-first determinant is -a^2 cos(i); its square preserves a."""
+    a, W, w = 2.3, 1.1, 0.8
+    cW, sW, cw, sw = np.cos(W), np.sin(W), np.cos(w), np.sin(w)
+    coefficients = dict(
+        east_X=a * (sW * cw + cW * sw * cos_i),
+        east_Y=a * (-sW * sw + cW * cw * cos_i),
+        north_X=a * (cW * cw - sW * sw * cos_i),
+        north_Y=a * (-cW * sw - sW * cw * cos_i),
+    )
+    determinant = (
+        coefficients["east_X"] * coefficients["north_Y"]
+        - coefficients["north_X"] * coefficients["east_Y"]
+    )
+    assert determinant == pytest.approx(-(a**2) * cos_i, abs=1e-12, rel=0)
+    assert float(ti_semimajor_axis(**coefficients)) == pytest.approx(
+        a, abs=1e-12, rel=0
+    )
 
 
 def test_state_to_theta_convention_lock():

@@ -19,8 +19,10 @@ argument of periapsis) and the semi-major axis:
 
     G = a\\sqrt{1-e^2} (-\\sin\\Omega\\sin\\omega + \\cos\\Omega\\cos\\omega\\cos i)
 
-These are the (north, east) components of the orbit's A and B position matrices
-from :func:`orbix.equations.orbit.AB_matrices_reduced`.
+These keep the classical letters: (A, F) multiply north and (B, G) east.
+The position matrices from :func:`orbix.equations.orbit.AB_matrices_reduced`
+instead store rows in the right-handed (east, north, away) frame, with
+positive dz/dt receding. Thus their sky rows are (B, A) and (G, F).
 """
 
 import equinox as eqx

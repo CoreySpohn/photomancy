@@ -7,7 +7,7 @@ import pytest
 from hwoutils.constants import G, Msun2kg
 from orbix import KeplerianOrbit
 from orbix.kepler import markley_solve_trig
-from sky_reference import sky_position
+from sky_reference import position_au, sky_position
 
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.diagnostics import orbits_from_samples
@@ -153,6 +153,35 @@ def test_relative_astrometry_east_north(k16, oracle):
     np.testing.assert_allclose(actual, expected, atol=1e-9, rtol=0)
 
 
+@pytest.mark.parametrize("cos_i", [0.7, -0.7])
+def test_raw_rows_and_forward_match_classical_ti(k16, cos_i):
+    """Classical TI formulas give east, north, away raw rows for either sense."""
+    p = dict(k16, cos_i=cos_i)
+    times = jnp.asarray(np.linspace(-0.2, 1.3, 25) * p["T"])
+    expected = position_au(
+        times, **{k: v for k, v in p.items() if k not in ("Ms", "dist_pc")}
+    )
+    orbit = KeplerianOrbit.from_period(
+        T_d=p["T"],
+        e=p["e"],
+        cos_i=p["cos_i"],
+        W_rad=p["W"],
+        cos_w=p["cos_w"],
+        sin_w=p["sin_w"],
+        tp_d=p["tp"],
+        Ms_kg=p["Ms"],
+    )
+    rows, beta, radius = orbit.propagate(
+        trig_solver=markley_solve_trig, t_jd=times, Ms_kg=p["Ms"]
+    )
+    np.testing.assert_allclose(rows[0], expected, atol=1e-9, rtol=0)
+    np.testing.assert_allclose(
+        np.cos(beta[0]), expected[2] / radius[0], atol=1e-12, rtol=0
+    )
+    actual = predict_relative_astrometry(times, **forward_params(p))
+    np.testing.assert_allclose(actual, expected[:2] / p["dist_pc"], atol=1e-9, rtol=0)
+
+
 @pytest.mark.parametrize("correlated", [False, True])
 def test_ti_axis_uncertainties_and_covariance(k16, correlated):
     """Brandt et al. (2021), Eqs. 6-9: TI coefficients respect RA/Dec errors.
@@ -268,10 +297,11 @@ def test_eig_astrometry_east_north(k16):
 
 @pytest.mark.parametrize("predictor", ["eig", "forward"])
 def test_standard_lambert_phase(predictor):
-    """Sobolev (1975); Brown (2005), Eq. 4: alpha=30 deg gives Phi=0.88084.
+    """Sobolev (1975); Brown (2005), Eq. 4: beta=30 deg gives Phi=0.88084.
 
     For a=1 AU, i=60 deg, Omega=omega=0 and M=90 deg, the raw
-    (north, east, away) position is (0, 0.5, sqrt(3)/2) AU.
+    (east, north, away) position is (0.5, 0, sqrt(3)/2) AU.
+    The components follow the right-handed raw-row order.
     """
     period = 2 * np.pi / np.sqrt(G * Msun2kg)
     Lambda = 1e-9
@@ -298,8 +328,8 @@ def test_standard_lambert_phase(predictor):
                 10.0,
             )
         )[:, 0]
-    alpha = np.pi / 6
-    phase = (np.sin(alpha) + (np.pi - alpha) * np.cos(alpha)) / np.pi
+    beta = np.pi / 6
+    phase = (np.sin(beta) + (np.pi - beta) * np.cos(beta)) / np.pi
     assert phase == pytest.approx(0.88084, abs=5e-6)
     assert float(sep) == pytest.approx(0.05, abs=1e-12)
     assert float(10 ** (-0.4 * dmag) / Lambda) == pytest.approx(phase, abs=1e-12)
