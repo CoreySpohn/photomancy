@@ -80,6 +80,14 @@ explanation/glossary
 
 ```{toctree}
 :maxdepth: 1
+:caption: How-to
+:hidden:
+
+how-to/migrate-sky-convention
+```
+
+```{toctree}
+:maxdepth: 1
 :caption: Examples
 :hidden:
 

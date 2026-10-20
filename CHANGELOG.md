@@ -3,6 +3,20 @@
 ## Unreleased
 
 * **orbit:** Rename `TIBasisModel` parameters `(A, F, B, G)` -> `(east_X, east_Y, north_X, north_Y)`; coefficient values and order are unchanged.
+* **orbit:** `ti_semimajor_axis` now takes `(east_X, east_Y, north_X, north_Y)`
+  where it took `(A, F, B, Gc)`; the values and their order are unchanged, so
+  positional calls still work and keyword calls must be renamed. The few-epoch
+  fitters (`admissible_region_fit`, `lambert_depth_fit`) label their posterior
+  columns with `TI_PARAM_NAMES = ("e", "lnP", "tau", "east_X", "east_Y",
+  "north_X", "north_Y")` instead of `("e", "lnP", "tau", "A", "F", "B", "G")`,
+  so code that indexes a saved few-epoch posterior by the old names must use the
+  new ones. Such posteriors live in Thiele-Innes coordinates and cannot be
+  converted by `migrate_sky_convention`; refit them.
+* **orbit:** Add `migrate_sky_convention(samples)` for saved physical-element
+  samples from astrometry-only fits made with earlier releases: it applies
+  `cos_i -> -cos_i` and `W -> (pi/2 - W) mod 2 pi` and raises on posteriors stored
+  in transformed sampling coordinates. See the how-to page on migrating saved
+  fits.
 * **deps:** Require `orbix>=3.0.0`, whose raw position and velocity rows are right-handed (east, north, away), with dz/dt positive when receding.
 * **orbit:** Relative and stellar astrometry, Thiele-Innes fits, OFTI and EIG now
   use (Delta alpha*, Delta Dec) = (east, north) and the standard phase angle
