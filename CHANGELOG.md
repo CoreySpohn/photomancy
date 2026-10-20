@@ -4,9 +4,12 @@
 
 * **orbit:** Relative and stellar astrometry, Thiele-Innes fits, OFTI and EIG now
   use (Delta alpha*, Delta Dec) = (east, north) and the standard phase angle.
-  Fits made with earlier releases carry mirrored elements
-  (i' = 180 deg - i, Omega' = 90 deg - Omega) and must be refit or converted.
-  EIG and forward-model photometry phases were inverted.
+  Astrometry-only fits made with earlier releases carry mirrored elements and
+  convert by i' = 180 deg - i, Omega' = (90 deg - Omega) mod 360, with a, e,
+  omega and the epoch terms unchanged. EIG and forward-model photometry
+  phases were inverted, so fits and forecasts that used photometry must be
+  refit rather than converted. Pass east offsets (Delta RA cos Dec), not
+  Delta RA, as `RelativeAstromData.ra`.
 
 ## [0.3.0](https://github.com/CoreySpohn/photomancy/compare/v0.2.0...v0.3.0) (2026-10-14)
 
