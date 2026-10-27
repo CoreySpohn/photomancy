@@ -249,7 +249,7 @@ def test_predict_rv_known_mass_matches_exact_two_body_K():
         Mp=mass,
     )[0]
     measured_K = -velocity / (1.0 + eccentricity)
-    assert float(measured_K) == pytest.approx(float(expected_K), rel=1e-12)
+    assert float(measured_K) == pytest.approx(float(expected_K), rel=1e-12, abs=0)
 
 
 @pytest.mark.parametrize("n_planets", [1, 2])
