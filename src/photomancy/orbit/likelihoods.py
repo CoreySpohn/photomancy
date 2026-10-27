@@ -86,9 +86,12 @@ def loglike_rv_marginalized(
     mask = is_valid  # boolean
 
     # Total variance: measurement + jitter
-    var = rv_err**2 + jitters[inst_ids] ** 2
-    w = jnp.where(mask, 1.0 / var, 0.0)  # masked weights
-    r = rv_obs - rv_model
+    inst_ids = jnp.where(mask, inst_ids, 0)
+    err = jnp.where(mask, rv_err, 1.0)
+    jitter = jnp.where(mask, jitters[inst_ids], 0.0)
+    var = err**2 + jitter**2
+    w = jnp.where(mask, 1.0 / var, 0.0)
+    r = jnp.where(mask, rv_obs, 0.0) - jnp.where(mask, rv_model, 0.0)
 
     # Segment sums collapse the matrix algebra to O(N)
     A = jax.ops.segment_sum(w, inst_ids, num_segments=n_inst)
@@ -97,9 +100,10 @@ def loglike_rv_marginalized(
 
     # Marginalized log-likelihood -- only count valid observations
     N_valid = jnp.sum(mask)
+    A_safe = jnp.where(A > 0, A, 1.0)
     return -0.5 * (
-        jnp.sum(C - B**2 / jnp.where(A > 0, A, 1.0))
-        + jnp.sum(jnp.where(A > 0, jnp.log(A), 0.0))
+        jnp.sum(C - B**2 / A_safe)
+        + jnp.sum(jnp.log(A_safe))
         + jnp.sum(jnp.where(mask, jnp.log(var), 0.0))
         + N_valid * jnp.log(2.0 * jnp.pi)
     )

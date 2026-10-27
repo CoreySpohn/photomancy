@@ -102,3 +102,44 @@ def test_repadding_preserves_channel_validity_mask(channel):
     assert bool(result.is_valid[0])
     assert not bool(result.is_valid[1])
     assert getattr(padded.padded(), channel) is result
+
+
+@pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
+def test_invalid_rv_rows_have_finite_likelihood_and_gradient(invalid_value):
+    """Invalid observations, predictions, errors, and jitters cannot poison sums."""
+    from photomancy.orbit.likelihoods import loglike_rv_marginalized
+
+    def evaluate(obs, model, err, jitter):
+        return loglike_rv_marginalized(
+            obs,
+            model,
+            err,
+            jnp.array([0, 1]),
+            2,
+            jitter,
+            jnp.array([True, False]),
+        )
+
+    args = (
+        jnp.array([3.0, invalid_value]),
+        jnp.array([1.0, invalid_value]),
+        jnp.array([0.5, invalid_value]),
+        jnp.array([0.2, invalid_value]),
+    )
+    value, gradients = jax.jit(jax.value_and_grad(evaluate, argnums=(0, 1, 2, 3)))(
+        *args
+    )
+    expected = loglike_rv_marginalized(
+        args[0][:1],
+        args[1][:1],
+        args[2][:1],
+        jnp.array([0]),
+        1,
+        args[3][:1],
+        jnp.array([True]),
+    )
+    assert jnp.isfinite(value)
+    assert float(value) == pytest.approx(float(expected), abs=1e-14)
+    for gradient in gradients:
+        assert jnp.all(jnp.isfinite(gradient))
+        assert float(gradient[1]) == 0.0
