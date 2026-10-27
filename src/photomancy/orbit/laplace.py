@@ -142,7 +142,7 @@ def map_laplace_fit(
     log_Rp_range: tuple[float, float] = (-5.0, -2.5),
     log_Ag_range: tuple[float, float] = (-2.0, 0.0),
     ecc_prior: str = "kipping13",
-    jitter_scale: float = 1e-10,
+    jitter_scale: float = 0.00017314568368055556,  # 1e-10 AU/day in m/s
     init_vals: dict | None = None,
     seed: int = 0,
     n_steps: int = 500,
@@ -172,7 +172,7 @@ def map_laplace_fit(
         log_Rp_range: ``(min, max)`` for ``log10(Rp/AU)`` prior.
         log_Ag_range: ``(min, max)`` for ``log10(geometric albedo)``.
         ecc_prior: Eccentricity prior name.
-        jitter_scale: Scale for HalfNormal jitter prior.
+        jitter_scale: Scale for HalfNormal jitter prior (m/s).
         init_vals: Init dict from :func:`find_init`. If ``None``,
             NumPyro's default random init is used.
         seed: PRNG seed for sampling.
@@ -204,6 +204,7 @@ def map_laplace_fit(
         log_Ag_range=log_Ag_range,
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
+        n_inst=rv_data.n_inst if rv_data is not None else 1,
         seed=seed,
     )
 
@@ -275,7 +276,7 @@ def map_laplace_mixture_fit(
     log_Rp_range: tuple[float, float] = (-5.0, -2.5),
     log_Ag_range: tuple[float, float] = (-2.0, 0.0),
     ecc_prior: str = "kipping13",
-    jitter_scale: float = 1e-10,
+    jitter_scale: float = 0.00017314568368055556,  # 1e-10 AU/day in m/s
     k: int = 5,
     init_list: list[dict] | None = None,
     use_top_k_init: bool = False,
@@ -304,7 +305,7 @@ def map_laplace_mixture_fit(
         log_Rp_range: ``(min, max)`` for ``log10(Rp/AU)`` prior.
         log_Ag_range: ``(min, max)`` for ``log10(geometric albedo)``.
         ecc_prior: Eccentricity prior name.
-        jitter_scale: Scale for HalfNormal jitter prior.
+        jitter_scale: Scale for HalfNormal jitter prior (m/s).
         k: Number of initial conditions to try.  Default 5.
         init_list: Optional list of K init dicts. If ``None``,
             initialisation is determined by ``use_top_k_init``.
@@ -341,6 +342,7 @@ def map_laplace_mixture_fit(
         log_Ag_range=log_Ag_range,
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
+        n_inst=rv_data.n_inst if rv_data is not None else 1,
         seed=seed,
     )
 

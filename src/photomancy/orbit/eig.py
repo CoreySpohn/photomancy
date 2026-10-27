@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
-from hwoutils.constants import G
+from hwoutils.constants import G, Mearth2kg
 from orbix.equations.orbit import (
     AB_matrices_reduced,
     mean_anomaly_tp,
@@ -69,13 +69,14 @@ def _predict_astrom_pure(
     M0 = phys["M0"]
 
     # Derived quantities
-    a_cubed = G * Ms * T**2 / (4.0 * jnp.pi**2)
+    Mp = 10.0 ** phys["log_Mp"] * Mearth2kg if "log_Mp" in phys else 0.0
+    mu = G * (Ms + Mp)
+    a_cubed = mu * T**2 / (4.0 * jnp.pi**2)
     a = a_cubed ** (1.0 / 3.0)
     tp = -M0 / (2.0 * jnp.pi / T)
     cos_w = jnp.cos(w)
     sin_w = jnp.sin(w)
 
-    mu = G * Ms
     n = mean_motion(a, mu)
     # Use atleast_1d to create a proper 1-element time array
     M = mean_anomaly_tp(jnp.atleast_1d(t), n, tp)
@@ -119,13 +120,14 @@ def _predict_sep_dmag_pure(
     w = phys["w_raw"]
     M0 = phys["M0"]
 
-    a_cubed = G * Ms * T**2 / (4.0 * jnp.pi**2)
+    Mp = 10.0 ** phys["log_Mp"] * Mearth2kg if "log_Mp" in phys else 0.0
+    mu = G * (Ms + Mp)
+    a_cubed = mu * T**2 / (4.0 * jnp.pi**2)
     a = a_cubed ** (1.0 / 3.0)
     tp = -M0 / (2.0 * jnp.pi / T)
     cos_w = jnp.cos(w)
     sin_w = jnp.sin(w)
 
-    mu = G * Ms
     n = mean_motion(a, mu)
     M = mean_anomaly_tp(jnp.atleast_1d(t), n, tp)
     sinE, cosE = diff_solve_trig(M, e)

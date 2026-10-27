@@ -5,10 +5,11 @@ inference-bridge, and EIG layers share one model trace cache, one data padding,
 and one set of constraint helpers without importing each other's internals.
 
 JIT-cache architecture: ``_MODEL_CACHE`` is keyed by the *static* model
-configuration (prior ranges, eccentricity prior, data-channel flags). On first
-call, the NumPyro model is traced once at the ``MAX_*`` shapes, extracting
-constraint transforms and a compilable potential function. Subsequent calls with
-different data (same shapes, via static padding) reuse the cached XLA compilation.
+configuration (prior ranges, eccentricity prior, data-channel flags, instrument
+count). On first call, the NumPyro model is traced once at the ``MAX_*``
+shapes, extracting constraint transforms and a compilable potential function.
+Subsequent calls with different data (same shapes, via static padding) reuse
+the cached XLA compilation.
 """
 
 import warnings
@@ -16,6 +17,7 @@ import warnings
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
+from hwoutils.constants import Msun2kg
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import initialize_model
 
@@ -51,6 +53,7 @@ def _cache_key(
     ecc_prior,
     jitter_scale,
     n_planets,
+    n_inst,
 ):
     """Generate a hashable key for the model cache."""
     return (
@@ -67,6 +70,7 @@ def _cache_key(
         ecc_prior,
         jitter_scale,
         n_planets,
+        n_inst,
     )
 
 
@@ -85,6 +89,7 @@ def _get_or_build_cached(
     ecc_prior,
     jitter_scale,
     n_planets=1,
+    n_inst=1,
     seed=0,
 ):
     """Return (or build + cache) model metadata for a given config.
@@ -107,6 +112,7 @@ def _get_or_build_cached(
         ecc_prior,
         jitter_scale,
         n_planets,
+        n_inst,
     )
 
     if key in _MODEL_CACHE:
@@ -130,10 +136,10 @@ def _get_or_build_cached(
     )
 
     # Build a placeholder OrbitData at MAX sizes (for tracing the active channels)
-    placeholder_Ms = 1.989e30
+    placeholder_Ms = Msun2kg
     placeholder_dist = 10.0
     placeholder_data = OrbitData(
-        rv=RVData.zeros() if has_rv else None,
+        rv=RVData.zeros(n_inst=n_inst) if has_rv else None,
         relative_astrom=RelativeAstromData.zeros() if has_relative_astrom else None,
         stellar_astrom=StellarAstromData.zeros() if has_stellar_astrom else None,
         pm_anomaly=PMAnomalyData.zeros() if has_pm_anomaly else None,

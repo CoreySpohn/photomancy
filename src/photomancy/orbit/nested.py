@@ -7,8 +7,8 @@ NumPyro log-density of the reparametrized model is the jaxns log-likelihood. The
 headline output is the Bayesian evidence (``log Z``), which turns an orbit fit into
 model comparison (planet count, period-alias resolution). The result is returned as a
 photomancy :class:`~photomancy.posterior.SamplePosterior` in the same physical columns
-OFTI / grid_search emit, so it drops into the EIG / clustering machinery
-(``cluster_to_mixture``, ``to_unconstrained``).
+OFTI / grid_search emit, plus true mass when sampled, so it drops into the EIG /
+clustering machinery (``cluster_to_mixture``, ``to_unconstrained``).
 
 jaxns is imported lazily inside the function: importing it enables JAX x64 globally as
 a side effect, so ``import photomancy`` stays light.
@@ -75,7 +75,7 @@ def orbit_nested_sampling(
     log_Rp_range=(-5.0, -2.5),
     log_Ag_range=(-2.0, 0.0),
     ecc_prior="kipping13",
-    jitter_scale=1e-10,
+    jitter_scale=0.00017314568368055556,  # 1e-10 AU/day in m/s
     num_live_points=None,
     max_samples=50000,
     num_samples=2000,
@@ -87,7 +87,8 @@ def orbit_nested_sampling(
     latent sites onto the unit cube, and runs it through the jaxns ``NestedSampler``
     with the default jaxns stopping condition (remaining evidence below
     ``log(1 + 1e-3)``). The returned posterior carries equally-weighted physical
-    samples (``a, e, cos_i, W, cos_w, sin_w, tp``) and the evidence; the evidence is
+    samples (``a, e, cos_i, W, cos_w, sin_w, tp``), with an additional ``Mp`` column
+    in kg when true mass is sampled, and the evidence; the evidence is
     the point of nested sampling -- a Bayes factor between two fits is orbit model
     comparison (e.g. planet present vs absent, alias A vs B).
 
@@ -109,7 +110,7 @@ def orbit_nested_sampling(
         log_Ag_range: ``(min, max)`` for the ``log10(geometric albedo)`` prior.
         ecc_prior: Eccentricity prior name (``"kipping13"``, ``"rayleigh"``,
             ``"vaneylen19"``, ``"disk"``).
-        jitter_scale: Scale for the HalfNormal RV-jitter prior.
+        jitter_scale: Scale for the HalfNormal RV-jitter prior (m/s).
         num_live_points: Number of independent root chains (jaxns
             ``root_allocation_degree``); ``None`` uses the jaxns default, ``30 * D``
             for ``D`` latent parameters.
@@ -120,7 +121,8 @@ def orbit_nested_sampling(
 
     Returns:
         A :class:`~photomancy.posterior.SamplePosterior` with ``samples`` of shape
-        ``(num_samples, 7)`` over ``_ORBIT_PHYS_NAMES``, uniform ``log_weights``, and
+        ``(num_samples, 7)`` over ``_ORBIT_PHYS_NAMES`` (8 columns including ``Mp``
+        when true mass is sampled), uniform ``log_weights``, and
         ``evidence`` set to the nested-sampling ``log Z`` (the jaxns classic
         expectation estimate, ``log_Z_mean``).
 
@@ -159,6 +161,7 @@ def orbit_nested_sampling(
 
     trace_key, run_key, sample_key, predict_key = jax.random.split(key, 4)
     prototype = trace(seed(model, trace_key)).get_trace(*model_args)
+    phys_names = (*_ORBIT_PHYS_NAMES, "Mp") if "Mp" in prototype else _ORBIT_PHYS_NAMES
     latent_shapes = {
         name: site["fn"].shape()
         for name, site in prototype.items()
@@ -197,10 +200,10 @@ def orbit_nested_sampling(
     # equally-weighted unit-cube draws map to physical columns through the model
     # (squeeze the planet axis).
     draws = Predictive(
-        unit_model, posterior_samples=unit_draws, return_sites=list(_ORBIT_PHYS_NAMES)
+        unit_model, posterior_samples=unit_draws, return_sites=list(phys_names)
     )(predict_key, *model_args)
     samples = jnp.stack(
-        [jnp.reshape(draws[name], (num_samples,)) for name in _ORBIT_PHYS_NAMES],
+        [jnp.reshape(draws[name], (num_samples,)) for name in phys_names],
         axis=1,
     )
 
@@ -208,5 +211,5 @@ def orbit_nested_sampling(
         samples=samples,
         log_weights=jnp.zeros(num_samples),
         evidence=jnp.asarray(results.log_Z_mean),
-        param_names=_ORBIT_PHYS_NAMES,
+        param_names=phys_names,
     )

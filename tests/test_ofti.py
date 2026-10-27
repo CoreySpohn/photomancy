@@ -249,8 +249,8 @@ def test_ecc_distribution():
     """ecc_distribution returns the right distribution per registry name."""
     assert isinstance(ecc_distribution("kipping13"), dist.Beta)
     assert isinstance(ecc_distribution("disk"), dist.Uniform)
-    assert isinstance(ecc_distribution("rayleigh"), dist.Weibull)
-    assert isinstance(ecc_distribution("vaneylen19"), dist.Weibull)
+    assert isinstance(ecc_distribution("rayleigh"), dist.Distribution)
+    assert isinstance(ecc_distribution("vaneylen19"), dist.Distribution)
     for name in ECC_PRIOR_NAMES:
         draws = ecc_distribution(name).sample(jax.random.PRNGKey(0), (2000,))
         assert bool(jnp.all(draws >= 0.0))

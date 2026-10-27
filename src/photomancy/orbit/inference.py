@@ -18,7 +18,7 @@ from collections.abc import Callable
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.constants import G
+from hwoutils.constants import G, Mearth2kg
 
 from photomancy.orbit._numpyro_bridge import (
     _get_or_build_cached,
@@ -68,7 +68,7 @@ def build_orbit_logdensity(
     log_Rp_range=(-5.0, -2.5),
     log_Ag_range=(-2.0, 0.0),
     ecc_prior="kipping13",
-    jitter_scale=1e-10,
+    jitter_scale=0.00017314568368055556,  # 1e-10 AU/day in m/s
     n_planets=1,
     seed=0,
 ):
@@ -98,7 +98,7 @@ def build_orbit_logdensity(
         log_Ag_range: ``(min, max)`` for the ``log10(geometric albedo)`` prior.
         ecc_prior: Eccentricity prior name (see
             :func:`~photomancy.orbit.model.build_model`).
-        jitter_scale: Scale for the HalfNormal RV-jitter prior.
+        jitter_scale: Scale for the HalfNormal RV-jitter prior (m/s).
         n_planets: Number of planets to fit (the model vmaps over planets and
             indexes astrometry by ``planet_id``).
         seed: PRNG seed for the one-time model trace.
@@ -127,6 +127,7 @@ def build_orbit_logdensity(
         log_Ag_range=log_Ag_range,
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
+        n_inst=rv_data.n_inst if rv_data is not None else 1,
         n_planets=n_planets,
         seed=seed,
     )
@@ -174,6 +175,9 @@ def to_unconstrained(posterior, problem, Ms):
     OFTI / grid_search emit physical rows ``(a, e, cos_i, W, cos_w, sin_w, tp)``; the
     EIG needs the model's unconstrained ``z``. Converts ``a -> period`` (Kepler) then
     each row -> raw sites -> ``z`` via ``problem.init_to_z`` (vmapped, no Python loop).
+    A true-mass ``Mp`` column (kg) is included in the Kepler inversion and carried
+    into the model's mass site. Mass-free rows use stellar mass, matching the
+    OFTI / grid_search orbit construction.
 
     Args:
         posterior: A physical :class:`~photomancy.posterior.SamplePosterior` whose
@@ -188,12 +192,13 @@ def to_unconstrained(posterior, problem, Ms):
     cols = {
         name: posterior.samples[:, i] for i, name in enumerate(posterior.param_names)
     }
-    period = 2.0 * jnp.pi * jnp.sqrt(cols["a"] ** 3 / (G * Ms))
+    period = 2.0 * jnp.pi * jnp.sqrt(cols["a"] ** 3 / (G * (Ms + cols.get("Mp", 0.0))))
 
-    def one(t, e, cos_i, w_node, cos_w, sin_w, tp):
-        return problem.init_to_z(
-            elements_to_sites(t, e, cos_i, w_node, cos_w, sin_w, tp, n_planets=1)
-        )
+    def one(t, e, cos_i, w_node, cos_w, sin_w, tp, Mp):
+        sites = elements_to_sites(t, e, cos_i, w_node, cos_w, sin_w, tp, n_planets=1)
+        if "Mp" in cols:
+            sites["log_Mp"] = jnp.atleast_1d(jnp.log10(Mp / Mearth2kg))
+        return problem.init_to_z(sites)
 
     z = jax.vmap(one)(
         period,
@@ -203,6 +208,7 @@ def to_unconstrained(posterior, problem, Ms):
         cols["cos_w"],
         cols["sin_w"],
         cols["tp"],
+        cols.get("Mp", jnp.zeros_like(period)),
     )
     return SamplePosterior(
         samples=z,

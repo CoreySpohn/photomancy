@@ -51,7 +51,9 @@ def test_stellar_forward_is_scaled_relative():
     args = _truth_args(times)
     Mp = 317.8 * Mearth2kg  # ~1 Jupiter mass
 
-    ra_rel, dec_rel = predict_relative_astrometry(Ms=MSUN_KG, dist_pc=DIST_PC, **args)
+    ra_rel, dec_rel = predict_relative_astrometry(
+        Ms=MSUN_KG, Mp=Mp, dist_pc=DIST_PC, **args
+    )
     ra_star, dec_star = predict_stellar_astrometry(
         Ms=MSUN_KG, Mp=Mp, dist_pc=DIST_PC, **args
     )

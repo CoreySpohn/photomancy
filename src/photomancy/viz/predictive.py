@@ -1,19 +1,17 @@
 """Predictive panels: RV curves, dMag tracks, and the detectability plane.
 
 These functions own the domain knowledge the hand-rolled versions kept
-fumbling: the forward models and data containers speak AU/day while a
-reader expects m/s (``plot_rv`` converts); ``dMag`` axes read fainter
+fumbling: forward models return AU/day and observations use m/s
+(``plot_rv`` converts the curves); ``dMag`` axes read fainter
 downward (``plot_dmag`` inverts once, idempotently); and the padded data
 containers carry ``is_valid`` prefix masks and ``-inf`` pads that must
 never reach a drawn artist.
 """
 
 import numpy as np
-from hwoutils.constants import AU2m, d2s
 
+from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
 from photomancy.viz._require import eyepiece
-
-RV_AU_PER_DAY_TO_M_PER_S = AU2m / d2s
 
 
 def _curves(values):
@@ -57,15 +55,15 @@ def plot_rv(
 ):
     """Radial-velocity curves in m/s, from the library's native AU/day.
 
-    ``predict_rv`` and ``RVData`` both speak AU/day; this panel converts
-    both to m/s for display, which is the unit a reader expects.
+    ``predict_rv`` returns AU/day; this panel converts curves to m/s.
+    ``RVData`` observations and uncertainties are already in m/s.
 
     Args:
         t_d: Times in days, shape ``(T,)``.
         rv_AU_per_d: Predicted curves in AU/day, ``(T,)`` or ``(K, T)`` --
             a fan of posterior-predictive draws enters as the batch.
         data: Optional ``RVData``; its valid prefix is drawn as errorbars,
-            converted from AU/day the same way.
+            already in m/s.
         ax: Axes to draw into. None creates a new figure.
         line_kw: Extra kwargs for each curve's ``ax.plot``, applied last.
 
@@ -90,8 +88,8 @@ def plot_rv(
         n = _valid_slice(data)
         errbar = ax.errorbar(
             np.asarray(data.times)[:n],
-            np.asarray(data.rv)[:n] * RV_AU_PER_DAY_TO_M_PER_S,
-            yerr=np.asarray(data.rv_err)[:n] * RV_AU_PER_DAY_TO_M_PER_S,
+            np.asarray(data.rv)[:n],
+            yerr=np.asarray(data.rv_err)[:n],
             fmt="o",
             color=_neutral_color(),
             markersize=4,

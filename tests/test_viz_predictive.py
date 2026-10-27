@@ -23,7 +23,7 @@ def _close_figures():
 
 
 def test_plot_rv_converts_au_per_day_to_m_per_s():
-    """Curves and data both convert; pad rows are never drawn."""
+    """Curves convert to m/s; pad rows are never drawn."""
     from photomancy.orbit.data import RVData
     from photomancy.viz import plot_rv
 
@@ -31,8 +31,8 @@ def test_plot_rv_converts_au_per_day_to_m_per_s():
     rv = 1.0e-6 * np.sin(2.0 * np.pi * t / 150.0)
     data = RVData.pad(
         times=jnp.array([10.0, 90.0, 200.0]),
-        rv=jnp.array([1.0e-6, -0.5e-6, 0.2e-6]),
-        rv_err=jnp.array([1.0e-7, 1.0e-7, 1.0e-7]),
+        rv=jnp.array([1.0e-6, -0.5e-6, 0.2e-6]) * (AU2m / d2s),
+        rv_err=jnp.array([1.0e-7, 1.0e-7, 1.0e-7]) * (AU2m / d2s),
         inst_ids=jnp.zeros(3, dtype=int),
         n_inst=1,
     )
@@ -142,3 +142,22 @@ def test_plot_detectability_inverts_idempotently():
     plot_detectability(sep, dmag + 0.5, ax=result.ax)
     assert result.ax.yaxis_inverted()
     assert result.ax.get_ylim()[0] >= result.ax.get_ylim()[1]
+
+
+def test_plot_rv_preserves_observed_m_per_s():
+    """Observed m/s velocities and uncertainties are drawn without conversion."""
+    from photomancy.orbit.data import RVData
+    from photomancy.viz import plot_rv
+
+    data = RVData.pad(
+        times=jnp.array([10.0, 20.0]),
+        rv=jnp.array([8.0, -3.0]),
+        rv_err=jnp.array([0.5, 0.7]),
+        inst_ids=jnp.zeros(2, dtype=int),
+        n_inst=1,
+    )
+    result = plot_rv(np.array([0.0, 30.0]), np.zeros(2), data=data)
+    np.testing.assert_allclose(result.ax.lines[1].get_ydata(), [8.0, -3.0])
+    segments = result.artists["collection"].get_segments()
+    np.testing.assert_allclose(segments[0][:, 1], [7.5, 8.5])
+    np.testing.assert_allclose(segments[1][:, 1], [-3.7, -2.3])

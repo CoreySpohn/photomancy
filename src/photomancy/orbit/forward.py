@@ -22,12 +22,16 @@ from orbix.kepler.core import diff_solve_trig
 two_pi_G = two_pi * G
 
 
-def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp):
+def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp, *, Mp=0.0):
     """Predict radial velocity signal for a single planet.
 
     Uses the singularity-free RV formula with the Normal->Disk parameterization.
     The ``sqrt(1-e^2)`` factor in K cancels with the orbital velocity prefactor,
-    giving a formula that is well-behaved at e=0.
+    giving a formula that is well-behaved at e=0. When the true mass ``Mp``
+    is supplied, the amplitude uses ``Ms + Mp``. If only ``Mp sin i`` is
+    available (an RV-only minimum-mass fit), omitting ``Mp`` uses the
+    ``Mp << Ms`` approximation. Its fractional overestimate in K is
+    ``(2/3)(Mp/Ms) + O((Mp/Ms)^2)``.
 
     Args:
         times: Observation epochs (days). Shape ``(N,)``.
@@ -38,6 +42,8 @@ def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp):
         cos_w: Cosine of argument of periapsis. Scalar.
         sin_w: Sine of argument of periapsis. Scalar.
         tp: Time of periapsis passage (days). Scalar.
+        Mp: True planet mass (kg), if known. Defaults to zero in Kepler
+            denominators for the minimum-mass approximation.
 
     Returns:
         rv_model: Predicted RV (AU/day). Shape ``(N,)``.
@@ -51,9 +57,8 @@ def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp):
     sinE, cosE = diff_solve_trig(M, e)
 
     # e-independent base velocity scale: K0 = K * sqrt(1-e^2)
-    # K = (2piG/T)^(1/3) * Mp_sini / Ms^(2/3) / sqrt(1-e^2)
-    # K0 = (2piG/T)^(1/3) * Mp_sini / Ms^(2/3)
-    K0 = (two_pi_G / T) ** (1.0 / 3.0) * Mp_sini / Ms ** (2.0 / 3.0)
+    # K0 = K * sqrt(1-e^2), with total two-body mass when available.
+    K0 = (two_pi_G / T) ** (1.0 / 3.0) * Mp_sini / (Ms + Mp) ** (2.0 / 3.0)
 
     # Singularity-free RV: cancellation of sqrt(1-e^2) factors
     sqrt_1me2 = jnp.sqrt(1.0 - e**2)
@@ -63,7 +68,9 @@ def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp):
     return rv_model
 
 
-def predict_relative_astrometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc):
+def predict_relative_astrometry(
+    times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc, *, Mp=0.0
+):
     """Predict relative astrometry (RA, DEC offsets) for a single planet.
 
     Projects the 3D position vector onto the sky plane and converts to
@@ -83,12 +90,13 @@ def predict_relative_astrometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dis
         tp: Time of periapsis passage (days). Scalar.
         Ms: Stellar mass (kg). Scalar.
         dist_pc: Distance to system (parsec). Scalar.
+        Mp: True planet mass (kg), if known. Default zero assumes ``Mp << Ms``.
 
     Returns:
         Tuple of ``(ra_pred, dec_pred)``, each shape ``(N,)`` in arcsec.
     """
     # Derived quantities
-    mu = G * Ms
+    mu = G * (Ms + Mp)
     n = mean_motion(a, mu)
     M = mean_anomaly_tp(times, n, tp)
     sinE, cosE = diff_solve_trig(M, e)
@@ -142,7 +150,7 @@ def predict_stellar_astrometry(
         ``(N,)`` in arcsec.
     """
     ra_rel, dec_rel = predict_relative_astrometry(
-        times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc
+        times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc, Mp=Mp
     )
     frac = Mp / (Ms + Mp)
     return -frac * ra_rel, -frac * dec_rel
@@ -228,7 +236,9 @@ def predict_pm_anomaly(
     return mu_gaia - mu_hg
 
 
-def predict_photometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Lambda, dist_pc):
+def predict_photometry(
+    times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Lambda, dist_pc, *, Mp=0.0
+):
     """Predict angular separation and delta-magnitude for a single planet.
 
     Computes the planet's on-sky separation (arcsec) and apparent brightness
@@ -246,6 +256,7 @@ def predict_photometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Lambda, dist
         Ms: Stellar mass (kg). Scalar.
         Lambda: Photometric area ``Ag * Rp^2`` (AU^2). Scalar.
         dist_pc: Distance to system (parsec). Scalar.
+        Mp: True planet mass (kg), if known. Default zero assumes ``Mp << Ms``.
 
     Returns:
         Tuple of ``(alpha_arcsec, dMag)``, each shape ``(N,)``.
@@ -253,7 +264,7 @@ def predict_photometry(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Lambda, dist
             - ``dMag``: Delta-magnitude (larger = fainter).
     """
     # Orbital propagation
-    mu = G * Ms
+    mu = G * (Ms + Mp)
     n = mean_motion(a, mu)
     M = mean_anomaly_tp(times, n, tp)
     sinE, cosE = diff_solve_trig(M, e)

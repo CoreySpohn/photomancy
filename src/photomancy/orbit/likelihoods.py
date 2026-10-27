@@ -67,16 +67,20 @@ def loglike_rv_marginalized(
 
     Because the instrument design matrix is an indicator matrix, the analytical
     marginalization of zero-points gamma_j collapses to O(N) segment sums. This
-    avoids sampling ``n_inst`` nuisance parameters.
+    avoids sampling ``n_inst`` nuisance parameters. Each populated instrument
+    removes one Gaussian dimension, so the normalization uses ``N_valid - J``.
+    Relative to retaining all ``N_valid`` dimensions, log evidence increases by
+    ``J / 2 * log(2 * pi)`` for a fixed set of populated instruments. The flat
+    offset measure is in m/s.
 
     Args:
-        rv_obs: Observed RVs (AU/day). Shape ``(N,)``.
-        rv_model: Predicted RVs from forward model (AU/day). Shape ``(N,)``.
-        rv_err: RV measurement uncertainties (AU/day). Shape ``(N,)``.
+        rv_obs: Observed RVs (m/s). Shape ``(N,)``.
+        rv_model: Predicted RVs converted from forward model (m/s). Shape ``(N,)``.
+        rv_err: RV measurement uncertainties (m/s). Shape ``(N,)``.
         inst_ids: Integer instrument index per obs, ``0..n_inst-1``.
             Shape ``(N,)``.
         n_inst: Number of distinct instruments. Integer.
-        jitters: Per-instrument jitter terms (AU/day). Shape ``(n_inst,)``.
+        jitters: Per-instrument jitter terms (m/s). Shape ``(n_inst,)``.
         is_valid: Boolean validity mask. Shape ``(N,)``.
 
     Returns:
@@ -86,9 +90,12 @@ def loglike_rv_marginalized(
     mask = is_valid  # boolean
 
     # Total variance: measurement + jitter
-    var = rv_err**2 + jitters[inst_ids] ** 2
-    w = jnp.where(mask, 1.0 / var, 0.0)  # masked weights
-    r = rv_obs - rv_model
+    inst_ids = jnp.where(mask, inst_ids, 0)
+    err = jnp.where(mask, rv_err, 1.0)
+    jitter = jnp.where(mask, jitters[inst_ids], 0.0)
+    var = err**2 + jitter**2
+    w = jnp.where(mask, 1.0 / var, 0.0)
+    r = jnp.where(mask, rv_obs, 0.0) - jnp.where(mask, rv_model, 0.0)
 
     # Segment sums collapse the matrix algebra to O(N)
     A = jax.ops.segment_sum(w, inst_ids, num_segments=n_inst)
@@ -97,11 +104,13 @@ def loglike_rv_marginalized(
 
     # Marginalized log-likelihood -- only count valid observations
     N_valid = jnp.sum(mask)
+    J = jnp.sum(A > 0)
+    A_safe = jnp.where(A > 0, A, 1.0)
     return -0.5 * (
-        jnp.sum(C - B**2 / jnp.where(A > 0, A, 1.0))
-        + jnp.sum(jnp.where(A > 0, jnp.log(A), 0.0))
+        jnp.sum(C - B**2 / A_safe)
+        + jnp.sum(jnp.log(A_safe))
         + jnp.sum(jnp.where(mask, jnp.log(var), 0.0))
-        + N_valid * jnp.log(2.0 * jnp.pi)
+        + (N_valid - J) * jnp.log(2.0 * jnp.pi)
     )
 
 

@@ -11,8 +11,8 @@ Available eccentricity priors (pass as ``ecc_prior`` to
 Name           Description
 ============== ===================================================
 ``"kipping13"`` Beta(0.867, 3.03) -- Kipping (2013) short-period
-``"rayleigh"``  Rayleigh(sigma=0.3) via Weibull(sigmasqrt2, 2)
-``"vaneylen19"`` Rayleigh(sigma=0.049) -- Van Eylen et al. (2019)
+``"rayleigh"``  Rayleigh(sigma=0.3), truncated to [0, 1)
+``"vaneylen19"`` Rayleigh(sigma=0.049), truncated to [0, 1)
 ``"disk"``      Uniform(0, 1) on *e*, Uniform(0, 2pi) on *omega*
 ============== ===================================================
 
@@ -27,9 +27,13 @@ Name           Description
    but critical mathematical error.
 """
 
+from typing import ClassVar
+
+import jax
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
+from numpyro.distributions import constraints
 
 # ---------------------------------------------------------------------------
 # Pure-JAX transforms (no NumPyro dependency)
@@ -71,14 +75,53 @@ def eccentricity_disk_transform(e_x, e_y):
 # Eccentricity distributions (sampler-context-free)
 # ---------------------------------------------------------------------------
 
+
+class _TruncatedRayleigh(dist.Distribution):
+    """Rayleigh conditioned on 0 <= e < 1, including direct inverse-CDF draws.
+
+    NumPyro's TruncatedDistribution only accepts symmetric real-support bases,
+    so Weibull truncation needs its own normalization and inverse CDF.
+    """
+
+    arg_constraints: ClassVar = {"sigma": constraints.positive}
+    support = constraints.unit_interval
+    reparametrized_params: ClassVar = ["sigma"]
+
+    def __init__(self, sigma, *, validate_args=None):
+        self.sigma = jnp.asarray(sigma)
+        super().__init__(batch_shape=self.sigma.shape, validate_args=validate_args)
+
+    @property
+    def _normalizer(self):
+        return -jnp.expm1(-1.0 / (2.0 * self.sigma**2))
+
+    def sample(self, key, sample_shape=()):
+        """Draw from the conditional CDF, avoiding the excluded upper endpoint."""
+        u = jax.random.uniform(key, shape=sample_shape + self.batch_shape)
+        return self.icdf(u)
+
+    def icdf(self, q):
+        """Map the nested sampler's unit cube through the conditional CDF."""
+        e = self.sigma * jnp.sqrt(-2.0 * jnp.log1p(-q * self._normalizer))
+        return jnp.minimum(e, jnp.nextafter(jnp.ones_like(e), 0.0))
+
+    def log_prob(self, value):
+        """Return the normalized density, with zero probability outside [0, 1)."""
+        valid = (value >= 0.0) & (value < 1.0)
+        safe_value = jnp.where(valid, value, 0.5)
+        base = dist.Weibull(self.sigma * jnp.sqrt(2.0), 2.0)
+        log_prob = base.log_prob(safe_value) - jnp.log(self._normalizer)
+        return jnp.where(valid, log_prob, -jnp.inf)
+
+
 # The numpyro Distribution object for each named eccentricity prior. This is the
 # single source of truth: the NumPyro samplers below register a ``sample`` site
 # from it, and rejection samplers (e.g. photomancy.orbit.ofti) draw from it directly
 # via ``.sample(key, shape)`` outside any model context.
 _ECC_DISTRIBUTIONS = {
     "disk": lambda: dist.Uniform(0.0, 1.0),
-    "rayleigh": lambda: dist.Weibull(scale=0.3 * jnp.sqrt(2.0), concentration=2.0),
-    "vaneylen19": lambda: dist.Weibull(scale=0.049 * jnp.sqrt(2.0), concentration=2.0),
+    "rayleigh": lambda: _TruncatedRayleigh(0.3),
+    "vaneylen19": lambda: _TruncatedRayleigh(0.049),
     "kipping13": lambda: dist.Beta(0.867, 3.03),
 }
 
@@ -136,7 +179,7 @@ def _sample_ecc_disk():
 
 @_register("rayleigh")
 def _sample_ecc_rayleigh():
-    """Rayleigh(sigma=0.3) on e via Weibull(sigma*sqrt(2), 2). Mode ~ 0.3."""
+    """Rayleigh(sigma=0.3) on e, truncated to [0, 1). Mode ~ 0.3."""
     e = numpyro.sample("e_raw", ecc_distribution("rayleigh"))
     w = numpyro.sample("w_raw", dist.Uniform(0.0, 2.0 * jnp.pi))
     return e, jnp.cos(w), jnp.sin(w)
@@ -144,7 +187,7 @@ def _sample_ecc_rayleigh():
 
 @_register("vaneylen19")
 def _sample_ecc_vaneylen19():
-    """Rayleigh(sigma=0.049) on e -- Van Eylen et al. (2019) for small planets."""
+    """Rayleigh(sigma=0.049) on e in [0, 1) -- Van Eylen et al. (2019)."""
     e = numpyro.sample("e_raw", ecc_distribution("vaneylen19"))
     w = numpyro.sample("w_raw", dist.Uniform(0.0, 2.0 * jnp.pi))
     return e, jnp.cos(w), jnp.sin(w)
@@ -189,7 +232,7 @@ DEFAULT_PRIORS = {
     "cos_i_range": (-1.0, 1.0),  # isotropic inclination
     "W_range": (0.0, 2 * jnp.pi),  # ascending node
     "M0_range": (0.0, 2 * jnp.pi),  # mean anomaly at epoch
-    "jitter_scale": 1e-10,  # HalfNormal scale for jitter (AU/day)
+    "jitter_scale": 0.00017314568368055556,  # 1e-10 AU/day in m/s
     "log_Mp_range": (-2.0, 4.0),  # log10(M_earth): 0.01-10,000 M_earth
     "Ag_range": (0.0, 1.0),  # geometric albedo
     "log_Lambda_range": (-30.0, -20.0),  # log10(AU^2): photometric area
