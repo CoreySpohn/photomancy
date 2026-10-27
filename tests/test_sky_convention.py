@@ -338,12 +338,14 @@ def test_standard_lambert_phase(predictor):
 @pytest.mark.parametrize("observable", ["stellar", "proper_motion", "pm_anomaly"])
 def test_reflex_observables_east_north(k16, observable):
     """Green (1985), ch. 17: barycentric reflex retains the east/north axes."""
-    Mp = 0.1 * k16["Ms"]
-    fraction = -Mp / (k16["Ms"] + Mp)
+    # The K16 mass is the Kepler total; split it so Ms + Mp keeps the period.
+    Ms = k16["Ms"] / 1.1
+    Mp = 0.1 * Ms
+    fraction = -Mp / (Ms + Mp)
     hip, gaia, window, n = 500.0, 9000.0, 1000.0, 25
     times = np.linspace(gaia - window / 2, gaia + window / 2, n)
     positions = fraction * reference(times, k16)
-    params = dict(forward_params(k16), Mp=Mp)
+    params = dict(forward_params(k16), Ms=Ms, Mp=Mp)
     if observable == "stellar":
         actual = predict_stellar_astrometry(jnp.asarray(times), **params)
         expected = positions
