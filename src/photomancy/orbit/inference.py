@@ -68,7 +68,7 @@ def build_orbit_logdensity(
     log_Rp_range=(-5.0, -2.5),
     log_Ag_range=(-2.0, 0.0),
     ecc_prior="kipping13",
-    jitter_scale=1e-10,
+    jitter_scale=0.00017314568368055556,  # 1e-10 AU/day in m/s
     n_planets=1,
     seed=0,
 ):
@@ -98,7 +98,7 @@ def build_orbit_logdensity(
         log_Ag_range: ``(min, max)`` for the ``log10(geometric albedo)`` prior.
         ecc_prior: Eccentricity prior name (see
             :func:`~photomancy.orbit.model.build_model`).
-        jitter_scale: Scale for the HalfNormal RV-jitter prior.
+        jitter_scale: Scale for the HalfNormal RV-jitter prior (m/s).
         n_planets: Number of planets to fit (the model vmaps over planets and
             indexes astrometry by ``planet_id``).
         seed: PRNG seed for the one-time model trace.

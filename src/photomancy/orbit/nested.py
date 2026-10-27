@@ -75,7 +75,7 @@ def orbit_nested_sampling(
     log_Rp_range=(-5.0, -2.5),
     log_Ag_range=(-2.0, 0.0),
     ecc_prior="kipping13",
-    jitter_scale=1e-10,
+    jitter_scale=0.00017314568368055556,  # 1e-10 AU/day in m/s
     num_live_points=None,
     max_samples=50000,
     num_samples=2000,
@@ -109,7 +109,7 @@ def orbit_nested_sampling(
         log_Ag_range: ``(min, max)`` for the ``log10(geometric albedo)`` prior.
         ecc_prior: Eccentricity prior name (``"kipping13"``, ``"rayleigh"``,
             ``"vaneylen19"``, ``"disk"``).
-        jitter_scale: Scale for the HalfNormal RV-jitter prior.
+        jitter_scale: Scale for the HalfNormal RV-jitter prior (m/s).
         num_live_points: Number of independent root chains (jaxns
             ``root_allocation_degree``); ``None`` uses the jaxns default, ``30 * D``
             for ``D`` latent parameters.

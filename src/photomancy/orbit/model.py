@@ -29,6 +29,20 @@ from photomancy.orbit.likelihoods import (
     loglike_stellar_astrom,
 )
 from photomancy.orbit.priors import sample_ecc_prior
+from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
+
+
+def _rv_loglike(data, prediction, jitter):
+    """Convert the AU/day forward prediction at the m/s likelihood boundary."""
+    return loglike_rv_marginalized(
+        data.rv,
+        prediction * RV_AU_PER_DAY_TO_M_PER_S,
+        data.rv_err,
+        data.inst_ids,
+        data.n_inst,
+        jitter,
+        data.is_valid,
+    )
 
 
 def build_model(
@@ -45,7 +59,7 @@ def build_model(
     log_Rp_range=(-5.0, -2.5),
     log_Ag_range=(-2.0, 0.0),
     ecc_prior="kipping13",
-    jitter_scale=1e-10,
+    jitter_scale=0.00017314568368055556,  # 1e-10 AU/day in m/s
 ):
     """Build a NumPyro model function for orbit fitting.
 
@@ -68,7 +82,7 @@ def build_model(
         log_Ag_range: (min, max) for log10(geometric albedo) prior.
         ecc_prior: Eccentricity prior name. One of ``"kipping13"`` (default),
             ``"rayleigh"``, ``"vaneylen19"``, or ``"disk"``.
-        jitter_scale: Scale for HalfNormal jitter prior (AU/day).
+        jitter_scale: Scale for HalfNormal jitter prior (m/s).
 
     Returns:
         A callable ``model(Ms, dist_pc, data)`` suitable for ``numpyro.infer.MCMC``
@@ -199,15 +213,7 @@ def build_model(
                     sin_w_s,
                     tp_s,
                 )
-                ll_rv_val = loglike_rv_marginalized(
-                    rv_data.rv,
-                    rv_model,
-                    rv_data.rv_err,
-                    rv_data.inst_ids,
-                    rv_data.n_inst,
-                    jitter,
-                    rv_data.is_valid,
-                )
+                ll_rv_val = _rv_loglike(rv_data, rv_model, jitter)
                 numpyro.factor("ll_rv", ll_rv_val)
                 ll_total = ll_total + ll_rv_val
 
@@ -396,15 +402,7 @@ def build_model(
                     T, Mp_sini, e, cos_w, sin_w, tp
                 )
                 rv_model = jnp.sum(rv_per_planet, axis=0)
-                ll_rv = loglike_rv_marginalized(
-                    rv_data.rv,
-                    rv_model,
-                    rv_data.rv_err,
-                    rv_data.inst_ids,
-                    rv_data.n_inst,
-                    jitter,
-                    rv_data.is_valid,
-                )
+                ll_rv = _rv_loglike(rv_data, rv_model, jitter)
                 numpyro.factor("ll_rv", ll_rv)
 
             if has_relative_astrom:

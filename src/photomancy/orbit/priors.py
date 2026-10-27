@@ -189,7 +189,7 @@ DEFAULT_PRIORS = {
     "cos_i_range": (-1.0, 1.0),  # isotropic inclination
     "W_range": (0.0, 2 * jnp.pi),  # ascending node
     "M0_range": (0.0, 2 * jnp.pi),  # mean anomaly at epoch
-    "jitter_scale": 1e-10,  # HalfNormal scale for jitter (AU/day)
+    "jitter_scale": 0.00017314568368055556,  # 1e-10 AU/day in m/s
     "log_Mp_range": (-2.0, 4.0),  # log10(M_earth): 0.01-10,000 M_earth
     "Ag_range": (0.0, 1.0),  # geometric albedo
     "log_Lambda_range": (-30.0, -20.0),  # log10(AU^2): photometric area

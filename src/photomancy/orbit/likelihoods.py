@@ -70,13 +70,13 @@ def loglike_rv_marginalized(
     avoids sampling ``n_inst`` nuisance parameters.
 
     Args:
-        rv_obs: Observed RVs (AU/day). Shape ``(N,)``.
-        rv_model: Predicted RVs from forward model (AU/day). Shape ``(N,)``.
-        rv_err: RV measurement uncertainties (AU/day). Shape ``(N,)``.
+        rv_obs: Observed RVs (m/s). Shape ``(N,)``.
+        rv_model: Predicted RVs converted from forward model (m/s). Shape ``(N,)``.
+        rv_err: RV measurement uncertainties (m/s). Shape ``(N,)``.
         inst_ids: Integer instrument index per obs, ``0..n_inst-1``.
             Shape ``(N,)``.
         n_inst: Number of distinct instruments. Integer.
-        jitters: Per-instrument jitter terms (AU/day). Shape ``(n_inst,)``.
+        jitters: Per-instrument jitter terms (m/s). Shape ``(n_inst,)``.
         is_valid: Boolean validity mask. Shape ``(N,)``.
 
     Returns:

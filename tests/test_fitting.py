@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from hwoutils.constants import G, Mearth2kg, Msun2kg, Rearth2AU
+from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, Rearth2AU, d2s
 from orbix.kepler.core import diff_solve_trig
 
 from photomancy.orbit.data import NullData, OrbitData, RelativeAstromData, RVData
@@ -740,8 +740,8 @@ class TestNumPyroModel:
 
         rv_data = RVData(
             times=jnp.linspace(0, 365.25, 10),
-            rv=jnp.ones(10) * 1e-10,
-            rv_err=jnp.ones(10) * 1e-11,
+            rv=jnp.ones(10) * 1e-10 * (AU2m / d2s),
+            rv_err=jnp.ones(10) * 1e-11 * (AU2m / d2s),
             inst_ids=jnp.zeros(10, dtype=jnp.int32),
             is_valid=jnp.ones(10, dtype=bool),
             n_inst=1,
@@ -773,8 +773,8 @@ class TestNumPyroModel:
 
         rv_data = RVData(
             times=jnp.linspace(0, 365.25, 10),
-            rv=jnp.ones(10) * 1e-10,
-            rv_err=jnp.ones(10) * 1e-11,
+            rv=jnp.ones(10) * 1e-10 * (AU2m / d2s),
+            rv_err=jnp.ones(10) * 1e-11 * (AU2m / d2s),
             inst_ids=jnp.zeros(10, dtype=jnp.int32),
             is_valid=jnp.ones(10, dtype=bool),
             n_inst=1,
@@ -803,8 +803,8 @@ class TestNumPyroModel:
 
         rv_data = RVData(
             times=jnp.linspace(0, 365.25, 10),
-            rv=jnp.ones(10) * 1e-10,
-            rv_err=jnp.ones(10) * 1e-11,
+            rv=jnp.ones(10) * 1e-10 * (AU2m / d2s),
+            rv_err=jnp.ones(10) * 1e-11 * (AU2m / d2s),
             inst_ids=jnp.zeros(10, dtype=jnp.int32),
             is_valid=jnp.ones(10, dtype=bool),
             n_inst=1,
@@ -848,6 +848,8 @@ class TestNumPyroModel:
             true_sin_w,
             true_tp,
         )
+
+        rv_true = rv_true * (AU2m / d2s)
 
         # Add noise
         key = jax.random.PRNGKey(123)
