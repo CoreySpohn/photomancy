@@ -67,7 +67,11 @@ def loglike_rv_marginalized(
 
     Because the instrument design matrix is an indicator matrix, the analytical
     marginalization of zero-points gamma_j collapses to O(N) segment sums. This
-    avoids sampling ``n_inst`` nuisance parameters.
+    avoids sampling ``n_inst`` nuisance parameters. Each populated instrument
+    removes one Gaussian dimension, so the normalization uses ``N_valid - J``.
+    Relative to retaining all ``N_valid`` dimensions, log evidence increases by
+    ``J / 2 * log(2 * pi)`` for a fixed set of populated instruments. The flat
+    offset measure is in m/s.
 
     Args:
         rv_obs: Observed RVs (m/s). Shape ``(N,)``.
@@ -100,12 +104,13 @@ def loglike_rv_marginalized(
 
     # Marginalized log-likelihood -- only count valid observations
     N_valid = jnp.sum(mask)
+    J = jnp.sum(A > 0)
     A_safe = jnp.where(A > 0, A, 1.0)
     return -0.5 * (
         jnp.sum(C - B**2 / A_safe)
         + jnp.sum(jnp.log(A_safe))
         + jnp.sum(jnp.where(mask, jnp.log(var), 0.0))
-        + N_valid * jnp.log(2.0 * jnp.pi)
+        + (N_valid - J) * jnp.log(2.0 * jnp.pi)
     )
 
 

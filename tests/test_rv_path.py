@@ -168,3 +168,57 @@ def test_rayleigh_prior_has_truncation_normalization():
     base = dist.Weibull(scale=0.3 * jnp.sqrt(2.0), concentration=2.0)
     expected = base.log_prob(e) - jnp.log1p(-jnp.exp(-1.0 / (2 * 0.3**2)))
     assert jnp.allclose(ecc_distribution("rayleigh").log_prob(e), expected, rtol=1e-12)
+
+
+def test_single_rv_observation_integrates_to_one():
+    """Integrating the sole observation's flat offset leaves log likelihood zero."""
+    from photomancy.orbit.likelihoods import loglike_rv_marginalized
+
+    result = loglike_rv_marginalized(
+        jnp.array([7.0]),
+        jnp.array([-2.0]),
+        jnp.ones(1),
+        jnp.zeros(1, dtype=int),
+        1,
+        jnp.zeros(1),
+        jnp.ones(1, dtype=bool),
+    )
+    assert float(result) == 0.0
+
+
+@pytest.mark.parametrize("n_inst", [2, 3])
+def test_rv_offset_marginalization_matches_quadrature(n_inst):
+    """Three observations match integrating both populated instrument offsets."""
+    import numpy as np
+    from scipy.integrate import quad
+
+    from photomancy.orbit.likelihoods import loglike_rv_marginalized
+
+    obs = np.array([1.4, -0.3, 2.1])
+    model = np.array([0.2, -0.7, 1.0])
+    err = np.array([0.7, 0.8, 0.9])
+    ids = np.array([0, 0, 1])
+    jitters = np.array([0.3, 0.4, 0.5])[:n_inst]
+    variance = err**2 + jitters[ids] ** 2
+    # The double integral factorizes because the offsets have disjoint rows.
+    integral = 1.0
+    for instrument in (0, 1):
+        selected = ids == instrument
+
+        def gaussian(offset, selected=selected):
+            residual = obs[selected] - model[selected] - offset
+            return np.exp(-0.5 * np.sum(residual**2 / variance[selected])) / np.sqrt(
+                np.prod(2 * np.pi * variance[selected])
+            )
+
+        integral *= quad(gaussian, -np.inf, np.inf, epsabs=1e-12, epsrel=1e-12)[0]
+    result = loglike_rv_marginalized(
+        jnp.asarray(obs),
+        jnp.asarray(model),
+        jnp.asarray(err),
+        jnp.asarray(ids),
+        n_inst,
+        jnp.asarray(jitters),
+        jnp.ones(3, dtype=bool),
+    )
+    assert float(jnp.exp(result)) == pytest.approx(integral, rel=1e-6)
