@@ -143,3 +143,28 @@ def test_invalid_rv_rows_have_finite_likelihood_and_gradient(invalid_value):
     for gradient in gradients:
         assert jnp.all(jnp.isfinite(gradient))
         assert float(gradient[1]) == 0.0
+
+
+@pytest.mark.parametrize("name", ["rayleigh", "vaneylen19"])
+def test_eccentricity_prior_draws_and_density_stay_below_one(name):
+    """Both direct draws and log densities exclude unbound eccentricities."""
+    from photomancy.orbit.priors import ecc_distribution
+
+    prior = ecc_distribution(name)
+    draws = prior.sample(jax.random.key(47), (100_000,))
+    assert bool(jnp.all((draws >= 0.0) & (draws < 1.0)))
+    assert float(prior.log_prob(1.01)) == -jnp.inf
+    assert float(prior.log_prob(1.0)) == -jnp.inf
+    assert float(prior.log_prob(-0.01)) == -jnp.inf
+
+
+def test_rayleigh_prior_has_truncation_normalization():
+    """The interior Rayleigh density includes the probability removed above 1."""
+    import numpyro.distributions as dist
+
+    from photomancy.orbit.priors import ecc_distribution
+
+    e = jnp.array([0.1, 0.3, 0.8])
+    base = dist.Weibull(scale=0.3 * jnp.sqrt(2.0), concentration=2.0)
+    expected = base.log_prob(e) - jnp.log1p(-jnp.exp(-1.0 / (2 * 0.3**2)))
+    assert jnp.allclose(ecc_distribution("rayleigh").log_prob(e), expected, rtol=1e-12)
