@@ -70,3 +70,35 @@ def test_cached_rv_jitter_matches_instrument_count():
         problem = build_orbit_logdensity(Msun2kg, 10.0, rv_data=data)
         physical = problem.to_physical(problem.init_to_z({}))
         assert jnp.atleast_1d(physical["jitter"]).shape == (n_inst,)
+
+
+@pytest.mark.parametrize(
+    "channel", ["rv", "relative_astrom", "stellar_astrom", "null", "imaging"]
+)
+def test_repadding_preserves_channel_validity_mask(channel):
+    """Growing any observation channel preserves invalid rows and static shape."""
+    import equinox as eqx
+
+    from photomancy.orbit.data import (
+        ImagingData,
+        NullData,
+        RelativeAstromData,
+        StellarAstromData,
+    )
+
+    classes = {
+        "rv": RVData,
+        "relative_astrom": RelativeAstromData,
+        "stellar_astrom": StellarAstromData,
+        "null": NullData,
+        "imaging": ImagingData,
+    }
+    data = classes[channel].zeros(max_n=2)
+    data = eqx.tree_at(lambda d: d.is_valid, data, jnp.array([True, False]))
+    padded = OrbitData(**{channel: data}).padded()
+    result = getattr(padded, channel)
+    assert result.is_valid.shape[0] > 2
+    assert int(result.is_valid.sum()) == 1
+    assert bool(result.is_valid[0])
+    assert not bool(result.is_valid[1])
+    assert getattr(padded.padded(), channel) is result

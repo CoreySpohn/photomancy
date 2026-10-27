@@ -550,9 +550,9 @@ class OrbitData(eqx.Module):
     def padded(self):
         """Pad each present channel to its ``MAX_*`` size for JIT-cache stability.
 
-        Channels already at ``MAX_*`` (or ``None``) pass through unchanged -- re-padding
-        an already-padded container would reset its ``is_valid`` mask. The proper-motion
-        anomaly is a fixed-shape 2-vector and never needs padding.
+        Existing validity masks are preserved when growing a channel. Channels
+        already at ``MAX_*`` (or ``None``) pass through unchanged. The
+        proper-motion anomaly is a fixed-shape 2-vector and never needs padding.
         """
         rv = self.rv
         if rv is not None and rv.times.shape[0] != MAX_RV:
@@ -562,6 +562,11 @@ class OrbitData(eqx.Module):
                 rv_err=rv.rv_err,
                 inst_ids=rv.inst_ids,
                 n_inst=rv.n_inst,
+            )
+            rv = eqx.tree_at(
+                lambda d: d.is_valid,
+                rv,
+                _pad_1d(self.rv.is_valid, MAX_RV, fill=False),
             )
         rel = self.relative_astrom
         if rel is not None and rel.times.shape[0] != MAX_REL_ASTROM:
@@ -574,6 +579,11 @@ class OrbitData(eqx.Module):
                 corr=rel.corr,
                 planet_id=rel.planet_id,
             )
+            rel = eqx.tree_at(
+                lambda d: d.is_valid,
+                rel,
+                _pad_1d(self.relative_astrom.is_valid, MAX_REL_ASTROM, fill=False),
+            )
         stellar = self.stellar_astrom
         if stellar is not None and stellar.times.shape[0] != MAX_STELLAR_ASTROM:
             stellar = StellarAstromData.pad(
@@ -584,12 +594,22 @@ class OrbitData(eqx.Module):
                 dec_err=stellar.dec_err,
                 corr=stellar.corr,
             )
+            stellar = eqx.tree_at(
+                lambda d: d.is_valid,
+                stellar,
+                _pad_1d(self.stellar_astrom.is_valid, MAX_STELLAR_ASTROM, fill=False),
+            )
         null = self.null
         if null is not None and null.epochs.shape[0] != MAX_IMG:
             null = NullData.pad(
                 epochs=null.epochs,
                 sep_grid=null.sep_grid,
                 dmag0_grid=null.dmag0_grid,
+            )
+            null = eqx.tree_at(
+                lambda d: d.is_valid,
+                null,
+                _pad_1d(self.null.is_valid, MAX_IMG, fill=False),
             )
         imaging = self.imaging
         if imaging is not None and imaging.epochs.shape[0] != MAX_IMG:
@@ -600,6 +620,11 @@ class OrbitData(eqx.Module):
                 is_detected=imaging.is_detected,
                 dmag_obs=imaging.dmag_obs,
                 dmag_err=imaging.dmag_err,
+            )
+            imaging = eqx.tree_at(
+                lambda d: d.is_valid,
+                imaging,
+                _pad_1d(self.imaging.is_valid, MAX_IMG, fill=False),
             )
         return OrbitData(
             rv=rv,
