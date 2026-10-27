@@ -342,3 +342,51 @@ def test_reflex_orbit_closes_at_total_mass_period():
     )
     assert float(ra[1]) == pytest.approx(float(ra[0]), rel=1e-12, abs=1e-15)
     assert float(dec[1]) == pytest.approx(float(dec[0]), rel=1e-12, abs=1e-15)
+
+
+@pytest.mark.parametrize("known_mass", [False, True])
+def test_predict_rv_is_receding_positive_stellar_velocity(known_mass):
+    """RV is +dz_star/dt in the right-handed (east, north, away) frame."""
+    from hwoutils.constants import two_pi
+    from orbix.equations import period_to_sma
+    from orbix.equations.orbit import AB_matrices_reduced
+    from orbix.equations.propagation import single_r
+    from orbix.kepler.core import diff_solve_trig
+
+    period, e, cos_i, node, omega, tp = 430.0, 0.37, 0.43, 1.1, 0.72, 31.0
+    mass = (0.1 if known_mass else 1e-4) * Msun2kg
+    sin_i = jnp.sqrt(1 - cos_i**2)
+    a = period_to_sma(period, Msun2kg + mass)
+    A, B = AB_matrices_reduced(
+        a,
+        jnp.sqrt(1 - e**2),
+        sin_i,
+        cos_i,
+        jnp.sin(node),
+        jnp.cos(node),
+        jnp.sin(omega),
+        jnp.cos(omega),
+    )
+
+    def stellar_z(time):
+        sinE, cosE = diff_solve_trig(jnp.atleast_1d(two_pi * (time - tp) / period), e)
+        z_planet = single_r(A, B, e, jnp.atleast_1d(sinE), jnp.atleast_1d(cosE))[2, 0]
+        return -(mass / (Msun2kg + mass)) * z_planet
+
+    times = jnp.linspace(0.0, 2.0 * period, 31)
+    velocity = jax.vmap(jax.grad(stellar_z))(times)
+    prediction = predict_rv(
+        times,
+        period,
+        Msun2kg,
+        mass * sin_i,
+        e,
+        jnp.cos(omega),
+        jnp.sin(omega),
+        tp,
+        **({"Mp": mass} if known_mass else {}),
+    )
+    tolerance = 1e-12 if known_mass else (2.0 / 3.0) * (mass / Msun2kg)
+    assert bool(jnp.any(velocity > 0))
+    assert bool(jnp.any(velocity < 0))
+    assert jnp.allclose(prediction, velocity, rtol=tolerance, atol=0.0)
