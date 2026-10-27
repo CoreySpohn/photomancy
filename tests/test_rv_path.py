@@ -222,3 +222,123 @@ def test_rv_offset_marginalization_matches_quadrature(n_inst):
         jnp.ones(3, dtype=bool),
     )
     assert float(jnp.exp(result)) == pytest.approx(integral, rel=1e-6)
+
+
+def test_predict_rv_known_mass_matches_exact_two_body_K():
+    """Known mass gives the exact two-body K at Mp/Ms=0.1 (Lovis/Fischer Eq. 14)."""
+    from hwoutils.constants import G, two_pi
+
+    period, eccentricity, cos_i = 400.0, 0.35, 0.4
+    mass = 0.1 * Msun2kg
+    minimum_mass = mass * jnp.sqrt(1.0 - cos_i**2)
+    expected_K = (
+        (two_pi * G / period) ** (1.0 / 3.0)
+        * minimum_mass
+        / (Msun2kg + mass) ** (2.0 / 3.0)
+        / jnp.sqrt(1.0 - eccentricity**2)
+    )
+    velocity = predict_rv(
+        jnp.array([0.0]),
+        period,
+        Msun2kg,
+        minimum_mass,
+        eccentricity,
+        1.0,
+        0.0,
+        0.0,
+        Mp=mass,
+    )[0]
+    measured_K = -velocity / (1.0 + eccentricity)
+    assert float(measured_K) == pytest.approx(float(expected_K), rel=1e-12)
+
+
+@pytest.mark.parametrize("n_planets", [1, 2])
+def test_joint_model_uses_total_mass(n_planets):
+    """Joint RV/reflex fits use each planet's true mass in both a and K."""
+    from hwoutils.constants import G, two_pi
+    from orbix.equations import period_to_sma
+
+    from photomancy.orbit.data import StellarAstromData
+    from photomancy.orbit.likelihoods import loglike_rv_marginalized
+
+    times = jnp.array([0.0, 100.0, 200.0, 350.0])
+    periods = jnp.array([400.0, 700.0])[:n_planets]
+    masses = jnp.array([0.1, 0.05])[:n_planets] * Msun2kg
+    cos_i = jnp.full(n_planets, 0.4)
+    K = (two_pi * G / periods) ** (1.0 / 3.0) * masses * jnp.sqrt(1 - cos_i**2)
+    K /= (Msun2kg + masses) ** (2.0 / 3.0)
+    velocities = -jnp.sum(
+        K[:, None] * jnp.cos(two_pi * times / periods[:, None]), axis=0
+    )
+    data = RVData(
+        times=times,
+        rv=velocities * (AU2m / d2s),
+        rv_err=jnp.full(4, 0.5),
+        inst_ids=jnp.zeros(4, dtype=int),
+        is_valid=jnp.ones(4, dtype=bool),
+        n_inst=1,
+    )
+    params = {
+        "log_P": jnp.log10(periods),
+        "log_Mp": jnp.log10(masses / Mearth2kg),
+        "e_raw": jnp.zeros(n_planets),
+        "w_raw": jnp.zeros(n_planets),
+        "cos_i": cos_i,
+        "W": jnp.zeros(n_planets),
+        "M0": jnp.zeros(n_planets),
+        "jitter": jnp.array([0.01]),
+    }
+    model = build_model(
+        has_rv=True,
+        has_stellar_astrom=True,
+        n_planets=n_planets,
+        ecc_prior="disk",
+        log_Mp_range=(-2.0, 5.0),
+    )
+    trace = handlers.trace(
+        handlers.substitute(handlers.seed(model, 0), data=params)
+    ).get_trace(
+        Msun2kg,
+        10.0,
+        OrbitData(rv=data, stellar_astrom=StellarAstromData.zeros(max_n=2)),
+    )
+    assert jnp.allclose(
+        trace["a"]["value"], period_to_sma(periods, Msun2kg + masses), rtol=1e-12
+    )
+    expected = loglike_rv_marginalized(
+        data.rv,
+        data.rv,
+        data.rv_err,
+        data.inst_ids,
+        1,
+        params["jitter"],
+        data.is_valid,
+    )
+    assert float(trace["ll_rv"]["fn"].log_factor) == pytest.approx(
+        float(expected), abs=1e-10
+    )
+
+
+def test_reflex_orbit_closes_at_total_mass_period():
+    """Stellar propagation uses the same two-body mass as Kepler's third law."""
+    from orbix.equations import period_to_sma
+
+    from photomancy.orbit.forward import predict_stellar_astrometry
+
+    period, mass, tp = 400.0, 0.1 * Msun2kg, 21.0
+    a = period_to_sma(period, Msun2kg + mass)
+    ra, dec = predict_stellar_astrometry(
+        jnp.array([tp, tp + period]),
+        a,
+        0.35,
+        0.4,
+        0.7,
+        jnp.cos(0.6),
+        jnp.sin(0.6),
+        tp,
+        Msun2kg,
+        mass,
+        10.0,
+    )
+    assert float(ra[1]) == pytest.approx(float(ra[0]), rel=1e-12, abs=1e-15)
+    assert float(dec[1]) == pytest.approx(float(dec[0]), rel=1e-12, abs=1e-15)

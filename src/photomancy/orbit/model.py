@@ -149,9 +149,6 @@ def build_model(
             n_orb = 2.0 * jnp.pi / T
             tp = numpyro.deterministic("tp", -M0 / n_orb)
 
-            # Semi-major axis from Kepler's 3rd law
-            a = numpyro.deterministic("a", period_to_sma(T, Ms))
-
             # Photometric parameters
             if has_photometry:
                 log_Rp = numpyro.sample(
@@ -171,6 +168,7 @@ def build_model(
         # stellar reflex channels -- astrometry and the proper-motion anomaly -- which
         # resolve i and so yield the dynamical mass)
         # ----------------------------------------------------------------
+        Mp = jnp.zeros(n_planets)
         if has_rv or has_stellar_astrom or has_pm_anomaly:
             with numpyro.plate("planet_masses", n_planets):
                 log_Mp = numpyro.sample(
@@ -180,6 +178,9 @@ def build_model(
                 Mp = numpyro.deterministic("Mp", 10.0**log_Mp * Mearth2kg)
                 sin_i = jnp.sqrt(1.0 - cos_i**2)
                 Mp_sini = numpyro.deterministic("Mp_sini", Mp * sin_i)
+
+        # The sampled mass is a true mass, with inclination sampled separately.
+        a = numpyro.deterministic("a", period_to_sma(T, Ms + Mp))
 
         if has_rv:
             with numpyro.plate("instruments", rv_data.n_inst):
@@ -197,6 +198,7 @@ def build_model(
             W_s = jnp.squeeze(W)
             tp_s = jnp.squeeze(tp)
             a_s = jnp.squeeze(a)
+            Mp_s = jnp.squeeze(Mp)
 
             ll_total = jnp.float64(0.0)
 
@@ -212,6 +214,7 @@ def build_model(
                     cos_w_s,
                     sin_w_s,
                     tp_s,
+                    Mp=Mp_s,
                 )
                 ll_rv_val = _rv_loglike(rv_data, rv_model, jitter)
                 numpyro.factor("ll_rv", ll_rv_val)
@@ -230,6 +233,7 @@ def build_model(
                     tp_s,
                     Ms,
                     dist_pc,
+                    Mp=Mp_s,
                 )
                 ll_relative_astrom_val = loglike_relative_astrom(
                     ra_pred, dec_pred, relative_astrom_data
@@ -297,6 +301,7 @@ def build_model(
                     Ms,
                     Lambda_s,
                     dist_pc,
+                    Mp=Mp_s,
                 )
                 ll_null_val = loglike_null(alpha_pred, dMag_pred, null_data)
                 numpyro.factor("ll_null", ll_null_val)
@@ -317,6 +322,7 @@ def build_model(
                     Ms,
                     Lambda_s,
                     dist_pc,
+                    Mp=Mp_s,
                 )
                 ll_img_val = loglike_imaging(
                     alpha_pred_img, dMag_pred_img, imaging_data
@@ -334,7 +340,7 @@ def build_model(
             from photomancy.orbit.forward import predict_rv as _prv
             from photomancy.orbit.forward import predict_stellar_astrometry as _psa
 
-            def _single_planet_rv(T_p, Mp_sini_p, e_p, cos_w_p, sin_w_p, tp_p):
+            def _single_planet_rv(T_p, Mp_sini_p, e_p, cos_w_p, sin_w_p, tp_p, Mp_p):
                 return _prv(
                     rv_data.times,
                     T_p,
@@ -344,9 +350,12 @@ def build_model(
                     cos_w_p,
                     sin_w_p,
                     tp_p,
+                    Mp=Mp_p,
                 )
 
-            def _single_planet_astrom(a_p, e_p, cos_i_p, W_p, cos_w_p, sin_w_p, tp_p):
+            def _single_planet_astrom(
+                a_p, e_p, cos_i_p, W_p, cos_w_p, sin_w_p, tp_p, Mp_p
+            ):
                 return _pa(
                     relative_astrom_data.times,
                     a_p,
@@ -358,6 +367,7 @@ def build_model(
                     tp_p,
                     Ms,
                     dist_pc,
+                    Mp=Mp_p,
                 )
 
             def _single_planet_stellar(
@@ -399,7 +409,7 @@ def build_model(
 
             if has_rv:
                 rv_per_planet = jax.vmap(_single_planet_rv)(
-                    T, Mp_sini, e, cos_w, sin_w, tp
+                    T, Mp_sini, e, cos_w, sin_w, tp, Mp
                 )
                 rv_model = jnp.sum(rv_per_planet, axis=0)
                 ll_rv = _rv_loglike(rv_data, rv_model, jitter)
@@ -407,7 +417,7 @@ def build_model(
 
             if has_relative_astrom:
                 ra_all, dec_all = jax.vmap(_single_planet_astrom)(
-                    a, e, cos_i, W, cos_w, sin_w, tp
+                    a, e, cos_i, W, cos_w, sin_w, tp, Mp
                 )
                 ra_pred = ra_all[
                     relative_astrom_data.planet_id,
