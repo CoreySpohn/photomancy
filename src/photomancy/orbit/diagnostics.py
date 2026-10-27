@@ -42,7 +42,8 @@ def orbits_from_samples(samples, Ms_kg):
 
     Args:
         samples: Dict of physical parameters keyed as ``to_physical`` emits
-            them, each value scalar or ``(K,)``.
+            them, each value scalar or ``(K,)``. Includes true planet mass
+            ``Mp`` in kg when available; otherwise assumes negligible planet mass.
         Ms_kg: Stellar mass in kg (the fit argument, not a fitted parameter).
 
     Returns:
@@ -58,7 +59,7 @@ def orbits_from_samples(samples, Ms_kg):
         cos_w=samples["cos_w"],
         sin_w=samples["sin_w"],
         tp_d=samples["tp"],
-        Ms_kg=Ms_kg,
+        Ms_kg=Ms_kg + samples.get("Mp", 0.0),
     )
 
 
