@@ -127,6 +127,7 @@ def build_orbit_logdensity(
         log_Ag_range=log_Ag_range,
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
+        n_inst=rv_data.n_inst if rv_data is not None else 1,
         n_planets=n_planets,
         seed=seed,
     )

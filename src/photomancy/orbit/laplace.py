@@ -204,6 +204,7 @@ def map_laplace_fit(
         log_Ag_range=log_Ag_range,
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
+        n_inst=rv_data.n_inst if rv_data is not None else 1,
         seed=seed,
     )
 
@@ -341,6 +342,7 @@ def map_laplace_mixture_fit(
         log_Ag_range=log_Ag_range,
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
+        n_inst=rv_data.n_inst if rv_data is not None else 1,
         seed=seed,
     )
 
