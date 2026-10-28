@@ -22,6 +22,7 @@ from photomancy.backends import (
     SMCBackend,
 )
 from photomancy.core import build_scene_logdensity
+from photomancy.evidence import sigma_from_log_bayes_factor
 from photomancy.posterior import (
     AbstractPosterior,
     GaussianPosterior,
@@ -52,4 +53,5 @@ __all__ = [
     "build_scene_logdensity",
     "project_samples",
     "sample_capped",
+    "sigma_from_log_bayes_factor",
 ]

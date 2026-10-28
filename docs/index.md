@@ -52,6 +52,24 @@ log_evidence = posterior.evidence
 The orbit, disk, and atmosphere domains package these plug-ins for their own data, so a
 typical fit calls a domain helper rather than wiring the plug-ins by hand.
 
+For nested-model comparisons, convert the natural-log evidence difference to the
+bound-based, two-sided Gaussian significance used by Benneke and Seager (2013):
+
+```python
+from photomancy import sigma_from_log_bayes_factor
+
+log_bayes_factor = posterior_with.evidence - posterior_without.evidence
+sigma = sigma_from_log_bayes_factor(log_bayes_factor)
+```
+
+{func}`~photomancy.evidence.sigma_from_log_bayes_factor` inverts the
+Sellke, Bayarri and Berger (2001) bound in log space and accepts scalars or arrays
+under JAX transformations. Negative log Bayes factors return NaN; zero returns the
+finite branch endpoint at `p = 1/e`. Bayes factors below about 2.5 (about 2 sigma)
+are weak evidence. The function applies no floor or display cap, and its calibration
+does not measure a frequentist false-alarm probability. See the function's API
+reference for the equations and paper citations.
+
 ## Installation
 
 ```bash
