@@ -108,8 +108,9 @@ class RelativeAstromData(eqx.Module):
 
     Args:
         times: Observation epochs (days). Shape ``(N,)``.
-        ra: Relative RA offset (arcsec). Shape ``(N,)``.
-        dec: Relative DEC offset (arcsec). Shape ``(N,)``.
+        ra: East offset Delta alpha* = Delta RA cos Dec (arcsec).
+            Shape ``(N,)``.
+        dec: North offset Delta Dec (arcsec). Shape ``(N,)``.
         ra_err: RA uncertainty (arcsec). Shape ``(N,)``.
         dec_err: DEC uncertainty (arcsec). Shape ``(N,)``.
         corr: RA/DEC correlation coefficient. Shape ``(N,)``.

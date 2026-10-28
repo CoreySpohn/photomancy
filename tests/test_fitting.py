@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import pytest
 from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, Rearth2AU, d2s
 from orbix.kepler.core import diff_solve_trig
+from sky_reference import sky_position
 
 from photomancy.orbit.data import NullData, OrbitData, RelativeAstromData, RVData
 from photomancy.orbit.forward import (
@@ -916,20 +917,25 @@ class TestThieleInnes:
         )
 
     def _make_astrom_data(self, params, n_pts=20, noise_arcsec=1e-6, seed=42):
-        """Generate synthetic astrometry from known orbital parameters."""
+        """Independent truth: Green (1985), Spherical Astronomy, ch. 17."""
         key = jax.random.PRNGKey(seed)
         times = jnp.linspace(0.0, params["T"] * 1.5, n_pts)
-        ra_true, dec_true = predict_relative_astrometry(
-            times=times,
-            a=params["a"],
-            e=params["e"],
-            cos_i=params["cos_i"],
-            cos_w=params["cos_w"],
-            sin_w=params["sin_w"],
-            W=params["W"],
-            tp=params["tp"],
-            Ms=params["Ms"],
-            dist_pc=params["dist_pc"],
+        ra_true, dec_true = sky_position(
+            times,
+            **{
+                k: params[k]
+                for k in (
+                    "T",
+                    "a",
+                    "e",
+                    "cos_i",
+                    "cos_w",
+                    "sin_w",
+                    "W",
+                    "tp",
+                    "dist_pc",
+                )
+            },
         )
         k1, k2 = jax.random.split(key)
         ra = ra_true + noise_arcsec * jax.random.normal(k1, shape=ra_true.shape)
@@ -980,10 +986,10 @@ class TestThieleInnes:
 
         assert jnp.isfinite(result.log_likelihood)
         assert jnp.allclose(result.a, orbit["a"], rtol=1e-2)
-        # cos_i recovery (up to sign -- i vs pi-i ambiguity)
+        # Inclination is determined; only the joint node/periapsis branch is ambiguous.
         assert jnp.allclose(
-            jnp.abs(result.cos_i),
-            jnp.abs(orbit["cos_i"]),
+            result.cos_i,
+            orbit["cos_i"],
             atol=0.02,
         )
 

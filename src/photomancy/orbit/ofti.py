@@ -102,7 +102,8 @@ def _scale_rotate_score(
     # Scale a (separation ~ a) and rotate W (sky-plane rotation) to hit target.
     r0 = jnp.maximum(jnp.hypot(x0, y0), 1e-30)
     a_new = jnp.hypot(tx, ty) / r0
-    W_new = (jnp.arctan2(ty, tx) - jnp.arctan2(y0, x0)) % _TWO_PI
+    # (x, y) = (east, north); position angle runs north through east.
+    W_new = (jnp.arctan2(tx, ty) - jnp.arctan2(x0, y0)) % _TWO_PI
 
     # Kepler-consistency: new period from scaled a; tp preserves m_ref at t_ref.
     n_new = mean_motion(a_new, mu)

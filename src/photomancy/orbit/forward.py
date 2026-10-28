@@ -74,7 +74,10 @@ def predict_relative_astrometry(
     """Predict relative astrometry (RA, DEC offsets) for a single planet.
 
     Projects the 3D position vector onto the sky plane and converts to
-    angular separation in arcseconds.
+    angular separation in arcseconds. RA means Delta alpha* = Delta RA cos Dec
+    (east); Dec is north. Raw positions and velocities use the right-handed
+    (east, north, away) frame; dz/dt is positive when receding. The node angle
+    is measured north through east.
 
     Args:
         times: Observation epochs (days). Shape ``(N,)``.
@@ -109,7 +112,7 @@ def predict_relative_astrometry(
     # Position vector: r = A*(cosE - e) + B*sinE, shape (3, N)
     r = single_r(A, B, e, sinE, cosE)
 
-    # Project to sky plane (RA = x, DEC = y) and convert AU -> arcsec
+    # Raw rows are (east, north, away); return (east, north) in arcsec.
     # At distance d_pc: angle_arcsec = separation_AU / d_pc
     # (since 1 AU at 1 pc = 1 arcsec by definition)
     ra_pred = r[0] / dist_pc  # arcsec
@@ -281,14 +284,10 @@ def predict_photometry(
     sky_sep_AU = jnp.sqrt(r[0] ** 2 + r[1] ** 2)
     alpha_arcsec = sky_sep_AU / dist_pc
 
-    # Phase angle: cos(beta) = -z/|r| (z toward observer). This is the
-    # planet-centered angle between the planet-to-star and planet-to-observer
-    # directions, so beta = 0 is superior conjunction at full phase. Note
-    # orbix's propagate returns the supplement (measured from the observer
-    # axis); the two must not be mixed.
+    # Standard star-planet-observer phase: cos(beta) = z/|r|, z away.
     r_mag = jnp.sqrt(r[0] ** 2 + r[1] ** 2 + r[2] ** 2)
     r_mag_safe = jnp.maximum(r_mag, 1e-30)
-    cos_beta = -r[2] / r_mag_safe
+    cos_beta = r[2] / r_mag_safe
     sin_beta = jnp.sqrt(jnp.maximum(1.0 - cos_beta**2, 0.0))
 
     # Lambert phase function

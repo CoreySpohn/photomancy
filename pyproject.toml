@@ -31,11 +31,11 @@ dependencies = [
     "numpy",
     "numpyro>=0.15.0",
     "optax>=0.2.3",
-    # >=2.0.0: orbix.kepler.markley_solve_trig, the default solver of
-    # orbit.projected, first ships in 2.0.0 (KeplerianOrbit.from_period, used by
-    # orbit.diagnostics, needs >=1.1.0).
-    "orbix>=2.0.0",
-    "skyscapes",
+    # >=3.0.0: raw positions and velocities use (east, north, away).
+    "orbix>=3.0.0",
+    # >=2.1.0: scene states and the disk chart use the same (east, north) sky
+    # chart as orbix 3, so an older skyscapes must not install beside photomancy.
+    "skyscapes>=2.1.0",
 ]
 
 [project.optional-dependencies]
@@ -63,7 +63,7 @@ test = [
 ]
 # Optional extras (jaxns and numpyro are core deps, not extras):
 npe = ["flowjax"]       # amortized neural posterior estimation
-imaging = ["coronalyze"]  # differentiable detection/extraction likelihood helpers
+imaging = ["coronalyze>=1.2.0"]  # differentiable detection/extraction likelihood helpers
 # eyepiece>=0.1.0 carries every interface photomancy.viz calls (corner,
 # corner_overlay, sky_fan, cov_ellipse, save_fig, PlotResult); checked by
 # interface in the test suite rather than by version string.

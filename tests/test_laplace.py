@@ -9,10 +9,10 @@ import numpy as np
 jax.config.update("jax_enable_x64", True)
 
 from orbix.equations import period_to_sma  # noqa: E402
+from sky_reference import sky_position  # noqa: E402
 
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.diagnostics import sample_physical  # noqa: E402
-from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init  # noqa: E402
 from photomancy.orbit.laplace import map_laplace_fit  # noqa: E402
@@ -30,25 +30,29 @@ ASTROM_ERR = 5.0e-3
 
 
 def _make_astrom(n_obs, seed=42):
-    """Generate synthetic astrometry data."""
+    """Independent sky truth: Green (1985), Spherical Astronomy, ch. 17."""
     a_true = float(period_to_sma(TRUE_T, Msun2kg))
     tp_true = -1.5 / (2.0 * jnp.pi / TRUE_T)
     np.random.seed(seed)
     times = np.sort(np.random.uniform(0, 3 * TRUE_T, 20))[:n_obs]
-    ra_true, dec_true = predict_relative_astrometry(
-        jnp.array(times),
-        a_true,
-        0.15,
-        0.5,
-        2.3,
-        jnp.cos(0.8),
-        jnp.sin(0.8),
-        tp_true,
-        Msun2kg,
-        DIST_PC,
+    ra_true, dec_true = sky_position(
+        times,
+        T=TRUE_T,
+        a=a_true,
+        e=0.15,
+        cos_i=0.5,
+        W=2.3,
+        cos_w=np.cos(0.8),
+        sin_w=np.sin(0.8),
+        tp=tp_true,
+        dist_pc=DIST_PC,
     )
-    ra = jnp.array(np.array(ra_true) + np.random.randn(n_obs) * ASTROM_ERR)
-    dec = jnp.array(np.array(dec_true) + np.random.randn(n_obs) * ASTROM_ERR)
+    # Keep the seeded perturbations on their original physical axes:
+    # raw propagation used north first; observables are now (east, north).
+    north_noise = np.random.randn(n_obs) * ASTROM_ERR
+    east_noise = np.random.randn(n_obs) * ASTROM_ERR
+    ra = jnp.asarray(ra_true + east_noise)
+    dec = jnp.asarray(dec_true + north_noise)
     return RelativeAstromData(
         times=jnp.array(times),
         ra=ra,
