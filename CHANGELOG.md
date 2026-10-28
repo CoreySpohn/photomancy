@@ -28,6 +28,33 @@
   refit rather than converted. Pass east offsets (Delta RA cos Dec), not
   Delta RA, as `RelativeAstromData.ra`.
 
+## [0.4.0](https://github.com/CoreySpohn/photomancy/compare/v0.3.0...v0.4.0) (2026-10-28)
+
+
+### Features
+
+* **evidence:** convert log Bayes factors to detection significance ([24d7b10](https://github.com/CoreySpohn/photomancy/commit/24d7b1003c7bb907c4e75fc82f21a3ef2eb564a5))
+* **orbit:** add migrate_sky_convention for saved fits, name the Thiele-Innes renames, fix the cos_i notebook call ([81279b3](https://github.com/CoreySpohn/photomancy/commit/81279b34f8266f5b9908e8cf196743140e72cb2d))
+
+
+### Bug Fixes
+
+* **orbit:** count marginalized offsets in the RV likelihood normalization ([f59e382](https://github.com/CoreySpohn/photomancy/commit/f59e382bcebe3c6bd6217e85c548fe96e66f0ce0))
+* **orbit:** fit and predict astrometry in (east, north) with the standard phase angle ([2197b9f](https://github.com/CoreySpohn/photomancy/commit/2197b9f3ba0c9c1b280154bf5636ae0ef1b96984))
+* **orbit:** keep the RV validity mask when re-padding ([e233b73](https://github.com/CoreySpohn/photomancy/commit/e233b73485660baa123bcd33606f99fa83af9153))
+* **orbit:** mask invalid RV rows before forming residuals ([41f67ca](https://github.com/CoreySpohn/photomancy/commit/41f67caebcf2ff4b12a8ba10e925d63ba1493ba3))
+* **orbit:** read orbix (east, north, away) rows directly, name the phase beta and the TIBasisModel coefficients by axis ([5df2b80](https://github.com/CoreySpohn/photomancy/commit/5df2b80f0ad3a536f41071ecf6f9aa71ee648880))
+* **orbit:** size the cached RV jitter by the data's instrument count ([e6ecbb7](https://github.com/CoreySpohn/photomancy/commit/e6ecbb75d5b0952bcb7cf1bc687ac31398084ba9))
+* **orbit:** treat RVData velocities as m/s throughout the RV likelihood ([3a6720b](https://github.com/CoreySpohn/photomancy/commit/3a6720b0813318b998d72530fa578d710b177c62))
+* **orbit:** truncate eccentricity priors to [0, 1) ([667b664](https://github.com/CoreySpohn/photomancy/commit/667b66414aa2807bfd8eca197fd72ef09bf9c359))
+* **orbit:** use the total mass consistently in the RV amplitude and Kepler's law ([9cf2063](https://github.com/CoreySpohn/photomancy/commit/9cf2063976fc01cb100c7d92636dea3c2215055a))
+* **orbit:** use the total mass in EIG predictions, posterior diagnostics and the period inversion ([fa53ca6](https://github.com/CoreySpohn/photomancy/commit/fa53ca6f3437881833a8531076794f40371cba0c))
+
+
+### Documentation
+
+* **examples:** only radial velocity breaks the (Omega + pi, omega + pi) ambiguity ([bce7246](https://github.com/CoreySpohn/photomancy/commit/bce7246f45a5bc9599f99e047da881f919d674cc))
+
 ## [0.3.0](https://github.com/CoreySpohn/photomancy/compare/v0.2.0...v0.3.0) (2026-10-14)
 
 
