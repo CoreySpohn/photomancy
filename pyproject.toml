@@ -102,7 +102,7 @@ exclude = ["/scripts", "/docs", "/tests", "/.github"]
 "docs/**" = ["D", "E402"]
 
 [tool.ruff.lint]
-select = ["B", "D", "E", "F", "I", "UP", "RUF"]
+select = ["B", "D", "E", "F", "I", "UP", "RUF", "NPY"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

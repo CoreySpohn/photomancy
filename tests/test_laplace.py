@@ -33,8 +33,10 @@ def _make_astrom(n_obs, seed=42):
     """Independent sky truth: Green (1985), Spherical Astronomy, ch. 17."""
     a_true = float(period_to_sma(TRUE_T, Msun2kg))
     tp_true = -1.5 / (2.0 * jnp.pi / TRUE_T)
-    np.random.seed(seed)
-    times = np.sort(np.random.uniform(0, 3 * TRUE_T, 20))[:n_obs]
+    np.random.seed(seed)  # noqa: NPY002 - Preserve seeded fixture stream.
+    times = np.sort(
+        np.random.uniform(0, 3 * TRUE_T, 20)  # noqa: NPY002 - Preserve seeded times.
+    )[:n_obs]
     ra_true, dec_true = sky_position(
         times,
         T=TRUE_T,
@@ -49,8 +51,12 @@ def _make_astrom(n_obs, seed=42):
     )
     # Keep the seeded perturbations on their original physical axes:
     # raw propagation used north first; observables are now (east, north).
-    north_noise = np.random.randn(n_obs) * ASTROM_ERR
-    east_noise = np.random.randn(n_obs) * ASTROM_ERR
+    north_noise = (
+        np.random.randn(n_obs) * ASTROM_ERR  # noqa: NPY002 - Preserve seeded noise.
+    )
+    east_noise = (
+        np.random.randn(n_obs) * ASTROM_ERR  # noqa: NPY002 - Preserve seeded noise.
+    )
     ra = jnp.asarray(ra_true + east_noise)
     dec = jnp.asarray(dec_true + north_noise)
     return RelativeAstromData(

@@ -29,8 +29,10 @@ def _make_astrom(n_obs, seed=42):
     """Synthetic relative astrometry for a single planet at TRUE_T."""
     a_true = float(period_to_sma(TRUE_T, MSUN_KG))
     tp_true = -1.5 / (2.0 * jnp.pi / TRUE_T)
-    np.random.seed(seed)
-    times = np.sort(np.random.uniform(0, 3 * TRUE_T, 20))[:n_obs]
+    np.random.seed(seed)  # noqa: NPY002 - Preserve seeded fixture stream.
+    times = np.sort(
+        np.random.uniform(0, 3 * TRUE_T, 20)  # noqa: NPY002 - Preserve seeded times.
+    )[:n_obs]
     ra_true, dec_true = predict_relative_astrometry(
         jnp.array(times),
         a_true,
@@ -43,8 +45,12 @@ def _make_astrom(n_obs, seed=42):
         MSUN_KG,
         DIST_PC,
     )
-    ra = jnp.array(np.array(ra_true) + np.random.randn(n_obs) * ASTROM_ERR)
-    dec = jnp.array(np.array(dec_true) + np.random.randn(n_obs) * ASTROM_ERR)
+    ra = jnp.array(
+        np.array(ra_true) + np.random.randn(n_obs) * ASTROM_ERR  # noqa: NPY002 - Preserve seeded noise.
+    )
+    dec = jnp.array(
+        np.array(dec_true) + np.random.randn(n_obs) * ASTROM_ERR  # noqa: NPY002 - Preserve seeded noise.
+    )
     return RelativeAstromData(
         times=jnp.array(times),
         ra=ra,
