@@ -1,6 +1,7 @@
 """Disk fitting: recover a skyscapes System's disk via the scene-as-PyTree engine."""
 
 import jax
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -79,6 +80,7 @@ def test_build_disk_logdensity_is_finite_and_differentiable():
     assert float(unravel(z0).disk.sma_AU) == 50.0
 
 
+@pytest.mark.slow
 def test_laplace_recovers_disk_shape_and_orientation():
     """Laplace MAP recovers the truth disk shape + orientation from a noisy image."""
     truth = _make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30

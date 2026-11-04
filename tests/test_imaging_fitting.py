@@ -9,6 +9,7 @@ tests pin the gradient finite, the padding helpers, and a full joint fit.
 import warnings
 
 import jax
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -125,6 +126,7 @@ def test_orbit_data_padded_handles_non_max_null_container():
     assert int(padded_null.is_valid.sum()) == 2
 
 
+@pytest.mark.slow
 def test_joint_astrom_imaging_fit_recovers_period():
     """A joint astrometry + imaging fit runs end-to-end and recovers the period.
 
