@@ -30,7 +30,8 @@ dependencies = [
     "numpy>=2.1.2",
     # Older NumPyro releases import JAX APIs that are deprecated or removed.
     "numpyro>=0.21.0",
-    "optax>=0.2.3",
+    # >=0.2.4: fixes stalled orbit fits with the revised L-BFGS defaults.
+    "optax>=0.2.4",
     # >=3.0.0: raw positions and velocities use (east, north, away).
     "orbix>=3.0.0",
     # >=2.1.0: scene states and the disk chart use the same (east, north) sky
