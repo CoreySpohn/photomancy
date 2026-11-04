@@ -129,9 +129,14 @@ jobs:
       # runner carries the info string `python notest` and a one-line reason above it.
       - name: Execute fenced code blocks
         run: |
+          status=0
           pytest README.md docs --markdown-docs --markdown-docs-syntax=superfences \
             -p no:cacheprovider --timeout=120 -ra --tb=short \
-            --junitxml=junit-docs.xml
+            --junitxml=junit-docs.xml || status=$?
+          # Exit 5 means no Python fences to run, which is not a failure.
+          if [ "$status" -ne 0 ] && [ "$status" -ne 5 ]; then
+            exit "$status"
+          fi
 
       # Executes {code-cell} blocks and notebooks, and fails on any Sphinx warning.
       - name: Build docs with execution forced
