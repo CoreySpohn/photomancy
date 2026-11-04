@@ -3,11 +3,16 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import pytest
 import tensorflow_probability.substrates.jax as tfp
 
 from photomancy.backends import JaxnsBackend, build_scene_nested_model
 
 tfpd = tfp.distributions
+
+
+# Full sampler runs belong in the nightly tier.
+pytestmark = pytest.mark.slow
 
 
 class _Toy(eqx.Module):

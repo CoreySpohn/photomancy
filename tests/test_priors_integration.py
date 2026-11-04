@@ -8,6 +8,7 @@ the next fit's prior (``to_prior``) so information accumulates across data batch
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import pytest
 
 from photomancy.backends import (
     JaxnsBackend,
@@ -25,6 +26,7 @@ class _Toy(eqx.Module):
     label: str = eqx.field(static=True)
 
 
+@pytest.mark.slow
 def test_same_prior_drives_laplace_and_jaxns_consistently():
     """One IndependentPrior drives a Laplace fit and a jaxns fit (adapter)."""
     data = jnp.array([0.5])

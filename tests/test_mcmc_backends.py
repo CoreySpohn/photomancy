@@ -2,9 +2,13 @@
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from photomancy.backends import MCLMCBackend, NUTSBackend, SMCBackend
 from photomancy.posterior import SamplePosterior
+
+# Full sampler runs belong in the nightly tier.
+pytestmark = pytest.mark.slow
 
 
 def test_nuts_backend_samples_concentrate_at_truth():

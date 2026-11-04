@@ -1,7 +1,7 @@
 """Monte Carlo mutual-information references for the analytic EIG forms.
 
 Test-only utilities (not public API): brute-force estimators of the same mutual
-informations the closed forms in ``photomancy.eig`` compute, for validating
+information quantities the closed forms in ``photomancy.eig`` compute, for validating
 exactness and upper-bound properties on small toys. Each estimator returns
 ``(estimate, standard_error)`` so tests can assert within MC error bars.
 """

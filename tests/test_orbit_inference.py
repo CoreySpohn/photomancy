@@ -5,6 +5,7 @@ import warnings
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -151,6 +152,7 @@ def test_to_unconstrained_round_trips_known_orbit():
     assert abs(float(phys["cos_i"][0]) - 0.4) < 0.02
 
 
+@pytest.mark.slow
 def test_orbit_nested_sampling_recovers_period_and_evidence():
     """Nested sampling (jaxns) on the NumPyro orbit model -> SamplePosterior + log Z."""
     from photomancy.orbit.nested import orbit_nested_sampling

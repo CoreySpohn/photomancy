@@ -263,6 +263,7 @@ def test_ecc_distribution():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_ofti_matches_nuts():
     """OFTI and NUTS marginals agree on a short arc with matched priors."""
     from functools import partial
