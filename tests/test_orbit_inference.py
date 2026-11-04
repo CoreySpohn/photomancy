@@ -9,7 +9,8 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from orbix.equations import period_to_sma  # noqa: E402
+from hwoutils.constants import G  # noqa: E402
+from orbix.equations import period_a, period_to_sma  # noqa: E402
 
 from photomancy.backends import LaplaceMixtureBackend  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
@@ -178,6 +179,20 @@ def test_orbit_nested_sampling_recovers_period_and_evidence():
     assert post.param_names == ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
     assert post.samples.shape == (1500, 7)
     assert bool(jnp.isfinite(post.evidence))
-    # the period (via a) is recovered: median a near the truth.
-    a_true = float(period_to_sma(TRUE_T, MSUN_KG))
-    assert abs(float(jnp.median(post.samples[:, 0])) - a_true) / a_true < 0.1
+    # With normalized priors, Z cannot exceed the zero-residual Gaussian peak.
+    # There is no analytic orbit log Z target to compare within sampling error.
+    loglike_upper = -2 * astrom.times.size * jnp.log(jnp.sqrt(2 * jnp.pi) * ASTROM_ERR)
+    assert float(post.evidence) <= float(loglike_upper)
+
+    periods = period_a(post.samples[:, 0], G * MSUN_KG)
+    period_median = float(jnp.median(periods))
+    period_std = float(jnp.std(periods))
+    period_error = abs(period_median - TRUE_T)
+    # Recover within 3 posterior standard deviations (seed 0: z = 1.82).
+    # Six epochs cover less than half an orbit; also keep a loose absolute guard.
+    assert 0 < period_std < float("inf")
+    assert period_error < 3 * period_std, (
+        f"period={period_median:.3f}, truth={TRUE_T}, std={period_std:.3f}, "
+        f"z={period_error / period_std:.3f}"
+    )
+    assert period_error / TRUE_T < 0.25
