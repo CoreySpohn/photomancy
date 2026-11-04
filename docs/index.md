@@ -34,7 +34,9 @@ flowchart LR
 
 A domain supplies three plug-ins over a scene, and the engine turns them into a fit:
 
-```python
+This sketch requires a user-supplied scene, forward model, likelihood, and prior.
+
+```python notest
 from photomancy import LaplaceBackend, build_scene_logdensity
 
 # forward:    scene -> predicted data
@@ -55,7 +57,9 @@ typical fit calls a domain helper rather than wiring the plug-ins by hand.
 For nested-model comparisons, convert the natural-log evidence difference to the
 bound-based, two-sided Gaussian significance used by Benneke and Seager (2013):
 
-```python
+This comparison requires posteriors from two user-supplied model fits.
+
+```python notest
 from photomancy import sigma_from_log_bayes_factor
 
 log_bayes_factor = posterior_with.evidence - posterior_without.evidence

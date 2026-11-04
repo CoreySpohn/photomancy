@@ -40,6 +40,8 @@ exclude_patterns = ["_build", ".build", "jupyter_execute", "Thumbs.db", ".DS_Sto
 autoapi_dirs = ["../src"]
 autoapi_ignore = ["**/_version.py"]
 autodoc_typehints = "description"
+# AutoAPI already indexes fields; Napoleon renders their descriptions only.
+napoleon_use_ivar = True
 
 myst_enable_extensions = ["amsmath", "dollarmath"]
 myst_fence_as_directive = ["mermaid"]
@@ -47,7 +49,7 @@ myst_fence_as_directive = ["mermaid"]
 # -- Options for HTML output -------------------------------------------------
 
 html_theme = "sphinx_book_theme"
-html_static_path = ["_static"]
+html_static_path = []  # No custom static assets are shipped.
 master_doc = "index"
 html_title = "photomancy"
 html_theme_options = {
@@ -62,7 +64,7 @@ source_suffix = {
     ".md": "myst-nb",
 }
 # Pages are stored output-free and execute at build (each runs in ~10 s).
-nb_execution_mode = "auto"
+nb_execution_mode = "force"
 nb_execution_timeout = 300
 # Every page executes at build time; a cell that stops working fails the build
 # here rather than rendering a broken page on the documentation host.

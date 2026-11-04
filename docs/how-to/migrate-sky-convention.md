@@ -23,7 +23,9 @@ exchanges them.
 
 ## Convert samples
 
-```python
+This conversion requires samples from a saved fit made with an earlier release.
+
+```python notest
 from photomancy.orbit import migrate_sky_convention
 
 samples = {"T": T, "e": e, "a": a, "cos_i": cos_i, "W": W,

@@ -31,7 +31,9 @@ and run `pip install -e ".[test,docs]"`.
 
 A domain supplies three plug-ins over a scene, and the engine turns them into a fit:
 
-```python
+This sketch requires a user-supplied scene, forward model, likelihood, and prior.
+
+```python notest
 from photomancy import LaplaceBackend, build_scene_logdensity
 
 # forward:    scene -> predicted data
