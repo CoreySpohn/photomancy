@@ -47,6 +47,8 @@ docs = [
     "sphinxcontrib-mermaid",
     "sphinx_autodoc_typehints",
     "ipython",
+    # numpyro imports tqdm.auto, which warns on stderr in a kernel without widgets.
+    "ipywidgets",
     "hwostyle",
     "matplotlib",
     "eyepiece>=0.1.0",
