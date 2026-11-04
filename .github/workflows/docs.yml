@@ -7,15 +7,21 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   docs:
     name: Build docs
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
+    - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      with:
+        persist-credentials: false
+        fetch-depth: 0
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@eb1897b8dc4b5d5bfe39a428a8f2304605e0983c # v7.0.0
       with:
         enable-cache: true
 
@@ -23,7 +29,7 @@ jobs:
       run: uv venv .venv --python 3.12
 
     - name: Install package with docs dependencies
-      run: uv pip install -e ".[docs]"
+      run: uv pip install --python .venv/bin/python -e ".[docs]" --override .github/sibling-pins.txt
       env:
         VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
@@ -31,4 +37,4 @@ jobs:
     # nb_execution_raise_on_error, so a cell that stops working fails here
     # rather than on the documentation host.
     - name: Build the documentation
-      run: .venv/bin/sphinx-build -b html docs docs/_build/html
+      run: .venv/bin/sphinx-build -W --keep-going -b html -D nb_execution_mode=force -D nb_execution_raise_on_error=1 docs docs/_build/html
