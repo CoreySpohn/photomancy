@@ -6,8 +6,6 @@ predicted separation. The grids are padded (trailing sep=0, dmag0=-inf), which m
 tests pin the gradient finite, the padding helpers, and a full joint fit.
 """
 
-import warnings
-
 import jax
 import pytest
 
@@ -182,9 +180,7 @@ def test_joint_astrom_imaging_fit_recovers_period():
         imaging_data=img,
         log_P_range=log_p_range,
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_dicts = find_init_top_k(astrom, msun, dist, k=5, log_T_range=log_p_range)
+    init_dicts = find_init_top_k(astrom, msun, dist, k=5, log_T_range=log_p_range)
     inits = jnp.stack([problem.init_to_z(d) for d in init_dicts])
 
     post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=300).run(

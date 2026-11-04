@@ -1,7 +1,5 @@
 """Tests for the analytic Fisher EIG (Bayesian experimental design)."""
 
-import warnings
-
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -87,11 +85,9 @@ def test_detectability_eig_zero_when_modes_agree():
 def test_evaluate_orbit_candidates_returns_finite_nonnegative_eig():
     """evaluate_orbit_candidates scores epochs against a fitted mixture posterior."""
     astrom = _make_astrom(5)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        post = map_laplace_mixture_fit(
-            MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
-        )
+    post = map_laplace_mixture_fit(
+        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
+    )
     problem = build_orbit_logdensity(
         MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )

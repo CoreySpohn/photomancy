@@ -1,7 +1,5 @@
 """RV-only and joint RV + astrometry orbit fitting through the generic engine."""
 
-import warnings
-
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -99,11 +97,7 @@ def test_joint_rv_astrometry_recovers_period_and_mass():
         relative_astrom_data=astrom,
         log_P_range=LOG_P_RANGE,
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_dicts = find_init_top_k(
-            astrom, MSUN_KG, DIST_PC, k=5, log_T_range=LOG_P_RANGE
-        )
+    init_dicts = find_init_top_k(astrom, MSUN_KG, DIST_PC, k=5, log_T_range=LOG_P_RANGE)
     inits = jnp.stack([problem.init_to_z(d) for d in init_dicts])
 
     post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=300).run(

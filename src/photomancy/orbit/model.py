@@ -200,7 +200,7 @@ def build_model(
             a_s = jnp.squeeze(a)
             Mp_s = jnp.squeeze(Mp)
 
-            ll_total = jnp.float64(0.0)
+            ll_total = jnp.asarray(0.0, dtype=float)
 
             # --- RV ---
             if has_rv:

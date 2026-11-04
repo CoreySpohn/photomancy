@@ -1,7 +1,5 @@
 """Tests for photomancy.orbit.laplace -- MAP + Laplace approximation."""
 
-import warnings
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -79,17 +77,15 @@ def _make_astrom(n_obs, seed=42):
 def test_map_laplace_fit_smoke():
     """map_laplace_fit returns a GaussianPosterior with consistent shapes."""
     astrom = _make_astrom(5)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-        result = map_laplace_fit(
-            Msun2kg,
-            DIST_PC,
-            relative_astrom_data=astrom,
-            log_P_range=LOG_P_RANGE,
-            init_vals=init_vals,
-            n_steps=200,
-        )
+    init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
+    result = map_laplace_fit(
+        Msun2kg,
+        DIST_PC,
+        relative_astrom_data=astrom,
+        log_P_range=LOG_P_RANGE,
+        init_vals=init_vals,
+        n_steps=200,
+    )
     assert isinstance(result, GaussianPosterior)
     d = result.mean.shape[0]
     assert result.cov.shape == (d, d)
@@ -99,16 +95,14 @@ def test_map_laplace_fit_smoke():
 def test_map_converges():
     """MAP on n=5 data recovers T within 10% of truth."""
     astrom = _make_astrom(5)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-        result = map_laplace_fit(
-            Msun2kg,
-            DIST_PC,
-            relative_astrom_data=astrom,
-            log_P_range=LOG_P_RANGE,
-            init_vals=init_vals,
-        )
+    init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
+    result = map_laplace_fit(
+        Msun2kg,
+        DIST_PC,
+        relative_astrom_data=astrom,
+        log_P_range=LOG_P_RANGE,
+        init_vals=init_vals,
+    )
     problem = build_orbit_logdensity(
         Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
@@ -123,17 +117,15 @@ def test_covariance_positive_definite():
     """Regularised covariance is positive-definite for n=1,2,3."""
     for n_obs in [1, 2, 3]:
         astrom = _make_astrom(n_obs)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-            result = map_laplace_fit(
-                Msun2kg,
-                DIST_PC,
-                relative_astrom_data=astrom,
-                log_P_range=LOG_P_RANGE,
-                init_vals=init_vals,
-                n_steps=100,
-            )
+        init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
+        result = map_laplace_fit(
+            Msun2kg,
+            DIST_PC,
+            relative_astrom_data=astrom,
+            log_P_range=LOG_P_RANGE,
+            init_vals=init_vals,
+            n_steps=100,
+        )
         eigvals = jnp.linalg.eigvalsh(result.cov)
         assert jnp.all(eigvals > 0), f"n={n_obs}: eigenvalues={eigvals}"
 
@@ -141,17 +133,15 @@ def test_covariance_positive_definite():
 def test_samples_shape():
     """The fitted GaussianPosterior samples flat z-space with the right shape."""
     astrom = _make_astrom(5)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-        result = map_laplace_fit(
-            Msun2kg,
-            DIST_PC,
-            relative_astrom_data=astrom,
-            log_P_range=LOG_P_RANGE,
-            init_vals=init_vals,
-            n_steps=100,
-        )
+    init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
+    result = map_laplace_fit(
+        Msun2kg,
+        DIST_PC,
+        relative_astrom_data=astrom,
+        log_P_range=LOG_P_RANGE,
+        init_vals=init_vals,
+        n_steps=100,
+    )
     samples = result.sample(jax.random.PRNGKey(1), 100)
     assert samples.shape == (100, result.mean.shape[0])
 
@@ -159,17 +149,15 @@ def test_samples_shape():
 def test_log_prob_finite():
     """log_prob() returns finite values at the MAP point."""
     astrom = _make_astrom(5)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-        result = map_laplace_fit(
-            Msun2kg,
-            DIST_PC,
-            relative_astrom_data=astrom,
-            log_P_range=LOG_P_RANGE,
-            init_vals=init_vals,
-            n_steps=100,
-        )
+    init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
+    result = map_laplace_fit(
+        Msun2kg,
+        DIST_PC,
+        relative_astrom_data=astrom,
+        log_P_range=LOG_P_RANGE,
+        init_vals=init_vals,
+        n_steps=100,
+    )
     lp = result.log_prob(result.mean)
     assert jnp.isfinite(lp), f"log_prob at MAP = {lp}"
     # log_prob at the mean is the maximum (zero Mahalanobis distance),

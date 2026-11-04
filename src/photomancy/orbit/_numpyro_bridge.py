@@ -12,8 +12,6 @@ Subsequent calls with different data (same shapes, via static padding) reuse
 the cached XLA compilation.
 """
 
-import warnings
-
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
@@ -151,14 +149,12 @@ def _get_or_build_cached(
 
     # Trace the model ONCE with dynamic_args
     rng = jax.random.PRNGKey(seed)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        model_info = initialize_model(
-            rng,
-            model,
-            dynamic_args=True,
-            model_args=model_args,
-        )
+    model_info = initialize_model(
+        rng,
+        model,
+        dynamic_args=True,
+        model_args=model_args,
+    )
 
     # Extract template and transforms
     z_template = model_info.param_info.z
@@ -201,14 +197,12 @@ def _init_dict_to_z_flat(init_dict, z_template, inv_transforms):
     z_out = {}
     for z_key in z_template.keys():
         if z_key in init_dict and z_key in inv_transforms:
-            z_val = inv_transforms[z_key](
-                jnp.asarray(init_dict[z_key], dtype=jnp.float64)
-            )
+            z_val = inv_transforms[z_key](jnp.asarray(init_dict[z_key], dtype=float))
             # Boundary init values produce +/-inf/NaN -- fall back to template
             z_val = jnp.where(jnp.isfinite(z_val), z_val, z_template[z_key])
             z_out[z_key] = z_val
         elif z_key in init_dict:
-            z_out[z_key] = jnp.asarray(init_dict[z_key], dtype=jnp.float64)
+            z_out[z_key] = jnp.asarray(init_dict[z_key], dtype=float)
         else:
             z_out[z_key] = z_template[z_key]
     z_flat, _ = jax.flatten_util.ravel_pytree(z_out)

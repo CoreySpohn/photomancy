@@ -1,7 +1,5 @@
 """Tests for the orbit -> generic-backend bridge (build_orbit_logdensity)."""
 
-import warnings
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -67,9 +65,7 @@ def _make_astrom(n_obs, seed=42):
 def test_build_orbit_logdensity_maps_between_z_and_physical():
     """The bridge yields a finite flat logdensity and round-trips the period."""
     astrom = _make_astrom(6)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_dict = find_init(astrom, MSUN_KG, DIST_PC, log_T_range=LOG_P_RANGE)
+    init_dict = find_init(astrom, MSUN_KG, DIST_PC, log_T_range=LOG_P_RANGE)
 
     problem = build_orbit_logdensity(
         MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
@@ -97,11 +93,7 @@ def test_orbit_fit_through_generic_backend_recovers_period():
     problem = build_orbit_logdensity(
         MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_dicts = find_init_top_k(
-            astrom, MSUN_KG, DIST_PC, k=5, log_T_range=LOG_P_RANGE
-        )
+    init_dicts = find_init_top_k(astrom, MSUN_KG, DIST_PC, k=5, log_T_range=LOG_P_RANGE)
     inits = jnp.stack([problem.init_to_z(d) for d in init_dicts])
 
     post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=300).run(
@@ -120,9 +112,7 @@ def test_orbit_problem_exposes_unflatten_and_trace():
     problem = build_orbit_logdensity(
         MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        init_dict = find_init(astrom, MSUN_KG, DIST_PC, log_T_range=LOG_P_RANGE)
+    init_dict = find_init(astrom, MSUN_KG, DIST_PC, log_T_range=LOG_P_RANGE)
     z = problem.init_to_z(init_dict)
 
     assert callable(problem.unflatten)
@@ -196,3 +186,38 @@ def test_orbit_nested_sampling_recovers_period_and_evidence():
         f"z={period_error / period_std:.3f}"
     )
     assert period_error / TRUE_T < 0.25
+
+
+@pytest.mark.parametrize("use_x64", [False, True])
+def test_orbit_model_respects_precision(use_x64):
+    """Standalone model tracing follows JAX precision without dtype warnings."""
+    from numpyro.distributions.transforms import biject_to
+    from numpyro.handlers import seed, trace
+
+    from photomancy.orbit._numpyro_bridge import _init_dict_to_z_flat
+    from photomancy.orbit.data import OrbitData
+    from photomancy.orbit.model import build_model
+
+    with jax.enable_x64(use_x64):
+        astrom = _make_astrom(3)
+        model = build_model(has_relative_astrom=True, log_P_range=LOG_P_RANGE)
+        sites = trace(seed(model, rng_seed=0)).get_trace(
+            MSUN_KG, DIST_PC, OrbitData(relative_astrom=astrom)
+        )
+        ll = sites["ll_total"]["value"]
+        assert ll.dtype == (jnp.float64 if use_x64 else jnp.float32)
+        assert jnp.isfinite(ll)
+
+        # The same precision must survive physical -> unconstrained conversion.
+        latent = {
+            name: site
+            for name, site in sites.items()
+            if site["type"] == "sample" and not site.get("is_observed", False)
+        }
+        z = _init_dict_to_z_flat(
+            {name: site["value"] for name, site in latent.items()},
+            {name: jnp.zeros_like(site["value"]) for name, site in latent.items()},
+            {name: biject_to(site["fn"].support).inv for name, site in latent.items()},
+        )
+        assert z.dtype == ll.dtype
+        assert jnp.all(jnp.isfinite(z))

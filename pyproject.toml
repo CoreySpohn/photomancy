@@ -110,6 +110,21 @@ select = ["B", "D", "E", "F", "I", "UP", "RUF", "NPY"]
 convention = "google"
 
 [tool.pytest.ini_options]
+filterwarnings = [
+    "error",
+    # tol_colors initializes colormaps with Matplotlib's deprecated set_bad API.
+    "ignore:The set_bad function will be deprecated.*:PendingDeprecationWarning:tol_colors",
+    # TFP's JAX backend still registers ndarray via JAX's deprecated core alias.
+    "ignore:jax[.]core[.]pytype_aval_mappings is deprecated[.]:DeprecationWarning:tensorflow_probability.python.internal.backend.jax.ops",
+    # HAPI's regex literals contain invalid escapes on Python 3.12.
+    "ignore:invalid escape sequence.*:SyntaxWarning:.*/hapi/hapi$",
+    # ExoJAX's regex and math docstrings contain non-raw escapes on Python 3.12.
+    "ignore:invalid escape sequence.*:SyntaxWarning:.*/exojax/(utils/isotopes|opacity/_common/lsd|database/core_atom/broadening|database/mie|atm/atmprof|rt/toon|rt/twostream)$",
+    # Vaex's regex examples and plotting expressions contain non-raw escapes.
+    "ignore:invalid escape sequence.*:SyntaxWarning:.*/vaex/(functions|viz/mpl|viz/contour)$",
+    # ExoJAX's HITRAN import redirects stdout to an unclosed /dev/null handle.
+    "ignore:unclosed file .*name='/dev/null'.*:ResourceWarning:exojax.database._common.hitranapi",
+]
 markers = [
     "medium: tests with a 30-second default time budget",
     "slow: tests with a 300-second default time budget, run nightly",

@@ -1,7 +1,5 @@
 """Tests for orbit posterior diagnostics (physical samples, mode summaries)."""
 
-import warnings
-
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -54,11 +52,9 @@ def _make_astrom(n_obs=5, seed=42):
 
 def _fit_posterior_and_problem():
     astrom = _make_astrom(5)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        post = map_laplace_mixture_fit(
-            MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
-        )
+    post = map_laplace_mixture_fit(
+        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE, k=3
+    )
     problem = build_orbit_logdensity(
         MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )

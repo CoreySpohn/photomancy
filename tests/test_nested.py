@@ -8,6 +8,9 @@ import tensorflow_probability.substrates.jax as tfp
 
 from photomancy.backends import JaxnsBackend, build_scene_nested_model
 
+# jaxns requires x64; make the standalone file independent of other tests.
+jax.config.update("jax_enable_x64", True)
+
 tfpd = tfp.distributions
 
 
