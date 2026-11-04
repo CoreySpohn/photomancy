@@ -27,7 +27,6 @@ dependencies = [
     # jaxctx supplies the prior interface the jaxns 3 adapter subclasses.
     "jaxctx>=1.2.0",
     "jaxns>=3.0.0",
-    "jaxtyping",
     "numpy",
     "numpyro>=0.15.0",
     "optax>=0.2.3",
@@ -47,27 +46,33 @@ docs = [
     "sphinx-autoapi",
     "sphinxcontrib-mermaid",
     "sphinx_autodoc_typehints",
+    "ipython",
+    "hwostyle",
     "matplotlib",
     "eyepiece>=0.1.0",
 ]
 # photomancy[viz] so the viz tests actually run: without it they all die on the
 # eyepiece import and the suite goes green having tested nothing.
 test = [
-    "nox",
     "pytest",
     "pytest-xdist",
     "hypothesis",
     "pytest-cov",
-    "arviz",
+    "pytest-testmon",
+    "pytest-markdown-docs",
+    "pytest-timeout",
+    "pytest-fail-slow",
+    "packaging",
+    "scipy",
+    "tfp-nightly",  # jaxns uses this provider of tensorflow_probability.
     "photomancy[viz]",
 ]
 # Optional extras (jaxns and numpyro are core deps, not extras):
-npe = ["flowjax"]       # amortized neural posterior estimation
 imaging = ["coronalyze>=1.2.0"]  # differentiable detection/extraction likelihood helpers
 # eyepiece>=0.1.0 carries every interface photomancy.viz calls (corner,
 # corner_overlay, sky_fan, cov_ellipse, save_fig, PlotResult); checked by
 # interface in the test suite rather than by version string.
-viz = ["eyepiece>=0.1.0"]
+viz = ["eyepiece>=0.1.0", "matplotlib"]
 
 [project.urls]
 Homepage = "https://github.com/CoreySpohn/photomancy"
@@ -103,4 +108,31 @@ select = ["B", "D", "E", "F", "I", "UP", "RUF"]
 convention = "google"
 
 [tool.pytest.ini_options]
-addopts = "-n auto"
+markers = [
+    "medium: tests with a 30-second default time budget",
+    "slow: tests with a 300-second default time budget, run nightly",
+]
+
+[tool.testbudget]
+library = "photomancy"
+mode = "report"
+unit_s = 5
+medium_s = 30
+slow_s = 300
+
+[tool.deptry]
+known_first_party = ["photomancy"]
+optional_dependencies_dev_groups = ["dev", "docs", "test"]
+
+[tool.deptry.per_rule_ignores]
+DEP002 = [
+    "jaxlib",  # JAX loads its compiled backend; retain the explicit version floor.
+    "skyscapes",  # Disk and atmosphere fits consume user-supplied skyscapes models.
+    "coronalyze",  # The imaging extra supplies user-defined detection forwards.
+]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["src/photomancy"]
