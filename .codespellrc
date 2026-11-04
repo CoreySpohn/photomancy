@@ -1,0 +1,4 @@
+[codespell]
+skip = .git,*.ipynb,uv.lock,*/_build,*.fits
+# Local likelihood factory shorthand in tests/test_priors_integration.py.
+ignore-words-list = lik
