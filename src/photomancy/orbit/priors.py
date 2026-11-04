@@ -7,14 +7,19 @@ calls live in the model builder, not here.
 Available eccentricity priors (pass as ``ecc_prior`` to
 :func:`~photomancy.orbit.model.build_model`):
 
-============== ===================================================
-Name           Description
-============== ===================================================
-``"kipping13"`` Beta(0.867, 3.03) -- Kipping (2013) short-period
-``"rayleigh"``  Rayleigh(sigma=0.3), truncated to [0, 1)
-``"vaneylen19"`` Rayleigh(sigma=0.049), truncated to [0, 1)
-``"disk"``      Uniform(0, 1) on *e*, Uniform(0, 2pi) on *omega*
-============== ===================================================
+.. list-table::
+   :header-rows: 1
+
+   * - Name
+     - Description
+   * - ``"kipping13"``
+     - Beta(0.867, 3.03) -- Kipping (2013) short-period
+   * - ``"rayleigh"``
+     - Rayleigh(sigma=0.3), truncated to [0, 1)
+   * - ``"vaneylen19"``
+     - Rayleigh(sigma=0.049), truncated to [0, 1)
+   * - ``"disk"``
+     - Uniform(0, 1) on *e*, Uniform(0, 2pi) on *omega*
 
 .. note::
    Prior versions used a Normal->Disk (Cartesian) transform for the

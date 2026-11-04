@@ -24,7 +24,7 @@ class SceneLogDensity(eqx.Module):
     rather than closing over them in a bare function -- keeps any arrays they carry as
     leaves of this Module. In particular, a forward written as an ``eqx.Module`` (e.g.
     a coronagraph forward holding a PSF datacube) exposes its arrays here. A backend
-    that ``filter_jit``s with this logdensity as an argument then threads those arrays
+    that uses ``filter_jit`` with this logdensity as an argument threads those arrays
     as traced inputs instead of constant-folding them into the compiled kernel.
 
     Arrays captured inside a *closure* forward/likelihood (rather than a Module) remain

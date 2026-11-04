@@ -131,5 +131,5 @@ gallery
 :caption: API Reference
 :hidden:
 
-autoapi/photomancy/index
+autoapi/index
 ```

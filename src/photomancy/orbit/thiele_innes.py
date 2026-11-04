@@ -81,13 +81,13 @@ class TIFitResult(eqx.Module):
 def _solve_abfg(X, Y, ra, dec, ra_err, dec_err, corr):
     """Solve for (A, B, F, G) via weighted least squares.
 
-    The astrometric model (in arcsec) is:
+    The astrometric model (in arcsec) is::
 
         DEC(t) = (A*X(t) + F*Y(t)) / dist_pc
         RA(t)  = (B*X(t) + G*Y(t)) / dist_pc
 
     After absorbing dist_pc into (A, B, F, G), we can write this as two
-    independent 2-parameter weighted linear regressions:
+    independent 2-parameter weighted linear regressions::
 
         DEC(t) = A'*X(t) + F'*Y(t)
         RA(t)  = B'*X(t) + G'*Y(t)
@@ -184,14 +184,16 @@ def _solve_abfg(X, Y, ra, dec, ra_err, dec_err, corr):
 def _abfg_to_elements(A_scaled, F_scaled, B_scaled, G_scaled, e):
     """Convert scaled TI constants to orbital elements.
 
-    The TI constants relate to orbital elements as:
+    The TI constants relate to orbital elements as::
+
         A = a * (cosW*cosw - sinW*sinw*cosi)
         B = a * (sinW*cosw + cosW*sinw*cosi)
         F = a*sqrt(1-e^2) * (-cosW*sinw - sinW*cosw*cosi)
         G = a*sqrt(1-e^2) * (-sinW*sinw + cosW*cosw*cosi)
 
     From these we can recover (a, i, W, w) using the standard
-    identities:
+    identities::
+
         A^2 + B^2 = a^2 * (cos^2w + sin^2w*cos^2i) = a^2 * alpha
         F^2 + G^2 = a^2(1-e^2) * (sin^2w + cos^2w*cos^2i) = a^2(1-e^2) * beta
         AF + BG = a^2sqrt(1-e^2) * (-cosw*sinw(1-cos^2i)) = a^2sqrt(1-e^2) * gamma

@@ -5,7 +5,7 @@ multi-modal, but they have exact structure: conditioning on the observed sky
 positions of one or two epochs reduces the unknowns to line-of-sight depths
 (plus a velocity for the single-epoch case), and per discrete solution family
 the map from those latents to orbit parameters is a smooth change of
-variables. Sampling the latents and weighting each particle by
+variables. Sampling the latents and weighting each particle by::
 
     prior(theta) * |det d(theta)/d(latents)| * like(other epochs) / proposal
 
@@ -375,7 +375,7 @@ def lambert_depth_fit(
     Conditions on two epochs' sky positions, samples their line-of-sight
     depths and the implied gravitational parameter, solves the Lambert
     boundary-value problem per (revolutions, way, branch) family, and weights
-    by prior x |det J| x likelihood of the remaining epochs. Exact for the
+    by prior x ``|det J|`` x likelihood of the remaining epochs. Exact for the
     ``TIBasisModel`` posterior up to Monte Carlo error.
 
     Args:

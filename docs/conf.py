@@ -78,3 +78,19 @@ nb_execution_show_tb = True
 # findfont warning per figure and pushes stderr blocks onto the rendered pages.
 # "remove-warn" drops them from the page and still reports them here.
 nb_output_stderr = "remove-warn"
+
+
+def _skip_conflicting_orbit_aliases(app, what, name, obj, skip, options):
+    # These function re-exports collide with their module names. Keep the
+    # functions documented in their defining modules and all other re-exports.
+    if (
+        what == "function"
+        and obj.imported
+        and name in {"photomancy.orbit.grid_search", "photomancy.orbit.ofti"}
+    ):
+        return True
+    return None
+
+
+def setup(app):
+    app.connect("autoapi-skip-member", _skip_conflicting_orbit_aliases)
