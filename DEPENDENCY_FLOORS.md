@@ -40,7 +40,6 @@ self-version constraint on shallow VCS checkouts.
 | packaging | >=24.2 | 24.2 | test |
 | pre-commit | >=3.6 | 3.6.0 | dev |
 | pytest | >=7.3.2 | 7.3.2 | test |
-| pytest-cov | >=1.0 | 1.0 | test |
 | pytest-fail-slow | >=0.1.0 | 0.1.0 | test |
 | pytest-markdown-docs | >=0.5.0 | 0.5.0 | test |
 | pytest-testmon | >=2.0.7 | 2.0.7 | test |
