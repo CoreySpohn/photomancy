@@ -28,8 +28,16 @@ This conversion requires samples from a saved fit made with an earlier release.
 ```python notest
 from photomancy.orbit import migrate_sky_convention
 
-samples = {"T": T, "e": e, "a": a, "cos_i": cos_i, "W": W,
-           "cos_w": cos_w, "sin_w": sin_w, "tp": tp}   # from an earlier fit
+samples = {
+    "T": T,
+    "e": e,
+    "a": a,
+    "cos_i": cos_i,
+    "W": W,
+    "cos_w": cos_w,
+    "sin_w": sin_w,
+    "tp": tp,
+}  # from an earlier fit
 current = migrate_sky_convention(samples)
 ```
 
