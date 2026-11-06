@@ -165,10 +165,13 @@ def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
     acceptance ratio leaves the window; a move that gives the new record full
     weight (an error in the tempering weights of the conditional Gaussian and
     of log Z) shifts some moment by more than 4 errors (it reaches 7.3).
+    Finally, over three moves with both outcomes, the carried log Z and
+    likelihoods must equal a fresh evaluation at the returned particles.
     Fails if the conditional Gaussian or log Z uses the wrong precision (a
     tempering weight, the correlation or the prior scale), if the random walk
     is not symmetric, if proposals outside the window are accepted, or if the
-    TI target's one-solve design matrix drifts from its forward model.
+    TI target's one-solve design matrix drifts from its forward model, or if
+    an accepted move keeps the old cached log Z or likelihoods.
     """
     target = ThieleInnesTarget()
     sigma, beta, n = 0.05, 0.3, 4000
@@ -283,6 +286,44 @@ def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
     assert float(jnp.mean(jnp.isfinite(in_window))) < 0.9
     assert max_z(run(exact, 1.0)) > 4.0
 
+    # Cache consistency: after every move the carried log Z and likelihoods
+    # equal a fresh evaluation at the returned particles, for accepted and
+    # rejected proposals alike (a stale log Z on acceptance biases every later
+    # move but is too small for the moment checks above).
+    weights = jnp.array([1.0, beta])
+
+    @jax.jit
+    def fresh(x):
+        def evaluate(theta):
+            lr, ln = target.log_likelihood_split(theta, records, select)
+            return target.log_prior(theta), lr, ln
+
+        log_z = jax.vmap(lambda t: _linear_gaussian(target, t, records, weights)[2])(x)
+        return jax.vmap(evaluate)(x), log_z
+
+    step = eqx.filter_jit(_collapsed_step)
+    x = start[:512]
+    aux, log_z = fresh(x)
+    chol = jnp.diag(jnp.asarray(ref_sd[:3])) / math.sqrt(3.0)
+    for i in range(3):
+        x, aux, log_z, accepted = step(
+            jax.random.fold_in(_key(5), i),
+            x,
+            aux,
+            log_z,
+            chol,
+            target,
+            records,
+            weights,
+            select,
+            exact,
+        )
+        assert 0.05 < float(jnp.mean(accepted)) < 0.95
+        aux_now, log_z_now = fresh(x)
+        np.testing.assert_allclose(log_z, log_z_now, rtol=1e-12, atol=1e-12)
+        for cached, now in zip(aux, aux_now, strict=True):
+            np.testing.assert_allclose(cached, now, rtol=1e-10, atol=1e-9)
+
 
 class _PriorMovesUpdater(OrbitUpdater):
     """Mutant whose moves target the prior instead of the tempered posterior."""
@@ -393,6 +434,65 @@ def test_rungs_after_temperature_one_are_noops():
         if jnp.issubdtype(x.dtype, jax.dtypes.prng_key):
             x, y = jax.random.key_data(x), jax.random.key_data(y)
         np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_incomplete_ladder_returns_the_corrected_weights():
+    """A one-rung ladder that ends below 1 returns the importance correction.
+
+    One rung from the prior toward a record 14 prior sigma away stops at a
+    small temperature beta. With a single rung, every quantity can be rebuilt
+    from the inputs and outputs: the rung reweights the prior particles by
+    ``beta l`` (its evidence and conditional ESS follow from the prior
+    belief), then resamples, so the weights before the correction are
+    uniform; the correction multiplies them by ``exp((1 - beta) l)`` at the
+    returned particles, which it does not move. Checked independently: the
+    returned log weights, the total evidence increment, and the ESS
+    diagnostic (the smaller of the two conditional ESS values). Fails if the
+    correction's diagnostics are computed but uncorrected weights are
+    returned, if the correction applies the wrong power or skips the
+    evidence, or if the ESS ignores the correction.
+    """
+    target = ConjugateGaussianTarget()
+    n = 256
+    updater = OrbitUpdater(n_particles=n, n_rungs=1, n_moves=1, record_capacity=2)
+    record = UpdaterRecord(
+        time=0.0, ra=14.0, dec=0.0, ra_err=SIGMA, dec_err=SIGMA, record_id=1
+    )
+    prior = updater.prior_belief(target, _key(6))
+    out, diag = updater.update(prior, record, _key(7))
+    beta = float(diag.temperature)
+    assert int(diag.rungs_used) == 1
+    assert 0.0 < beta < 1.0
+    assert int(diag.status) == UpdaterStatus.LOW_ESS
+
+    def loglike(particles):
+        return np.asarray(
+            jax.vmap(target.log_likelihood, in_axes=(0, None))(
+                particles, record.as_data()
+            )
+        )
+
+    def lse(x):
+        return float(special.logsumexp(x))
+
+    def cess(log_w, inc):
+        return n * math.exp(2.0 * lse(log_w + inc) - lse(log_w + 2.0 * inc))
+
+    lw0 = np.asarray(prior.log_weights)
+    l0 = loglike(prior.particles)
+    l1 = loglike(out.particles)
+    lw_before = np.full(n, -math.log(n))
+    expected = lw_before + (1.0 - beta) * l1
+    expected = expected - lse(expected)
+    np.testing.assert_allclose(np.asarray(out.log_weights), expected, atol=1e-9)
+
+    log_z = lse(lw0 + beta * l0) + lse(lw_before + (1.0 - beta) * l1)
+    np.testing.assert_allclose(float(diag.log_evidence_increment), log_z, rtol=1e-9)
+
+    rung = cess(lw0, beta * (l0 - l0.max()))
+    correction = cess(lw_before, (1.0 - beta) * (l1 - l1.max()))
+    assert correction < rung
+    np.testing.assert_allclose(float(diag.ess), min(rung, correction), rtol=1e-8)
 
 
 ORBIT_UPDATER = OrbitUpdater(n_particles=1024, n_rungs=32, n_moves=4, record_capacity=3)

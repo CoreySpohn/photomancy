@@ -41,8 +41,9 @@ Kernel (fixed-particle tempered SMC with a fixed loop count):
 - Each rung picks its temperature increment by a fixed-count bisection so
   that the conditional effective sample size of the incremental weights equals
   ``target_cess_fraction`` of the particles, reweights, resamples
-  systematically and applies exactly ``n_moves`` random-walk Metropolis moves
-  that leave the rung's tempered target invariant.
+  systematically and applies exactly ``n_moves`` Metropolis moves, each of
+  which, for the rung's step covariance held fixed, leaves the rung's
+  tempered target invariant.
 - The ladder is a ``fori_loop`` over ``n_rungs``: once ``beta`` reaches 1 the
   remaining rungs are no-ops. If the budget ends below 1 the rest of the
   likelihood is applied as one importance reweighting without resampling or
@@ -59,10 +60,19 @@ Kernel (fixed-particle tempered SMC with a fixed loop count):
   gets a collapsed move instead: the random walk acts on the other
   coordinates only, the linear block is redrawn from its conditional Gaussian
   given them and the tempered records, and the acceptance ratio uses the
-  marginal likelihood with the block integrated out (exact; see
+  marginal likelihood with the block integrated out (an exact
+  Metropolis-Hastings kernel for a given step covariance; see
   :func:`_collapsed_step`). The posterior that one or two astrometric epochs
   leave is a thin curved region in the full chart, which a random walk over
   every coordinate cannot follow.
+- Adaptation: each rung's step covariance is estimated from the particles
+  that the rung then moves. A kernel with its covariance held fixed is
+  invariant for the rung's target, but choosing the covariance from the same
+  population makes the scheme an adaptive SMC sampler: the moved population
+  is not exactly invariant at a finite particle count (the error vanishes as
+  the count grows), and consistency rests on the standard analysis of
+  adaptive SMC (Beskos, Jasra, Kantas and Thiery 2016, Annals of Applied
+  Probability).
 - The sum over rungs of the log mean incremental weight is the log marginal
   likelihood of the record given the buffered records.
 """
@@ -801,7 +811,9 @@ def _metropolis_step(key, particles, aux, step_chol, wrap, evaluate, log_target)
     symmetric step onto a circle keeps it symmetric (the wrapped density is a
     sum over images of a symmetric kernel), so the Hastings ratio reduces to
     ``exp(log_target(proposal) - log_target(current))``. A density defined in
-    another parameterization must carry that chart's Jacobian.
+    another parameterization must carry that chart's Jacobian. Invariance
+    holds for ``step_chol`` fixed; estimated from the particles being moved,
+    it holds only in the adaptive-SMC sense (see the module notes).
 
     Args:
         key: Typed PRNG key.
@@ -927,8 +939,11 @@ def _collapsed_step(
     ``pi(u, c) / N(c; m(u), V(u)) = p_rest(u, c) Z(u)``, so the Hastings ratio
     ``pi(u', c') q(u, c | u', c') / (pi(u, c) q(u', c' | u, c))`` reduces to
     ``p_rest(u', c') Z(u') / (p_rest(u, c) Z(u))``. A proposal outside the
-    indicator has ``p_rest = 0`` and is rejected. The move is exact: it leaves
-    the tempered target invariant without any approximation of the window.
+    indicator has ``p_rest = 0`` and is rejected. For a given ``step_chol``
+    the move is an exact Metropolis-Hastings kernel: it leaves the tempered
+    target invariant, window included. When ``step_chol`` is estimated from
+    the particles being moved, as the updater does, invariance of the moved
+    population holds only in the adaptive-SMC sense (see the module notes).
 
     Args:
         key: Typed PRNG key.
