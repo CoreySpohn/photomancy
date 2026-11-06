@@ -16,7 +16,8 @@ posterior an unbounded sampler would return.
 ## Status and amendments
 
 - **Status: draft.** Values marked *provisional* below may be re-sized on the
-  development panel by the rules in "Provisional values".
+  development panel by the rules in "Provisional values", only inside the
+  bounds stated there.
   After re-sizing, the parameter block's `status` becomes `frozen` in a
   dedicated commit, and that commit is the frozen protocol.
 - The protocol commit recorded in every verdict row is the latest commit that
@@ -108,19 +109,21 @@ stated here under `stated`.
     "quantities": ["e", "lnP", "future_east", "future_north"],
     "updates": ["initializer", "epoch_2", "epoch_3"],
     "worlds_per_cell": 400,
-    "alias_subset_worlds": 200,
+    "alias_subset_worlds": 400,
     "development_worlds_per_regime_and_mass_model": 6,
     "smoke_worlds": 24
   },
   "prng": {
     "implementation": "threefry2x32",
+    "key_type": "typed key, jax.random.key(seed, impl='threefry2x32'), x64 enabled",
     "root_seed": 271828,
     "stages": {"development": 1, "panel": 2, "smoke": 3},
     "purposes": {
       "truth": 0, "noise": 1, "updater_a": 2, "updater_b": 3,
       "updater_doubled": 4, "reference_1": 5, "reference_2": 6,
-      "reference_3": 7, "reference_4": 8, "pit": 9, "schedule_null": 10
-    }
+      "reference_3": 7, "reference_4": 8, "pit": 9
+    },
+    "simulation_seeds": {"sizing": 6, "alias_freeze": 7, "schedule_null": 8}
   },
   "visibility": {"wavelength_nm": 500.0, "aperture_m": 6.0,
                  "iwa_lambda_over_d": 3.0, "owa_lambda_over_d": 30.0},
@@ -128,22 +131,33 @@ stated here under `stated`.
     "coverage": {"interval": 0.90, "reported_interval": 0.50, "family_alpha": 0.05},
     "calibration": {"family_alpha": 0.05},
     "alias_accuracy": {"bins": 8, "quantities": ["lnP", "e", "future_pa"],
-                       "family_alpha": 0.05, "delta2": 0.0005},
+                       "family_alpha": 0.05, "delta2": 0.0005, "delta2_max": 0.001,
+                       "min_power": 0.8,
+                       "alternative": {"damaged_fraction": 0.02, "moved_mass": 0.2},
+                       "freeze_panels": 200},
     "failed_updates": {"acceptable_rate": 0.02, "family_alpha": 0.05,
                        "upper_bound_confidence": 0.95},
     "schedule_stability": {"margin_k": 2.0, "comparisons": ["independent_keys", "doubled_budget"],
-                           "null_exceedance_probability": "gaussian", "family_alpha": 0.05}
+                           "null": "binomial at the claimed ESS, per world",
+                           "null_simulations_per_world": 2000, "family_alpha": 0.05,
+                           "min_power": 0.8, "alternative_exceedance": 0.10}
   },
   "reference": {
-    "ti_window": {"proposals_per_fit": 1048576, "allocation": "equal per Lambert family",
+    "ti_window": {"proposals_per_fit": 1048576, "max_proposals_per_fit": 8388608,
+                  "allocation": "equal per Lambert family",
                   "depth_half_width": "(1 + e_max) a_max",
                   "max_revolutions": "ceil(baseline / P_lo)"},
-    "physical_fixed": {"proposals_per_fit": 4194304, "anchor": "highest-SNR valid epoch"},
-    "sufficiency": {"runs": 4, "bound_fraction_of_delta2": 0.25}
+    "physical_fixed": {"proposals_per_fit": 4194304, "max_proposals_per_fit": 33554432,
+                       "anchor": "highest-SNR valid epoch"},
+    "repeat_noise": {"runs": 4, "bound_fraction_of_delta2": 0.25},
+    "convergence": {"bound_fraction_of_delta2": 0.25},
+    "cross_method": {"bound_fraction_of_delta2": 0.5,
+                     "ti_window": "admissible_region_fit, same model and budget",
+                     "physical_fixed": "same weights, anchor at the lowest-SNR valid epoch"},
+    "one_epoch_exactness": {"anchor_scatter_ratio": 1.0, "tolerance_se": 3.0}
   },
   "provisional": [
     "criteria.alias_accuracy.delta2",
-    "criteria.schedule_stability.null_exceedance_probability",
     "reference.ti_window.proposals_per_fit",
     "reference.physical_fixed.proposals_per_fit"
   ],
@@ -154,7 +168,8 @@ stated here under `stated`.
     "dkw_epsilon_5dp": 0.09904,
     "alias_z_3dp": 3.078,
     "failed_updates_critical_count": 17,
-    "schedule_critical_count": 32
+    "schedule_critical_count": 32,
+    "schedule_max_critical_count": 34
   }
 }
 ```
@@ -246,7 +261,13 @@ lanes) from orbit geometry.
   change only `lnP_hi` and `e_max`.
 - **Support.** `TIBasisModel.in_support`: $0 < e < e_\mathrm{max}$,
   $\ln P_\mathrm{lo} < \ln P < \ln P_\mathrm{hi}$, the mass window, all finite.
-- **Truths.** `TIBasisModel.sample_prior(key, 1)` under the world's truth key.
+- **Truths.** Drawn in JAX by `tools/updater_panel.py` (`ti_truth`): blocks of
+  1,024 candidates, block $j$ keyed by `fold_in(truth_key, j)`, with $e$, $\ln P$
+  and $\tau$ uniform on the declared ranges and the TI constants normal; the
+  first candidate that satisfies `TIBasisModel.in_support` is the truth. This is
+  exact rejection sampling of the declared prior. (`TIBasisModel.sample_prior`
+  is not used: it reseeds NumPy from a 31-bit integer and floors $e$ at
+  $10^{-6}$.)
 - **Reference.** `few_epoch.lambert_depth_fit` on the same model instance (see
   "Reference method and budget").
 
@@ -268,8 +289,10 @@ lanes) from orbit geometry.
   regime truncations applied to the same arguments.
 - **Support.** $P_\mathrm{lo} \le P \le P_\mathrm{hi}$ and $0 \le e <
   e_\mathrm{max}$.
-- **Truths.** Drawn directly from this prior under the world's truth key, $e$
-  by rejection from the Beta distribution until $e < e_\mathrm{max}$.
+- **Truths.** Drawn in JAX by `tools/updater_panel.py` (`physical_truth`)
+  under the world's truth key, $e$ by rejection from the Beta distribution in
+  blocks of 1,024 until $e < e_\mathrm{max}$, with $M_\mathrm{ref}$ the mean
+  anomaly at the first cadence epoch.
 - **Chart.** The updater may run in any chart (for example
   $\sqrt e(\cos\omega, \sin\omega)$ and a mean longitude) provided its prior
   density carries that chart's Jacobian, so that the prior measure above is
@@ -302,7 +325,7 @@ guarantee:
   \rceil$, so every alias family that fits the baseline is enumerated.
 - `n_per_family` $= \lfloor N_\mathrm{prop} / F \rfloor$ with
   $F = 2 + 4\,$`n_max_rev` families and *provisional* $N_\mathrm{prop} = 2^{20}$
-  = 1,048,576 proposals per fit.
+  = 1,048,576 proposals per fit, at most $2^{23}$.
 
 The dry run prints both arguments for every regime and epoch count.
 
@@ -320,9 +343,12 @@ a further approximation whenever a later proposal exceeds it.
 The reference therefore uses OFTI's proposal with the exact importance weight.
 `ofti.ScaleAndRotate.sample_and_score` draws the shape parameters from the prior
 and an anchor position $t$ from the anchor epoch's error kernel, and solves for
-$(a, \Omega)$ so that the orbit passes through $t$. The map from $t$ to
-$(\ln a, \Omega)$ has Jacobian $\rho^2$, where $\rho = |t|$, so for the prior
-above the normalized weight is
+$(a, \Omega)$ so that the orbit passes through $t$. With $\rho = |t|$, the
+Jacobian determinant of the anchor position with respect to the solved
+coordinates is $|\partial(x, y)/\partial(\ln a, \Omega)| = \rho^2$ (its inverse,
+$\rho^{-2}$, is the determinant of the map from $t$ to $(\ln a, \Omega)$). The
+proposal density in $(\ln a, \Omega)$ is therefore the error kernel times
+$\rho^2$, and for the prior above the normalized weight is
 
 $$
 w \propto \frac{L_\mathrm{other}(\theta)}{\rho^2}\,\mathbb{1}[\theta \in \mathrm{support}],
@@ -332,29 +358,45 @@ where $L_\mathrm{other}$ is the likelihood of every accepted epoch except the
 anchor (obtained by scoring with the anchor epoch masked invalid; the anchor
 values still drive the proposal). The anchor is the highest signal-to-noise
 valid epoch, the `ofti` default rule. The budget is *provisional*
-$N_\mathrm{prop} = 2^{22}$ = 4,194,304 proposals per fit.
+$N_\mathrm{prop} = 2^{22}$ = 4,194,304 proposals per fit, at most $2^{25}$.
 
-### Sufficiency of the reference budget
+### Reference certification
 
-A reference budget is sufficient when four independent reference runs, used as
-both sides of the alias statistic of the next section,
+Repeatability alone does not show that a reference is accurate: independent
+runs that all miss the same mode agree with each other. A reference is
+certified for a mass model only after all four checks below pass on the
+development worlds. Each check uses the alias statistic of the next section with
+its own runs as the two sides, pooled over the regimes for each mass model,
+epoch count and alias quantity (24 worlds), and compares the upper bound
+$\overline{D2} + z\,\mathrm{SE}$ with a fraction of $\delta_2$.
 
-$$
-D2^{\mathrm{ref}}_w = \sum_b (R_{1,b} - R_{3,b})(R_{2,b} - R_{4,b}),
-$$
+1. **Repeat noise.** Four independent runs at the budget,
+   $D2_w = \sum_b (R_{1,b} - R_{3,b})(R_{2,b} - R_{4,b})$; bound at most
+   $\delta_2 / 4$. This measures Monte Carlo noise only.
+2. **Convergence.** Two runs at the budget against two runs at twice the
+   budget; bound at most $\delta_2 / 4$. A finite-budget bias that shrinks with
+   the budget (an under-sampled mode, the self-normalization bias of order
+   1/ESS) shows here.
+3. **Independent proposal.** Two runs of a sampler with a different proposal
+   and the same target: for the TI pair `few_epoch.admissible_region_fit`
+   (one conditioned epoch, a velocity box proposal) on the same model instance,
+   budget and `z_max_au`; for the physical pair the same exact weights with the anchor at
+   the lowest signal-to-noise valid epoch. Bound at most $\delta_2 / 2$. A mode
+   that one proposal misses is unlikely to be missed by both.
+4. **Exact low-dimensional cases.** For the TI pair, the library test that
+   compares `lambert_depth_fit` with a dense grid posterior passes. For the
+   physical pair, a one-epoch fit (where the exact posterior of the anchor
+   position is the error kernel, up to the slowly varying prior factor) returns
+   an anchor scatter within 3 Monte Carlo standard errors of $\sigma$ per axis.
 
-give an upper bound $\overline{D2} + z\,\mathrm{SE}$ of at most $\delta_2 / 4$,
-pooled over the 48 development worlds, for each mass model, epoch count and
-alias quantity. A reference that cannot meet this at its budget leaves the
-alias criterion incomplete for the affected groups (see
-"Incomplete verdicts").
+A reference that fails a check at its maximum budget is not certified, and the
+alias criterion of its mass model is `incomplete` (see "Incomplete verdicts").
 
 ## Worlds, seeds and random numbers
 
 - **Panel.** 4 regimes x 2 mass models x 400 worlds = 3,200 worlds; every world
   is graded at both epoch counts and for all four quantities, so each of the 64
-  cells has 400 worlds. The alias criterion uses the fixed subset of world
-  indices 0 to 199 in each regime and mass model.
+  cells has 400 worlds. The alias criterion also uses all 400 worlds.
 - **Development.** 6 worlds per regime and mass model (48) on the development
   stage, disjoint from the panel by construction.
 - **Smoke.** 24 worlds (3 per regime and mass model) on their own stage, for a
@@ -362,12 +404,14 @@ alias criterion incomplete for the affected groups (see
 - **Every world counts in every denominator.** A world whose update returns a
   status other than `OK` is scored on the belief it returned.
 
-Random numbers use JAX's threefry2x32 generator in 64-bit mode. Every draw has a
-key derived by folding semantic coordinates into the root key, never by a
-counter or by execution order:
+Random numbers use typed JAX keys of the threefry2x32 implementation, created
+explicitly (`jax.random.key(root_seed, impl="threefry2x32")`, independent of the
+ambient default), in 64-bit mode. Every draw has a key derived by folding
+semantic coordinates into the root key, never by a counter or by execution
+order:
 
 ```text
-world_key = fold_in(fold_in(fold_in(fold_in(PRNGKey(root_seed), stage),
+world_key = fold_in(fold_in(fold_in(fold_in(key(root_seed), stage),
                                     mass_model_index), regime_index), world_index)
 purpose_key = fold_in(world_key, purpose)
 update_key  = fold_in(purpose_key, update_index)       # 0, 1, 2
@@ -377,15 +421,35 @@ Stage, purpose and index values are in the parameter block (mass models and
 regimes are indexed in the order listed there). The development and panel
 stages differ in the second fold, so their keys never coincide; development
 seeds therefore cannot leak into the panel. The doubled-budget run, the two
-independent updater runs, the four reference runs, the PIT randomization and the
-schedule null runs each have their own purpose, so no two of them share a key.
+independent updater runs, the four reference runs and the PIT randomization
+each have their own purpose, so no two of them share a key. Development
+certification runs use the development stage: the convergence runs at twice the
+budget take the reference purposes 1 and 2 with `update_index` 1, and the
+independent-proposal runs take purposes 3 and 4 with `update_index` 1. Seeded
+NumPy simulations (sizing, the alias freeze, the schedule null) use
+`numpy.random.default_rng([root_seed, s, ...])` with the stream numbers `s` under
+`simulation_seeds` and the group and quantity indices appended. A unit test
+checks that every declared key coordinate gives a distinct key and that the keys
+do not change with JAX's default generator setting.
 
 ## Criteria
 
 Each criterion is a column of the verdict table with its own verdict. The
-updater passes only if every criterion passes in every group. All family error
-rates are controlled by Bonferroni over the stated number of tests, which holds
-under any dependence between tests.
+updater passes only if every criterion passes in every group. Family error rates
+are split by Bonferroni over the stated number of tests, which holds under any
+dependence between tests. What each per-test level rests on differs:
+
+- **Exact.** The coverage and failed-update cutoffs are exact binomial tails for
+  independent worlds at the stated null rate, and the calibration band is the
+  exact finite-sample DKW inequality.
+- **Exact given a declared null.** The schedule cutoff is an exact
+  Poisson-binomial tail of per-world null probabilities, which are computed
+  under the declared null (particles equivalent to ESS independent draws) by
+  seeded simulation.
+- **Approximate.** The alias bound is a normal approximation to the mean of 400
+  independent world statistics. Its operating characteristics (pass rate of an
+  exact updater, power against the stated alternative) are validated by
+  simulation, not guaranteed.
 
 ### Coverage
 
@@ -427,24 +491,34 @@ For each group (regime, mass model, epoch count; 16 groups) and alias quantity
 ($\ln P$, $e$ and the future position angle measured east of north; 3
 quantities), bin each posterior into 8 equal-width bins over the regime's
 support ($[\ln P_\mathrm{lo}, \ln P_\mathrm{hi}]$, $[0, e_\mathrm{max}]$,
-$[0, 2\pi)$). For world $w$ of the 200-world subset, with bin masses $U_a, U_b$
-from the two independent updater runs and $R_a, R_b$ from two independent
-reference runs,
+$[0, 2\pi)$). For each of the 400 worlds $w$, with bin masses $U_a, U_b$ from the
+two independent updater runs and $R_a, R_b$ from two independent reference runs,
 
 $$
-D2_w = \sum_{b=1}^{8} (U_{a,b} - R_{a,b})(U_{b,b} - R_{b,b}),
+D2_w = \sum_{b=1}^{8} (U_{a,b} - R_{a,b})(U_{b,b} - R_{b,b}).
 $$
 
-an unbiased estimate of the squared $L_2$ distance between the updater's and the
-reference's binned posteriors, with no reference-noise floor because the four
-runs are independent. The group statistic is the mean $\overline{D2}$ with
-standard error $\mathrm{SE} = s / \sqrt{200}$.
+Because the four runs are independent given the data, $D2_w$ is an unbiased
+estimate of the squared $L_2$ distance between the *expected* binned outputs of
+the updater and of the reference, with no floor from the reference's Monte
+Carlo noise. That distance equals the distance to the exact posterior only as
+far as each algorithm's expected output is unbiased; self-normalized importance
+weights carry a bias of order 1/ESS, which the reference certification bounds.
+The group statistic is the mean $\overline{D2}$ with standard error
+$\mathrm{SE} = s / \sqrt{400}$.
 
 - The group fails when $\overline{D2} + z\,\mathrm{SE} > \delta_2$, with
   $z = \Phi^{-1}(1 - 0.05/48) =$ **3.078** (48 = 16 groups x 3 quantities).
-- *Provisional* $\delta_2 = 5 \times 10^{-4}$.
-- The reference-noise condition is the sufficiency rule above: the reference's
-  own repeat statistic must be at most $\delta_2/4$.
+  This is the approximate bound described above.
+- *Provisional* $\delta_2 = 5 \times 10^{-4}$, never above
+  $\delta_2^{\max} = 10^{-3}$.
+- Required power: at least 0.8 against the stated alternative, an updater
+  that moves 0.2 of the posterior mass from the second-largest bin into the
+  largest in 2 percent of worlds.
+- All 400 worlds are used, so the chance that a sample contains no damaged world
+  under that alternative is $0.98^{400} = 3.1 \times 10^{-4}$, below the per-test
+  level $0.05/48 = 1.04 \times 10^{-3}$. (A 200-world sample would miss every
+  damaged world with probability 0.018.)
 - The total variation $\mathrm{TV}_w = \tfrac12 \sum_b |U_{a,b} - R_{a,b}|$ is
   reported (median and 95th percentile) but not graded, because TV against a
   noisy reference is biased upward.
@@ -470,14 +544,28 @@ $\mathrm{SE}_d = \sqrt{se_a^2 + se_b^2}$ with $se = \sqrt{p(1-p)/\mathrm{ESS}}$,
 and an exceedance is $|d| > k\,\mathrm{SE}_d$ with $k = 2$ (two runs that both
 report $p$ exactly 0 or 1 give $d = 0$ and no exceedance).
 
-- Two comparisons per group: the two independent-key runs, and the nominal
-  budget against the doubled budget. With 16 groups that is 32 tests at family
-  level 0.05.
-- Under Gaussian Monte Carlo error the null exceedance probability is
-  $q_0 = 2[1 - \Phi(k)] = 0.0455$ (*provisional*: re-sized on the development
-  panel). The critical count is the smallest $c$ with
-  $\Pr[\mathrm{Bin}(400, q_0) > c] \le 0.05/32$, which is **32**: a test fails
-  with more than 32 exceedances among its 400 worlds.
+- **Tests.** Two comparisons per group: the two independent-key runs, and run
+  $a$ at the nominal budget against the doubled budget. With 16 groups that is
+  32 tests at family level 0.05, per-test level $0.05/32$. Each world enters
+  each test once, so the 400 terms of a test are independent.
+- **Null.** A stable updater's deviations are the Monte Carlo noise its own ESS
+  claims. For each world and comparison, the null exceedance probability $q_w$
+  is the frequency of exceedances in 2,000 simulated pairs
+  $\hat p_a \sim \mathrm{Bin}(n_a, \bar p)/n_a$, $\hat p_b \sim \mathrm{Bin}(n_b,
+  \bar p)/n_b$, with $\bar p = (p_a + p_b)/2$ and $n_a, n_b$ the two runs' ESS
+  rounded to integers (seed stream `schedule_null`, with the group and
+  comparison indices). This is computed per group and per comparison from the
+  graded worlds themselves, so no development calibration is pooled across
+  groups, and it is not estimated from the updater's own disagreement.
+- **Cutoff.** The exceedance count of a test is Poisson-binomial with
+  probabilities $q_w$ under the null; the cutoff $c$ is the smallest count with
+  $\Pr[\mathrm{count} > c] \le 0.05/32$, and the test fails with more than $c$
+  exceedances. In the large-ESS limit every $q_w$ is $2[1 - \Phi(2)] = 0.0455$
+  and $c$ = **32**.
+- **Power floor.** A test must keep power at least 0.8 against a true exceedance
+  probability of 0.10, which holds for $c \le$ **34** (largest $c$ with
+  $\Pr[\mathrm{Bin}(400, 0.10) > c] \ge 0.8$). A test whose null cutoff exceeds
+  34 is `incomplete`, never graded at the looser cutoff.
 
 ### Mechanics
 
@@ -493,59 +581,77 @@ code commit. Any red test fails this criterion.
 (and the alias case by a seeded simulation):
 
 - A cell whose true coverage is 0.82 fails with probability 0.935 (0.85: 0.466;
-  0.88: 0.030).
+  0.88: 0.030). Exact.
 - A failed-update group at a true rate of 0.05 fails with probability 0.709,
   at 0.06 with 0.919.
-- A schedule test with true exceedance probability 0.10 fails with probability
-  0.897.
+- A schedule test at the large-ESS cutoff of 32, with true exceedance
+  probability 0.10, fails with probability 0.897; at the cap of 34, with 0.82.
+  Exact.
 - An updater that moves 0.2 of the period mass in 2 percent of worlds fails the
-  alias test with probability near 0.98 at updater ESS 1,000 and reference ESS
-  4,400; an exact updater passes.
+  alias test with probability above 0.99 at $\delta_2 = 5\times 10^{-4}$ and
+  $10^{-3}$, at updater ESS 300 or 1,000 and reference ESS 4,400 (Dirichlet(0.7)
+  bin masses, 400 worlds); an exact updater passes. Simulated.
 
 ## Provisional values
 
 Three values may be re-sized on the development panel, before the freeze, by
-these rules only. Each re-sizing is a commit to the parameter block, made before
-any panel world is run, with the development record that justifies it.
+these rules only and only inside the stated bounds. Each re-sizing is a commit to
+the parameter block, made before any panel world is run, together with the
+development record that justifies it. If development precision cannot meet a
+bound, the response is more sampling (a larger reference budget, up to its
+maximum) or an `incomplete` verdict for the affected criterion, never a looser
+gate.
 
-1. **$\delta_2$.** An exact updater must pass each of the 48 alias tests with
-   probability at least $1 - 0.05/48$. For an exact updater
-   $\overline{D2} \approx \mathcal{N}(0, \mathrm{SE}_0^2)$, so the pass
-   probability is $\Phi(\delta_2/\mathrm{SE}_0 - z)$, which requires
-   $\delta_2 \ge 2 z\, \mathrm{SE}_0$. $\mathrm{SE}_0$ is computed per group by
-   the seeded multinomial simulation in `--sizing`, using the development
-   worlds' measured reference bin masses and the measured updater and reference
-   ESS (median per group), so that it contains Monte Carlo noise only, never
-   real updater error. The frozen value is
-   $\delta_2 = \max(5\times 10^{-4},\ 2 z \max_g \mathrm{SE}_{0,g})$, and the
-   power against the alternative above is recorded with it.
-2. **Schedule null probability $q_0$.** Each development world is run with 8
-   independent keys at the nominal budget, giving 4 disjoint pairs per world
-   and 192 independent pairs per epoch count. The measured exceedance rate at
-   $k = 2$ gives a one-sided 95 percent Clopper-Pearson upper bound; the frozen
-   $q_0$ is the larger of 0.0455 and the larger bound over the two epoch counts.
-   The critical count is then recomputed from the formula above.
-3. **Reference budgets.** Each budget is raised by factors of 2 from its
-   starting value until the sufficiency rule holds in every group; the frozen
-   value is the smallest budget that passes. A budget may not be lowered below
-   its starting value.
+1. **$\delta_2$, within $[5\times 10^{-4}, 10^{-3}]$.** An exact updater must pass
+   each of the 48 alias tests with probability at least $1 - 0.05/48$. For an
+   exact updater $\overline{D2} \approx \mathcal{N}(0, \mathrm{SE}_0^2)$, so this
+   requires $\delta_2 \ge 2 z\, \mathrm{SE}_0$. The candidate is
+   $\max(5\times 10^{-4},\ 2 z \max \mathrm{SE}_0)$ over groups and quantities.
+   It is accepted only if it is at most $10^{-3}$ and the simulated power against
+   the stated alternative is at least 0.8 in every group and quantity; otherwise
+   the alias criterion is `incomplete` for the groups that miss. The calculation
+   is `python tools/updater_panel.py --freeze SUMMARY.json`:
+   - *Inputs* (one entry per group): the median updater ESS and median
+     reference ESS over the group's development worlds, and the reference bin
+     masses of each development world for each alias quantity.
+   - *Aggregation*: 200 simulated panels per group and quantity; each panel
+     resamples 400 worlds' bin masses from the development worlds with
+     replacement and draws the four runs as multinomials at the given ESS;
+     $\mathrm{SE}_0$ is the mean panel standard error; power is the fraction of
+     panels that fail when the stated damage is applied.
+   - *Seeds*: stream `alias_freeze`, with the group and quantity indices.
+   - *Output*: the candidate $\delta_2$, per-group $\mathrm{SE}_0$ and power, and
+     `frozen` or `incomplete` with the reasons.
+2. **TI reference budget, from $2^{20}$ to at most $2^{23}$ proposals.**
+3. **Physical reference budget, from $2^{22}$ to at most $2^{25}$ proposals.**
+   Each budget is doubled from its starting value until the reference is
+   certified ("Reference certification"); the frozen value is the smallest
+   certified budget. Running the certification needs the development-panel code
+   (truth draws, reference runs and the binned summaries), which is required work
+   that must exist and be committed before the freeze.
 
-Proposal scales, the tempering ladder and the moves of the updater may be tuned
-on the development panel; the budget ceiling may not be raised.
+The schedule cutoff is not re-sized: it is computed per test from the graded
+worlds under the declared null, and capped by the power floor. Proposal scales,
+the tempering ladder and the moves of the updater may be tuned on the
+development panel; the budget ceiling may not be raised.
 
 ## Compute
 
-Per key, the panel makes 4 regimes x 2 mass models x 400 worlds x 3 updates =
-9,600 updates. Two independent keys and one doubled-budget run (which costs two)
-give 38,400 update-equivalents. Each pair needs 4 x 200 x 2 x 2 = 3,200
-reference fits (regimes, subset worlds, epoch counts, independent runs).
+Per key and model pair, the panel makes 4 regimes x 400 worlds x 3 updates =
+4,800 updates. Two independent keys and one doubled-budget run (which costs two)
+give 19,200 update-equivalents per pair, each priced at that pair's measured
+cost. Each pair needs 4 x 400 x 2 x 2 = 6,400 reference fits (regimes, worlds,
+epoch counts, independent runs), and the development certification about 480
+more (four repeat runs, two runs at twice the budget and two
+independent-proposal runs, for 48 world and epoch-count combinations).
 
 `tools/updater_latency_probe.py` times the vmapped astrometric likelihood over
 8,192 particles, with compilation timed apart from the steady state and every
 call blocked until ready, and scales it to $8192 \times 32 \times 4 =
 1{,}048{,}576$ evaluations per update. It also prices one proposal of each
-reference. Its output, `docs/updater-latency-probe.json`, records the machine and
-library versions, and the dry run uses it to price the tally. The likelihood
+reference. Its output, `docs/updater-latency-probe.json`, records the machine,
+library versions and budget; the dry run prices the tally from it only when the
+recorded budget equals the protocol's. The likelihood
 alone is a lower bound on an update: proposals, reweighting and resampling add
 to it. Latency is reported against the 100 ms target and never enters a
 verdict.
@@ -579,13 +685,17 @@ intended world, target and design batch; both are reported against a target of
 
 ## Incomplete verdicts
 
-- A group is graded only when all of its worlds have been run (400, or 200 for
-  the alias subset) and, for the alias criterion, its references meet the
-  sufficiency rule. Otherwise its verdict is `incomplete`.
+- A group is graded only when all of its 400 worlds have been run. Otherwise
+  its verdict is `incomplete`.
+- The alias criterion of a mass model is `incomplete` when its reference is not
+  certified at the maximum budget, and of a group when the frozen $\delta_2$
+  cannot meet its bound or power floor.
+- A schedule test is `incomplete` when its null cutoff exceeds the power-floor
+  cap of 34.
 - The work has a limit of 14 working days from the first commit of this
   protocol. The clock stops while a panel job waits for a compute slot, for at
-  most 7 further days. A panel cut short by either limit, or by a reference that
-  cannot reach sufficiency, is recorded as it stands.
+  most 7 further days. A panel cut short by either limit is recorded as it
+  stands.
 - The panel verdict is `fail` if any graded group fails, otherwise `incomplete`
   if any group is incomplete, otherwise `pass`. An incomplete panel is never
   recorded as a fail or a pass; it goes to the maintainer with the partial table.
