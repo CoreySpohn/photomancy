@@ -52,6 +52,9 @@ Kernel (fixed-particle tempered SMC with a fixed loop count):
 - Moves propose ``wrap(theta + scale L z)`` in the target's chart, with ``L``
   the Cholesky factor of the weighted particle covariance (periodic coordinates
   centered on their circular mean) and ``scale = proposal_scale / sqrt(d)``.
+  The proposal scale is the updater's ``proposal_scale`` when given, else the
+  target's ``default_proposal_scale``, so each target carries its own tuned
+  step.
   The proposal is symmetric on the chart (a Gaussian step, wrapped on the
   circle for periodic coordinates), so the Hastings ratio is the ratio of the
   tempered target densities; any chart Jacobian already sits in
@@ -65,6 +68,17 @@ Kernel (fixed-particle tempered SMC with a fixed loop count):
   :func:`_collapsed_step`). The posterior that one or two astrometric epochs
   leave is a thin curved region in the full chart, which a random walk over
   every coordinate cannot follow.
+- A target that also declares a period-alias map (``has_alias_move``; the
+  Thiele-Innes target) gets an alias jump after every collapsed move: the
+  frequency ``1 / P`` moves by ``k / Delta`` for a random nonzero integer
+  ``k``, where ``Delta`` is the smallest gap between the buffered epochs, the
+  phase shifts so that the mean anomalies at the epochs keep their values
+  modulo ``2 pi``, and the linear block is redrawn from its conditional
+  Gaussian. The map is a bijection whose inverse is the jump by ``-k``, so
+  with the map's Jacobian in the acceptance ratio it is an exact
+  Metropolis-Hastings kernel (see :func:`_alias_step`). On a cadence of equal
+  steps the jump leaves the predictions at every epoch unchanged, so it
+  crosses between period aliases that a local random walk cannot.
 - Adaptation: each rung's step covariance is estimated from the particles
   that the rung then moves. A kernel with its covariance held fixed is
   invariant for the rung's target, but choosing the covariance from the same
@@ -110,6 +124,10 @@ def _as_int(x):
 
 def _as_bool(x):
     return jnp.asarray(x, dtype=bool)
+
+
+def _as_float_or_none(x):
+    return None if x is None else jnp.asarray(x, dtype=float)
 
 
 class UpdaterStatus(enum.IntEnum):
@@ -228,6 +246,8 @@ class UpdaterDiagnostics(eqx.Module):
             the moves did not rejuvenate the resampled duplicates. A particle
             moved by any accepted step counts as distinct, so this bounds the
             diversity from above.
+        alias_acceptance_rate: Fraction of alias-jump proposals accepted (0
+            when the target has no alias move or none ran).
     """
 
     status: jax.Array = eqx.field(converter=_as_int)
@@ -239,6 +259,7 @@ class UpdaterDiagnostics(eqx.Module):
     acceptance_rate: jax.Array = eqx.field(converter=_as_float)
     temperature: jax.Array = eqx.field(converter=_as_float)
     n_unique: jax.Array = eqx.field(converter=_as_int)
+    alias_acceptance_rate: jax.Array = eqx.field(converter=_as_float, default=0.0)
 
 
 class AbstractUpdateTarget(eqx.Module):
@@ -269,6 +290,11 @@ class AbstractUpdateTarget(eqx.Module):
     conditional Gaussian (a collapsed move); with no linear block (the
     default) it moves every coordinate by random walk.
 
+    ``default_proposal_scale`` (class constant) is the random-walk scale the
+    kernel uses when the updater does not set one. A target with a linear
+    block may also declare a period-alias map (``has_alias_move`` with
+    :meth:`alias_jump` and :meth:`alias_k_max`).
+
     Array fields of a target are traced, not static, so a target with new
     values (a different truncation, say) reuses the compiled update.
     """
@@ -276,6 +302,8 @@ class AbstractUpdateTarget(eqx.Module):
     param_names: AbstractClassVar[tuple[str, ...]]
     periods: AbstractClassVar[tuple[float, ...]]
     linear_index: ClassVar[tuple[int, ...]] = ()
+    default_proposal_scale: ClassVar[float] = 0.3
+    has_alias_move: ClassVar[bool] = False
 
     @abstractmethod
     def sample_prior(self, key, n):
@@ -350,6 +378,31 @@ class AbstractUpdateTarget(eqx.Module):
         indicator depending on ``c``) is everything else.
         """
         raise NotImplementedError(f"{type(self).__name__} has no linear block.")
+
+    def alias_jump(self, theta, k, spacing, t_anchor):
+        """Move ``theta`` to its ``k``-th period alias for an epoch spacing.
+
+        A target with ``has_alias_move`` maps the frequency ``f = 1 / P`` to
+        ``f + k / spacing`` and shifts its phase so that the mean anomaly at
+        every epoch ``t_anchor + j spacing`` is unchanged modulo ``2 pi``. The
+        map with ``-k`` must be the inverse of the map with ``k``.
+
+        Args:
+            theta: Chart point. Shape ``(d,)``.
+            k: Nonzero integer alias index.
+            spacing: Epoch spacing (days), positive.
+            t_anchor: An epoch of the lattice (days).
+
+        Returns:
+            Tuple ``(theta_new, log_jacobian)``: the mapped point (non-finite
+            when the alias has no valid period) and the log absolute Jacobian
+            determinant of the map in the chart.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no alias move.")
+
+    def alias_k_max(self, spacing):
+        """Largest alias index ``|k|`` proposed for an epoch spacing."""
+        raise NotImplementedError(f"{type(self).__name__} has no alias move.")
 
     def wrap(self, theta):
         """Map the periodic coordinates of ``theta`` into ``[0, period)``."""
@@ -426,7 +479,8 @@ class ThieleInnesTarget(AbstractUpdateTarget):
     The four TI constants are the linear block: the predictions are linear in
     them and their prior is Gaussian times the implied-mass window.
     The model's bounds are stored as arrays, so lanes may carry different
-    truncations.
+    truncations. Its default random-walk scale is 1.0, tuned on the
+    development worlds, and it declares the period-alias move.
 
     Args:
         model: The ``TIBasisModel``. Default: its field defaults.
@@ -439,6 +493,8 @@ class ThieleInnesTarget(AbstractUpdateTarget):
     param_names: ClassVar[tuple[str, ...]] = TI_PARAM_NAMES
     periods: ClassVar[tuple[float, ...]] = (0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
     linear_index: ClassVar[tuple[int, ...]] = (3, 4, 5, 6)
+    default_proposal_scale: ClassVar[float] = 1.0
+    has_alias_move: ClassVar[bool] = True
 
     def __init__(self, model=None, dist_pc=10.0):
         """Store the model with array-valued bounds."""
@@ -500,6 +556,32 @@ class ThieleInnesTarget(AbstractUpdateTarget):
     def linear_prior_scale(self):
         """The TI constants' prior scale ``s_ti`` (AU); the window is the indicator."""
         return self.model.s_ti
+
+    def alias_jump(self, theta, k, spacing, t_anchor):
+        """Shift the frequency by ``k / spacing`` and the phase to match.
+
+        With mean anomaly ``M(t) = 2 pi ((t - t_ref) f - tau)`` and ``f =
+        exp(-lnP)``, the map ``f' = f + k / spacing``, ``tau' = tau + k
+        (t_anchor - t_ref) / spacing`` (modulo 1) changes ``M`` by ``2 pi k (t
+        - t_anchor) / spacing``, a multiple of ``2 pi`` at every epoch of the
+        lattice. The TI constants are untouched (the collapsed move redraws
+        them). In the chart ``(lnP, tau)`` the map has Jacobian ``f / f'``.
+
+        Returns:
+            Tuple ``(theta_new, log_jacobian)``; NaN when ``f' <= 0``.
+        """
+        freq = jnp.exp(-theta[1])
+        new_freq = freq + k / spacing
+        valid = new_freq > 0.0
+        ln_period = jnp.where(valid, -jnp.log(jnp.where(valid, new_freq, 1.0)), jnp.nan)
+        tau = jnp.mod(theta[2] + k * (t_anchor - self.model.t_ref) / spacing, 1.0)
+        new = theta.at[1].set(ln_period).at[2].set(tau)
+        return new, ln_period - theta[1]
+
+    def alias_k_max(self, spacing):
+        """Aliases spanning the prior's frequency range, at least 1."""
+        span = jnp.exp(-self.model.lnP_lo) - jnp.exp(-self.model.lnP_hi)
+        return jnp.maximum(jnp.ceil(spacing * span), 1.0).astype(int)
 
 
 class FixedMassTarget(AbstractUpdateTarget):
@@ -965,12 +1047,53 @@ def _collapsed_step(
     """
     k_step, k_draw, k_acc = jax.random.split(key, 3)
     n, d = particles.shape
-    lin = jnp.asarray(target.linear_index)
     nonlinear = jnp.asarray([i for i in range(d) if i not in target.linear_index])
     p = len(target.linear_index)
     steps = jax.random.normal(k_step, (n, d - p)) @ step_chol.T
     moved = jax.vmap(target.wrap)(particles.at[:, nonlinear].add(steps))
-    noise = jax.random.normal(k_draw, (n, p))
+    return _collapsed_accept(
+        k_draw,
+        k_acc,
+        particles,
+        aux,
+        log_marginal,
+        moved,
+        jnp.zeros(n),
+        target,
+        records,
+        weights,
+        select,
+        rest,
+    )
+
+
+def _collapsed_accept(
+    k_draw,
+    k_acc,
+    particles,
+    aux,
+    log_marginal,
+    moved,
+    log_jacobian,
+    target,
+    records,
+    weights,
+    select,
+    rest,
+):
+    """Redraw the linear block at moved points and accept by the collapsed ratio.
+
+    The nonlinear coordinates of ``moved`` come from a proposal that is
+    symmetric, or a bijection whose log Jacobian is ``log_jacobian``; the
+    linear block is redrawn from its conditional Gaussian there. The log
+    acceptance ratio is ``rest' + log Z' - rest - log Z + log_jacobian``.
+
+    Returns:
+        Tuple ``(particles, aux, log_marginal, accepted)``.
+    """
+    n = particles.shape[0]
+    lin = jnp.asarray(target.linear_index)
+    noise = jax.random.normal(k_draw, (n, len(target.linear_index)))
 
     def propose(theta, z):
         mean, chol, log_z, h_ra, h_dec = _linear_gaussian(
@@ -988,7 +1111,9 @@ def _collapsed_step(
 
     proposal, aux_prop, log_z_prop, rest_prop = jax.vmap(propose)(moved, noise)
     rest_now = jax.vmap(rest)(particles)
-    log_alpha = _finite_or_neg_inf((rest_prop + log_z_prop) - (rest_now + log_marginal))
+    log_alpha = _finite_or_neg_inf(
+        (rest_prop + log_z_prop) - (rest_now + log_marginal) + log_jacobian
+    )
     accepted = jnp.log(jax.random.uniform(k_acc, (n,))) < log_alpha
 
     def pick(new, old):
@@ -1000,6 +1125,76 @@ def _collapsed_step(
         jax.tree.map(pick, aux_prop, aux),
         pick(log_z_prop, log_marginal),
         accepted,
+    )
+
+
+def _epoch_lattice(records):
+    """Smallest positive gap between valid epochs and the earliest valid epoch.
+
+    Returns:
+        Tuple ``(spacing, t_anchor)``; ``spacing`` is 0 when fewer than two
+        distinct valid epochs exist.
+    """
+    t = records.times
+    valid = records.is_valid
+    gaps = jnp.abs(t[:, None] - t[None, :])
+    usable = valid[:, None] & valid[None, :] & (gaps > 0.0)
+    spacing = jnp.min(jnp.where(usable, gaps, jnp.inf))
+    spacing = jnp.where(jnp.isfinite(spacing), spacing, 0.0)
+    t_anchor = jnp.min(jnp.where(valid, t, jnp.inf))
+    return spacing, jnp.where(jnp.isfinite(t_anchor), t_anchor, 0.0)
+
+
+def _alias_step(
+    key, particles, aux, log_marginal, target, records, weights, select, rest
+):
+    """One collapsed period-alias jump of every particle.
+
+    Each particle draws ``k`` uniformly from ``{-K, ..., -1, 1, ..., K}`` with
+    ``K = target.alias_k_max(spacing)``, maps its nonlinear coordinates by
+    ``u' = T_k(u)`` (:meth:`AbstractUpdateTarget.alias_jump`, with the epoch
+    spacing and anchor of :func:`_epoch_lattice`), and redraws the linear
+    block from its conditional Gaussian at ``u'``. ``K``, the spacing and the
+    anchor depend on the records only, never on the particle, and ``T_{-k}``
+    inverts ``T_k`` with the same proposal probability, so the reverse move
+    exists and the Hastings ratio of this deterministic-bijection proposal is
+    ``p_rest(u', c') Z(u') |det dT_k / du| / (p_rest(u, c) Z(u))``. For a
+    given record buffer it is an exact Metropolis-Hastings kernel for the
+    tempered target, whether or not the epochs lie on the lattice (off it,
+    ``Z(u')`` differs from ``Z(u)`` and the ratio accounts for it). With
+    fewer than two distinct epochs every proposal is rejected.
+
+    Args: as :func:`_collapsed_step`, without ``step_chol``.
+
+    Returns:
+        Tuple ``(particles, aux, log_marginal, accepted)``.
+    """
+    k_mag, k_sign, k_draw, k_acc = jax.random.split(key, 4)
+    n = particles.shape[0]
+    spacing, t_anchor = _epoch_lattice(records)
+    usable = spacing > 0.0
+    safe_spacing = jnp.where(usable, spacing, 1.0)
+    k_max = target.alias_k_max(safe_spacing)
+    magnitude = jax.random.randint(k_mag, (n,), 1, k_max + 1)
+    sign = jnp.where(jax.random.bernoulli(k_sign, 0.5, (n,)), 1, -1)
+    k = (sign * magnitude).astype(float)
+    moved, log_jac = jax.vmap(
+        lambda theta, kk: target.alias_jump(theta, kk, safe_spacing, t_anchor)
+    )(particles, k)
+    log_jac = jnp.where(usable & jnp.isfinite(log_jac), log_jac, -jnp.inf)
+    return _collapsed_accept(
+        k_draw,
+        k_acc,
+        particles,
+        aux,
+        log_marginal,
+        moved,
+        log_jac,
+        target,
+        records,
+        weights,
+        select,
+        rest,
     )
 
 
@@ -1026,6 +1221,7 @@ class _Ladder(eqx.Module):
     rungs: jax.Array
     accepted: jax.Array
     proposed: jax.Array
+    alias_accepted: jax.Array
     min_cess: jax.Array
 
 
@@ -1054,14 +1250,17 @@ class OrbitUpdater(eqx.Module):
         proposal_scale: Random-walk step in units of the particle covariance
             of the coordinates that move by random walk (all of them, or all
             but a target's linear block), divided by the square root of their
-            number. Default 0.3, well below the 2.38 that is
-            optimal for a Gaussian target: one or two astrometric epochs
-            confine the orbit posteriors to thin curved regions where a random
-            walk over every coordinate rejects larger steps. A collapsed move,
-            whose random walk skips the linear block, tolerates larger steps.
+            number. Default None: the target's ``default_proposal_scale``
+            (0.3 for the physical target, 1.0 for the Thiele-Innes target).
+            One or two astrometric epochs confine the physical posteriors to
+            thin curved regions where a random walk over every coordinate
+            rejects larger steps; a collapsed move, whose random walk skips
+            the linear block, tolerates larger steps.
         n_bisect: Bisection iterations per rung (static). The smallest
             temperature increment a rung can take is ``(1 - beta) / 2^n_bisect``.
             Default 40.
+        alias_moves: Whether a target that declares a period-alias map gets
+            an alias jump after every collapsed move (static). Default True.
 
     Raises:
         ValueError: If a capacity is not positive.
@@ -1074,8 +1273,11 @@ class OrbitUpdater(eqx.Module):
     record_capacity: int = eqx.field(static=True)
     low_ess_fraction: jax.Array = eqx.field(converter=_as_float, default=0.1)
     target_cess_fraction: jax.Array = eqx.field(converter=_as_float, default=0.5)
-    proposal_scale: jax.Array = eqx.field(converter=_as_float, default=0.3)
+    proposal_scale: jax.Array | None = eqx.field(
+        converter=_as_float_or_none, default=None
+    )
     n_bisect: int = eqx.field(static=True, default=40)
+    alias_moves: bool = eqx.field(static=True, default=True)
 
     def __check_init__(self):
         """Validate capacities and the floating-point mode."""
@@ -1102,6 +1304,7 @@ class OrbitUpdater(eqx.Module):
         rungs=0,
         acceptance=0.0,
         temperature=0.0,
+        alias_acceptance=0.0,
     ):
         return UpdaterDiagnostics(
             status=status,
@@ -1113,6 +1316,7 @@ class OrbitUpdater(eqx.Module):
             acceptance_rate=acceptance,
             temperature=temperature,
             n_unique=n_unique,
+            alias_acceptance_rate=alias_acceptance,
         )
 
     @eqx.filter_jit
@@ -1292,7 +1496,13 @@ class OrbitUpdater(eqx.Module):
         d = len(target.periods)
         collapsed = len(target.linear_index) > 0
         moving = jnp.asarray([i for i in range(d) if i not in target.linear_index])
-        step_scale = self.proposal_scale / math.sqrt(len(moving))
+        scale = (
+            target.default_proposal_scale
+            if self.proposal_scale is None
+            else self.proposal_scale
+        )
+        step_scale = scale / math.sqrt(len(moving))
+        aliased = collapsed and target.has_alias_move and self.alias_moves
 
         def evaluate(theta):
             ll_rest, ll_new = target.log_likelihood_split(theta, records, is_new)
@@ -1352,10 +1562,14 @@ class OrbitUpdater(eqx.Module):
                     def log_z_of(theta):
                         return _linear_gaussian(target, theta, records, weights)[2]
 
+                    def rest(theta):
+                        return _rest_log_prior(target, theta)
+
                     def move(m, carry):
-                        particles, aux, log_z, accepted = carry
+                        particles, aux, log_z, accepted, alias_acc = carry
+                        k_rw, k_alias = jax.random.split(jax.random.fold_in(k_move, m))
                         particles, aux, log_z, acc = self._collapsed_move(
-                            jax.random.fold_in(k_move, m),
+                            k_rw,
                             particles,
                             aux,
                             log_z,
@@ -1365,11 +1579,24 @@ class OrbitUpdater(eqx.Module):
                             weights,
                             is_new,
                         )
-                        return particles, aux, log_z, accepted + jnp.sum(acc)
+                        if aliased:
+                            particles, aux, log_z, jumped = _alias_step(
+                                k_alias,
+                                particles,
+                                aux,
+                                log_z,
+                                target,
+                                records,
+                                weights,
+                                is_new,
+                                rest,
+                            )
+                            alias_acc = alias_acc + jnp.sum(jumped)
+                        return particles, aux, log_z, accepted + jnp.sum(acc), alias_acc
 
                     log_z = _finite_or_neg_inf(jax.vmap(log_z_of)(particles))
-                    particles, aux, _, accepted = jax.lax.fori_loop(
-                        0, self.n_moves, move, (particles, aux, log_z, zero)
+                    particles, aux, _, accepted, alias_accepted = jax.lax.fori_loop(
+                        0, self.n_moves, move, (particles, aux, log_z, zero, zero)
                     )
                 else:
 
@@ -1389,6 +1616,7 @@ class OrbitUpdater(eqx.Module):
                     particles, aux, accepted = jax.lax.fori_loop(
                         0, self.n_moves, move, (particles, aux, zero)
                     )
+                    alias_accepted = zero
                 return _Ladder(
                     particles=particles,
                     log_weights=jnp.full(n, -jnp.log(n)),
@@ -1400,6 +1628,7 @@ class OrbitUpdater(eqx.Module):
                     rungs=state.rungs + 1,
                     accepted=state.accepted + accepted,
                     proposed=state.proposed + n * self.n_moves,
+                    alias_accepted=state.alias_accepted + alias_accepted,
                     min_cess=state.min_cess,
                 )
 
@@ -1417,6 +1646,7 @@ class OrbitUpdater(eqx.Module):
                 rungs=jnp.asarray(0, dtype=int),
                 accepted=jnp.asarray(0, dtype=int),
                 proposed=jnp.asarray(0, dtype=int),
+                alias_accepted=jnp.asarray(0, dtype=int),
                 min_cess=jnp.asarray(float(n)),
             )
             state = jax.lax.fori_loop(0, self.n_rungs, rung, start)
@@ -1446,6 +1676,7 @@ class OrbitUpdater(eqx.Module):
                 final.rungs,
                 final.accepted / jnp.maximum(final.proposed, 1),
                 state.beta,
+                final.alias_accepted / jnp.maximum(final.proposed, 1),
             )
             updated = UpdaterBelief(
                 target=target,
