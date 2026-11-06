@@ -137,8 +137,15 @@ def test_ti_quadrature_matches_an_independent_exact_sampler():
     (1e-4 for masses, 1e-5 arcsec for end points). Bin masses must sum to 1.
     Fails if the quadrature drops or misweights the marginal likelihood, uses
     the wrong future-position covariance, or mislabels a bin or end point.
+    A 64-particle updater unit must also run through the executor with the
+    protocol's per-mass-model kernel values (fails if a per-model kernel
+    entry reaches the updater unresolved).
     """
     protocol = ex.panel.load_protocol()
+    unit = {"id": "u", "case": "ti_window", "kind": "updater", "repeat": 0}
+    rec = ex.ExactExecutor(protocol, particles=64)(unit)
+    assert rec["particles"] == 64
+    assert abs(sum(rec["values"][f"lnP_bin{b}"] for b in range(8)) - 1.0) < 1e-9
     setup = ex.case_setup(protocol, "ti_window")
     q0 = ex.ti_quadrature(setup, ex.level_counts(ex.TI_BASE, 0))["values"]
     q1 = ex.ti_quadrature(setup, ex.level_counts(ex.TI_BASE, 1))["values"]

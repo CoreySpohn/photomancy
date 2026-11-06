@@ -818,15 +818,19 @@ def updater_sample(protocol, setup, key, particles):
     from photomancy.orbit.updater import OrbitUpdater, UpdaterRecord
 
     kernel = protocol["updater_kernel"]
+
+    def per_model(value):
+        return value[setup["case"]] if isinstance(value, dict) else value
+
     updater = OrbitUpdater(
         n_particles=particles,
         n_rungs=protocol["updater_budget"]["rungs"],
         n_moves=protocol["updater_budget"]["moves_per_rung"],
         record_capacity=len(setup["times"]),
-        low_ess_fraction=kernel["low_ess_fraction"],
-        target_cess_fraction=kernel["target_cess_fraction"],
-        proposal_scale=kernel["proposal_scale"][setup["case"]],
-        alias_moves=kernel["alias_moves"],
+        low_ess_fraction=per_model(kernel["low_ess_fraction"]),
+        target_cess_fraction=per_model(kernel["target_cess_fraction"]),
+        proposal_scale=per_model(kernel["proposal_scale"]),
+        alias_moves=per_model(kernel["alias_moves"]),
     )
     import jax
 

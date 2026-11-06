@@ -283,7 +283,9 @@ def test_freeze_precision_comes_from_key_to_key_disagreement(tmp_path):
     are flagged (the run hash ignores the status, so the freeze commit does
     not orphan them, but not the kernel). Fails if the freeze reads the
     kernel ESS, mis-scales the variance estimate, freezes a partial panel, or
-    reuses stale records after an amendment.
+    reuses stale records after an amendment. A world whose reference fit
+    kept no weighted draw is left out and named (fails if an empty fit
+    crashes the freeze or is scored).
     """
     import numpy as np
 
@@ -301,8 +303,12 @@ def test_freeze_precision_comes_from_key_to_key_disagreement(tmp_path):
     flat = [1.0 / 8] * 8
     skew = [0.5, 0.5] + [0.0] * 6
     units = {}
-    for role, masses in (("updater_a", flat), ("updater_b", skew)):
-        rid = tool.unit_id("development", "ti_window", "R1", 0, role)
+    for w, role, masses in (
+        (w, role, masses)
+        for w in (0, 1)
+        for role, masses in (("updater_a", flat), ("updater_b", skew))
+    ):
+        rid = tool.unit_id("development", "ti_window", "R1", w, role)
         units[rid] = {
             "id": rid,
             "kind": "updater",
@@ -313,31 +319,36 @@ def test_freeze_precision_comes_from_key_to_key_disagreement(tmp_path):
                 for k in (2, 3)
             },
         }
-    for role in ("reference_1", "reference_2"):
-        for k in (2, 3):
-            rid = tool.unit_id("development", "ti_window", "R1", 0, role, k)
-            units[rid] = {
-                "id": rid,
-                "kind": "reference",
-                "proposals": 2**20,
-                "summary": {
-                    "kish_ess": 900.0,
-                    "bins": {q: flat for q in ("lnP", "e", "future_pa")},
-                },
-            }
+    for w in (0, 1):
+        for role in ("reference_1", "reference_2"):
+            for k in (2, 3):
+                rid = tool.unit_id("development", "ti_window", "R1", w, role, k)
+                units[rid] = {
+                    "id": rid,
+                    "kind": "reference",
+                    "proposals": 2**20,
+                    "summary": {
+                        "kish_ess": 900.0,
+                        "bins": {q: flat for q in ("lnP", "e", "future_pa")},
+                    },
+                }
+    hollow = tool.unit_id("development", "ti_window", "R1", 1, "reference_1", 2)
+    units[hollow]["summary"] = {"kish_ess": 0.0, "particles": 0}
     summary, missing = tool.assemble_freeze_summary(protocol, units)
+    assert summary["empty_references"] == [hollow]
     group = next(g for g in summary["groups"] if g["worlds"])
     world = group["worlds"][0]
     assert world["kernel_ess"] == 7372.8
     assert all(v < 10 for v in world["updater_ess"].values())
     # Per world: two updater runs and two references at each of two epoch counts.
-    assert len(missing) == 6 * 8 * 38 - 6
+    assert len(missing) == 6 * 8 * 38 - 12
 
     for rec in units.values():
         tool.append_record(tmp_path / "units-0of1.jsonl", rec)
     report = tool.freeze_report(protocol, tmp_path)
     assert report["status"] == "incomplete"
     assert any("freeze records missing" in r for r in report["reasons"])
+    assert any("kept no weighted draw" in r for r in report["reasons"])
     assert any("exact-check results not supplied" in r for r in report["reasons"])
     # The fake records carry no run hash, as if run under another protocol.
     assert any("another protocol content" in r for r in report["reasons"])
