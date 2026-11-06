@@ -279,8 +279,11 @@ def test_freeze_precision_comes_from_key_to_key_disagreement(tmp_path):
     records the kernel ESS (0.9 N by construction) never enters: two runs
     that disagree get a small precision whatever the kernel reports. A run
     directory missing development units freezes to ``incomplete`` with the
-    count of missing records. Fails if the freeze reads the kernel ESS,
-    mis-scales the variance estimate, or freezes a partial panel.
+    count of missing records, and records run under other protocol content
+    are flagged (the run hash ignores the status, so the freeze commit does
+    not orphan them, but not the kernel). Fails if the freeze reads the
+    kernel ESS, mis-scales the variance estimate, freezes a partial panel, or
+    reuses stale records after an amendment.
     """
     import numpy as np
 
@@ -336,6 +339,14 @@ def test_freeze_precision_comes_from_key_to_key_disagreement(tmp_path):
     assert report["status"] == "incomplete"
     assert any("freeze records missing" in r for r in report["reasons"])
     assert any("exact-check results not supplied" in r for r in report["reasons"])
+    # The fake records carry no run hash, as if run under another protocol.
+    assert any("another protocol content" in r for r in report["reasons"])
+    frozen = dict(protocol, status="frozen")
+    assert tool.run_hash(frozen) == tool.run_hash(protocol)
+    kernel = dict(protocol["updater_kernel"], alias_moves=False)
+    assert tool.run_hash(dict(protocol, updater_kernel=kernel)) != tool.run_hash(
+        protocol
+    )
 
 
 @pytest.mark.medium

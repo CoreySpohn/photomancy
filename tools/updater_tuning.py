@@ -49,6 +49,7 @@ CONFIGS = {
     "cess70_s030": {"target_cess_fraction": 0.7, "scale": 0.3, "alias": True},
     "cess90_s030": {"target_cess_fraction": 0.9, "scale": 0.3, "alias": True},
     "cess90_s060": {"target_cess_fraction": 0.9, "scale": 0.6, "alias": True},
+    "cess85_s030": {"target_cess_fraction": 0.85, "scale": 0.3, "alias": True},
 }
 
 
