@@ -15,7 +15,9 @@ a side effect, so ``import photomancy`` stays light.
 """
 
 import math
+from collections.abc import Callable
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpyro
@@ -34,6 +36,24 @@ from photomancy.priors import Uniform
 # Physical columns, matching the OFTI / grid_search SamplePosterior convention so an
 # orbit nested-sampling posterior is interchangeable with them downstream.
 _ORBIT_PHYS_NAMES = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
+
+
+class OrbitNestedPosterior(SamplePosterior):
+    """Physical nested samples with evidence and sampling diagnostics.
+
+    ``diagnostics`` contains ``log_evidence``, ``log_evidence_error`` (standard
+    deviation of log Z), ``converged`` (remaining evidence fraction below
+    ``evidence_tolerance``), ``weight_ess`` (Kish ESS before resampling),
+    ``num_iterations`` (jaxns goal iterations), ``num_distinct`` (distinct
+    physical rows after resampling), and the jaxns ``termination_reason``.
+    A hard stop, including exhausted storage, is not convergence.
+
+    References:
+        Skilling (2006), Bayesian Analysis 1(4), 833-859 (nested evidence).
+        Kish (1965), Survey Sampling (effective sample size of weighted draws).
+    """
+
+    diagnostics: dict = eqx.field(kw_only=True)
 
 
 class _UnitCubeReparam(Reparam):
@@ -70,6 +90,10 @@ def orbit_nested_sampling(
     pm_anomaly_data=None,
     null_data=None,
     imaging_data=None,
+    custom_loglike: Callable[[dict], jax.Array | float] | None = None,
+    custom_data=None,
+    sample_planet_scale: bool = False,
+    allow_overlap: bool = False,
     log_P_range=(1.0, 4.0),
     log_Mp_range=(-2.0, 4.0),
     log_Rp_range=(-5.0, -2.5),
@@ -79,15 +103,16 @@ def orbit_nested_sampling(
     num_live_points=None,
     max_samples=50000,
     num_samples=2000,
+    evidence_tolerance=1e-3,
     key=None,
 ):
     """Nested-sample the orbit model -> ``SamplePosterior`` + evidence (``log Z``).
 
     Builds the NumPyro orbit model for the supplied data channels, reparametrizes its
     latent sites onto the unit cube, and runs it through the jaxns ``NestedSampler``
-    with the default jaxns stopping condition (remaining evidence below
-    ``log(1 + 1e-3)``). The returned posterior carries equally-weighted physical
-    samples (``a, e, cos_i, W, cos_w, sin_w, tp``), with an additional ``Mp`` column
+    with a remaining-evidence fraction stopping condition. The returned posterior
+    carries equally-weighted physical samples (``a, e, cos_i, W, cos_w, sin_w, tp``),
+    with an additional ``Mp`` column
     in kg when true mass is sampled, and the evidence; the evidence is
     the point of nested sampling -- a Bayes factor between two fits is orbit model
     comparison (e.g. planet present vs absent, alias A vs B).
@@ -104,6 +129,17 @@ def orbit_nested_sampling(
             :class:`~photomancy.orbit.data.PMAnomalyData`, or ``None``.
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
+        custom_loglike: JAX-compatible ``params -> scalar`` data log-likelihood,
+            using the same :func:`~photomancy.orbit.model.build_model` route as
+            :func:`~photomancy.orbit.inference.build_orbit_logdensity`. Receives
+            physical orbit and planet-scale parameters, ``Ms``, ``dist_pc`` and
+            ``custom_data``. No term is added for an absent built-in channel.
+        custom_data: Pytree bound into ``params["custom_data"]`` in the callback.
+        sample_planet_scale: Sample ``log_Rp``, ``log_Ag`` and ``log_Mp`` even
+            without built-in data, allowing prior-only fits. Custom likelihoods
+            also activate these sites. Default False.
+        allow_overlap: Explicitly permit built-in channels with a custom
+            likelihood. Default False to prevent silent double counting.
         log_P_range: ``(min, max)`` for the ``log10(period/days)`` prior.
         log_Mp_range: ``(min, max)`` for the ``log10(mass/M_earth)`` prior.
         log_Rp_range: ``(min, max)`` for the ``log10(Rp/AU)`` prior.
@@ -117,23 +153,26 @@ def orbit_nested_sampling(
         max_samples: Hard cap on stored nested-sampling samples; jaxns stops early if
             the buffer fills before its evidence-convergence condition is met.
         num_samples: Number of equally-weighted posterior samples to return.
+        evidence_tolerance: Remaining-evidence fraction threshold, in (0, 1).
+            Default 1e-3. This is not the uncertainty on log evidence.
         key: PRNG key (required).
 
     Returns:
-        A :class:`~photomancy.posterior.SamplePosterior` with ``samples`` of shape
-        ``(num_samples, 7)`` over ``_ORBIT_PHYS_NAMES`` (8 columns including ``Mp``
-        when true mass is sampled), uniform ``log_weights``, and
+        An :class:`OrbitNestedPosterior` (a ``SamplePosterior``) over
+        ``_ORBIT_PHYS_NAMES``, plus ``Mp`` when sampled and ``Rp``, ``Ag`` and
+        ``Lambda`` whenever their sites are active. Includes ``diagnostics``,
+        uniform ``log_weights``, and
         ``evidence`` set to the nested-sampling ``log Z`` (the jaxns classic
         expectation estimate, ``log_Z_mean``).
 
     Raises:
-        ValueError: If ``key`` is ``None``.
+        ValueError: If ``key`` is ``None``, ``evidence_tolerance`` is outside
+            (0, 1), or custom and built-in terms overlap without explicit opt-in.
     """
     if key is None:
         raise ValueError("orbit_nested_sampling requires a PRNG key.")
-    from jaxns.core import NestedSampler
-    from jaxns.model import Model
-
+    if not 0.0 < evidence_tolerance < 1.0:
+        raise ValueError("evidence_tolerance must lie in (0, 1).")
     model = build_model(
         n_planets=1,
         has_rv=rv_data is not None,
@@ -142,6 +181,10 @@ def orbit_nested_sampling(
         has_pm_anomaly=pm_anomaly_data is not None,
         has_null=null_data is not None,
         has_imaging=imaging_data is not None,
+        custom_loglike=custom_loglike,
+        custom_data=custom_data,
+        sample_planet_scale=sample_planet_scale,
+        allow_overlap=allow_overlap,
         log_P_range=log_P_range,
         log_Mp_range=log_Mp_range,
         log_Rp_range=log_Rp_range,
@@ -149,6 +192,10 @@ def orbit_nested_sampling(
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
     )
+    from jaxns.core import NestedSampler
+    from jaxns.depth_condition import DepthCondition
+    from jaxns.model import Model
+
     data = OrbitData(
         rv=rv_data,
         relative_astrom=relative_astrom_data,
@@ -162,6 +209,8 @@ def orbit_nested_sampling(
     trace_key, run_key, sample_key, predict_key = jax.random.split(key, 4)
     prototype = trace(seed(model, trace_key)).get_trace(*model_args)
     phys_names = (*_ORBIT_PHYS_NAMES, "Mp") if "Mp" in prototype else _ORBIT_PHYS_NAMES
+    if "Rp" in prototype:
+        phys_names = (*phys_names, "Rp", "Ag", "Lambda")
     latent_shapes = {
         name: site["fn"].shape()
         for name, site in prototype.items()
@@ -189,8 +238,10 @@ def orbit_nested_sampling(
         model=Model(prior_model=prior_model),
         max_samples=int(max_samples),
         root_allocation_degree=num_live_points,
+        depth_condition=DepthCondition(dlogZ=evidence_tolerance),
     )
-    results = ns.run(key=run_key, args=model_args).to_result().trim()
+    state = ns.run(key=run_key, args=model_args)
+    results = state.to_result().trim()
     unit_draws = results.resample(num_samples, key=sample_key).X_samples
     unit_draws = {
         f"{name}_base": jnp.reshape(unit_draws[f"{name}_base"], (num_samples, *shape))
@@ -207,9 +258,18 @@ def orbit_nested_sampling(
         axis=1,
     )
 
-    return SamplePosterior(
+    return OrbitNestedPosterior(
         samples=samples,
         log_weights=jnp.zeros(num_samples),
         evidence=jnp.asarray(results.log_Z_mean),
         param_names=phys_names,
+        diagnostics=dict(
+            log_evidence=jnp.asarray(results.log_Z_mean),
+            log_evidence_error=jnp.asarray(results.log_Z_uncert),
+            converged=jnp.asarray(results.termination_reason == 0),
+            weight_ess=jnp.asarray(results.ess),
+            num_iterations=jnp.asarray(state.goal_loop_iter),
+            num_distinct=jnp.asarray(jnp.unique(samples, axis=0).shape[0]),
+            termination_reason=jnp.asarray(results.termination_reason),
+        ),
     )

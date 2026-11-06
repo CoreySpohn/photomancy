@@ -19,6 +19,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.constants import G, Mearth2kg
+from jax.flatten_util import ravel_pytree
+from numpyro.distributions.transforms import biject_to
+from numpyro.infer.util import initialize_model
 
 from photomancy.orbit._numpyro_bridge import (
     _get_or_build_cached,
@@ -27,6 +30,7 @@ from photomancy.orbit._numpyro_bridge import (
 )
 from photomancy.orbit.data import OrbitData
 from photomancy.orbit.init import elements_to_sites
+from photomancy.orbit.model import build_model
 from photomancy.posterior import SamplePosterior
 
 
@@ -63,6 +67,10 @@ def build_orbit_logdensity(
     pm_anomaly_data=None,
     null_data=None,
     imaging_data=None,
+    custom_loglike: Callable[[dict], jax.Array | float] | None = None,
+    custom_data=None,
+    sample_planet_scale: bool = False,
+    allow_overlap: bool = False,
     log_P_range=(1.0, 4.0),
     log_Mp_range=(-2.0, 4.0),
     log_Rp_range=(-5.0, -2.5),
@@ -92,6 +100,18 @@ def build_orbit_logdensity(
             :class:`~photomancy.orbit.data.PMAnomalyData`, or ``None``.
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
+        custom_loglike: JAX-compatible ``params -> scalar`` data log-likelihood.
+            Receives physical orbit and planet-scale parameters, plus ``Ms``,
+            ``dist_pc`` and ``custom_data``; see
+            :func:`~photomancy.orbit.model.build_model` for keys, units and
+            shapes. Absent built-in channels add no terms.
+        custom_data: Pytree bound into the callback's parameter dictionary under
+            ``"custom_data"``. Each custom fit owns its model trace.
+        sample_planet_scale: Activate ``log_Rp``, ``log_Ag`` and ``log_Mp``
+            without built-in channels, allowing prior-only fits. A custom
+            likelihood also activates these sites. Default False.
+        allow_overlap: Allow a custom likelihood together with any built-in
+            channel. Default False; combining them otherwise raises ValueError.
         log_P_range: ``(min, max)`` for the ``log10(period/days)`` prior.
         log_Mp_range: ``(min, max)`` for the ``log10(mass/M_earth)`` prior.
         log_Rp_range: ``(min, max)`` for the ``log10(Rp/AU)`` prior.
@@ -114,7 +134,7 @@ def build_orbit_logdensity(
         null=null_data,
         imaging=imaging_data,
     )
-    cached = _get_or_build_cached(
+    model_config = dict(
         has_rv=data.rv is not None,
         has_relative_astrom=data.relative_astrom is not None,
         has_stellar_astrom=data.stellar_astrom is not None,
@@ -127,11 +147,42 @@ def build_orbit_logdensity(
         log_Ag_range=log_Ag_range,
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
-        n_inst=rv_data.n_inst if rv_data is not None else 1,
         n_planets=n_planets,
-        seed=seed,
     )
     model_args = (Ms, dist_pc, data.padded())
+    if custom_loglike is not None or sample_planet_scale:
+        # Custom closures must not enter the shared cache: their data and callable
+        # are not represented in its static configuration key.
+        model = build_model(
+            **model_config,
+            custom_loglike=custom_loglike,
+            custom_data=custom_data,
+            sample_planet_scale=sample_planet_scale,
+            allow_overlap=allow_overlap,
+        )
+        info = initialize_model(
+            jax.random.PRNGKey(seed), model, dynamic_args=True, model_args=model_args
+        )
+        z_template = info.param_info.z
+        _, unflatten = ravel_pytree(z_template)
+        cached = dict(
+            potential_fn_factory=info.potential_fn,
+            postprocess_fn_factory=info.postprocess_fn,
+            inv_transforms={
+                name: biject_to(site["fn"].support).inv
+                for name, site in info.model_trace.items()
+                if site["type"] == "sample" and not site.get("is_observed", False)
+            },
+            z_template=z_template,
+            unflatten=unflatten,
+            param_names=tuple(sorted(z_template)),
+        )
+    else:
+        cached = _get_or_build_cached(
+            **model_config,
+            n_inst=rv_data.n_inst if rv_data is not None else 1,
+            seed=seed,
+        )
 
     unflatten = cached["unflatten"]
     potential_fn = cached["potential_fn_factory"](*model_args)

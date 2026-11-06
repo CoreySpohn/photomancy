@@ -11,7 +11,11 @@ and physical parameters (``Ms``, ``dist_pc``) as **explicit arguments**
 rather than capturing them in a closure. This allows the same model
 function object to be reused across calls with different data, enabling
 JIT compilation caching when combined with static-shape padding.
+Optional custom likelihoods and their ``custom_data`` are bound into the
+model closure; the host inference bridge gives each such fit its own trace.
 """
+
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
@@ -54,6 +58,10 @@ def build_model(
     has_pm_anomaly=False,
     has_null=False,
     has_imaging=False,
+    custom_loglike: Callable[[dict], jax.Array | float] | None = None,
+    custom_data=None,
+    sample_planet_scale: bool = False,
+    allow_overlap: bool = False,
     log_P_range=(0.0, 5.0),
     log_Mp_range=(-2.0, 4.0),
     log_Rp_range=(-5.0, -2.5),
@@ -65,7 +73,8 @@ def build_model(
 
     The returned function accepts ``(Ms, dist_pc, data)`` where ``data`` is an
     :class:`~photomancy.orbit.data.OrbitData` holding the observation channels
-    (dynamic, for JIT caching). Prior configuration is captured in the closure (static).
+    (dynamic, for JIT caching). Prior configuration and optional custom likelihood
+    data are captured in the closure.
 
     Args:
         n_planets: Number of planets to fit. Default 1.
@@ -76,6 +85,20 @@ def build_model(
         has_pm_anomaly: Whether a Hipparcos-Gaia proper-motion anomaly will be provided.
         has_null: Whether null-detection data will be provided.
         has_imaging: Whether unified imaging data will be provided.
+        custom_loglike: Optional JAX-compatible ``params -> scalar`` data
+            log-likelihood, added once with ``numpyro.factor``. Receives ``T``
+            and ``tp`` (days), ``a`` and ``Rp`` (AU), ``Mp`` and ``Ms`` (kg),
+            ``dist_pc`` (parsec), ``e``, ``cos_i``, ``W`` (radians), ``cos_w``,
+            ``sin_w``, ``M0`` (radians), ``Ag``, and ``Lambda = Ag * Rp**2``.
+            Planet parameters are scalars for one planet and vectors otherwise.
+            A custom likelihood activates the planet-scale priors automatically.
+        custom_data: Pytree captured by the model closure and exposed to the
+            one-argument callback as ``params["custom_data"]``.
+        sample_planet_scale: Sample ``log_Rp``, ``log_Ag`` and ``log_Mp`` even
+            without built-in photometry or reflex channels. Default False;
+            with no data or custom likelihood this gives a prior-only model.
+        allow_overlap: Explicitly allow built-in channels alongside a custom
+            likelihood. Default False to prevent silent double counting.
         log_P_range: (min, max) for log10(period/days) uniform prior.
         log_Mp_range: (min, max) for log10(mass/M_earth) uniform prior.
         log_Rp_range: (min, max) for log10(Rp/AU) uniform prior.
@@ -88,9 +111,7 @@ def build_model(
         A callable ``model(Ms, dist_pc, data)`` suitable for ``numpyro.infer.MCMC``
         and for use with ``dynamic_args=True`` in ``initialize_model``.
     """
-    has_photometry = has_null or has_imaging
-
-    if not any(
+    has_builtin = any(
         [
             has_rv,
             has_relative_astrom,
@@ -99,10 +120,17 @@ def build_model(
             has_null,
             has_imaging,
         ]
-    ):
+    )
+    has_planet_scale = sample_planet_scale or custom_loglike is not None
+    has_photometry = has_null or has_imaging or has_planet_scale
+    if custom_loglike is not None and has_builtin and not allow_overlap:
         raise ValueError(
-            "At least one of has_rv, has_relative_astrom, has_stellar_astrom, "
-            "has_pm_anomaly, has_null, or has_imaging must be True."
+            "custom_loglike with built-in data channels requires allow_overlap=True."
+        )
+    if not (has_builtin or has_planet_scale):
+        raise ValueError(
+            "At least one data channel, custom_loglike, or "
+            "sample_planet_scale=True is required."
         )
 
     def model(Ms, dist_pc, data):
@@ -169,7 +197,7 @@ def build_model(
         # resolve i and so yield the dynamical mass)
         # ----------------------------------------------------------------
         Mp = jnp.zeros(n_planets)
-        if has_rv or has_stellar_astrom or has_pm_anomaly:
+        if has_rv or has_stellar_astrom or has_pm_anomaly or has_planet_scale:
             with numpyro.plate("planet_masses", n_planets):
                 log_Mp = numpyro.sample(
                     "log_Mp",
@@ -189,6 +217,31 @@ def build_model(
         # ----------------------------------------------------------------
         # Evaluate likelihoods
         # ----------------------------------------------------------------
+        ll_custom = jnp.asarray(0.0, dtype=float)
+        if custom_loglike is not None:
+            params = dict(
+                T=T,
+                a=a,
+                e=e,
+                cos_i=cos_i,
+                W=W,
+                cos_w=cos_w,
+                sin_w=sin_w,
+                tp=tp,
+                M0=M0,
+                Mp=Mp,
+                Rp=Rp,
+                Ag=Ag,
+                Lambda=Lambda,
+            )
+            if n_planets == 1:
+                params = {name: jnp.squeeze(value) for name, value in params.items()}
+            params.update(Ms=Ms, dist_pc=dist_pc, custom_data=custom_data)
+            ll_custom = jnp.asarray(custom_loglike(params))
+            if ll_custom.ndim != 0:
+                raise ValueError("custom_loglike must return a scalar log-likelihood.")
+            numpyro.factor("ll_custom", ll_custom)
+
         if n_planets == 1:
             T_s = jnp.squeeze(T)
             e_s = jnp.squeeze(e)
@@ -200,7 +253,7 @@ def build_model(
             a_s = jnp.squeeze(a)
             Mp_s = jnp.squeeze(Mp)
 
-            ll_total = jnp.asarray(0.0, dtype=float)
+            ll_total = ll_custom
 
             # --- RV ---
             if has_rv:
