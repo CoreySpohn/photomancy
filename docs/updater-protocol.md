@@ -110,20 +110,23 @@ stated here under `stated`.
     "updates": ["initializer", "epoch_2", "epoch_3"],
     "worlds_per_cell": 400,
     "alias_subset_worlds": 400,
-    "development_worlds_per_regime_and_mass_model": 6,
+    "development_worlds_per_regime_and_mass_model": 38,
+    "tuning_worlds_per_regime_and_mass_model": 6,
     "smoke_worlds": 24
   },
   "prng": {
     "implementation": "threefry2x32",
     "key_type": "typed key, jax.random.key(seed, impl='threefry2x32'), x64 enabled",
     "root_seed": 271828,
-    "stages": {"development": 1, "panel": 2, "smoke": 3},
+    "stages": {"development": 1, "panel": 2, "smoke": 3, "exact": 4},
     "purposes": {
       "truth": 0, "noise": 1, "updater_a": 2, "updater_b": 3,
       "updater_doubled": 4, "reference_1": 5, "reference_2": 6,
-      "reference_3": 7, "reference_4": 8, "pit": 9
+      "reference_3": 7, "reference_4": 8, "pit": 9,
+      "cert_doubled_1": 10, "cert_doubled_2": 11,
+      "cert_proposal_1": 12, "cert_proposal_2": 13, "exact_run": 14
     },
-    "simulation_seeds": {"sizing": 6, "alias_freeze": 7, "schedule_null": 8}
+    "simulation_seeds": {"sizing": 6, "alias_freeze": 7}
   },
   "visibility": {"wavelength_nm": 500.0, "aperture_m": 6.0,
                  "iwa_lambda_over_d": 3.0, "owa_lambda_over_d": 30.0},
@@ -134,13 +137,12 @@ stated here under `stated`.
                        "family_alpha": 0.05, "delta2": 0.0005, "delta2_max": 0.001,
                        "min_power": 0.8,
                        "alternative": {"damaged_fraction": 0.02, "moved_mass": 0.2},
-                       "freeze_panels": 200},
+                       "freeze_panels": 400},
     "failed_updates": {"acceptable_rate": 0.02, "family_alpha": 0.05,
                        "upper_bound_confidence": 0.95},
-    "schedule_stability": {"margin_k": 2.0, "comparisons": ["independent_keys", "doubled_budget"],
-                           "null": "binomial at the claimed ESS, per world",
-                           "null_simulations_per_world": 2000, "family_alpha": 0.05,
-                           "min_power": 0.8, "alternative_exceedance": 0.10}
+    "schedule_stability": {"comparisons": ["independent_keys", "doubled_budget"],
+                           "tolerance": 0.05, "tolerance_max": 0.05,
+                           "max_count": 20, "max_count_cap": 20}
   },
   "reference": {
     "ti_window": {"proposals_per_fit": 1048576, "max_proposals_per_fit": 8388608,
@@ -152,9 +154,10 @@ stated here under `stated`.
     "repeat_noise": {"runs": 4, "bound_fraction_of_delta2": 0.25},
     "convergence": {"bound_fraction_of_delta2": 0.25},
     "cross_method": {"bound_fraction_of_delta2": 0.5,
-                     "ti_window": "admissible_region_fit, same model and budget",
+                     "ti_window": "admissible_region_fit, same model, budget and z_max_au",
                      "physical_fixed": "same weights, anchor at the lowest-SNR valid epoch"},
-    "one_epoch_exactness": {"anchor_scatter_ratio": 1.0, "tolerance_se": 3.0}
+    "exact_checks": {"sampler_repeats": 8, "monte_carlo_z": 3.0,
+                     "quadrature_error_factor": 2.0}
   },
   "provisional": [
     "criteria.alias_accuracy.delta2",
@@ -168,8 +171,7 @@ stated here under `stated`.
     "dkw_epsilon_5dp": 0.09904,
     "alias_z_3dp": 3.078,
     "failed_updates_critical_count": 17,
-    "schedule_critical_count": 32,
-    "schedule_max_critical_count": 34
+    "certification_miss_probability_3dp": 0.046
   }
 }
 ```
@@ -362,43 +364,90 @@ $N_\mathrm{prop} = 2^{22}$ = 4,194,304 proposals per fit, at most $2^{25}$.
 
 ### Reference certification
 
-Repeatability alone does not show that a reference is accurate: independent
-runs that all miss the same mode agree with each other. A reference is
-certified for a mass model only after all four checks below pass on the
-development worlds. Each check uses the alias statistic of the next section with
-its own runs as the two sides, pooled over the regimes for each mass model,
-epoch count and alias quantity (24 worlds), and compares the upper bound
+A reference is certified for a mass model only after all of the checks below
+pass. Checks 1 to 3 use the alias statistic of the next section, with the runs
+named in each check as the two sides, pooled over the regimes for each mass
+model, epoch count and alias quantity: all 38 development worlds per regime,
+152 per mass model. If 2 percent of worlds carried a reference failure, a
+152-world sample would contain none of them with probability
+$0.98^{152} = 0.046$. Each check compares the upper bound
 $\overline{D2} + z\,\mathrm{SE}$ with a fraction of $\delta_2$.
 
 1. **Repeat noise.** Four independent runs at the budget,
    $D2_w = \sum_b (R_{1,b} - R_{3,b})(R_{2,b} - R_{4,b})$; bound at most
    $\delta_2 / 4$. This measures Monte Carlo noise only.
-2. **Convergence.** Two runs at the budget against two runs at twice the
-   budget; bound at most $\delta_2 / 4$. A finite-budget bias that shrinks with
-   the budget (an under-sampled mode, the self-normalization bias of order
-   1/ESS) shows here.
-3. **Independent proposal.** Two runs of a sampler with a different proposal
-   and the same target: for the TI pair `few_epoch.admissible_region_fit`
-   (one conditioned epoch, a velocity box proposal) on the same model instance,
-   budget and `z_max_au`; for the physical pair the same exact weights with the anchor at
-   the lowest signal-to-noise valid epoch. Bound at most $\delta_2 / 2$. A mode
-   that one proposal misses is unlikely to be missed by both.
-4. **Exact low-dimensional cases.** For the TI pair, the library test that
-   compares `lambert_depth_fit` with a dense grid posterior passes. For the
-   physical pair, a one-epoch fit (where the exact posterior of the anchor
-   position is the error kernel, up to the slowly varying prior factor) returns
-   an anchor scatter within 3 Monte Carlo standard errors of $\sigma$ per axis.
+2. **Budget agreement.** Two runs at the budget against two runs at twice the
+   budget; bound at most $\delta_2 / 4$.
+3. **Proposal agreement.** Two runs of a sampler with a different proposal and
+   the same target: for the TI pair `few_epoch.admissible_region_fit` (one
+   conditioned epoch, a velocity box proposal) on the same model instance,
+   budget and `z_max_au`; for the physical pair the same exact weights with the
+   anchor at the lowest signal-to-noise valid epoch. Bound at most
+   $\delta_2 / 2$.
+4. **Exact checks** (next subsection) pass for the reference.
 
-A reference that fails a check at its maximum budget is not certified, and the
-alias criterion of its mass model is `incomplete` (see "Incomplete verdicts").
+Checks 2 and 3 are evidence, not bounds. Agreement between two budgets does not
+bound the bias of either without a convergence model, and the two proposals
+share the target code (the physical pair shares its weighting formula; the TI
+samplers share the model and support functions), so a shared error passes both.
+A mode that the updater and the reference both miss does not change $D2$ and is
+not detectable by the panel. The exact checks are the only accuracy anchor of
+the references. A reference that fails a check at its maximum budget is not
+certified, and the alias criterion of its mass model is `incomplete` (see
+"Incomplete verdicts").
+
+### Exact checks
+
+Two low-dimensional cases are integrated numerically to a demonstrated accuracy
+and compared with the sampler on the quantities the panel grades: the eight-bin
+masses of $\ln P$, $e$ and the future position angle, and the end points of the
+central 90 percent intervals of the future east and north positions.
+
+- **Physical pair, one epoch.** One epoch at $t = 0$ with $\sigma$ = 3.5 mas,
+  regime R1 support (so the period truncation is active), future epoch 30 days.
+  The posterior is the full physical prior times the one-epoch likelihood. The
+  integral is nested: an outer tensor rule over the shape coordinates (Gauss
+  rule on the truncated Beta CDF coordinate of $e$, which carries the prior and
+  the $e < e_\mathrm{max}$ truncation; Gauss rule on $\cos i$; periodic
+  trapezoid rules on $\omega$ and $M_\mathrm{ref}$), and for each shape an inner
+  rule over the anchor position $t$ in polar coordinates, with density
+  $\mathcal{N}(t; \mathrm{obs}, \Sigma)\,\rho^{-2}$ and the period truncation
+  applied exactly as the integration limits
+  $r_0 a_\mathrm{lo} \le \rho \le r_0 a_\mathrm{hi}$.
+- **TI pair, reduced case.** Two epochs (0 and 60 days, 3.5 mas), the TI model
+  with $P$ from 200 to 400 days and a wide mass window ($\mu$ from
+  $10^{-3}$ to $10^{3}\,GM_\odot$), future epoch 120 days. Given $(e, \ln P,
+  \tau)$ the positions are linear in the four TI constants, whose prior is
+  Gaussian, so they are integrated analytically, and the bin masses and the
+  future-position distribution (a Gaussian per node) follow from a
+  three-dimensional grid: Gauss rules in $e$ and $\ln P$, a periodic trapezoid
+  rule in $\tau$. The window's contribution is bounded per node, not ignored:
+  since $\lVert c\rVert/\sqrt 2 \le a \le \lVert c\rVert$ for the TI vector $c$,
+  a ball of radius $r$ around the conditional mean lies inside the window when
+  its image interval does, and the mass outside is at most the
+  $\chi^2_4$ tail at $r^2 / \lambda_\mathrm{max}$; the weighted sum of these
+  bounds must be below $10^{-6}$.
+- **Refinement.** Each rule is evaluated at three successive levels, each
+  doubling the nodes per dimension, and the table of every graded value at each
+  level is committed. The quadrature error estimate $\epsilon_q$ of a value is
+  twice the change between the two finest levels; the finest level must change
+  the value by less than the previous refinement did.
+- **Comparison.** The sampler (reference, and the updater for information) runs
+  8 times with independent keys at its budget. A value passes when
+  $|\bar x - x_q| \le \epsilon_q + 3\,s_x/\sqrt 8$, with $\bar x$ and $s_x$ the
+  mean and standard deviation over the 8 runs and $x_q$ the finest quadrature
+  value. The tolerance follows from the quadrature error and the measured
+  Monte Carlo spread, not from the astrometric error.
 
 ## Worlds, seeds and random numbers
 
 - **Panel.** 4 regimes x 2 mass models x 400 worlds = 3,200 worlds; every world
   is graded at both epoch counts and for all four quantities, so each of the 64
   cells has 400 worlds. The alias criterion also uses all 400 worlds.
-- **Development.** 6 worlds per regime and mass model (48) on the development
-  stage, disjoint from the panel by construction.
+- **Development.** 38 worlds per regime and mass model (304) on the development
+  stage, disjoint from the panel by construction. Tuning of the updater uses
+  worlds 0 to 5 of each (48); the freeze summaries and the reference
+  certification use all 38.
 - **Smoke.** 24 worlds (3 per regime and mass model) on their own stage, for a
   quick end-to-end run of the panel code.
 - **Every world counts in every denominator.** A world whose update returns a
@@ -414,23 +463,31 @@ order:
 world_key = fold_in(fold_in(fold_in(fold_in(key(root_seed), stage),
                                     mass_model_index), regime_index), world_index)
 purpose_key = fold_in(world_key, purpose)
-update_key  = fold_in(purpose_key, update_index)       # 0, 1, 2
+draw_key    = fold_in(purpose_key, index)
 ```
+
+The last index is the update (0 initializer, 1 epoch 2, 2 epoch 3) for updater
+runs, and the epoch index (1 for the two-epoch posterior, 2 for the three-epoch
+posterior) for reference, certification and PIT draws; truth and noise use 0.
 
 Stage, purpose and index values are in the parameter block (mass models and
 regimes are indexed in the order listed there). The development and panel
 stages differ in the second fold, so their keys never coincide; development
-seeds therefore cannot leak into the panel. The doubled-budget run, the two
-independent updater runs, the four reference runs and the PIT randomization
-each have their own purpose, so no two of them share a key. Development
-certification runs use the development stage: the convergence runs at twice the
-budget take the reference purposes 1 and 2 with `update_index` 1, and the
-independent-proposal runs take purposes 3 and 4 with `update_index` 1. Seeded
-NumPy simulations (sizing, the alias freeze, the schedule null) use
+seeds therefore cannot leak into the panel. Every run role has its own
+coordinates: the method and budget of a certification run are in its purpose
+(`reference_1` to `reference_4` for the repeat runs, `cert_doubled_*` for twice
+the budget, `cert_proposal_*` for the other proposal) and the epoch count in the
+last index. The exact checks use the `exact` stage, world index 0, regime index
+0 and purpose `exact_run` with the repeat number (0 to 7) as the index. Seeded
+NumPy simulations (sizing, the alias freeze) use
 `numpy.random.default_rng([root_seed, s, ...])` with the stream numbers `s` under
-`simulation_seeds` and the group and quantity indices appended. A unit test
-checks that every declared key coordinate gives a distinct key and that the keys
-do not change with JAX's default generator setting.
+`simulation_seeds`, followed by canonical indices (for the freeze, the group's
+regime, mass model and epoch-count indices in parameter-block order and the
+quantity index), never by input order. A unit test enumerates every declared run
+role through the production key function, checks that all keys differ, checks
+that a deliberately broken key function (one truth key for every world) is
+caught, and checks that the keys do not change with JAX's default generator
+setting.
 
 ## Criteria
 
@@ -442,10 +499,8 @@ dependence between tests. What each per-test level rests on differs:
 - **Exact.** The coverage and failed-update cutoffs are exact binomial tails for
   independent worlds at the stated null rate, and the calibration band is the
   exact finite-sample DKW inequality.
-- **Exact given a declared null.** The schedule cutoff is an exact
-  Poisson-binomial tail of per-world null probabilities, which are computed
-  under the declared null (particles equivalent to ESS independent draws) by
-  seeded simulation.
+- **Tolerance.** Schedule stability is an engineering tolerance on run-to-run
+  differences, not a hypothesis test, and no error rate is claimed for it.
 - **Approximate.** The alias bound is a normal approximation to the mean of 400
   independent world statistics. Its operating characteristics (pass rate of an
   exact updater, power against the stated alternative) are validated by
@@ -503,7 +558,8 @@ estimate of the squared $L_2$ distance between the *expected* binned outputs of
 the updater and of the reference, with no floor from the reference's Monte
 Carlo noise. That distance equals the distance to the exact posterior only as
 far as each algorithm's expected output is unbiased; self-normalized importance
-weights carry a bias of order 1/ESS, which the reference certification bounds.
+weights carry a bias of order 1/ESS, and nothing in the panel bounds it beyond
+the exact checks.
 The group statistic is the mean $\overline{D2}$ with standard error
 $\mathrm{SE} = s / \sqrt{400}$.
 
@@ -513,8 +569,8 @@ $\mathrm{SE} = s / \sqrt{400}$.
 - *Provisional* $\delta_2 = 5 \times 10^{-4}$, never above
   $\delta_2^{\max} = 10^{-3}$.
 - Required power: at least 0.8 against the stated alternative, an updater
-  that moves 0.2 of the posterior mass from the second-largest bin into the
-  largest in 2 percent of worlds.
+  that, in 2 percent of worlds, moves $\min(0.2, m_2)$ of posterior mass from
+  the second-largest bin (mass $m_2$) into the largest.
 - All 400 worlds are used, so the chance that a sample contains no damaged world
   under that alternative is $0.98^{400} = 3.1 \times 10^{-4}$, below the per-test
   level $0.05/48 = 1.04 \times 10^{-3}$. (A 200-world sample would miss every
@@ -539,33 +595,24 @@ reported.
 For each world, $p$ is the posterior predictive probability that the planet is
 visible at $t_f$: the weighted fraction of particles whose projected separation
 lies between 3 and 30 $\lambda/D$ at 500 nm for a 6 m aperture (51.6 to 516 mas;
-the dry run prints the values). For two runs $a$ and $b$, $d = p_a - p_b$,
-$\mathrm{SE}_d = \sqrt{se_a^2 + se_b^2}$ with $se = \sqrt{p(1-p)/\mathrm{ESS}}$,
-and an exceedance is $|d| > k\,\mathrm{SE}_d$ with $k = 2$ (two runs that both
-report $p$ exactly 0 or 1 give $d = 0$ and no exceedance).
+the dry run prints the values).
 
-- **Tests.** Two comparisons per group: the two independent-key runs, and run
-  $a$ at the nominal budget against the doubled budget. With 16 groups that is
-  32 tests at family level 0.05, per-test level $0.05/32$. Each world enters
-  each test once, so the 400 terms of a test are independent.
-- **Null.** A stable updater's deviations are the Monte Carlo noise its own ESS
-  claims. For each world and comparison, the null exceedance probability $q_w$
-  is the frequency of exceedances in 2,000 simulated pairs
-  $\hat p_a \sim \mathrm{Bin}(n_a, \bar p)/n_a$, $\hat p_b \sim \mathrm{Bin}(n_b,
-  \bar p)/n_b$, with $\bar p = (p_a + p_b)/2$ and $n_a, n_b$ the two runs' ESS
-  rounded to integers (seed stream `schedule_null`, with the group and
-  comparison indices). This is computed per group and per comparison from the
-  graded worlds themselves, so no development calibration is pooled across
-  groups, and it is not estimated from the updater's own disagreement.
-- **Cutoff.** The exceedance count of a test is Poisson-binomial with
-  probabilities $q_w$ under the null; the cutoff $c$ is the smallest count with
-  $\Pr[\mathrm{count} > c] \le 0.05/32$, and the test fails with more than $c$
-  exceedances. In the large-ESS limit every $q_w$ is $2[1 - \Phi(2)] = 0.0455$
-  and $c$ = **32**.
-- **Power floor.** A test must keep power at least 0.8 against a true exceedance
-  probability of 0.10, which holds for $c \le$ **34** (largest $c$ with
-  $\Pr[\mathrm{Bin}(400, 0.10) > c] \ge 0.8$). A test whose null cutoff exceeds
-  34 is `incomplete`, never graded at the looser cutoff.
+- **Comparisons.** For each world and each of two comparisons, the two
+  independent-key runs, and run $a$ at the nominal budget against the doubled
+  budget, $d = |p_a - p_b|$.
+- **Tolerance.** A group (regime, mass model, epoch count) fails a comparison
+  when more than 20 of its 400 worlds have $d > 0.05$.
+- **What it measures.** Run-to-run stability of the scheduling input at the
+  declared budget: whether two runs that should agree give the same answer to
+  within 5 percentage points in at least 95 percent of worlds. It is not a test
+  of calibration and uses no claimed ESS. For orientation, an updater whose
+  estimate behaves like $n$ independent draws at $p = 0.5$ exceeds the tolerance
+  in a world with probability $2[1 - \Phi(0.05/\sqrt{0.5/n})]$, about 0.025 at
+  $n = 1{,}000$ and 0.22 at $n = 300$ (`--sizing` prints these with the group
+  failure probabilities), so the tolerance requires a budget whose predictive
+  probabilities are effectively that precise.
+- **Bounds.** The tolerance (0.05) and the count (20) may only be tightened
+  before the freeze, never loosened.
 
 ### Mechanics
 
@@ -584,10 +631,11 @@ code commit. Any red test fails this criterion.
   0.88: 0.030). Exact.
 - A failed-update group at a true rate of 0.05 fails with probability 0.709,
   at 0.06 with 0.919.
-- A schedule test at the large-ESS cutoff of 32, with true exceedance
-  probability 0.10, fails with probability 0.897; at the cap of 34, with 0.82.
-  Exact.
-- An updater that moves 0.2 of the period mass in 2 percent of worlds fails the
+- A schedule comparison in which 10 percent of worlds exceed the tolerance
+  fails with probability 0.9998; 5 percent, with 0.44. Exact for independent
+  worlds.
+- An updater that moves $\min(0.2, m_2)$ of the period mass in 2 percent of
+  worlds fails the
   alias test with probability above 0.99 at $\delta_2 = 5\times 10^{-4}$ and
   $10^{-3}$, at updater ESS 300 or 1,000 and reference ESS 4,400 (Dirichlet(0.7)
   bin masses, 400 worlds); an exact updater passes. Simulated.
@@ -602,37 +650,44 @@ bound, the response is more sampling (a larger reference budget, up to its
 maximum) or an `incomplete` verdict for the affected criterion, never a looser
 gate.
 
-1. **$\delta_2$, within $[5\times 10^{-4}, 10^{-3}]$.** An exact updater must pass
-   each of the 48 alias tests with probability at least $1 - 0.05/48$. For an
-   exact updater $\overline{D2} \approx \mathcal{N}(0, \mathrm{SE}_0^2)$, so this
-   requires $\delta_2 \ge 2 z\, \mathrm{SE}_0$. The candidate is
-   $\max(5\times 10^{-4},\ 2 z \max \mathrm{SE}_0)$ over groups and quantities.
-   It is accepted only if it is at most $10^{-3}$ and the simulated power against
-   the stated alternative is at least 0.8 in every group and quantity; otherwise
-   the alias criterion is `incomplete` for the groups that miss. The calculation
-   is `python tools/updater_panel.py --freeze SUMMARY.json`:
-   - *Inputs* (one entry per group): the median updater ESS and median
-     reference ESS over the group's development worlds, and the reference bin
-     masses of each development world for each alias quantity.
-   - *Aggregation*: 200 simulated panels per group and quantity; each panel
-     resamples 400 worlds' bin masses from the development worlds with
-     replacement and draws the four runs as multinomials at the given ESS;
-     $\mathrm{SE}_0$ is the mean panel standard error; power is the fraction of
-     panels that fail when the stated damage is applied.
-   - *Seeds*: stream `alias_freeze`, with the group and quantity indices.
-   - *Output*: the candidate $\delta_2$, per-group $\mathrm{SE}_0$ and power, and
-     `frozen` or `incomplete` with the reasons.
+1. **$\delta_2$, within $[5\times 10^{-4}, 10^{-3}]$.** An exact updater
+   should pass each of the 48 alias tests with probability at least
+   $1 - 0.05/48$. For an exact updater $\overline{D2} \approx \mathcal{N}(0,
+   \mathrm{SE}_0^2)$, so this needs $\delta_2 \ge 2 z\, \mathrm{SE}_0$. The
+   candidate is $\max(5\times 10^{-4},\ 2 z \max \mathrm{SE}_0)$ over groups and
+   quantities. It is accepted only if it is at most $10^{-3}$ and, in every
+   group and quantity, the one-sided 95 percent Clopper-Pearson lower bound on
+   the simulated power against the stated alternative is at least 0.8;
+   otherwise the alias criterion is `incomplete` for the groups that miss. The
+   calculation is `python tools/updater_panel.py --freeze SUMMARY.json`:
+   - *Inputs*: exactly one entry for each of the 16 groups (the tool refuses a
+     missing, duplicate or unknown group), each listing its development worlds;
+     a world carries its updater ESS, its reference ESS and its reference bin
+     masses for each alias quantity.
+   - *Aggregation*: 400 simulated panels per group and quantity; each panel
+     resamples 400 whole development worlds with replacement, keeping each
+     world's masses and both ESS values together, and draws the four runs as
+     multinomials at those ESS values. $\mathrm{SE}_0$ is the mean panel
+     standard error; power is the fraction of panels that fail when the stated
+     damage is applied.
+   - *Seeds*: stream `alias_freeze` with the canonical group and quantity
+     indices.
+   - *Output*: the candidate $\delta_2$; per group and quantity
+     $\mathrm{SE}_0$, the power with its lower bound, and the exact-updater pass
+     rate with its two-sided 95 percent interval (reported, not claimed as a
+     level: 400 panels cannot show a rate of $1 - 0.05/48$); and `frozen` or
+     `incomplete` with the reasons.
 2. **TI reference budget, from $2^{20}$ to at most $2^{23}$ proposals.**
 3. **Physical reference budget, from $2^{22}$ to at most $2^{25}$ proposals.**
    Each budget is doubled from its starting value until the reference is
    certified ("Reference certification"); the frozen value is the smallest
-   certified budget. Running the certification needs the development-panel code
-   (truth draws, reference runs and the binned summaries), which is required work
-   that must exist and be committed before the freeze.
+   certified budget. Running the certification and the exact checks needs the
+   development-panel code (truth draws, reference runs, the quadrature and the
+   binned summaries), which is required work that must exist and be committed
+   before the freeze.
 
-The schedule cutoff is not re-sized: it is computed per test from the graded
-worlds under the declared null, and capped by the power floor. Proposal scales,
-the tempering ladder and the moves of the updater may be tuned on the
+The schedule tolerance and count may be tightened, not loosened. Proposal
+scales, the tempering ladder and the moves of the updater may be tuned on the
 development panel; the budget ceiling may not be raised.
 
 ## Compute
@@ -641,9 +696,10 @@ Per key and model pair, the panel makes 4 regimes x 400 worlds x 3 updates =
 4,800 updates. Two independent keys and one doubled-budget run (which costs two)
 give 19,200 update-equivalents per pair, each priced at that pair's measured
 cost. Each pair needs 4 x 400 x 2 x 2 = 6,400 reference fits (regimes, worlds,
-epoch counts, independent runs), and the development certification about 480
-more (four repeat runs, two runs at twice the budget and two
-independent-proposal runs, for 48 world and epoch-count combinations).
+epoch counts, independent runs), and the development certification 3,040
+fit-equivalents more (four repeat runs, two runs at twice the budget and two
+other-proposal runs, for 152 worlds and two epoch counts). The certification
+needs only the references, so it can run while the updater is being written.
 
 `tools/updater_latency_probe.py` times the vmapped astrometric likelihood over
 8,192 particles, with compilation timed apart from the steady state and every
@@ -690,8 +746,8 @@ intended world, target and design batch; both are reported against a target of
 - The alias criterion of a mass model is `incomplete` when its reference is not
   certified at the maximum budget, and of a group when the frozen $\delta_2$
   cannot meet its bound or power floor.
-- A schedule test is `incomplete` when its null cutoff exceeds the power-floor
-  cap of 34.
+- The alias criterion of a mass model is also `incomplete` when the exact
+  checks fail for its reference.
 - The work has a limit of 14 working days from the first commit of this
   protocol. The clock stops while a panel job waits for a compute slot, for at
   most 7 further days. A panel cut short by either limit is recorded as it
@@ -721,6 +777,11 @@ in the four designs above. It does not mean more:
   photometry, a free amplitude and a phase law with $q$ free shape parameters,
   the local minimum is $\max(3, q + 1)$ epochs.) The two-epoch cells grade
   calibration, never informativeness.
+- Alias accuracy is agreement with the reference. A mode that the updater and
+  the reference both miss is not detected; the exact checks are the only
+  anchor of reference accuracy, and they cover two low-dimensional cases.
+- Schedule stability is a tolerance on run-to-run agreement, not a statement
+  about calibration or about the true visibility probability.
 - Full Fisher rank does not imply a unique solution, and no complete
   enumeration of solutions is assumed, so alias accuracy is graded against the
   reference posterior, not against a list of roots.
