@@ -3,8 +3,9 @@
 The orbit-domain plug-ins for the photomancy inference engine: data containers,
 differentiable RV / astrometry / photometry forward models, pure-JAX likelihoods,
 eccentricity priors, blind initializers (Thiele-Innes grid search, OFTI, adaptive
-importance sampling), and the MAP + Laplace / EIG machinery. Built on orbix
-geometry (``orbix.equations``, ``orbix.kepler``).
+importance sampling), the MAP + Laplace / EIG machinery, and a fixed-capacity
+sequential updater (``OrbitUpdater``) that assimilates one record at a time.
+Built on orbix geometry (``orbix.equations``, ``orbix.kepler``).
 """
 
 from orbix.equations import period_to_sma
@@ -79,6 +80,17 @@ from photomancy.orbit.thiele_innes import (
     thiele_innes_fit,
     thiele_innes_grid_search,
 )
+from photomancy.orbit.updater import (
+    AbstractUpdateTarget,
+    ConjugateGaussianTarget,
+    FixedMassTarget,
+    OrbitUpdater,
+    ThieleInnesTarget,
+    UpdaterBelief,
+    UpdaterDiagnostics,
+    UpdaterRecord,
+    UpdaterStatus,
+)
 
 __all__ = [
     "ECC_PRIOR_NAMES",
@@ -87,13 +99,18 @@ __all__ = [
     # Grid-search (adaptive importance sampling)
     "AbstractGridStrategy",
     "AbstractShapeParam",
+    # Fixed-capacity sequential updater
+    "AbstractUpdateTarget",
     "AdaptiveImportanceSampler",
+    "ConjugateGaussianTarget",
     "EccVectorShape",
+    "FixedMassTarget",
     "ImagingData",
     "NullData",
     # Orbit -> generic-backend bridge
     "OrbitData",
     "OrbitProblem",
+    "OrbitUpdater",
     "PMAnomalyData",
     "ParamBounds",
     # Data containers
@@ -104,6 +121,11 @@ __all__ = [
     "TIBasisModel",
     # Thiele-Innes fitter
     "TIFitResult",
+    "ThieleInnesTarget",
+    "UpdaterBelief",
+    "UpdaterDiagnostics",
+    "UpdaterRecord",
+    "UpdaterStatus",
     # Bayesian experimental design
     # Exact few-epoch fitters
     "admissible_region_fit",
