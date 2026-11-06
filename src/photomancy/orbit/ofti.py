@@ -1,10 +1,10 @@
 """Orbits For The Impatient (OFTI) -- discovery-tier rejection sampler.
 
-OFTI (Blunt et al. 2017, AJ 153:229) fits relative astrometry by drawing orbit
-shapes from priors, scale-and-rotating each so it passes through one reference
-epoch, then rejection-sampling against the full likelihood. It is fast and
-posterior-exact in the short-arc regime where MAP+Laplace's Gaussian
-approximation under-covers and NUTS is slow.
+OFTI (Blunt et al. 2017, AJ 153, 229) fits relative astrometry by drawing orbit
+shapes from priors and a target from the reference-epoch Gaussian error.
+Each orbit is scaled and rotated through that target; the other valid epochs
+are applied by rejection. The prior on semimajor axis and ascending node is
+induced by scale-and-rotate, with period and eccentricity support truncations.
 
 This is a from-scratch JAX reimplementation, not a wrapper around orbitize!; the
 scale-and-rotate mechanics were cross-checked against orbitize.sampler.OFTI.
@@ -75,7 +75,7 @@ def _scale_rotate_score(
         m_ref: Mean anomaly at the reference epoch (radians). Scalar.
         tx: Target RA offset at the reference epoch (arcsec). Scalar.
         ty: Target DEC offset at the reference epoch (arcsec). Scalar.
-        data: RelativeAstromData (with is_valid).
+        data: RelativeAstromData with the reference epoch masked out of is_valid.
         t_ref: Reference epoch time (days). Scalar.
         mu: Standard gravitational parameter G*Ms (AU^3/day^2). Scalar.
         Ms: Stellar mass (kg). Scalar.
@@ -110,13 +110,13 @@ def _scale_rotate_score(
     tp_new = t_ref - m_ref / n_new
     log_P = jnp.log10(_TWO_PI / n_new)
 
-    # Full-track likelihood over all valid epochs.
+    # The caller masks the reference epoch, already sampled in the proposal.
     ra_p, dec_p = predict_relative_astrometry(
         data.times, a_new, e, cos_i, W_new, cos_w, sin_w, tp_new, Ms, dist_pc
     )
     ll = loglike_relative_astrom(ra_p, dec_p, data)
 
-    # Truncate the induced log(a) == log(P) prior to the requested range, and e.
+    # Truncate the induced prior to the requested period range, and e.
     in_support = (log_P >= log_P_lo) & (log_P <= log_P_hi) & (e < e_max)
     ll = jnp.where(in_support, ll, -jnp.inf)
 
@@ -142,7 +142,16 @@ class AbstractConditioner(eqx.Module):
 
 
 class ScaleAndRotate(AbstractConditioner):
-    """Classic OFTI conditioner: scale ``a`` and rotate ``W`` onto one epoch."""
+    """Condition on a Gaussian reference target by scaling ``a`` and rotating ``W``.
+
+    Draw shape parameters from their priors and a target from the correlated
+    reference-epoch error, then map each orbit through that target. Rejection
+    uses only the other valid epochs. The prior on ``(a, W)`` (``W`` is Omega)
+    is induced by this transformation, subject to period and eccentricity
+    truncations; no independent prior on ``a`` or ``W`` is imposed.
+
+    See Blunt et al. (2017, AJ 153, 229) for OFTI.
+    """
 
     def sample_and_score(
         self, key, n, data, ref_idx, Ms, dist_pc, ecc_prior, log_P_range, e_max
@@ -162,6 +171,8 @@ class ScaleAndRotate(AbstractConditioner):
 
         Returns:
             Tuple ``(rows, loglike)`` with shapes ``(n, 7)`` and ``(n,)``.
+            Scores include only nonreference valid epochs and are ``-inf``
+            outside the truncated support.
         """
         k_e, k_i, k_w, k_m, k_n1, k_n2 = jax.random.split(key, 6)
         e = ecc_distribution(ecc_prior).sample(k_e, (n,))
@@ -185,6 +196,9 @@ class ScaleAndRotate(AbstractConditioner):
         mu = G * Ms
         t_ref = data.times[ref_idx]
         log_P_lo, log_P_hi = log_P_range
+        score_data = eqx.tree_at(
+            lambda d: d.is_valid, data, data.is_valid.at[ref_idx].set(False)
+        )
 
         def cond_one(e_i, ci_i, cw_i, sw_i, m_i, tx_i, ty_i):
             return _scale_rotate_score(
@@ -195,7 +209,7 @@ class ScaleAndRotate(AbstractConditioner):
                 m_i,
                 tx_i,
                 ty_i,
-                data,
+                score_data,
                 t_ref,
                 mu,
                 Ms,
@@ -227,10 +241,16 @@ def ofti(
 ):
     """Sample the orbit posterior for short-arc astrometry via OFTI.
 
-    Draws orbits from priors, scale-and-rotates each onto a reference epoch, and
-    rejection-samples against the full astrometric likelihood until ``n_accept``
-    orbits are accepted. Returns a SamplePosterior with uniform weights (the
-    accepted set is an unweighted posterior sample).
+    With ScaleAndRotate, draw shape parameters from their priors and a target
+    from the reference-epoch Gaussian error, then scale and rotate each orbit
+    through that target. Apply the other valid epochs by rejection until
+    ``n_accept`` orbits are accepted. The prior on ``(a, W)`` (``W`` is Omega)
+    is induced by scale-and-rotate, with the requested support truncations.
+    With a valid rejection bound, the uniformly weighted particles sample the
+    posterior under this induced measure. The default empirical bound is an
+    approximation when later scores exceed it.
+
+    See Blunt et al. (2017, AJ 153, 229) for OFTI.
 
     Args:
         data: RelativeAstromData (with is_valid) of relative astrometry.
@@ -241,15 +261,19 @@ def ofti(
         ref_idx: Reference-epoch index; None selects the highest-SNR valid epoch.
         ecc_prior: Eccentricity prior name. Default "kipping13".
         log_P_range: (log10 P min, log10 P max) truncation on the derived period
-            (days). Scale-and-rotate induces a log-uniform prior on the period,
-            which this range truncates (equivalently a log-uniform prior on a).
+            (days). Truncates the prior induced by scale-and-rotate.
         e_max: Eccentricity truncation. Default 0.99.
         batch: Orbits proposed per rejection batch. Default 100000.
         max_batches: Safety cap on the number of batches. Default 1000.
-        loglike_ref: Reference log-likelihood subtracted before the acceptance
-            test (the chi^2_min efficiency device). None calibrates it from the
-            first batch's maximum. Pass 0.0 for strict, unbiased (less efficient)
-            rejection.
+        loglike_ref: Log-likelihood bound subtracted before acceptance. None
+            uses the first batch maximum; later scores above it are clipped to
+            acceptance probability one, so this is not a guaranteed bound.
+            Strict rejection requires an upper bound on the normalized score.
+            For ScaleAndRotate, use the sum of
+            ``-log(2*pi*ra_err*dec_err*sqrt(1-corr**2))`` over nonreference valid
+            epochs. This is zero for a single valid epoch, for which both None
+            and 0.0 accept every in-support proposal. In general 0.0 is not a
+            strict bound because Gaussian log normalization can be positive.
         conditioner: An AbstractConditioner; None uses ScaleAndRotate().
 
     Returns:

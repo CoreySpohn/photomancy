@@ -5,6 +5,7 @@ Kepler-consistent period), prior recovery, truth recovery, the output
 container, and a posterior cross-check against NUTS.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -18,6 +19,7 @@ from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.ofti import (
     PARAM_NAMES,
+    ScaleAndRotate,
     _default_ref_idx,
     _scale_rotate_score,
     ofti,
@@ -76,6 +78,14 @@ def make_data(key, n_obs, noise_mas=1.0, span=1.5 * T_TRUE):
 def _logP_from_a(a):
     """log10(period in days) from semimajor axis (AU) via Kepler III."""
     return np.log10(2.0 * np.pi / np.sqrt(MU / np.asarray(a) ** 3))
+
+
+_sample_and_score = eqx.filter_jit(ScaleAndRotate().sample_and_score)
+_predict_rows = eqx.filter_jit(
+    jax.vmap(
+        predict_relative_astrometry, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, None, None)
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +161,71 @@ def test_period_kepler_consistent():
 # ---------------------------------------------------------------------------
 # Priors / output container
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("loglike_ref", [None, 0.0])
+def test_single_epoch_reference_scatter(loglike_ref):
+    """Recover the reference error from 1024 accepted orbits.
+
+    Fails if rejection weights the reference epoch twice or rejects any
+    in-support proposal when the remaining likelihood is constant.
+    """
+    data = make_data(jax.random.PRNGKey(0), 1)
+    key = jax.random.PRNGKey(0)
+    n = 1024
+    pp = ofti(
+        data,
+        Ms=MSUN,
+        dist_pc=DIST_PC,
+        key=key,
+        n_accept=n,
+        ecc_prior="disk",
+        log_P_range=(-30.0, 30.0),
+        e_max=1.0,
+        batch=4096,
+        max_batches=1,
+        loglike_ref=loglike_ref,
+    )
+    ra, dec = _predict_rows(data.times, *pp.samples.T, MSUN, DIST_PC)
+    residuals = np.column_stack(
+        (
+            (ra[:, 0] - data.ra[0]) / data.ra_err[0],
+            (dec[:, 0] - data.dec[0]) / data.dec_err[0],
+        )
+    )
+    # For Gaussian draws, SE(s / sigma) ~= 1 / sqrt(2 * (n - 1)).
+    # Four SE at n=1024 is 0.0884, well below the double-count deficit 0.293.
+    tolerance = 4.0 / np.sqrt(2.0 * (n - 1))
+    np.testing.assert_allclose(residuals.std(axis=0, ddof=1), 1.0, atol=tolerance)
+
+    _, proposal_key, _ = jax.random.split(key, 3)
+    rows, ll = _sample_and_score(
+        proposal_key, 4096, data, 0, MSUN, DIST_PC, "disk", (-30.0, 30.0), 1.0
+    )
+    np.testing.assert_array_equal(ll, 0.0)
+    np.testing.assert_allclose(pp.samples, rows[:n], rtol=1e-5, atol=1e-5)
+
+
+def test_score_uses_only_nonreference_epoch():
+    """Fails if the reference epoch or an invalid epoch enters the score."""
+    data = make_data(jax.random.PRNGKey(0), 3, noise_mas=10.0, span=0.08 * T_TRUE)
+    data = eqx.tree_at(
+        lambda d: (d.is_valid, d.corr),
+        data,
+        (jnp.array([True, True, False]), jnp.full(3, 0.4)),
+    )
+    rows, ll = _sample_and_score(
+        jax.random.PRNGKey(0), 5, data, 0, MSUN, DIST_PC, "disk", (-30.0, 30.0), 1.0
+    )
+    ra, dec = _predict_rows(data.times, *rows.T, MSUN, DIST_PC)
+    dx = np.asarray((data.ra[1] - ra[:, 1]) / data.ra_err[1])
+    dy = np.asarray((data.dec[1] - dec[:, 1]) / data.dec_err[1])
+    rho = float(data.corr[1])
+    second_epoch_ll = -0.5 * (dx**2 + dy**2 - 2.0 * rho * dx * dy) / (1.0 - rho**2)
+    second_epoch_ll -= np.log(
+        2.0 * np.pi * float(data.ra_err[1] * data.dec_err[1]) * np.sqrt(1.0 - rho**2)
+    )
+    np.testing.assert_allclose(ll, second_epoch_ll, rtol=1e-4, atol=1e-4)
 
 
 def test_returns_particle_posterior():
