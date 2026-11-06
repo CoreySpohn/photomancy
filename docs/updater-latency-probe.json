@@ -1,0 +1,47 @@
+{
+  "kernel": "vmapped astrometric log likelihood, records as a dynamic argument",
+  "particles": 8192,
+  "rungs": 32,
+  "moves_per_rung": 4,
+  "evaluations_per_update": 1048576,
+  "epochs": 3,
+  "record_capacity": 3,
+  "repeats": 200,
+  "float": "float64",
+  "jax": "0.12.0.1",
+  "device": "cpu:0",
+  "platform": "macOS-26.7.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "results": {
+    "ti": {
+      "first_call_s": 0.3592162079876289,
+      "steady_median_s": 0.0010595624917186797,
+      "steady_iqr_s": [
+        0.000992426743323449,
+        0.0011321357524138875
+      ],
+      "steady_min_s": 0.00093495799228549,
+      "per_evaluation_us": 0.1293411244773779,
+      "ceiling_seconds_per_update": 0.135623998939991
+    },
+    "physical": {
+      "first_call_s": 0.2536327919806354,
+      "steady_median_s": 0.0013962710072519258,
+      "steady_iqr_s": [
+        0.001324197743088007,
+        0.001478708494687453
+      ],
+      "steady_min_s": 0.0012279580114409328,
+      "per_evaluation_us": 0.17044323818993234,
+      "ceiling_seconds_per_update": 0.1787226889282465
+    }
+  },
+  "ceiling_seconds_per_update": {
+    "ti": 0.135623998939991,
+    "physical": 0.1787226889282465
+  },
+  "reference_seconds_per_proposal": {
+    "ti": 1.9336327099495065e-05,
+    "physical": 2.3621366843640246e-06
+  }
+}
