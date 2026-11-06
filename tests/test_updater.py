@@ -467,24 +467,28 @@ def test_unsupported_prior_reports_zero_ess():
         _assert_bitwise_equal(out, belief)
 
 
-def test_orbit_targets_initialize_with_status():
+@pytest.mark.parametrize("target", ["ti", "physical"])
+def test_orbit_targets_initialize_with_status(target):
     """The TI and physical initializers run under jit and return a status.
 
-    Fails if an orbit target breaks the fixed-shape contract (a shape that
-    depends on values) or raises on a real one-epoch record, and if the TI
-    target's likelihood drops the AU-to-arcsec distance division.
+    One case per target, so each compiles only its own initializer. Fails if
+    an orbit target breaks the fixed-shape contract (a shape that depends on
+    values) or raises on a real one-epoch record, and if the TI target's
+    likelihood drops the AU-to-arcsec distance division.
     """
     record = UpdaterRecord(
         time=0.0, ra=0.12, dec=-0.05, ra_err=0.0035, dec_err=0.0035, record_id=1
     )
     key = jax.random.key(0, impl="threefry2x32")
     data = record.as_data()
-    for target in (ThieleInnesTarget(), FixedMassTarget()):
-        belief, diag = UPDATER.init(target, record, key)
-        assert int(diag.status) in {s.value for s in UpdaterStatus}
-        assert bool(diag.applied)
-        assert np.isclose(float(jnp.sum(jnp.exp(belief.log_weights))), 1.0)
-        assert bool(jnp.all(jnp.isfinite(jax.vmap(target.log_prior)(belief.particles))))
+    target = ThieleInnesTarget() if target == "ti" else FixedMassTarget()
+    belief, diag = UPDATER.init(target, record, key)
+    assert int(diag.status) in {s.value for s in UpdaterStatus}
+    assert bool(diag.applied)
+    assert np.isclose(float(jnp.sum(jnp.exp(belief.log_weights))), 1.0)
+    assert bool(jnp.all(jnp.isfinite(jax.vmap(target.log_prior)(belief.particles))))
+    if not isinstance(target, ThieleInnesTarget):
+        return
 
     ti = ThieleInnesTarget(dist_pc=20.0)
     theta = jnp.array([0.3, 6.0, 0.2, 1.0, -0.5, 0.4, 1.2])
