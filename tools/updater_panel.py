@@ -132,9 +132,11 @@ def upper_tail_critical_count(n, rate, alpha):
     return min(c for c in range(n + 1) if binom_sf(c, n, rate) <= alpha)
 
 
-def schedule_null_probability(margin_k):
-    """Null exceedance probability 2 (1 - Phi(k)) under Gaussian errors."""
-    return 2.0 * (1.0 - statistics.NormalDist().cdf(margin_k))
+def clopper_pearson_lower(x, n, confidence=0.95):
+    """One-sided Clopper-Pearson lower bound on a binomial rate."""
+    if x <= 0:
+        return 0.0
+    return 1.0 - clopper_pearson_upper(n - x, n, confidence)
 
 
 def group_counts(protocol):
@@ -147,9 +149,6 @@ def group_counts(protocol):
         "quantities": len(panel["quantities"]),
         "updates": len(panel["updates"]),
         "alias_quantities": len(protocol["criteria"]["alias_accuracy"]["quantities"]),
-        "schedule_comparisons": len(
-            protocol["criteria"]["schedule_stability"]["comparisons"]
-        ),
     }
 
 
@@ -179,15 +178,11 @@ def critical_values(protocol):
         n, fu["acceptable_rate"], fu["family_alpha"] / n_fu
     )
 
-    sched = crit["schedule_stability"]
-    q0 = schedule_null_probability(sched["margin_k"])
-    n_sched = groups * g["schedule_comparisons"]
-    sched_c = upper_tail_critical_count(n, q0, sched["family_alpha"] / n_sched)
-    sched_cap = max(
-        c
-        for c in range(n + 1)
-        if binom_sf(c, n, sched["alternative_exceedance"]) >= sched["min_power"]
+    damaged = alias["alternative"]["damaged_fraction"]
+    cert_worlds = (
+        g["regimes"] * protocol["panel"]["development_worlds_per_regime_and_mass_model"]
     )
+    cert_miss = (1.0 - damaged) ** cert_worlds
 
     return {
         "cells": n_cells,
@@ -203,52 +198,10 @@ def critical_values(protocol):
         "alias_z_3dp": round(z, 3),
         "failed_update_groups": n_fu,
         "failed_updates_critical_count": fu_c,
-        "schedule_tests": n_sched,
-        "schedule_null_probability": q0,
-        "schedule_critical_count": sched_c,
-        "schedule_max_critical_count": sched_cap,
+        "certification_worlds_per_mass_model": cert_worlds,
+        "certification_miss_probability": cert_miss,
+        "certification_miss_probability_3dp": round(cert_miss, 3),
     }
-
-
-# ---------------------------------------------------------------------------
-# Schedule null (per world, binomial at the claimed ESS)
-# ---------------------------------------------------------------------------
-
-
-def schedule_null_probabilities(p_a, p_b, ess_a, ess_b, margin_k, sims, rng):
-    """Per-world null exceedance probabilities under the claimed ESS.
-
-    Each world's two runs are replaced by binomial estimates of their mean
-    probability at their own ESS (rounded, at least 1); the null probability is
-    the exceedance frequency over ``sims`` simulated pairs.
-    """
-    import numpy as np
-
-    p_bar = 0.5 * (np.asarray(p_a, float) + np.asarray(p_b, float))
-    n_a = np.maximum(np.rint(np.asarray(ess_a, float)), 1).astype(np.int64)
-    n_b = np.maximum(np.rint(np.asarray(ess_b, float)), 1).astype(np.int64)
-    ha = rng.binomial(n_a, p_bar, size=(sims, p_bar.size)) / n_a
-    hb = rng.binomial(n_b, p_bar, size=(sims, p_bar.size)) / n_b
-    se_d = np.sqrt(ha * (1 - ha) / n_a + hb * (1 - hb) / n_b)
-    return (np.abs(ha - hb) > margin_k * se_d).mean(axis=0)
-
-
-def poisson_binomial_pmf(probs):
-    """Distribution of the count of independent Bernoulli(probs) successes."""
-    dist = [1.0]
-    for q in probs:
-        nxt = [0.0] * (len(dist) + 1)
-        for j, mass in enumerate(dist):
-            nxt[j] += mass * (1.0 - q)
-            nxt[j + 1] += mass * q
-        dist = nxt
-    return dist
-
-
-def schedule_cutoff(probs, alpha):
-    """Smallest c with P(count > c) <= alpha under the per-world null."""
-    dist = poisson_binomial_pmf(probs)
-    return min(c for c in range(len(dist)) if math.fsum(dist[c + 1 :]) <= alpha)
 
 
 # ---------------------------------------------------------------------------
@@ -378,14 +331,103 @@ def world_key(protocol, stage, mass_model, regime_index, world_index):
     return key
 
 
-def draw_key(protocol, stage, mass_model, regime_index, world_index, purpose, update):
-    """Key of one draw: world key, then purpose, then update index."""
+def draw_keys(protocol, stage, mass_model, regime_index, world_indices, purpose, index):
+    """Keys of one run role for an array of worlds (vectorized over worlds)."""
     import jax
+    import jax.numpy as jnp
 
+    prng = protocol["prng"]
+    m_index = protocol["panel"]["mass_models"].index(mass_model)
     with jax.enable_x64(True):
-        key = world_key(protocol, stage, mass_model, regime_index, world_index)
-        key = jax.random.fold_in(key, protocol["prng"]["purposes"][purpose])
-        return jax.random.fold_in(key, update)
+        block = root_key(protocol)
+        for value in (prng["stages"][stage], m_index, regime_index):
+            block = jax.random.fold_in(block, value)
+
+        def one(w):
+            key = jax.random.fold_in(block, w)
+            key = jax.random.fold_in(key, prng["purposes"][purpose])
+            return jax.random.fold_in(key, index)
+
+        return jax.vmap(one)(jnp.asarray(world_indices))
+
+
+def draw_key(protocol, stage, mass_model, regime_index, world_index, purpose, index):
+    """Key of one draw: world key, then purpose, then the last index."""
+    return draw_keys(
+        protocol, stage, mass_model, regime_index, [world_index], purpose, index
+    )[0]
+
+
+def run_roles(protocol):
+    """Every declared (stage, purpose, index) run role, with its world count.
+
+    Yields ``(stage, purpose, index, worlds)``. Updater runs use the update
+    index (0, 1, 2); reference, certification and PIT draws the epoch index (1
+    for two epochs, 2 for three); truth and noise 0.
+    """
+    panel = protocol["panel"]
+    updates = range(len(panel["updates"]))
+    epoch_indices = [k - 1 for k in panel["epoch_counts"]]
+    base = [("truth", 0), ("noise", 0)]
+    base += [
+        (p, u) for p in ("updater_a", "updater_b", "updater_doubled") for u in updates
+    ]
+    base += [
+        (p, e) for p in ("reference_1", "reference_2", "pit") for e in epoch_indices
+    ]
+    cert = [
+        (p, e)
+        for p in (
+            "reference_3",
+            "reference_4",
+            "cert_doubled_1",
+            "cert_doubled_2",
+            "cert_proposal_1",
+            "cert_proposal_2",
+        )
+        for e in epoch_indices
+    ]
+    repeats = protocol["reference"]["exact_checks"]["sampler_repeats"]
+    for stage in protocol["prng"]["stages"]:
+        if stage == "exact":
+            for r in range(repeats):
+                yield stage, "exact_run", r, 1
+            continue
+        roles = base + (cert if stage == "development" else [])
+        for purpose, index in roles:
+            yield stage, purpose, index, stage_worlds(protocol, stage)
+
+
+def all_role_keys(protocol, key_fn=None):
+    """Raw key data (uint32 pairs) of every declared draw, through ``key_fn``."""
+    import jax
+    import numpy as np
+
+    key_fn = key_fn or draw_keys
+    rows = []
+    for stage, purpose, index, worlds in run_roles(protocol):
+        for mass_model in protocol["panel"]["mass_models"]:
+            regimes = 1 if stage == "exact" else len(protocol["regimes"])
+            for r_index in range(regimes):
+                keys = key_fn(
+                    protocol,
+                    stage,
+                    mass_model,
+                    r_index,
+                    np.arange(worlds),
+                    purpose,
+                    index,
+                )
+                rows.append(np.asarray(jax.random.key_data(keys)).reshape(-1, 2))
+    return np.concatenate(rows)
+
+
+def key_collisions(protocol, key_fn=None):
+    """Number of declared draws whose key repeats another draw's key."""
+    import numpy as np
+
+    data = all_role_keys(protocol, key_fn)
+    return len(data) - len(np.unique(data, axis=0))
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +514,8 @@ def stage_worlds(protocol, stage):
     }
     if stage in per_cell:
         return per_cell[stage]
+    if stage == "exact":
+        return 1
     blocks = len(protocol["regimes"]) * len(panel["mass_models"])
     return panel["smoke_worlds"] // blocks
 
@@ -493,7 +537,7 @@ def compute_tally(protocol):
     ref_runs = 2
     fits = g["regimes"] * panel["alias_subset_worlds"] * g["epoch_counts"] * ref_runs
     # Certification: repeat-noise runs, two runs at twice the budget (cost four)
-    # and two independent-proposal runs.
+    # and two other-proposal runs, priced at the reference's cost per fit.
     cert_units = protocol["reference"]["repeat_noise"]["runs"] + 4 + 2
     dev_fits = g["regimes"] * dev_worlds * g["epoch_counts"] * cert_units
     return {
@@ -646,6 +690,11 @@ def dry_run(protocol, prices=None):
             f"future epochs {t_f} d, physical a {a_lo:.4f} to {a_hi:.4f} AU"
         )
     print(f"  visibility: {iwa:.1f} to {owa:.1f} mas")
+    sched = protocol["criteria"]["schedule_stability"]
+    print(
+        f"  schedule tolerance: d > {sched['tolerance']} in more than "
+        f"{sched['max_count']} of {protocol['panel']['worlds_per_cell']} worlds fails"
+    )
 
     print("\nTI reference arguments (lambert_depth_fit)")
     for regime in protocol["regimes"]:
@@ -738,15 +787,46 @@ def d2_pass_rates(
     return passes / panels
 
 
+def canonical_groups(protocol):
+    """Every (regime, mass model, epoch count) group, in parameter-block order."""
+    return [
+        (r["id"], m, k)
+        for r in protocol["regimes"]
+        for m in protocol["panel"]["mass_models"]
+        for k in protocol["panel"]["epoch_counts"]
+    ]
+
+
+def validate_summary(protocol, summary):
+    """Map each canonical group to its entry; refuse missing or extra groups."""
+    expected = canonical_groups(protocol)
+    seen = {}
+    for entry in summary["groups"]:
+        ident = (entry["regime"], entry["mass_model"], entry["epoch_count"])
+        if ident not in expected:
+            raise ValueError(f"unknown group {ident}")
+        if ident in seen:
+            raise ValueError(f"duplicate group {ident}")
+        if not entry["worlds"]:
+            raise ValueError(f"group {ident} has no development worlds")
+        seen[ident] = entry
+    missing = [g for g in expected if g not in seen]
+    if missing:
+        raise ValueError(f"missing groups {missing}")
+    return seen
+
+
 def freeze_alias(protocol, summary, panels=None):
     """Alias tolerance from development summaries, with its bound and power floor.
 
-    ``summary["groups"]`` holds one entry per group with ``regime``,
-    ``mass_model``, ``epoch_count``, ``updater_ess``, ``reference_ess`` and
-    ``reference_bin_masses`` (a dict from alias quantity to a list of per-world
-    bin-mass vectors). Returns a dict with the candidate ``delta2``, the
-    per-group standard errors and powers, and ``status`` (``frozen`` or
-    ``incomplete``) with the reasons.
+    ``summary["groups"]`` holds exactly one entry per canonical group with
+    ``regime``, ``mass_model``, ``epoch_count`` and ``worlds``; each world has
+    ``updater_ess``, ``reference_ess`` and ``bin_masses`` (a dict from alias
+    quantity to an eight-vector). Whole worlds are resampled, so masses and both
+    ESS values stay together. Returns the candidate ``delta2``, per-group
+    standard errors, power with its one-sided 95 percent lower bound, the
+    exact-updater pass rate with its 95 percent interval, and ``status``
+    (``frozen`` or ``incomplete``) with the reasons.
     """
     import numpy as np
 
@@ -757,9 +837,14 @@ def freeze_alias(protocol, summary, panels=None):
     z = critical_values(protocol)["alias_z"]
     stream = protocol["prng"]["simulation_seeds"]["alias_freeze"]
     root = protocol["prng"]["root_seed"]
+    entries = validate_summary(protocol, summary)
+    regimes = [r["id"] for r in protocol["regimes"]]
+    masses_order = protocol["panel"]["mass_models"]
+    epochs_order = protocol["panel"]["epoch_counts"]
 
     def panel_stats(rng, masses, ess_u, ess_r, damaged):
-        p = masses[rng.integers(0, len(masses), n_worlds)]
+        pick = rng.integers(0, len(masses), n_worlds)
+        p, nu, nr = masses[pick], ess_u[pick, None], ess_r[pick, None]
         q = p.copy()
         hit = np.flatnonzero(rng.random(n_worlds) < damaged)
         order = np.argsort(q[hit], axis=1)[:, ::-1]
@@ -767,19 +852,25 @@ def freeze_alias(protocol, summary, panels=None):
         take = np.minimum(alt["moved_mass"], q[rows, order[:, 1:2]])
         q[rows, order[:, 1:2]] -= take
         q[rows, order[:, 0:1]] += take
-        u_a, u_b = (rng.multinomial(ess_u, q) / ess_u for _ in range(2))
-        r_a, r_b = (rng.multinomial(ess_r, p) / ess_r for _ in range(2))
+        u_a, u_b = (rng.multinomial(nu[:, 0], q) / nu for _ in range(2))
+        r_a, r_b = (rng.multinomial(nr[:, 0], p) / nr for _ in range(2))
         d2 = ((u_a - r_a) * (u_b - r_b)).sum(1)
         return d2.mean(), d2.std(ddof=1) / np.sqrt(n_worlds)
 
     rows = []
-    for g_index, group in enumerate(summary["groups"]):
-        ess_u = max(round(group["updater_ess"]), 1)
-        ess_r = max(round(group["reference_ess"]), 1)
+    for ident in canonical_groups(protocol):
+        worlds = entries[ident]["worlds"]
+        ess_u = np.array([max(round(w["updater_ess"]), 1) for w in worlds])
+        ess_r = np.array([max(round(w["reference_ess"]), 1) for w in worlds])
+        canon = [
+            regimes.index(ident[0]),
+            masses_order.index(ident[1]),
+            epochs_order.index(ident[2]),
+        ]
         for q_index, quantity in enumerate(alias["quantities"]):
-            masses = np.asarray(group["reference_bin_masses"][quantity], float)
+            masses = np.asarray([w["bin_masses"][quantity] for w in worlds], float)
             masses = masses / masses.sum(axis=1, keepdims=True)
-            rng = np.random.default_rng([root, stream, g_index, q_index])
+            rng = np.random.default_rng([root, stream, *canon, q_index])
             null = [panel_stats(rng, masses, ess_u, ess_r, 0.0) for _ in range(panels)]
             damaged = [
                 panel_stats(rng, masses, ess_u, ess_r, alt["damaged_fraction"])
@@ -787,11 +878,12 @@ def freeze_alias(protocol, summary, panels=None):
             ]
             rows.append(
                 {
-                    "regime": group["regime"],
-                    "mass_model": group["mass_model"],
-                    "epoch_count": group["epoch_count"],
+                    "regime": ident[0],
+                    "mass_model": ident[1],
+                    "epoch_count": ident[2],
                     "quantity": quantity,
                     "se0": float(np.mean([se for _, se in null])),
+                    "null": null,
                     "damaged": damaged,
                 }
             )
@@ -801,15 +893,25 @@ def freeze_alias(protocol, summary, panels=None):
         reasons.append(f"delta2 {delta2:.3g} exceeds its bound {alias['delta2_max']}")
     graded = min(delta2, alias["delta2_max"])
     for r in rows:
-        dmg = r.pop("damaged")
-        r["power"] = float(np.mean([m + z * se > graded for m, se in dmg]))
-        if r["power"] < alias["min_power"]:
+        null, dmg = r.pop("null"), r.pop("damaged")
+        fails = sum(m + z * se > graded for m, se in dmg)
+        passes = sum(m + z * se <= graded for m, se in null)
+        r["power"] = fails / panels
+        r["power_lower_95"] = clopper_pearson_lower(fails, panels)
+        r["exact_pass_rate"] = passes / panels
+        r["exact_pass_interval_95"] = [
+            clopper_pearson_lower(passes, panels, 0.975),
+            clopper_pearson_upper(passes, panels, 0.975),
+        ]
+        if r["power_lower_95"] < alias["min_power"]:
             reasons.append(
                 f"{r['regime']} {r['mass_model']} {r['epoch_count']} {r['quantity']}: "
-                f"power {r['power']:.3f} below {alias['min_power']}"
+                f"power lower bound {r['power_lower_95']:.3f} "
+                f"below {alias['min_power']}"
             )
     return {
         "delta2": delta2,
+        "panels": panels,
         "status": "incomplete" if reasons else "frozen",
         "reasons": reasons,
         "groups": rows,
@@ -830,13 +932,19 @@ def sizing(protocol):
     print("Failed updates: P(group fails) at true rate")
     for r in (0.03, 0.04, 0.05, 0.06, 0.08):
         print(f"  {r}: {binom_sf(fu, n, r):.3f}")
-    print("Schedule: P(test fails) at true exceedance probability")
-    for label, sc in (
-        ("large-ESS cutoff", values["schedule_critical_count"]),
-        ("power-floor cap", values["schedule_max_critical_count"]),
-    ):
-        for q in (0.08, 0.10, 0.15):
-            print(f"  {label} {sc}, q={q}: {binom_sf(sc, n, q):.3f}")
+    sched = protocol["criteria"]["schedule_stability"]
+    tol, cap = sched["tolerance"], sched["max_count"]
+    print(f"Schedule tolerance: fail when more than {cap} of {n} worlds have d > {tol}")
+    for r in (0.03, 0.05, 0.08, 0.10):
+        print(
+            f"  {r} of worlds exceed: P(comparison fails) = {binom_sf(cap, n, r):.4f}"
+        )
+    print("  orientation, estimates like m independent draws at p = 0.5:")
+    for m in (300, 500, 1000, 2000):
+        q = 2.0 * (1.0 - statistics.NormalDist().cdf(tol / math.sqrt(0.5 / m)))
+        print(
+            f"    m={m}: P(d > {tol}) = {q:.4f}, P(fails) = {binom_sf(cap, n, q):.4f}"
+        )
     alias = protocol["criteria"]["alias_accuracy"]
     worlds = protocol["panel"]["alias_subset_worlds"]
     frac = alias["alternative"]["damaged_fraction"]
