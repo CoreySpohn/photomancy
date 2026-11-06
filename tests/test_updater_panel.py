@@ -493,14 +493,98 @@ def test_freeze_requires_every_planned_development_unit(tmp_path):
     quick = dict(protocol, criteria=dict(protocol["criteria"], alias_accuracy=alias))
     report = tool.freeze_report(quick, tmp_path)
     assert not any("planned development" in r for r in report["reasons"])
-    floor = next(r for r in report["reasons"] if "ESS floor" in r)
-    assert floor.startswith("2 reference fits")
+    floor = [r for r in report["reasons"] if "ESS floor" in r]
+    assert len(floor) == 2
     ti_budget = protocol["reference"]["ti_window"]["proposals_per_fit"]
-    assert f"('{low}', {ti_budget}, 199.0)" in floor
-    assert f"('{cert}', {2 * ti_budget}, 150.0)" in floor
+    assert f"('{low}', {ti_budget}, 199.0)" in floor[0]
+    assert f"('{cert}', {2 * ti_budget}, 150.0)" in floor[1]
     table = tool.ess_table(protocol, units)
     assert table["ti_window R2 k=3 primary"]["below_floor"] == [low]
     assert table["ti_window R3 k=2 independent"]["below_floor"] == [cert]
+
+
+@pytest.mark.parametrize(
+    "role",
+    [f"reference_{i}" for i in range(1, 5)]
+    + ["cert_doubled_1", "cert_doubled_2", "cert_proposal_1", "cert_proposal_2"],
+)
+def test_every_required_ti_reference_role_is_held_to_the_floor(role):
+    """Each required TI reference role below the ESS floor is named.
+
+    One fit of the role at ESS 199 among fits at 900 must appear in the
+    freeze's floor reason with its budget. A primary fit (budget 2^22) is
+    told to double; a doubled or check-3 fit (2^23, the cap) is told its
+    method needs an amendment, never to double past the cap. Fails if any
+    role is left out of the floor check, or if the remedy ignores the cap.
+    """
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    roles = {r for part in tool.PARTS.values() for r in part}
+    units = _fake_records(tool, protocol, roles, {0})
+    low = tool.unit_id("development", "ti_window", "R2", 0, role, 3)
+    units[low]["summary"] = dict(units[low]["summary"], kish_ess=199.0)
+    reasons = tool.ess_floor_reasons(protocol, units)
+    assert len(reasons) == 1
+    proposals = units[low]["proposals"]
+    assert f"('{low}', {proposals}, 199.0)" in reasons[0]
+    cap = protocol["reference"]["ti_window"]["max_proposals_per_fit"]
+    if 2 * proposals <= cap:
+        assert "double that method's budget" in reasons[0]
+    else:
+        assert "needs an amendment" in reasons[0]
+        assert "double that method" not in reasons[0]
+
+
+def test_budgets_above_the_proposal_cap_are_refused(tmp_path):
+    """A TI budget at the cap is refused before running and at the freeze.
+
+    With the TI primary budget doubled to 2^23 (the cap), the doubled and
+    check-3 runs would be at 2^24. The development runner and the exact-check
+    runner must refuse to start, the freeze and the exact report must give
+    the cap as a reason, and a record at 2^24 must not count as a protocol-
+    budget record. Fails if the cap on effective budgets is only descriptive.
+    """
+    tool = _load_tool()
+    spec = importlib.util.spec_from_file_location(
+        "updater_exact_checks", TOOL.parent / "updater_exact_checks.py"
+    )
+    exact = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(exact)
+    text = tool.PROTOCOL.read_text()
+    budget = '"ti_window": {"proposals_per_fit": 4194304,'
+    assert text.count(budget) == 1
+    path = tmp_path / "protocol.md"
+    path.write_text(text.replace(budget, '"ti_window": {"proposals_per_fit": 8388608,'))
+    protocol = tool.load_protocol(path)
+    assert tool.budget_cap_violations(protocol)
+    assert exact.budget_cap_violations(protocol)
+    with pytest.raises(SystemExit, match="refusing to run"):
+        tool.main(
+            [
+                "--protocol",
+                str(path),
+                "--run",
+                "development",
+                "--out",
+                str(tmp_path / "dev"),
+                "--worlds",
+                "0",
+            ]
+        )
+    with pytest.raises(SystemExit, match="refusing to run"):
+        exact.main(["--protocol", str(path), "--out", str(tmp_path / "exact")])
+    assert not (tmp_path / "dev").exists() and not (tmp_path / "exact").exists()
+    (tmp_path / "empty").mkdir()
+    reasons = tool.freeze_report(protocol, tmp_path / "empty", None)["reasons"]
+    assert any("exceed the proposal cap" in r for r in reasons)
+    report = exact.report(protocol, tmp_path / "empty")
+    assert all(
+        any("exceed the proposal cap" in r for r in e["reasons"])
+        for e in report["cases"].values()
+    )
+    uid = tool.unit_id("development", "ti_window", "R2", 0, "cert_proposal_1", 3)
+    record = {"id": uid, "kind": "reference", "proposals": 2 * 8388608}
+    assert not tool._record_at_protocol_budget(protocol, record)
 
 
 def test_resume_refuses_incompatible_records_and_manifests_survive_kills(tmp_path):

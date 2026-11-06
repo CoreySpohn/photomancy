@@ -2665,6 +2665,13 @@ def freeze_report(protocol, path, exact_path=None):
     report = {}
     incomplete = False
     units = None
+    over_cap = budget_cap_violations(protocol)
+    if over_cap:
+        incomplete = True
+        reasons.append(
+            "protocol budgets exceed the proposal cap after role multiples "
+            f"(the method needs an amendment, not another doubling): {over_cap}"
+        )
     if path.is_dir():
         records, duplicates = load_units(path)
         if duplicates:
@@ -2705,13 +2712,7 @@ def freeze_report(protocol, path, exact_path=None):
                 f"{len(absent)} of {len(planned)} planned development units "
                 f"missing or incompatible; first: {absent[:3]}"
             )
-        low = ess_floor_violations(protocol, units)
-        if low:
-            reasons.append(
-                f"{len(low)} reference fits below their ESS floor (double that "
-                "method's budget and rerun them; id, proposals, ESS): "
-                f"{low[:5]}"
-            )
+        reasons.extend(ess_floor_reasons(protocol, units))
         summary, _ = assemble_freeze_summary(protocol, units)
         empty = summary["empty_references"]
         if empty:
@@ -2856,7 +2857,9 @@ def _exact_reasons(protocol, exact_path, report):
 
 
 def _record_at_protocol_budget(protocol, record):
-    return record_at_budgets(protocol_budgets(protocol), record)
+    return record_at_budgets(protocol_budgets(protocol), record) and record_within_cap(
+        protocol, record
+    )
 
 
 def record_at_budgets(budgets, record):
@@ -2882,6 +2885,69 @@ def reference_budget_factor(mass_model, role):
     if role.startswith("cert_proposal") and mass_model == "ti_window":
         return 2
     return 1
+
+
+# A role of each budget multiple, for the cap check.
+_BUDGET_ROLES = ("reference_1", "cert_doubled_1", "cert_proposal_1")
+
+
+def budget_cap_violations(protocol, budgets=None):
+    """Effective reference budgets above their pair's ``max_proposals_per_fit``.
+
+    The effective budget is the run budget times the role's multiple
+    (``reference_budget_factor``), so a primary budget at the cap leaves the
+    doubled and, for the TI pair, the check-3 runs above it.
+    """
+    budgets = budgets or protocol_budgets(protocol)
+    out = []
+    for pair in ("ti_window", "physical_fixed"):
+        cap = protocol["reference"][pair]["max_proposals_per_fit"]
+        for role in _BUDGET_ROLES:
+            proposals = budgets[pair] * reference_budget_factor(pair, role)
+            if proposals > cap:
+                out.append(f"{pair} {role[:-2]}: {proposals} > cap {cap}")
+    return out
+
+
+def record_within_cap(protocol, record):
+    """Whether a reference record's proposals are within its pair's cap."""
+    if record.get("kind") != "reference":
+        return True
+    pair = record["id"].split("/")[1]
+    cap = protocol["reference"][pair]["max_proposals_per_fit"]
+    return record.get("proposals", 0) <= cap
+
+
+def ess_floor_reasons(protocol, units):
+    """Freeze reasons for the reference fits below their ESS floor.
+
+    A fit whose doubled budget stays within the cap is remedied by doubling
+    that method's budget; a fit already at a budget whose doubling would
+    exceed the cap cannot be, and its method needs an amendment.
+    """
+    low = ess_floor_violations(protocol, units)
+    caps = {
+        p: protocol["reference"][p]["max_proposals_per_fit"]
+        for p in ("ti_window", "physical_fixed")
+    }
+    double, amend = [], []
+    for row in low:
+        pair = row[0].split("/")[1]
+        (double if 2 * row[1] <= caps[pair] else amend).append(row)
+    reasons = []
+    if double:
+        reasons.append(
+            f"{len(double)} reference fits below their ESS floor (double that "
+            "method's budget and rerun them; id, proposals, ESS): "
+            f"{double[:5]}"
+        )
+    if amend:
+        reasons.append(
+            f"{len(amend)} reference fits below their ESS floor whose budget "
+            "cannot be doubled within the proposal cap (the method needs an "
+            f"amendment; id, proposals, ESS): {amend[:5]}"
+        )
+    return reasons
 
 
 def progress(protocol, out_dir, stage="development"):
@@ -2991,6 +3057,12 @@ def run_stage(protocol, args):
     budgets = protocol_budgets(
         protocol, args.particles, args.ti_proposals, args.physical_proposals
     )
+    over_cap = budget_cap_violations(protocol, budgets)
+    if over_cap:
+        raise SystemExit(
+            "refusing to run: reference budgets exceed the proposal cap after "
+            f"role multiples (amend the method instead): {over_cap}"
+        )
     shard = parse_shard(args.shard)
     units = plan_units(
         protocol,

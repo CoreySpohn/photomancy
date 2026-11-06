@@ -530,7 +530,14 @@ primary `reference_1` to `reference_4`, the doubled `cert_doubled_1` and
 `cert_doubled_2`, and the check-3 `cert_proposal_1` and `cert_proposal_2`)
 whose Kish ESS is below the floor, with its id, its budget and its ESS, and
 refuses to freeze while any remains. The remedy is the doubling of
-"Provisional values" for that method's budget, then a rerun of its fits.
+"Provisional values" for that method's budget, then a rerun of its fits,
+only while the doubled budget stays within `max_proposals_per_fit`. The cap
+applies to the effective budget, after the role's multiple (two for the
+doubled runs and the TI check-3 runs): the development runner and the
+exact-check runner refuse to start, and the freeze and the exact report
+refuse, when any effective budget exceeds it, and a record above the cap
+never counts. A fit below the floor whose budget cannot be doubled within
+the cap is reported as needing an amendment of the method.
 `python tools/updater_panel.py --ess DIR` prints the worst and median Kish ESS
 per regime, epoch count and group of a run directory, with the fits below the
 floor.

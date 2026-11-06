@@ -1069,13 +1069,41 @@ def unit_of(record_id):
     return {"id": record_id, "case": case, "kind": kind, "repeat": int(tail[1:])}
 
 
+def _proposal_cap(protocol, case):
+    return protocol["reference"][CASE_MASS_MODEL[case]]["max_proposals_per_fit"]
+
+
+def budget_cap_violations(protocol, proposals=None):
+    """Sampler budgets of the exact checks above their pair's proposal cap.
+
+    Effective budgets, after the check-3 sampler's multiple of two.
+    """
+    out = []
+    for case in CASES:
+        for sampler in CASE_SAMPLERS[case]:
+            if sampler == "updater":
+                continue
+            unit = {"case": case, "kind": sampler}
+            n = expected_budget(protocol, unit, proposals)["proposals"]
+            if n > _proposal_cap(protocol, case):
+                out.append(
+                    f"{case} {sampler}: {n} > cap {_proposal_cap(protocol, case)}"
+                )
+    return out
+
+
 def record_valid(protocol, record, run_hash, proposals=None, particles=None):
-    """Whether an exact record matches the current code, protocol and budget."""
+    """Whether an exact record matches the current code, protocol and budget.
+
+    A sampler record above its pair's proposal cap is never valid.
+    """
     if record.get("run_hash") != run_hash:
         return False
     try:
         unit = unit_of(record["id"])
     except (KeyError, ValueError):
+        return False
+    if record.get("proposals", 0) > _proposal_cap(protocol, unit["case"]):
         return False
     budget = expected_budget(protocol, unit, proposals, particles)
     return all(record.get(k) == v for k, v in budget.items())
@@ -1250,8 +1278,14 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
     }
     levels = [int(lv) for lv in levels]
     consecutive = len(levels) == 3 and levels == list(range(levels[0], levels[0] + 3))
+    over_cap = budget_cap_violations(protocol)
     for case in cases:
         reasons = []
+        if over_cap:
+            reasons.append(
+                "protocol budgets exceed the proposal cap (the method needs an "
+                f"amendment, not another doubling): {over_cap}"
+            )
         if not consecutive and case != "ti_binding":
             reasons.append(f"levels {levels} are not three consecutive refinements")
         mine = {i: r for i, r in records.items() if i.split("/")[1] == case}
@@ -1372,6 +1406,12 @@ def main(argv=None):
             proposals["ti_window"] = args.ti_proposals
         if args.physical_proposals:
             proposals["physical_fixed"] = args.physical_proposals
+        over_cap = budget_cap_violations(protocol, proposals)
+        if over_cap:
+            raise SystemExit(
+                "refusing to run: sampler budgets exceed the proposal cap "
+                f"(amend the method instead): {over_cap}"
+            )
         shard = panel.parse_shard(args.shard)
         executor = ExactExecutor(protocol, proposals, args.particles)
         entry = panel.manifest_entry(
