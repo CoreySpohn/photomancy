@@ -81,6 +81,7 @@ from jax.scipy.special import betainc, logsumexp
 from jax.scipy.stats import beta as beta_dist
 from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_motion
+from orbix.kepler.core import diff_solve_trig
 
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
@@ -314,8 +315,8 @@ class AbstractUpdateTarget(eqx.Module):
         Valid only for a target whose :meth:`predict` is linear and homogeneous
         in the coordinates ``linear_index`` (``c``). Column ``j`` is the
         prediction at the ``j``-th unit vector of ``c``, the other coordinates
-        of ``theta`` held fixed; under ``vmap`` the work that does not depend
-        on ``c`` (a Kepler solve, say) runs once.
+        of ``theta`` held fixed. This costs one :meth:`predict` per linear
+        coordinate; a target can override it with a cheaper exact form.
 
         Args:
             theta: Chart point (its linear coordinates are ignored). Shape
@@ -458,6 +459,33 @@ class ThieleInnesTarget(AbstractUpdateTarget):
         """Model offsets in arcsec (AU divided by the distance in parsec)."""
         east_au, north_au = self.model.forward_au(theta, times)
         return east_au / self.dist_pc, north_au / self.dist_pc
+
+    def linear_design(self, theta, times):
+        """Design matrices from one Kepler solve.
+
+        East is ``(X, Y) . (east_X, east_Y)`` and north ``(X, Y) . (north_X,
+        north_Y)`` divided by the distance, with ``X = cos E - e`` and
+        ``Y = sqrt(1 - e^2) sin E`` as in ``TIBasisModel.forward_au``. The
+        generic implementation would solve Kepler's equation once per TI
+        constant.
+
+        Args:
+            theta: Chart point (its TI constants are ignored). Shape ``(7,)``.
+            times: Epochs (days). Shape ``(K,)``.
+
+        Returns:
+            Tuple ``(H_ra, H_dec)``, each shape ``(K, 4)``.
+        """
+        e, ln_period, tau = theta[0], theta[1], theta[2]
+        mean_anomaly = two_pi * ((times - self.model.t_ref) / jnp.exp(ln_period) - tau)
+        sin_e, cos_e = diff_solve_trig(jnp.mod(mean_anomaly, two_pi), e)
+        x = (cos_e - e) / self.dist_pc
+        y = jnp.sqrt(1.0 - e**2) * sin_e / self.dist_pc
+        zero = jnp.zeros_like(x)
+        return (
+            jnp.stack([x, y, zero, zero], axis=1),
+            jnp.stack([zero, zero, x, y], axis=1),
+        )
 
     def linear_prior_scale(self):
         """The TI constants' prior scale ``s_ti`` (AU); the window is the indicator."""

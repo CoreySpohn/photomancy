@@ -22,6 +22,7 @@ from scipy import special  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import TIBasisModel, lambert_depth_fit  # noqa: E402
 from photomancy.orbit.updater import (  # noqa: E402
+    AbstractUpdateTarget,
     ConjugateGaussianTarget,
     FixedMassTarget,
     OrbitUpdater,
@@ -166,10 +167,20 @@ def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
     of log Z) shifts some moment by more than 4 errors (it reaches 7.3).
     Fails if the conditional Gaussian or log Z uses the wrong precision (a
     tempering weight, the correlation or the prior scale), if the random walk
-    is not symmetric, or if proposals outside the window are accepted.
+    is not symmetric, if proposals outside the window are accepted, or if the
+    TI target's one-solve design matrix drifts from its forward model.
     """
     target = ThieleInnesTarget()
     sigma, beta, n = 0.05, 0.3, 4000
+    # The TI design override must equal the generic one built from predict.
+    for theta in (ORBIT_CASES["ti"][1], jnp.array([0.7, 7.5, 0.9, 0, 0, 0, 0.0])):
+        times = jnp.array([0.0, 200.0, 1234.5])
+        for fast, generic in zip(
+            target.linear_design(theta, times),
+            AbstractUpdateTarget.linear_design(target, theta, times),
+            strict=True,
+        ):
+            np.testing.assert_allclose(fast, generic, rtol=0, atol=1e-14)
     records = RelativeAstromData(
         times=jnp.array([0.0, 200.0]),
         ra=jnp.array([0.08, -0.05]),
