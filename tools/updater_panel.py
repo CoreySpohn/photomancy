@@ -1594,10 +1594,20 @@ def code_commit():
 
 
 def write_manifest(out_dir, shard, entry):
-    """Append one invocation entry to the shard's manifest file."""
+    """Append an invocation entry to the shard's manifest, or update it.
+
+    An entry whose ``started`` time matches the last entry replaces it, so a
+    run writes its entry when it starts (a killed run still leaves its
+    provenance) and completes it when it finishes.
+    """
     path = Path(out_dir) / f"manifest-{shard[0]}of{shard[1]}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     data = json.loads(path.read_text()) if path.exists() else {"invocations": []}
-    data["invocations"].append(entry)
+    runs = data["invocations"]
+    if runs and runs[-1].get("started") == entry.get("started"):
+        runs[-1] = entry
+    else:
+        runs.append(entry)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
@@ -2053,6 +2063,10 @@ def assemble_freeze_summary(protocol, units, stage="development"):
     two) and its updater precision per alias quantity from the disagreement
     of ``updater_a`` and ``updater_b`` (``key_to_key_ess``).
 
+    A world whose reference fit kept no weighted draw (an empty fit, where the
+    budget is too small for that world) cannot be scored; it is left out and
+    its unit id is listed in ``summary["empty_references"]``.
+
     Returns:
         Tuple ``(summary, missing)``; ``missing`` lists absent unit ids.
     """
@@ -2060,7 +2074,7 @@ def assemble_freeze_summary(protocol, units, stage="development"):
 
     alias_q = protocol["criteria"]["alias_accuracy"]["quantities"]
     n_dev = stage_worlds(protocol, stage)
-    groups, missing = [], []
+    groups, missing, empty = [], [], []
     for regime_id, mass_model, k in canonical_groups(protocol):
         worlds = []
         for w in range(n_dev):
@@ -2079,6 +2093,14 @@ def assemble_freeze_summary(protocol, units, stage="development"):
             absent = [ids[r] for r, rec in recs.items() if rec is None]
             if absent:
                 missing += absent
+                continue
+            hollow = [
+                ids[r]
+                for r in ("reference_1", "reference_2")
+                if _bins(recs[r], k, alias_q[0]) is None
+            ]
+            if hollow:
+                empty += hollow
                 continue
             cap = recs["updater_a"]["particles"]
             worlds.append(
@@ -2117,7 +2139,7 @@ def assemble_freeze_summary(protocol, units, stage="development"):
                 "worlds": worlds,
             }
         )
-    return {"groups": groups}, sorted(set(missing))
+    return {"groups": groups, "empty_references": sorted(empty)}, sorted(set(missing))
 
 
 CERTIFICATION_CHECKS = {
@@ -2150,8 +2172,8 @@ def certify_references(protocol, units, delta2, stage="development"):
     every development world of every regime: ``D2_w = sum_b (X_b - Y_b)(X'_b -
     Y'_b)`` with the run pairs of ``CERTIFICATION_CHECKS``, and the check
     passes when ``mean + z SE`` (``z`` the alias critical value) is at most
-    its fraction of ``delta2``. A mass model with any missing record is
-    ``incomplete``.
+    its fraction of ``delta2``. A mass model with any missing record, or any
+    empty reference fit (no weighted draw), is ``incomplete``.
     """
     import numpy as np
 
@@ -2161,7 +2183,7 @@ def certify_references(protocol, units, delta2, stage="development"):
     n_dev = stage_worlds(protocol, stage)
     out = {}
     for mass_model in protocol["panel"]["mass_models"]:
-        rows, missing = [], []
+        rows, missing, empty = [], [], set()
         for k in protocol["panel"]["epoch_counts"]:
             for check, (left, right) in CERTIFICATION_CHECKS.items():
                 for q in alias_q:
@@ -2181,7 +2203,15 @@ def certify_references(protocol, units, delta2, stage="development"):
                                     if r is None
                                 ]
                                 continue
-                            x, y, x2, y2 = (np.asarray(_bins(r, k, q)) for r in recs)
+                            bins = [_bins(r, k, q) for r in recs]
+                            if any(b is None for b in bins):
+                                empty.update(
+                                    i
+                                    for i, b in zip(ids, bins, strict=True)
+                                    if b is None
+                                )
+                                continue
+                            x, y, x2, y2 = (np.asarray(b) for b in bins)
                             d2.append(float(np.sum((x - y) * (x2 - y2))))
                     if not d2:
                         continue
@@ -2204,7 +2234,7 @@ def certify_references(protocol, units, delta2, stage="development"):
                         }
                     )
         missing = sorted(set(missing))
-        if missing:
+        if missing or empty:
             status = "incomplete"
         elif all(r["pass"] for r in rows):
             status = "certified"
@@ -2213,6 +2243,7 @@ def certify_references(protocol, units, delta2, stage="development"):
         out[mass_model] = {
             "status": status,
             "missing_units": len(missing),
+            "empty_units": len(empty),
             "checks": rows,
         }
     return out
@@ -2254,7 +2285,14 @@ def freeze_report(protocol, path, exact_path=None):
         if off_budget:
             reasons.append(f"records at non-protocol budgets: {off_budget}")
         summary, missing = assemble_freeze_summary(protocol, units)
-        if missing:
+        empty = summary["empty_references"]
+        if empty:
+            reasons.append(
+                f"{len(empty)} reference fits kept no weighted draw (the proposal "
+                "budget is too small for those worlds; double it); first empty: "
+                f"{empty[:3]}"
+            )
+        if missing or empty:
             panel = protocol["panel"]
             needed = (
                 stage_worlds(protocol, "development")
@@ -2262,11 +2300,12 @@ def freeze_report(protocol, path, exact_path=None):
                 * len(panel["mass_models"])
                 * (2 + 2 * len(panel["epoch_counts"]))
             )
-            reasons.append(
-                f"{len(missing)} of {needed} freeze records missing (updater_a, "
-                "updater_b, reference_1 and reference_2 for every development world "
-                f"of every group); first missing: {missing[:3]}"
-            )
+            if missing:
+                reasons.append(
+                    f"{len(missing)} of {needed} freeze records missing (updater_a, "
+                    "updater_b, reference_1 and reference_2 for every development "
+                    f"world of every group); first missing: {missing[:3]}"
+                )
             report["worlds_complete_per_group"] = {
                 "{regime} {mass_model} k={epoch_count}".format(**g): len(g["worlds"])
                 for g in summary["groups"]
@@ -2275,14 +2314,15 @@ def freeze_report(protocol, path, exact_path=None):
         units = None
         summary = json.loads(path.read_text())
         missing = []
-    if missing and units:
+        empty = []
+    if (missing or empty) and units:
         # For information only: the certification statistics of whatever
         # records exist, bounded by the provisional delta2.
         provisional = protocol["criteria"]["alias_accuracy"]["delta2"]
         report["certification_partial_vs_provisional_delta2"] = certify_references(
             protocol, units, provisional
         )
-    if not missing:
+    if not missing and not empty:
         try:
             alias = freeze_alias(protocol, summary)
         except ValueError as err:
@@ -2429,6 +2469,8 @@ def run_stage(protocol, args):
     entry = manifest_entry(protocol, None, budgets)
     entry["protocol_budgets"] = budgets_match_protocol(protocol, budgets)
     entry["shard"] = args.shard
+    entry["finished"] = None
+    write_manifest(args.out, shard, entry)
     executor = UnitExecutor(protocol, budgets, chunk=args.chunk)
     counts = run_units(
         units, args.out, shard, executor, log=lambda m: print(m, flush=True)
