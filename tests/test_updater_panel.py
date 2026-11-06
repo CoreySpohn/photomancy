@@ -155,8 +155,8 @@ def test_freeze_never_loosens_the_alias_gate():
 
     shuffled = _summary(tool, protocol, mixed_ess, ids=reversed(range(38)))
     in_order = _summary(tool, protocol, mixed_ess)
-    mixed = tool.freeze_alias(protocol, shuffled, panels=8)
-    assert mixed == tool.freeze_alias(protocol, in_order, panels=8)
+    mixed = tool.freeze_alias(protocol, shuffled, panels=4)
+    assert mixed == tool.freeze_alias(protocol, in_order, panels=4)
     assert mixed["status"] == "incomplete"
     assert mixed["delta2"] > alias["delta2_max"]
 
