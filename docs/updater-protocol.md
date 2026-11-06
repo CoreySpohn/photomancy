@@ -27,6 +27,26 @@ posterior an unbounded sampler would return.
   stays in the verdict table beside any rerun.
 - The panel is a script (`tools/updater_panel.py`), never a test. Its committed
   outputs are the verdict table and the development-panel record.
+- **Pre-freeze amendments.** The amendments below were made while the protocol
+  was a draft, before any panel world was run, and each is marked in the text
+  with its label. They change no cap and no minimum-power rule.
+  - A1: the updater kernel block (`updater_kernel`): conditional-ESS target,
+    proposal scale per target and the period-alias move, tuned on the tuning
+    worlds only ("Updater kernel").
+  - A2: the definitions of the update statuses that count as failed updates
+    ("Failed updates").
+  - A3: the updater precision used by the alias freeze is measured from the
+    disagreement of the two independent-key runs, never from the kernel's own
+    ESS ("Provisional values").
+  - A4: the run pairs of the certification checks and their critical value;
+    for the exact checks, the repeat indices, the updater key, the reduced TI
+    case's mass window and the sharper window bound ("Reference
+    certification", "Exact checks", "Worlds, seeds and random numbers").
+  - A5: the compute tally repriced at the measured cost of a whole update and
+    of a reference fit (`compute`; "Compute").
+  - A6: how the references are executed in batches, and the records the
+    development runner writes ("Reference method and budget", "Development
+    runner").
 
 ## Parameter block
 
@@ -52,7 +72,7 @@ stated here under `stated`.
   },
   "updater_kernel": {
     "low_ess_fraction": 0.1,
-    "target_cess_fraction": 0.9,
+    "target_cess_fraction": {"ti_window": 0.85, "physical_fixed": 0.9},
     "proposal_scale": {"ti_window": 1.0, "physical_fixed": 0.3},
     "alias_moves": true
   },
@@ -165,7 +185,8 @@ stated here under `stated`.
     "exact_checks": {"sampler_repeats": 16, "family_alpha": 0.01,
                      "bins_per_case": 24, "interval_end_points_per_case": 4,
                      "cases": 2, "quadrature_error_factor": 2.0,
-                     "bin_mass_floor": 0.002}
+                     "bin_mass_floor": 0.002,
+                     "ti_mass_window_msun": [0.001, 10000.0]}
   },
   "provisional": [
     "criteria.alias_accuracy.delta2",
@@ -173,6 +194,11 @@ stated here under `stated`.
     "reference.physical_fixed.proposals_per_fit"
   ],
   "limits": {"working_days": 14, "compute_wait_days": 7},
+  "compute": {
+    "source": "development runner on one slot (4 threads), arm64 macOS laptop, jax 0.12; tuning worlds; references at the protocol budget",
+    "measured_seconds_per_update": {"ti_window": 0.645, "physical_fixed": 0.491},
+    "measured_reference_seconds_per_fit": {"ti_window": 28.2, "physical_fixed": 22.6}
+  },
   "stated": {
     "coverage_critical_count": 339,
     "overcoverage_report_count": 379,
@@ -312,6 +338,56 @@ lanes) from orbit geometry.
 - **Reference.** The OFTI scale-and-rotate proposal with exact importance
   weights (next section).
 
+## Updater kernel
+
+*Amendment A1.* The parameter block's `updater_kernel` fixes the kernel the
+panel grades, within the budget ceiling (which is unchanged). The values were
+tuned on the tuning worlds only (development worlds 0 to 5 of each regime and
+mass model) with `tools/updater_tuning.py`; the record is
+`docs/updater-tuning.json`.
+
+- **Conditional-ESS target** (was 0.5 for both pairs): 0.85 for the TI pair
+  and 0.9 for the physical pair. Each rung's temperature increment keeps that
+  fraction of the particles' conditional ESS. At 0.5 both pairs lost
+  lineages: the multinomial size implied by the disagreement of two
+  independent keys (amendment A3) had a median of 6 for the TI ln P bins in R2
+  at two epochs (1,059 at 0.85) and of 43 for the physical ln P bins in R1 at
+  two epochs (302 at 0.9). For the TI pair 0.85 rather than 0.9 trades median
+  precision for the worst worlds and for rung headroom: in R2 at three epochs
+  the median lane-implied ESS is 1,061 against 1,747, but the smallest is 207
+  against 74, and the initializer needs at most 23 rungs (R3) against 29, out
+  of 32.
+- **Proposal scale per target** (`OrbitUpdater.proposal_scale` left unset, so
+  each target's `default_proposal_scale` applies): 1.0 for the TI pair, whose
+  collapsed move walks only $(e, \ln P, \tau)$, and 0.3 for the physical pair,
+  whose random walk covers every coordinate.
+- **Period-alias move** for the TI pair (`alias_moves`). After every collapsed
+  move each particle proposes the frequency $1/P + k/\Delta$, with $k$ uniform
+  on the nonzero integers up to the number of aliases the prior's frequency
+  range spans and $\Delta$ the smallest gap between buffered epochs, shifts its
+  phase so that the mean anomaly at every epoch of the lattice is unchanged
+  modulo $2\pi$, and redraws the TI constants from their conditional Gaussian.
+  The acceptance ratio carries the map's Jacobian $f/f'$, so the move is an
+  exact Metropolis-Hastings kernel for the rung's target
+  (`test_alias_jump_leaves_tempered_ti_posterior_invariant`, with a mutant
+  that drops the Jacobian). On the panel's equal-step cadences the jump leaves
+  every prediction unchanged and so crosses between period aliases; in R1 no
+  alias lies inside the prior, so it is never accepted there.
+- **Residual spread.** On the R2 tuning worlds with 8 independent keys each
+  (target 0.9, scale 1.0), the alias move raises the median lane-implied ESS of
+  the ln P bins from 582 to 1,421 at two epochs and from 836 to 1,747 at
+  three, at 0.91 rather than 0.52 s per update. With the frozen target 0.85
+  the hardest tuning world sits at a lane-implied ESS of 74 at two epochs
+  (largest total variation between two lanes 0.19) and 207 at three (0.11):
+  the alias move does not remove this spread, and the panel measures it. The
+  physical pair's precision is lower and more uneven (two-key ESS of the e
+  bins as low as 9 in R3, where the eccentricity is near zero and the chart's
+  angle is undefined); that too is what the panel measures.
+
+The low-ESS floor stays at 0.1 of the particles. The budget ceiling (8,192
+particles, 32 rungs, 4 moves per rung) is unchanged; a rung budget that ends
+below temperature 1 is an `INCOMPLETE_LADDER` failed update.
+
 ## Reference method and budget
 
 Both references are importance samplers whose only approximation is Monte Carlo
@@ -340,6 +416,15 @@ guarantee:
   = 1,048,576 proposals per fit, at most $2^{23}$.
 
 The dry run prints both arguments for every regime and epoch count.
+
+*Amendment A6.* A fit is executed in batches so that its memory is bounded:
+the Lambert fit as successive calls with the same families and `n_per_family`
+equal to the batch size, keyed by `fold_in(run_key, batch_index)`, the last
+batch truncated per family so that every family receives exactly
+`n_per_family` proposals; the admissible-region and physical fits likewise in
+batches of a fixed number of proposals. The pooled particles are the same
+estimator as one call: independent proposals, equal allocation per family and
+unchanged weights.
 
 ### Physical reference
 
@@ -396,6 +481,17 @@ $\overline{D2} + z\,\mathrm{SE}$ with a fraction of $\delta_2$.
    $\delta_2 / 2$.
 4. **Exact checks** (next subsection) pass for the reference.
 
+*Amendment A4.* The runs of each check are, by purpose: repeat noise
+`reference_1`, `reference_2`, `reference_3`, `reference_4` with $R_1, \dots,
+R_4$ in that order; budget agreement $D2_w = \sum_b (R_{1,b} - C_{1,b})(R_{2,b}
+- C_{2,b})$ with $C_1, C_2$ the runs `cert_doubled_1` and `cert_doubled_2` at
+twice the budget; proposal agreement the same with `cert_proposal_1` and
+`cert_proposal_2`. The critical value $z$ is the alias criterion's (3.078). A
+check is made per mass model, epoch count and alias quantity (6 bounds per check
+and mass model), and the reference is certified only when all 18 hold. The
+bound is computed against the frozen $\delta_2$; the freeze tool runs the checks
+after computing it.
+
 Checks 2 and 3 are evidence, not bounds. Agreement between two budgets does not
 bound the bias of either without a convergence model, and the two proposals
 share the target code (the physical pair shares its weighting formula; the TI
@@ -426,7 +522,12 @@ central 90 percent intervals of the future east and north positions.
   $r_0 a_\mathrm{lo} \le \rho \le r_0 a_\mathrm{hi}$.
 - **TI pair, reduced case.** Two epochs (0 and 60 days, 3.5 mas), the TI model
   with $P$ from 200 to 400 days and a wide mass window ($\mu$ from
-  $10^{-3}$ to $10^{3}\,GM_\odot$), future epoch 120 days. Given $(e, \ln P,
+  $10^{-3}$ to $10^{4}\,GM_\odot$; *amendment A4*: the upper edge was
+  $10^{3}$, where the implied masses of the $s_\mathrm{TI} = 2$ AU prior at
+  these periods, typically near $100\,M_\odot$, put a window-bound mass of
+  $3.2 \times 10^{-4}$ outside the window; at $10^{4}$ the bound is
+  $3.9 \times 10^{-14}$ and the truth draw is unchanged), future epoch 120
+  days. Given $(e, \ln P,
   \tau)$ the positions are linear in the four TI constants, whose prior is
   Gaussian, so they are integrated analytically, and the bin masses and the
   future-position distribution (a Gaussian per node) follow from a
@@ -436,14 +537,24 @@ central 90 percent intervals of the future east and north positions.
   a ball of radius $r$ around the conditional mean lies inside the window when
   its image interval does, and the mass outside is at most the
   $\chi^2_4$ tail at $r^2 / \lambda_\mathrm{max}$; the weighted sum of these
-  bounds must be below $10^{-6}$.
+  bounds must be below $10^{-6}$. (*Amendment A4*: the runner uses the sharper
+  radius from $a(c)$ being the largest singular value of the $2 \times 2$ TI
+  matrix, which is 1-Lipschitz in $c$, so a ball of radius
+  $\min(a(m) - a_\mathrm{lo}, a_\mathrm{hi} - a(m))$ lies inside the window;
+  it reports the interval form above as well.)
 - **Refinement.** Each rule is evaluated at three successive levels, each
   doubling the nodes per dimension, and the table of every graded value at each
   level is committed. The quadrature error estimate $\epsilon_q$ of a value is
   twice the change between the two finest levels; the finest level must change
   the value by less than the previous refinement did.
 - **Comparison.** The sampler (reference, and the updater for information) runs
-  16 times with independent keys at its budget. The compared values are, per
+  16 times with independent keys at its budget (*amendment A4*: the reference
+  uses the `exact_run` key of the repeat, the updater that key folded with 1).
+  The runner is `tools/updater_exact_checks.py`; its report holds the
+  refinement table of every value at every level and a verdict per mass
+  model, `pass`, `fail` or `incomplete` (a missing level or repeat, a value
+  whose refinement does not shrink, or a window bound of $10^{-6}$ or more).
+  The compared values are, per
   case, the 24 bin masses (8 bins of 3 quantities) and the 4 interval end
   points, so $m = 56$ over the two cases. A value passes when
   $|\bar x - x_q| \le \epsilon_q + \max(t^\star s_x/\sqrt{16},\ f)$, with
@@ -463,6 +574,42 @@ central 90 percent intervals of the future east and north positions.
   0.01 calibration holds only for sampler runs with ESS of about 1,000 or more. The tolerance follows
   from the quadrature error and the measured Monte Carlo spread, not from the
   astrometric error. Every value must pass.
+
+## Development runner
+
+*Amendment A6.* `python tools/updater_panel.py --run development --out DIR`
+runs the development stage as independent work units:
+
+- an updater unit runs the three updates of one world for one run role
+  (`updater_a`, `updater_b`, `updater_doubled`) and records, per update, the
+  status, the kernel's `ess`, the Kish ESS of the returned weights, the
+  distinct-particle count, the rungs used, the temperature, the acceptance
+  rates and the warm wall time, and, after epochs 2 and 3, the graded summary;
+- a reference unit runs one fit for one world, run role (`reference_1` to
+  `reference_4`, `cert_doubled_*`, `cert_proposal_*`) and epoch count, and
+  records the method, the proposals, the Kish ESS and the graded summary;
+- a graded summary holds the eight-bin masses of each alias quantity, the
+  central 90 and 50 percent interval end points of each panel quantity, the
+  schedule probability, the randomized PITs (drawn under the PIT purpose key)
+  and the truth.
+
+Each unit is appended as one JSON line to `DIR/units-{i}of{n}.jsonl` the moment
+it finishes; a restart skips every unit present in any unit file of `DIR`, and
+`--shard i/n` assigns every $n$-th unit of the canonical order to shard $i$, so
+two processes or machines share one stage without overlap. Every invocation
+appends its provenance (protocol and code commits, a dirty-tree flag, JAX
+version, host, budgets and arguments) to `DIR/manifest-{i}of{n}.json`, and
+every record carries a hash of the protocol content that determines what it
+computes (everything but the status, the criteria, the provisional list, the
+stated values, the limits, the compute prices and the reference budgets), so
+the freeze refuses records left over from before an amendment.
+`--freeze DIR --exact EXACT.json` assembles the freeze input, computes
+$\delta_2$, runs certification checks 1 to 3 against it and reads the
+exact-check verdicts; it reports `frozen` only when every development record
+exists at the protocol budgets and every check passes, and otherwise
+`incomplete` with each reason. The exact checks have their own runner,
+`tools/updater_exact_checks.py`, whose refinement tables are committed with the
+freeze.
 
 ## Worlds, seeds and random numbers
 
@@ -503,7 +650,8 @@ coordinates: the method and budget of a certification run are in its purpose
 (`reference_1` to `reference_4` for the repeat runs, `cert_doubled_*` for twice
 the budget, `cert_proposal_*` for the other proposal) and the epoch count in the
 last index. The exact checks use the `exact` stage, world index 0, regime index
-0 and purpose `exact_run` with the repeat number (0 to 7) as the index. Seeded
+0 and purpose `exact_run` with the repeat number (0 to 15, amendment A4) as the
+index. Seeded
 NumPy simulations (sizing, the alias freeze) use
 `numpy.random.default_rng([root_seed, s, ...])` with the stream numbers `s` under
 `simulation_seeds`, followed by canonical indices (for the freeze, the group's
@@ -609,7 +757,33 @@ $\mathrm{SE} = s / \sqrt{400}$.
 For each regime, mass model and update (initializer, epoch 2, epoch 3; 24
 groups of 400 independent worlds), count the worlds whose update status is not
 `OK` (low ESS, no support, budget exhausted, incomplete ladder). An acceptable
-updater fails at most 2 percent of updates. At per-group level $0.05/24$ the
+updater fails at most 2 percent of updates.
+
+*Amendment A2.* The statuses are those of
+`photomancy.orbit.updater.UpdaterStatus`; when several hold, the first in the
+order `NO_SUPPORT`, `BUDGET_EXHAUSTED`, `LOW_ESS`, `INCOMPLETE_LADDER` is
+reported:
+
+- `NO_SUPPORT`: no particle has a finite posterior weight under the record;
+  the belief is returned unchanged.
+- `BUDGET_EXHAUSTED`: a static capacity ran out (the accepted-record buffer is
+  full), so the record cannot be stored; the belief is returned unchanged. A
+  short rung budget is `INCOMPLETE_LADDER`, not this.
+- `LOW_ESS`: the record was assimilated, but the smallest conditional
+  effective sample size of any reweighting step of the update, or the number
+  of distinct weighted particles, is below `low_ess_fraction` (0.1) of the
+  particles. With the adaptive ladder every rung sits at the conditional-ESS
+  target by construction, so this catches a degenerate final correction of an
+  incomplete ladder, a rung whose bisection could not reach the target, or
+  moves that failed to rejuvenate the duplicates resampling creates.
+- `INCOMPLETE_LADDER`: the record was assimilated, but the 32 adaptive rungs
+  ended with the temperature below 1; the rest of the record's log likelihood
+  was applied as one importance reweighting without resampling or moves (and
+  that correction kept its conditional ESS above the floor, otherwise the
+  status is `LOW_ESS`).
+
+A padded or duplicate record is a no-op with status `OK` and does not occur in
+the panel. At per-group level $0.05/24$ the
 critical count is the smallest $c$ with $\Pr[\mathrm{Bin}(400, 0.02) > c] \le
 0.05/24$, which is **17**: a group fails when more than 17 of its 400 worlds
 fail. The one-sided 95 percent Clopper-Pearson upper bound on the rate is
@@ -691,6 +865,17 @@ gate.
      duplicate or unknown id and sorts the worlds by id before resampling); a
      world carries its updater ESS, its reference ESS and its reference bin
      masses for each alias quantity.
+   - *Updater precision (amendment A3).* The updater ESS of a world and alias
+     quantity is the effective multinomial size implied by the disagreement
+     of its two independent-key runs: with $\bar p$ the mean of their bin
+     masses and $s^2 = \tfrac12 \sum_b (U_{a,b} - U_{b,b})^2$, it is
+     $\sum_b \bar p_b (1 - \bar p_b) / s^2$, capped at the particle count
+     and floored at 1, so the simulated updater runs reproduce the measured
+     run-to-run variance. The kernel's own `ess` diagnostic is never used: the
+     adaptive ladder holds it at the conditional-ESS target times the particle
+     count by construction, whatever the precision of the binned output. The
+     reference ESS is the smaller Kish ESS of `reference_1` and
+     `reference_2`, and the reference bin masses are their mean.
    - *Aggregation*: 400 simulated panels per group and quantity; each panel
      resamples 400 whole development worlds with replacement, keeping each
      world's masses and both ESS values together, and draws the four runs as
@@ -738,6 +923,28 @@ recorded budget equals the protocol's. The likelihood
 alone is a lower bound on an update: proposals, reweighting and resampling add
 to it. Latency is reported against the 100 ms target and never enters a
 verdict.
+
+*Amendment A5.* The likelihood-only prices (0.136 s per TI update and 0.179 s
+per physical update) understate a whole update by a factor of 3 to 5, and the
+per-proposal reference prices understate a fit by 1.4 (TI) and 2.3 (physical),
+because a fit also evaluates the graded quantities of every proposal. The
+parameter block's `compute` holds the measured cost on one slot of the
+development machine: the mean warm wall time of an update of the tuned kernel
+over every update of the tuning runs (initializer, epoch 2 and epoch 3), and the
+wall time of a reference fit at the protocol budget through the development
+runner. `--dry-run` reprices the tally from it:
+
+| Pair | s per update | s per reference fit | Updater, development | Reference, development | Updater, panel | Reference, panel |
+|---|---|---|---|---|---|---|
+| ti_window | 0.645 | 28.2 | 0.3 h | 23.8 h | 3.4 h | 50.1 h |
+| physical_fixed | 0.491 | 22.6 | 0.2 h | 19.1 h | 2.6 h | 40.2 h |
+
+The development stage (updater runs and reference certification) is about 44
+single-slot hours and the panel about 96; two slots halve both. Every cost is at
+the provisional reference budgets; each doubling of a budget doubles that pair's
+reference hours. The doubled-budget updater run is priced at twice an update.
+The TI reference cost is dominated by R2, whose Lambert fit enumerates 62
+families.
 
 ## Verdict table
 
