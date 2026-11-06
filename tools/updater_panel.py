@@ -14,8 +14,9 @@ Usage::
         [--parts updater,reference,certification] [--worlds 0-5]
     python tools/updater_panel.py --status RUN_DIR [--stage panel]
     python tools/updater_panel.py --check-panel RUN_DIR
-    python tools/updater_panel.py --grade RUN_DIR [--mechanics pass|fail]
-        [--verdict-out docs/updater-verdict.csv] [--memory-mb MB]
+    python tools/updater_panel.py --grade RUN_DIR --mechanics-evidence FILE
+        --freeze-evidence FILE [--verdict-out docs/updater-verdict.csv]
+        [--memory-mb MB] [--latency-ms MS]
 
 ``--dry-run`` prints the cells, the world and seed allocation, the model hashes,
 the reference arguments, the critical values and the compute tally. ``--sizing``
@@ -3039,26 +3040,42 @@ def main(argv=None):
     parser.add_argument(
         "--verdict-out",
         type=Path,
-        default=REPO / "docs" / "updater-verdict.csv",
-        help="verdict table written by --grade",
+        default=None,
+        help="verdict table written by --grade (default docs/updater-verdict.csv; "
+        "an exploratory grade writes only to an explicit path)",
     )
     parser.add_argument(
-        "--mechanics",
-        choices=["pass", "fail"],
+        "--mechanics-evidence",
+        type=Path,
         default=None,
-        help="result of the mechanics tests at the graded commit "
-        "(without it the mechanics verdict is incomplete)",
+        help="JSON attestation of the mechanics tests: result (pass or fail), "
+        "code_commit and log_sha256 (without it the verdict is incomplete)",
+    )
+    parser.add_argument(
+        "--freeze-evidence",
+        type=Path,
+        default=None,
+        help="committed --freeze report (with its binding block); without it "
+        "no alias verdict can pass",
     )
     parser.add_argument(
         "--memory-mb",
         type=float,
         default=None,
-        help="peak memory of the intended batch, recorded by --grade",
+        help="measured peak memory of the intended batch, recorded by --grade",
+    )
+    parser.add_argument(
+        "--latency-ms",
+        type=float,
+        default=None,
+        help="measured warm batched amortized ms per active update for the "
+        "intended batch, recorded by --grade",
     )
     parser.add_argument(
         "--allow-dirty",
         action="store_true",
-        help="grade a panel whose manifests flag a dirty code tree",
+        help="grade a panel whose manifests flag a dirty code tree "
+        "(exploratory: no pass is recorded)",
     )
     parser.add_argument(
         "--roles", default=None, help="comma list: run only these run roles"
@@ -3072,7 +3089,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     protocol = load_protocol(args.protocol)
     if args.freeze is not None:
-        print(json.dumps(freeze_report(protocol, args.freeze, args.exact), indent=2))
+        report = freeze_report(protocol, args.freeze, args.exact)
+        verdict = _load_verdict_module()
+        report["binding"] = verdict.freeze_binding(_self_module(verdict), protocol)
+        print(json.dumps(report, indent=2))
     if args.dry_run:
         path = args.prices or (PRICES if PRICES.exists() else None)
         prices = json.loads(path.read_text()) if path else None
@@ -3104,33 +3124,61 @@ def main(argv=None):
     return status
 
 
-def _panel_audit_or_grade(protocol, args):
-    """Run ``--check-panel`` or ``--grade``; exit code 0 pass, 1 fail, 2 else."""
+def _load_verdict_module():
     path = Path(__file__).with_name("updater_verdict.py")
     spec = importlib.util.spec_from_file_location("updater_verdict", path)
-    verdict = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(verdict)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _self_module(verdict):
+    """This module as ``sys.modules`` knows it, else a fresh copy."""
     tool = sys.modules.get(__name__)
     if tool is None or not hasattr(tool, "atomic_write_text"):
         tool = verdict.load_tool()
+    return tool
+
+
+def _panel_audit_or_grade(protocol, args):
+    """Run ``--check-panel`` or ``--grade``; exit code 0 pass, 1 fail, 2 else."""
+    verdict = _load_verdict_module()
+    tool = _self_module(verdict)
     if args.check_panel is not None:
         audit = verdict.audit_panel(
             tool, protocol, args.check_panel, "panel", allow_dirty=args.allow_dirty
         )
         print(json.dumps(verdict.audit_summary(audit), indent=2, default=str))
         return {"complete": 0}.get(audit["status"], 2)
+
+    def load(path, reader):
+        if path is None:
+            return None
+        try:
+            return reader(path)
+        except (OSError, ValueError):
+            return {}
+
     result = verdict.grade_panel(
         tool,
         protocol,
         args.grade,
         allow_dirty=args.allow_dirty,
-        mechanics=args.mechanics,
+        mechanics=load(args.mechanics_evidence, verdict.read_mechanics_attestation),
         memory_mb=args.memory_mb,
+        latency_ms=args.latency_ms,
+        freeze_report=load(
+            args.freeze_evidence, lambda p: json.loads(Path(p).read_text())
+        ),
     )
     print(verdict.report_text(result))
-    if result["rows"] is not None:
-        verdict.write_verdict(tool, result, args.verdict_out)
-        print(f"wrote {args.verdict_out}")
+    out = args.verdict_out
+    if result["rows"] is not None and result["exploratory"] and out is None:
+        print("exploratory grade: no table written (name one with --verdict-out)")
+    elif result["rows"] is not None:
+        out = out or REPO / "docs" / "updater-verdict.csv"
+        verdict.write_verdict(tool, result, out)
+        print(f"wrote {out}")
     return {"pass": 0, "fail": 1}.get(result["status"], 2)
 
 

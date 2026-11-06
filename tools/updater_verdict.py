@@ -185,6 +185,33 @@ def _manifests(path):
     return entries, unreadable
 
 
+HEX_COMMIT = re.compile(r"^[0-9a-f]{7,64}$")
+
+
+def provenance_gaps(entry):
+    """Fields of a manifest entry that are absent or not populated.
+
+    The commits must look like commit ids, the versions and platform must be
+    non-empty strings, the arguments a non-empty list, the dirty flag a
+    boolean and the budgets a dict. Agreement between shards on an absent
+    field is not provenance.
+    """
+    gaps = []
+    for key in ("protocol_commit", "code_commit"):
+        if not isinstance(entry.get(key), str) or not HEX_COMMIT.match(entry[key]):
+            gaps.append(key)
+    for key in ("jax", "jaxlib", "platform", "run_hash", "protocol_hash"):
+        if not isinstance(entry.get(key), str) or not entry[key].strip():
+            gaps.append(key)
+    if not isinstance(entry.get("argv"), list) or not entry["argv"]:
+        gaps.append("argv")
+    if not isinstance(entry.get("code_dirty"), bool):
+        gaps.append("code_dirty")
+    if not isinstance(entry.get("budgets"), dict):
+        gaps.append("budgets")
+    return gaps
+
+
 def _one_value(entries, field, key=None):
     """Distinct values of a manifest field, in a stable order."""
     key = key or (lambda entry: entry.get(field))
@@ -200,7 +227,7 @@ def audit_manifests(tool, protocol, path, require_frozen=True, allow_dirty=False
     """
     path = Path(path)
     entries, unreadable = _manifests(path)
-    reasons = []
+    reasons, notes = [], []
     if unreadable:
         reasons.append(f"unreadable manifests: {unreadable}")
     if not entries:
@@ -242,6 +269,16 @@ def audit_manifests(tool, protocol, path, require_frozen=True, allow_dirty=False
         )
     if any(e.get("protocol_budgets") is not True for _, e in entries):
         reasons.append("an invocation ran at non-protocol budgets (a test run)")
+    expected = tool.protocol_budgets(protocol)
+    wrong = sorted({name for name, e in entries if e.get("budgets") != expected})
+    if wrong:
+        reasons.append(
+            f"recorded budgets differ from the protocol's {expected} in: {wrong}"
+        )
+    for name, entry in entries:
+        missing_fields = provenance_gaps(entry)
+        if missing_fields:
+            reasons.append(f"unpopulated provenance in {name}: {missing_fields}")
     for label, values in (
         ("jax versions", _one_value(entries, "jax")),
         ("jaxlib versions", _one_value(entries, "jaxlib")),
@@ -258,11 +295,14 @@ def audit_manifests(tool, protocol, path, require_frozen=True, allow_dirty=False
     dirty = sorted({name for name, e in entries if e.get("code_dirty") is not False})
     if dirty and not allow_dirty:
         reasons.append(f"invocations with a dirty or unknown code tree in: {dirty}")
+    elif dirty:
+        notes.append(f"exploratory: dirty or unknown code tree in {dirty}")
     interrupted = sum(1 for _, e in entries if not e.get("finished"))
     commits = _one_value(entries, "code_commit")
     protocol_commits = _one_value(entries, "protocol_commit")
     return {
         "reasons": reasons,
+        "notes": notes,
         "invocations": len(entries),
         "interrupted_invocations": interrupted,
         "code_commit": commits[0] if len(commits) == 1 else "",
@@ -363,14 +403,137 @@ def pit_sup_distance(pits):
     return float(max(np.max(i / n - u), np.max(u - (i - 1) / n)))
 
 
-def _finite(values):
-    import numpy as np
+STATUSES = ("OK", "NO_SUPPORT", "BUDGET_EXHAUSTED", "LOW_ESS", "INCOMPLETE_LADDER")
+NORMALIZATION_TOLERANCE = 1e-6
 
-    return bool(np.all(np.isfinite(np.asarray(values, float))))
+
+def _number(x):
+    """``x`` as a finite float, else None (booleans and non-numbers included)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    return float(x) if math.isfinite(x) else None
+
+
+def valid_probability_vector(values, size):
+    """Whether ``values`` is ``size`` finite, nonnegative numbers summing to one."""
+    if not isinstance(values, (list, tuple)) or len(values) != size:
+        return False
+    nums = [_number(v) for v in values]
+    if any(v is None or v < 0.0 for v in nums):
+        return False
+    return abs(sum(nums) - 1.0) <= NORMALIZATION_TOLERANCE
+
+
+def valid_unit_interval(value):
+    """Whether ``value`` is a finite number in [0, 1]."""
+    x = _number(value)
+    return x is not None and 0.0 <= x <= 1.0
+
+
+def valid_intervals(ends):
+    """Whether an interval pair is finite, ordered and nested (50 inside 90)."""
+    try:
+        lo90, hi90 = (_number(v) for v in ends["90"])
+        lo50, hi50 = (_number(v) for v in ends["50"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if None in (lo90, hi90, lo50, hi50):
+        return False
+    return lo90 <= lo50 <= hi50 <= hi90
+
+
+def _empty_fit(summary):
+    """Whether a summary reports a fit with no weighted draw."""
+    if not isinstance(summary, dict):
+        return True
+    return summary.get("particles") == 0 or _number(summary.get("kish_ess", 1.0)) == 0.0
+
+
+def record_problems(protocol, record):
+    """What is missing or invalid in a unit record, as a list of strings.
+
+    An updater record needs a declared status for every update, and for each
+    epoch count a finite truth, finite ordered nested intervals and PITs in
+    [0, 1] for every graded quantity, normalized bin masses for every alias
+    quantity and a schedule probability in [0, 1]. A reference record needs
+    normalized bin masses for every alias quantity from a fit that kept a
+    weighted draw. The grader scores a record only when it has no problems;
+    missing evidence is never counted as a failure or a tolerated deviation.
+    """
+    panel = protocol["panel"]
+    alias = protocol["criteria"]["alias_accuracy"]
+    nbins = alias["bins"]
+    problems = []
+    kind = record.get("kind")
+    if kind == "updater":
+        updates = record.get("updates")
+        if not isinstance(updates, list) or len(updates) != len(panel["updates"]):
+            problems.append("updates")
+        else:
+            for u, entry in enumerate(updates):
+                if not isinstance(entry, dict) or entry.get("status") not in STATUSES:
+                    problems.append(f"status of update {u}")
+        for k in panel["epoch_counts"]:
+            problems += _summary_problems(protocol, record, k, nbins)
+    elif kind == "reference":
+        summary = record.get("summary")
+        if _empty_fit(summary):
+            problems.append("reference fit kept no weighted draw")
+        else:
+            problems += _bin_problems(summary, alias["quantities"], nbins)
+    else:
+        problems.append("kind")
+    return problems
+
+
+def _bin_problems(summary, quantities, nbins):
+    bins = summary.get("bins") if isinstance(summary, dict) else None
+    if not isinstance(bins, dict):
+        return ["bins"]
+    return [
+        f"bins {q}"
+        for q in quantities
+        if not valid_probability_vector(bins.get(q), nbins)
+    ]
+
+
+def _summary_problems(protocol, record, k, nbins):
+    summaries = record.get("summaries")
+    summary = summaries.get(str(k)) if isinstance(summaries, dict) else None
+    if _empty_fit(summary):
+        return [f"summary at {k} epochs is empty"]
+    problems = _bin_problems(
+        summary, protocol["criteria"]["alias_accuracy"]["quantities"], nbins
+    )
+    truth = (record.get("truth") or {}).get(str(k))
+    intervals = summary.get("intervals")
+    pits = summary.get("pit")
+    for q in protocol["panel"]["quantities"]:
+        if not isinstance(truth, dict) or _number(truth.get(q)) is None:
+            problems.append(f"truth {q} at {k}")
+        if not isinstance(intervals, dict) or not valid_intervals(intervals.get(q)):
+            problems.append(f"intervals {q} at {k}")
+        if not isinstance(pits, dict) or not valid_unit_interval(pits.get(q)):
+            problems.append(f"pit {q} at {k}")
+    if not valid_unit_interval(summary.get("schedule_p")):
+        problems.append(f"schedule_p at {k}")
+    return problems
+
+
+def valid_units(protocol, units):
+    """The records without problems, and the problems of the others by id."""
+    good, bad = {}, {}
+    for ident, record in units.items():
+        problems = record_problems(protocol, record)
+        if problems:
+            bad[ident] = problems
+        else:
+            good[ident] = record
+    return good, bad
 
 
 class _Group:
-    """The records of one (regime, mass model) block, by world and role."""
+    """The valid records of one (regime, mass model) block, by world and role."""
 
     def __init__(self, tool, units, stage, mass_model, regime, n):
         self.tool, self.units, self.stage = tool, units, stage
@@ -383,7 +546,7 @@ class _Group:
         return self.units.get(ident)
 
     def records(self, role, k=None):
-        """One record per world, ``None`` where absent."""
+        """One record per world, ``None`` where absent or invalid."""
         return [self.record(w, role, k) for w in range(self.n)]
 
     def complete(self, roles, k=None):
@@ -399,20 +562,11 @@ class _Group:
 
 
 def _summary(record, k):
-    if record is None:
-        return {}
-    return record.get("summaries", {}).get(str(k)) or {}
+    return record["summaries"][str(k)]
 
 
-def _incomplete_row(row, columns):
-    for c in columns:
-        row[f"verdict_{c}"] = "incomplete"
-
-
-def cell_statistics(group, k, quantity, tool, protocol, crit):
+def cell_statistics(group, k, quantity, crit):
     """Coverage and calibration of one cell: counts, statistic and verdicts."""
-    import numpy as np
-
     out = {"coverage": "incomplete", "calibration": "incomplete"}
     stats = {}
     worlds, complete = group.complete((GRADED_ROLE,))
@@ -420,42 +574,31 @@ def cell_statistics(group, k, quantity, tool, protocol, crit):
     if not complete:
         return out, stats
     covered = covered_50 = 0
-    pits, hollow = [], 0
+    pits = []
     for rec in group.records(GRADED_ROLE):
         s = _summary(rec, k)
-        truth = rec.get("truth", {}).get(str(k), {}).get(quantity)
-        ends = s.get("intervals", {}).get(quantity)
-        pit = s.get("pit", {}).get(quantity)
-        if truth is None or ends is None or not math.isfinite(float(truth)):
-            hollow += 1
-            continue
-        lo, hi = ends["90"]
+        truth = rec["truth"][str(k)][quantity]
+        lo, hi = s["intervals"][quantity]["90"]
         covered += bool(lo <= truth <= hi)
-        lo, hi = ends["50"]
+        lo, hi = s["intervals"][quantity]["50"]
         covered_50 += bool(lo <= truth <= hi)
-        if pit is None or not math.isfinite(float(pit)):
-            hollow += 1
-        else:
-            pits.append(float(pit))
+        pits.append(float(s["pit"][quantity]))
     stats["covered_count"], stats["covered_50_count"] = covered, covered_50
     out["coverage"] = decide_coverage(covered, crit["coverage_critical_count"])
-    if hollow:
-        # A world whose belief has no scorable interval or PIT counts against
-        # calibration; its CDF value cannot be placed.
-        out["calibration"] = "fail"
-        return out, stats
-    sup = pit_sup_distance(np.asarray(pits))
+    sup = pit_sup_distance(pits)
     stats["pit_sup_distance"] = sup
     out["calibration"] = decide_calibration(sup, crit["dkw_epsilon"])
     return out, stats
 
 
 def alias_statistics(group, k, quantity, protocol, crit):
-    """D2 statistic and TV of one group and alias quantity, or None if unscorable.
+    """D2 statistic and TV of one group and alias quantity.
 
     Returns:
-        ``(verdict, stats)``; a hollow or non-finite bin vector, or a missing
-        unit, makes the verdict ``incomplete``.
+        ``(verdict, stats)``. ``verdict`` is ``pass`` or ``fail`` from the
+        statistics alone, or ``incomplete`` when a run is missing or invalid
+        or the tolerance exceeds its cap. The caller blocks a ``pass`` that
+        lacks certification evidence.
     """
     import numpy as np
 
@@ -466,21 +609,13 @@ def alias_statistics(group, k, quantity, protocol, crit):
     stats["worlds"] = worlds
     if not complete:
         return "incomplete", stats
-    nbins = alias["bins"]
     d2, tv = [], []
     for w in range(group.n):
         vec = {}
         for role in roles:
             rec = group.record(w, role, k if role.startswith("ref") else None)
-            s = (
-                _summary(rec, k)
-                if rec["kind"] == "updater"
-                else rec.get("summary") or {}
-            )
-            bins = s.get("bins", {}).get(quantity)
-            if bins is None or len(bins) != nbins or not _finite(bins):
-                return "incomplete", stats
-            vec[role] = np.asarray(bins, float)
+            s = _summary(rec, k) if rec["kind"] == "updater" else rec["summary"]
+            vec[role] = np.asarray(s["bins"][quantity], float)
         (ua, ra), (ub, rb) = ALIAS_PAIRS
         d2.append(float((vec[ua] - vec[ra]) @ (vec[ub] - vec[rb])))
         tv.append(0.5 * float(np.abs(vec[ua] - vec[ra]).sum()))
@@ -500,26 +635,11 @@ def update_statistics(group, update, protocol, crit, tool):
     stats = {}
     worlds, complete = group.complete((GRADED_ROLE,))
     stats["worlds"] = worlds
-    warm = []
-    for role in ("updater_a", "updater_b"):
-        for rec in group.records(role):
-            try:
-                u = rec["updates"][update]
-                if u.get("includes_compile") is False:
-                    warm.append(float(u["seconds"]))
-            except (TypeError, KeyError, IndexError):
-                continue
-    if warm:
-        stats["latency_ms_per_update"] = 1000.0 * sum(warm) / len(warm)
     if not complete:
         return "incomplete", stats
-    failed = 0
-    for rec in group.records(GRADED_ROLE):
-        try:
-            status = rec["updates"][update]["status"]
-        except (TypeError, KeyError, IndexError):
-            status = None
-        failed += status != "OK"
+    failed = sum(
+        rec["updates"][update]["status"] != "OK" for rec in group.records(GRADED_ROLE)
+    )
     stats["exhausted_count"] = failed
     conf = protocol["criteria"]["failed_updates"]["upper_bound_confidence"]
     stats["exhausted_cp_upper"] = tool.clopper_pearson_upper(failed, group.n, conf)
@@ -537,23 +657,135 @@ def schedule_statistics(group, k, protocol):
     if not complete:
         return "incomplete", stats
     p = {
-        role: np.array(
-            [
-                float(_summary(rec, k).get("schedule_p", math.nan))
-                for rec in group.records(role)
-            ]
-        )
+        role: np.array([_summary(rec, k)["schedule_p"] for rec in group.records(role)])
         for role in SCHEDULE_ROLES
     }
     tol = sched["tolerance"]
-    # A comparison that cannot be evaluated (NaN) counts as a deviation.
-    keys = int(np.sum(~(np.abs(p["updater_a"] - p["updater_b"]) <= tol)))
-    budget = int(np.sum(~(np.abs(p["updater_a"] - p["updater_doubled"]) <= tol)))
+    keys = int(np.sum(np.abs(p["updater_a"] - p["updater_b"]) > tol))
+    budget = int(np.sum(np.abs(p["updater_a"] - p["updater_doubled"]) > tol))
     stats["schedule_deviations_keys"], stats["schedule_deviations_budget"] = (
         keys,
         budget,
     )
     return decide_schedule(keys, budget, sched["max_count"]), stats
+
+
+# ---------------------------------------------------------------------------
+# Evidence from outside the panel: certification and mechanics
+# ---------------------------------------------------------------------------
+
+
+def freeze_binding(tool, protocol):
+    """Binding block that ``--freeze`` adds to its report.
+
+    The freeze report is evidence for a later grade only through what it was
+    computed for: the run hash (protocol content and implementation), the
+    budgets and the alias tolerance in force.
+    """
+    return {
+        "run_hash": tool.run_hash(protocol),
+        "budgets": tool.protocol_budgets(protocol),
+        "alias_delta2": protocol["criteria"]["alias_accuracy"]["delta2"],
+    }
+
+
+def freeze_evidence(tool, protocol, report):
+    """Validate a freeze report against the protocol being graded.
+
+    The report is the committed output of ``--freeze`` (with its binding
+    block). It is accepted only when it says ``frozen`` with no reasons, its
+    binding equals the current run hash, protocol budgets and frozen alias
+    tolerance, every mass model's reference is ``certified``, every exact-check
+    case passed, and every group and alias quantity has a power lower bound at
+    the protocol's floor.
+
+    Returns:
+        Dict with ``valid``, ``reasons``, ``certified`` (mass model to bool)
+        and ``power_ok`` (set of (regime, mass model, epoch count, quantity)
+        meeting the floor).
+    """
+    alias = protocol["criteria"]["alias_accuracy"]
+    reasons = []
+    out = {"valid": False, "reasons": reasons, "certified": {}, "power_ok": set()}
+    if not isinstance(report, dict):
+        reasons.append("freeze evidence is not a freeze report")
+        return out
+    if report.get("status") != "frozen" or report.get("reasons"):
+        reasons.append("freeze report is not frozen with no reasons")
+    binding = report.get("binding") or {}
+    if binding.get("run_hash") != tool.run_hash(protocol):
+        reasons.append("freeze report is bound to another run hash")
+    if binding.get("budgets") != tool.protocol_budgets(protocol):
+        reasons.append("freeze report is bound to other budgets")
+    frozen = report.get("alias", {}).get("delta2")
+    graded = None if _number(frozen) is None else min(frozen, alias["delta2_max"])
+    same = (
+        graded is not None
+        and math.isclose(graded, alias["delta2"], rel_tol=1e-9)
+        and math.isclose(
+            binding.get("alias_delta2", math.nan), alias["delta2"], rel_tol=1e-9
+        )
+    )
+    if not same:
+        reasons.append("freeze report's alias tolerance is not the protocol's")
+    for mass_model in protocol["panel"]["mass_models"]:
+        cert = (report.get("certification") or {}).get(mass_model, {})
+        out["certified"][mass_model] = cert.get("status") == "certified"
+        if not out["certified"][mass_model]:
+            reasons.append(f"{mass_model} reference is not certified in the report")
+    exact = (report.get("exact_checks") or {}).get("verdicts")
+    if not isinstance(exact, dict) or not exact or set(exact.values()) != {"pass"}:
+        reasons.append("exact checks are absent or not all passed")
+    for row in (report.get("alias") or {}).get("groups", []):
+        lower = _number(row.get("power_lower_95"))
+        if lower is not None and lower >= alias["min_power"]:
+            out["power_ok"].add(
+                (
+                    row.get("regime"),
+                    row.get("mass_model"),
+                    row.get("epoch_count"),
+                    row.get("quantity"),
+                )
+            )
+    out["valid"] = not reasons
+    return out
+
+
+def mechanics_verdict(evidence, code_commit):
+    """Verdict of the mechanics criterion from an attestation, with a reason.
+
+    The attestation is a dict with ``result`` (``pass`` or ``fail``), the
+    ``code_commit`` the tests ran at and the ``log_sha256`` of the test log
+    (64 hex digits). It counts only when its commit equals the commit the
+    panel's manifests record. Anything else is ``incomplete``.
+    """
+    if not isinstance(evidence, dict):
+        return "incomplete", "no mechanics attestation"
+    if evidence.get("result") not in ("pass", "fail"):
+        return "incomplete", "mechanics attestation has no pass or fail result"
+    digest = evidence.get("log_sha256")
+    if not isinstance(digest, str) or not re.match(r"^[0-9a-f]{64}$", digest):
+        return "incomplete", "mechanics attestation has no test-log hash"
+    if not code_commit or evidence.get("code_commit") != code_commit:
+        return "incomplete", "mechanics attestation is for another code commit"
+    return evidence["result"], ""
+
+
+def read_mechanics_attestation(path):
+    """Load an attestation file; a ``log_path`` entry must match ``log_sha256``."""
+    import hashlib
+
+    path = Path(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    log = data.get("log_path")
+    if log is not None:
+        try:
+            digest = hashlib.sha256((path.parent / log).read_bytes()).hexdigest()
+        except OSError:
+            return {}
+        if digest != data.get("log_sha256"):
+            return {}
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -617,21 +849,35 @@ def thresholds(tool, protocol, n):
 
 
 def build_rows(
-    tool, protocol, units, commits=None, stage="panel", mechanics=None, memory_mb=None
+    tool,
+    protocol,
+    units,
+    commits=None,
+    stage="panel",
+    mechanics=None,
+    memory_mb=None,
+    latency_ms=None,
+    freeze=None,
 ):
-    """The verdict rows of a set of usable unit records.
+    """The verdict rows of a set of unit records.
 
     Args:
         tool: The loaded ``updater_panel`` module.
         protocol: The parameter block.
         units: Map of unit id to record (current run hash, protocol budgets).
+            Records with missing or invalid contents are not scored; the
+            criteria that read them are ``incomplete``.
         commits: ``protocol_commit`` and ``code_commit`` for every row.
         stage: Stage of the unit ids.
-        mechanics: ``"pass"`` or ``"fail"``, the result of the mechanics tests
-            at the graded commit; any other value leaves the criterion
-            ``incomplete``.
-        memory_mb: Peak memory of the intended batch, written on the
+        mechanics: ``"pass"`` or ``"fail"`` (``mechanics_verdict``); any other
+            value leaves the criterion ``incomplete``.
+        memory_mb: Measured peak memory of the intended batch, written on the
             failed-update rows when given.
+        latency_ms: Measured warm batched amortized cost per active update for
+            the intended batch, written on the failed-update rows when given.
+        freeze: ``freeze_evidence`` output. Without valid evidence, and for a
+            mass model or group it does not certify, an alias ``pass`` becomes
+            ``incomplete``; a ``fail`` stays a fail.
 
     Returns:
         List of row dicts in column order: the 64 cells, the position-angle
@@ -644,6 +890,7 @@ def build_rows(
     seeds = f"{protocol['prng']['root_seed']}/{stage}"
     mech = mechanics if mechanics in ("pass", "fail") else "incomplete"
     alias_q = protocol["criteria"]["alias_accuracy"]["quantities"]
+    units, _ = valid_units(protocol, units)
     rows = []
 
     def new(*args):
@@ -655,6 +902,20 @@ def build_rows(
         for key, value in stats.items():
             row[key] = value
 
+    def alias(group, row, k, q):
+        verdict, stats = alias_statistics(group, k, q, protocol, crit)
+        if verdict == "pass":
+            key = (group.regime, group.mass_model, k, q)
+            backed = (
+                freeze is not None
+                and freeze.get("valid")
+                and freeze["certified"].get(group.mass_model)
+                and key in freeze["power_ok"]
+            )
+            verdict = "pass" if backed else "incomplete"
+        row["verdict_alias"] = verdict
+        return stats
+
     blocks = [
         (r["id"], m, _Group(tool, units, stage, m, r["id"], n))
         for r in protocol["regimes"]
@@ -664,24 +925,19 @@ def build_rows(
         for k in panel["epoch_counts"]:
             for q in panel["quantities"]:
                 row = new(regime, mass_model, k, q)
-                verdicts, stats = cell_statistics(group, k, q, tool, protocol, crit)
+                verdicts, stats = cell_statistics(group, k, q, crit)
                 row["verdict_coverage"] = verdicts["coverage"]
                 row["verdict_calibration"] = verdicts["calibration"]
                 fill(row, stats)
                 if q in alias_q:
-                    row["verdict_alias"], stats = alias_statistics(
-                        group, k, q, protocol, crit
-                    )
+                    stats = alias(group, row, k, q)
                     stats.pop("worlds", None)
                     fill(row, stats)
                 rows.append(row)
     for regime, mass_model, group in blocks:
         for k in panel["epoch_counts"]:
             row = new(regime, mass_model, k, "future_pa")
-            row["verdict_alias"], stats = alias_statistics(
-                group, k, "future_pa", protocol, crit
-            )
-            fill(row, stats)
+            fill(row, alias(group, row, k, "future_pa"))
             rows.append(row)
     for regime, mass_model, group in blocks:
         for u in range(len(panel["updates"])):
@@ -692,6 +948,8 @@ def build_rows(
             fill(row, stats)
             if memory_mb is not None:
                 row["memory_mb"] = memory_mb
+            if latency_ms is not None:
+                row["latency_ms_per_update"] = latency_ms
             rows.append(row)
     for regime, mass_model, group in blocks:
         for k in panel["epoch_counts"]:
@@ -736,6 +994,14 @@ def rows_to_csv(rows):
     return buffer.getvalue()
 
 
+def _positive(value, name):
+    if value is None:
+        return None
+    if _number(value) is None or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}")
+    return float(value)
+
+
 def grade_panel(
     tool,
     protocol,
@@ -745,36 +1011,82 @@ def grade_panel(
     allow_dirty=False,
     mechanics=None,
     memory_mb=None,
+    latency_ms=None,
+    freeze_report=None,
 ):
     """Audit a panel directory and grade it.
 
+    Args:
+        tool: The loaded ``updater_panel`` module.
+        protocol: The parameter block.
+        path: Panel run directory.
+        stage: Stage of the units.
+        require_frozen: Refuse a protocol whose status is not ``frozen``.
+        mechanics: Attestation dict for ``mechanics_verdict``.
+        memory_mb: Measured peak memory of the intended batch.
+        latency_ms: Measured warm batched amortized ms per active update.
+        freeze_report: The committed ``--freeze`` report, as a dict.
+        allow_dirty: Grade a panel whose manifests flag a dirty tree. The
+            result is exploratory: every ``pass`` is written as ``incomplete``
+            so the table cannot satisfy a gate, and ``exploratory`` lists why.
+
     Returns:
         Dict with ``status`` (``refused``, ``incomplete``, ``fail`` or
-        ``pass``), the ``audit`` (without records) and, unless refused, the
-        ``rows`` and per-criterion ``counts``. A refused directory has no rows.
+        ``pass``), ``reasons`` (why a panel that could pass does not), the
+        ``audit`` (without records) and, unless refused, the ``rows`` and
+        per-criterion ``counts``. A refused directory has no rows.
     """
+    memory_mb = _positive(memory_mb, "memory_mb")
+    latency_ms = _positive(latency_ms, "latency_ms")
     audit = audit_panel(tool, protocol, path, stage, require_frozen, allow_dirty)
     if audit["status"] == "refused":
-        return {"status": "refused", "audit": audit_summary(audit), "rows": None}
+        return {
+            "status": "refused",
+            "reasons": audit["refusals"],
+            "audit": audit_summary(audit),
+            "rows": None,
+        }
     prov = audit["provenance"]
-    code = prov["code_commit"] + ("-dirty" if prov["code_dirty"] else "")
+    commit = prov["code_commit"]
+    mech, mech_reason = mechanics_verdict(mechanics, commit)
+    freeze = freeze_evidence(tool, protocol, freeze_report)
     rows = build_rows(
         tool,
         protocol,
         audit["usable"],
-        {"protocol_commit": prov["protocol_commit"], "code_commit": code},
+        {
+            "protocol_commit": prov["protocol_commit"],
+            "code_commit": commit + ("-dirty" if prov["code_dirty"] else ""),
+        },
         stage,
-        mechanics,
+        mech,
         memory_mb,
+        latency_ms,
+        freeze,
     )
+    reasons = []
+    if mech_reason:
+        reasons.append(mech_reason)
+    if not freeze["valid"]:
+        reasons += freeze["reasons"]
+    exploratory = list(prov["notes"])
+    counts = verdict_counts(rows)
+    if exploratory:
+        reasons += exploratory
+        for row in rows:
+            for c in CRITERIA:
+                if row[f"verdict_{c}"] == "pass":
+                    row[f"verdict_{c}"] = "incomplete"
     verdict = panel_verdict(rows)
     if audit["status"] == "incomplete" and verdict == "pass":
         verdict = "incomplete"
     return {
         "status": verdict,
+        "reasons": reasons,
+        "exploratory": bool(exploratory),
         "audit": audit_summary(audit),
         "rows": rows,
-        "counts": verdict_counts(rows),
+        "counts": counts,
     }
 
 

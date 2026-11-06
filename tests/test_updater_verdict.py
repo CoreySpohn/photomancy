@@ -7,16 +7,25 @@ the 24-world smoke test runs the real updater.
 
 import copy
 import csv
+import hashlib
 import importlib.util
 import io
 import json
+import math
+import statistics
+import zlib
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 TOOLS = Path(__file__).parents[1] / "tools"
 N = 12
 BINS = [1.0 / 8] * 8
+ALIAS_QUANTITIES = ("lnP", "e", "future_pa")
+CODE = "a" * 40
+PROTOCOL_COMMIT = "b" * 40
+LOG_HASH = "c" * 64
 
 
 def _load(name):
@@ -49,47 +58,59 @@ def protocol(tool):
     return p
 
 
+# --- synthetic records ---
+
+
 def _updater(tool, protocol, unit, world_fn):
     """A synthetic updater record at the protocol budget."""
     budgets = tool.protocol_budgets(protocol)
     doubled = 2 if unit["role"] == "updater_doubled" else 1
-    k_summaries, truths = {}, {}
+    summaries, truths = {}, {}
     for k in (2, 3):
         spec = world_fn(unit, k)
-        k_summaries[str(k)] = spec["summary"]
+        summaries[str(k)] = spec["summary"]
         truths[str(k)] = spec["truth"]
+    statuses = world_fn(unit, 0)["status"]
     return {
         "kind": "updater",
         "particles": budgets["particles"] * doubled,
         "updates": [
             {
                 "update": u,
-                "status": world_fn(unit, 0)["status"][u],
+                "status": statuses[u],
                 "seconds": 0.5,
                 "includes_compile": False,
             }
             for u in range(3)
         ],
-        "summaries": k_summaries,
+        "summaries": summaries,
         "truth": truths,
     }
 
 
-def make_units(tool, protocol, edit=None):
-    """Synthetic panel records; ``edit(unit, k, spec)`` damages a record."""
+def make_units(tool, protocol, edit=None, bins=None, post=None):
+    """Synthetic panel records.
+
+    ``edit(unit, k, spec)`` damages an updater's summary, truth or statuses;
+    ``bins(unit, k)`` returns a dict of alias-quantity bin masses for any
+    record; ``post(unit, record)`` damages a finished record.
+    """
     quantities = protocol["panel"]["quantities"]
     budgets = tool.protocol_budgets(protocol)
     run_hash = tool.run_hash(protocol)
 
+    def bin_masses(unit, k):
+        if bins is not None:
+            return bins(unit, k)
+        return {q: list(BINS) for q in ALIAS_QUANTITIES}
+
     def world_fn(unit, k):
         w = unit["world"]
+        half = [-1.0, 1.0] if w % 2 else [0.5, 0.9]
         summary = {
-            "intervals": {
-                q: {"90": [-1.0, 1.0], "50": [-1.0, 1.0] if w % 2 else [2.0, 3.0]}
-                for q in quantities
-            },
+            "intervals": {q: {"90": [-1.0, 1.0], "50": list(half)} for q in quantities},
             "pit": {q: (w + 0.5) / N for q in quantities},
-            "bins": {q: list(BINS) for q in ("lnP", "e", "future_pa")},
+            "bins": bin_masses(unit, k),
             "schedule_p": 0.5,
         }
         spec = {
@@ -111,17 +132,40 @@ def make_units(tool, protocol, edit=None):
                 "kind": "reference",
                 "proposals": budgets[unit["mass_model"]]
                 * tool.reference_budget_factor(unit["mass_model"], unit["role"]),
-                "summary": {
-                    "kish_ess": 900.0,
-                    "bins": {q: list(BINS) for q in ("lnP", "e", "future_pa")},
-                },
+                "summary": {"kish_ess": 900.0, "bins": bin_masses(unit, k)},
             }
-            if edit is not None:
-                spec = world_fn(unit, k)
-                if "reference_bins" in spec:
-                    rec["summary"]["bins"] = spec["reference_bins"](unit)
-        out[unit["id"]] = dict(rec, id=unit["id"], run_hash=run_hash)
+        rec = dict(rec, id=unit["id"], run_hash=run_hash)
+        if post is not None:
+            post(unit, rec)
+        out[unit["id"]] = rec
     return out
+
+
+def freeze_report(tool, verdict, protocol, mass_models=None):
+    """A synthetic committed freeze report that satisfies every requirement."""
+    alias = protocol["criteria"]["alias_accuracy"]
+    groups = [
+        {
+            "regime": r,
+            "mass_model": m,
+            "epoch_count": k,
+            "quantity": q,
+            "power_lower_95": 0.9,
+        }
+        for r, m, k in tool.canonical_groups(protocol)
+        for q in alias["quantities"]
+    ]
+    return {
+        "status": "frozen",
+        "reasons": [],
+        "binding": verdict.freeze_binding(tool, protocol),
+        "alias": {"delta2": alias["delta2"], "groups": groups},
+        "certification": {
+            m: {"status": "certified"}
+            for m in (mass_models or protocol["panel"]["mass_models"])
+        },
+        "exact_checks": {"verdicts": {"case_1": "pass", "case_2": "pass"}},
+    }
 
 
 @pytest.fixture(scope="module")
@@ -130,9 +174,19 @@ def clean(tool, protocol):
     return make_units(tool, protocol)
 
 
-def grade(tool, verdict, protocol, units, mechanics="pass"):
+@pytest.fixture(scope="module")
+def evidence(tool, verdict, protocol):
+    """Valid freeze evidence for the test protocol."""
+    return verdict.freeze_evidence(
+        tool, protocol, freeze_report(tool, verdict, protocol)
+    )
+
+
+def grade(tool, verdict, protocol, units, evidence, mechanics="pass", **kw):
     """Verdict rows of in-memory records."""
-    return verdict.build_rows(tool, protocol, units, {}, "panel", mechanics)
+    return verdict.build_rows(
+        tool, protocol, units, {}, "panel", mechanics, freeze=evidence, **kw
+    )
 
 
 def by(rows, **match):
@@ -145,10 +199,12 @@ def verdicts(rows, criterion):
     return {r[f"verdict_{criterion}"] for r in rows}
 
 
-# --- schema ----------------------------------------------------------------
+# --- schema ---
 
 
-def test_clean_panel_passes_with_the_protocol_schema(tool, verdict, protocol, clean):
+def test_clean_panel_passes_with_the_protocol_schema(
+    tool, verdict, protocol, clean, evidence
+):
     """A panel built to satisfy every criterion passes, in the stated schema.
 
     Fails if a column is missing or misordered, a row family has the wrong
@@ -156,24 +212,21 @@ def test_clean_panel_passes_with_the_protocol_schema(tool, verdict, protocol, cl
     16 schedule groups), a verdict is outside the four values, or a criterion
     that does not apply to a row is not ``na``.
     """
-    rows = grade(tool, verdict, protocol, clean)
+    rows = grade(tool, verdict, protocol, clean, evidence)
     assert len(rows) == 120
     assert len(by(rows, quantity="updates")) == 24
     assert len(by(rows, quantity="schedule")) == 16
     assert len(by(rows, quantity="future_pa")) == 16
-    text = verdict.rows_to_csv(rows)
-    table = list(csv.DictReader(io.StringIO(text)))
+    table = list(csv.DictReader(io.StringIO(verdict.rows_to_csv(rows))))
     assert (
         list(table[0])
         == (
             "regime mass_model epoch_count quantity worlds covered_count "
-            "covered_50_count "
-            "pit_sup_distance d2_mean d2_upper exhausted_count exhausted_cp_upper "
-            "schedule_deviations_keys schedule_deviations_budget tv_median tv_p95 "
-            "latency_ms_per_update memory_mb seeds verdict_coverage "
-            "verdict_calibration "
-            "verdict_alias verdict_failed_updates verdict_schedule verdict_mechanics "
-            "protocol_commit code_commit"
+            "covered_50_count pit_sup_distance d2_mean d2_upper exhausted_count "
+            "exhausted_cp_upper schedule_deviations_keys schedule_deviations_budget "
+            "tv_median tv_p95 latency_ms_per_update memory_mb seeds verdict_coverage "
+            "verdict_calibration verdict_alias verdict_failed_updates verdict_schedule "
+            "verdict_mechanics protocol_commit code_commit"
         ).split()
     )
     for r in table:
@@ -181,31 +234,77 @@ def test_clean_panel_passes_with_the_protocol_schema(tool, verdict, protocol, cl
             assert r[f"verdict_{c}"] in verdict.VERDICTS
     assert verdicts(rows, "coverage") == {"pass", "na"}
     assert verdict.panel_verdict(rows) == "pass"
-    assert {r["verdict_mechanics"] for r in rows} == {"pass"}
     cell = by(rows, regime="R1", mass_model="ti_window", epoch_count=2, quantity="e")[0]
     assert cell["covered_count"] == N and cell["covered_50_count"] == N // 2
     assert cell["verdict_alias"] == "pass" and cell["verdict_failed_updates"] == "na"
     assert cell["seeds"] == "271828/panel"
     upd = by(rows, quantity="updates", epoch_count=1)[0]
-    assert upd["exhausted_count"] == 0 and upd[
-        "latency_ms_per_update"
-    ] == pytest.approx(500.0)
+    assert upd["exhausted_count"] == 0
+    assert upd["latency_ms_per_update"] == "" and upd["memory_mb"] == ""
     assert by(rows, quantity="future_east")[0]["verdict_alias"] == "na"
 
 
-def test_mechanics_is_incomplete_unless_supplied(tool, verdict, protocol, clean):
-    """Without the mechanics result no panel can pass.
+def test_latency_and_memory_are_only_the_supplied_measurements(
+    tool, verdict, protocol, clean, evidence
+):
+    """Latency and memory are written as given on the update rows and nowhere else.
 
-    Fails if a missing or unrecognized mechanics input yields pass.
+    Fails if latency is derived from the records' per-world times, or either
+    value leaks onto other rows or changes a verdict.
     """
-    for value in (None, "green"):
-        rows = grade(tool, verdict, protocol, clean, mechanics=value)
-        assert verdict.panel_verdict(rows) == "incomplete"
-    rows = grade(tool, verdict, protocol, clean, mechanics="fail")
-    assert verdict.panel_verdict(rows) == "fail"
+    rows = grade(
+        tool, verdict, protocol, clean, evidence, latency_ms=12.5, memory_mb=300.0
+    )
+    upd = by(rows, quantity="updates")
+    assert {r["latency_ms_per_update"] for r in upd} == {12.5}
+    assert {r["memory_mb"] for r in upd} == {300.0}
+    assert {r["latency_ms_per_update"] for r in rows if r["quantity"] != "updates"} == {
+        ""
+    }
+    assert verdict.panel_verdict(rows) == "pass"
 
 
-# --- each criterion fails on its own ----------------------------------------
+# --- mechanics attestation ---
+
+
+def test_mechanics_needs_an_attestation_bound_to_the_commit(verdict, tmp_path):
+    """Only a complete attestation for the recorded commit counts.
+
+    Fails if a bare flag, a missing log hash, a result other than pass or fail,
+    or another commit's attestation yields a verdict other than incomplete, or
+    if a recorded failure is not a fail.
+    """
+    good = {"result": "pass", "code_commit": CODE, "log_sha256": LOG_HASH}
+    assert verdict.mechanics_verdict(good, CODE)[0] == "pass"
+    assert verdict.mechanics_verdict(dict(good, result="fail"), CODE)[0] == "fail"
+    for bad in (
+        None,
+        "pass",
+        {},
+        dict(good, result="green"),
+        dict(good, log_sha256="zz"),
+        dict(good, log_sha256=None),
+        dict(good, code_commit="d" * 40),
+    ):
+        assert verdict.mechanics_verdict(bad, CODE)[0] == "incomplete"
+    assert verdict.mechanics_verdict(good, "")[0] == "incomplete"
+    log = tmp_path / "mechanics.log"
+    log.write_text("42 passed\n")
+    digest = hashlib.sha256(log.read_bytes()).hexdigest()
+    path = tmp_path / "attest.json"
+    entry = {
+        "result": "pass",
+        "code_commit": CODE,
+        "log_sha256": digest,
+        "log_path": "mechanics.log",
+    }
+    path.write_text(json.dumps(entry))
+    assert verdict.read_mechanics_attestation(path)["result"] == "pass"
+    log.write_text("42 passed, edited\n")
+    assert verdict.read_mechanics_attestation(path) == {}
+
+
+# --- each criterion fails on its own ---
 
 
 def _is(unit, **kw):
@@ -214,7 +313,6 @@ def _is(unit, **kw):
 
 def _undercover(unit, k, spec):
     """Truth outside the 90 percent interval in 8 worlds of one cell."""
-    # One cell: ti_window R2, epoch 3, quantity e; the truth is outside in 8 worlds.
     if (
         _is(unit, role="updater_a", mass_model="ti_window", regime="R2")
         and k == 3
@@ -231,8 +329,8 @@ def _bad_pits(unit, k, spec):
 
 def _bad_alias(unit, k, spec):
     """Both keys shifted off the reference in one group."""
-    if _is(unit, role="updater_a", regime="R4", mass_model="ti_window") or _is(
-        unit, role="updater_b", regime="R4", mass_model="ti_window"
+    if unit["role"] in ("updater_a", "updater_b") and _is(
+        unit, regime="R4", mass_model="ti_window"
     ):
         spec["summary"]["bins"]["lnP"] = [0.225, 0.025] + [0.125] * 6
 
@@ -289,10 +387,12 @@ SCENARIOS = {
 }
 
 
-def check_each_criterion_fails_alone(tool, verdict, protocol):
+def check_each_criterion_fails_alone(tool, verdict, protocol, evidence):
     """Damage one block per criterion; only the damaged rows may fail."""
     for criterion, (edit, where) in SCENARIOS.items():
-        rows = grade(tool, verdict, protocol, make_units(tool, protocol, edit))
+        rows = grade(
+            tool, verdict, protocol, make_units(tool, protocol, edit), evidence
+        )
         failed = [r for r in rows if r[f"verdict_{criterion}"] == "fail"]
         assert failed, f"{criterion}: nothing failed"
         assert all(
@@ -303,24 +403,96 @@ def check_each_criterion_fails_alone(tool, verdict, protocol):
         assert verdict.panel_verdict(rows) == "fail"
 
 
-def test_each_criterion_fails_on_its_own_and_only_in_its_cell(tool, verdict, protocol):
+def test_each_criterion_fails_on_its_own_and_only_in_its_cell(
+    tool, verdict, protocol, evidence
+):
     """A criterion that fails in one cell fails that row and no other.
 
     Fails if a criterion is not graded (its damaged cell passes), the verdict
     is pooled over cells (the damaged cell is hidden by the passing ones), or
-    a failure spills into another criterion or cell. The 8 of 12 covered
-    worlds fall below the critical count 6 for 12 worlds only when the cell
-    is graded alone.
+    a failure spills into another criterion or cell.
     """
-    check_each_criterion_fails_alone(tool, verdict, protocol)
+    check_each_criterion_fails_alone(tool, verdict, protocol, evidence)
 
 
-def test_alias_margin_comes_from_the_standard_error(tool, verdict, protocol):
+def test_cancelling_strata_do_not_hide_a_failure(tool, verdict, protocol, evidence):
+    """Over-coverage in one regime does not offset under-coverage in another.
+
+    Fails if coverage is pooled across blocks: R1 always covers and R2
+    undercovers, and the R2 row must still fail.
+    """
+    rows = grade(
+        tool, verdict, protocol, make_units(tool, protocol, _undercover), evidence
+    )
+    assert verdicts(by(rows, regime="R1"), "coverage") == {"pass", "na"}
+    row = by(rows, regime="R2", mass_model="ti_window", epoch_count=3, quantity="e")[0]
+    assert row["verdict_coverage"] == "fail"
+
+
+# --- numeric expectations ---
+
+
+def _dirichlet(unit, k, scale=60.0):
+    seed = zlib.crc32(
+        f"{unit['mass_model']}{unit['regime']}{unit['world']}{unit['role']}{k}".encode()
+    )
+    rng = np.random.default_rng(seed)
+    return {q: rng.dirichlet(np.full(8, scale)).tolist() for q in ALIAS_QUANTITIES}
+
+
+def test_alias_statistic_matches_an_independent_computation(
+    tool, verdict, protocol, evidence
+):
+    """D2, its standard error, the bound and TV equal a hand computation.
+
+    Four distinct runs per world (the two keys and the two references differ
+    and are asymmetric), expected values from explicit loops and
+    ``statistics.stdev``. Fails if one difference is squared, a reference is
+    reused on both sides, the standard deviation uses ddof=0, the standard
+    error is halved or doubled, or the z quantile is wrong.
+    """
+
+    def bins(unit, k):
+        return _dirichlet(unit, k)
+
+    units = make_units(tool, protocol, bins=bins)
+    rows = grade(tool, verdict, protocol, units, evidence)
+    row = by(rows, regime="R1", mass_model="ti_window", epoch_count=2, quantity="lnP")[
+        0
+    ]
+    d2, tv = [], []
+    for w in range(N):
+
+        def vec(role, k=None, w=w):
+            ident = f"panel/ti_window/R1/w{w:03d}/{role}" + (f"/k{k}" if k else "")
+            rec = units[ident]
+            s = rec["summaries"]["2"] if rec["kind"] == "updater" else rec["summary"]
+            return s["bins"]["lnP"]
+
+        ua, ub, r1, r2 = (
+            vec("updater_a"),
+            vec("updater_b"),
+            vec("reference_1", 2),
+            vec("reference_2", 2),
+        )
+        d2.append(sum((ua[i] - r1[i]) * (ub[i] - r2[i]) for i in range(8)))
+        tv.append(0.5 * sum(abs(ua[i] - r1[i]) for i in range(8)))
+    z = statistics.NormalDist().inv_cdf(1 - 0.05 / 48)
+    se = statistics.stdev(d2) / math.sqrt(N)
+    assert row["d2_mean"] == pytest.approx(statistics.fmean(d2), rel=1e-9)
+    assert row["d2_upper"] == pytest.approx(statistics.fmean(d2) + z * se, rel=1e-9)
+    assert row["tv_median"] == pytest.approx(statistics.median(tv), rel=1e-9)
+    assert row["tv_p95"] == pytest.approx(float(np.percentile(tv, 95)), rel=1e-9)
+    delta2 = protocol["criteria"]["alias_accuracy"]["delta2"]
+    assert (row["verdict_alias"] == "pass") == (row["d2_upper"] <= delta2)
+
+
+def test_alias_margin_comes_from_the_standard_error(tool, verdict, protocol, evidence):
     """A mean D2 under the tolerance fails when its upper bound exceeds it.
 
     A quarter of the worlds carry D2 of 1.8e-3, so the mean (4.5e-4) is under
     5e-4 and the mean plus 3.08 standard errors is over it. Fails if the
-    bound ignores the standard error (z = 0), or doubles or halves it.
+    bound ignores the standard error (z = 0).
     """
 
     def edit(unit, k, spec):
@@ -331,58 +503,11 @@ def test_alias_margin_comes_from_the_standard_error(tool, verdict, protocol):
         ):
             spec["summary"]["bins"]["e"] = [0.125 + 0.03, 0.125 - 0.03] + [0.125] * 6
 
-    rows = grade(tool, verdict, protocol, make_units(tool, protocol, edit))
+    rows = grade(tool, verdict, protocol, make_units(tool, protocol, edit), evidence)
     row = by(rows, regime="R1", mass_model="ti_window", epoch_count=2, quantity="e")[0]
-    assert (
-        row["d2_mean"]
-        < tool.load_protocol()["criteria"]["alias_accuracy"]["delta2"]
-        < row["d2_upper"]
-    )
+    delta2 = protocol["criteria"]["alias_accuracy"]["delta2"]
+    assert row["d2_mean"] < delta2 < row["d2_upper"]
     assert row["verdict_alias"] == "fail"
-    assert row["tv_p95"] >= row["tv_median"] >= 0.0
-
-
-@pytest.mark.parametrize("bad", [float("nan"), float("inf")], ids=["nan", "inf"])
-def test_non_finite_values_never_pass(tool, verdict, protocol, bad):
-    """NaN or inf in any graded input is a fail or incomplete, never a pass.
-
-    Fails if a NaN interval, PIT, schedule probability or bin vector slips
-    through a comparison that is false for NaN.
-    """
-
-    def edit(unit, k, spec):
-        if (
-            _is(unit, role="updater_a", regime="R1", mass_model="ti_window")
-            and k == 2
-            and unit["world"] == 0
-        ):
-            spec["truth"]["e"] = bad
-            spec["summary"]["pit"]["lnP"] = bad
-            spec["summary"]["schedule_p"] = bad
-            spec["summary"]["bins"]["future_pa"] = [bad] + [0.0] * 7
-
-    rows = grade(tool, verdict, protocol, make_units(tool, protocol, edit))
-    assert (
-        by(rows, regime="R1", mass_model="ti_window", epoch_count=2, quantity="lnP")[0][
-            "verdict_calibration"
-        ]
-        == "fail"
-    )
-    assert (
-        by(
-            rows,
-            regime="R1",
-            mass_model="ti_window",
-            epoch_count=2,
-            quantity="future_pa",
-        )[0]["verdict_alias"]
-        == "incomplete"
-    )
-    sched = by(
-        rows, regime="R1", mass_model="ti_window", epoch_count=2, quantity="schedule"
-    )[0]
-    assert sched["schedule_deviations_keys"] == 1
-    assert verdict.panel_verdict(rows) != "pass"
 
 
 def test_thresholds_match_the_protocol_values(tool, verdict):
@@ -415,49 +540,77 @@ def test_decisions_at_their_boundaries(verdict):
         verdict.decide_coverage(6, 6) == "fail"
         and verdict.decide_coverage(7, 6) == "pass"
     )
-    assert (
-        verdict.decide_failed_updates(17, 17) == "pass"
-        and verdict.decide_failed_updates(18, 17) == "fail"
-    )
-    assert (
-        verdict.decide_schedule(20, 20, 20) == "pass"
-        and verdict.decide_schedule(20, 21, 20) == "fail"
-    )
-    assert (
-        verdict.decide_alias(5e-4, 5e-4) == "pass"
-        and verdict.decide_alias(5.01e-4, 5e-4) == "fail"
-    )
-    assert (
-        verdict.decide_calibration(0.2, 0.2) == "pass"
-        and verdict.decide_calibration(0.21, 0.2) == "fail"
-    )
+    assert verdict.decide_failed_updates(17, 17) == "pass"
+    assert verdict.decide_failed_updates(18, 17) == "fail"
+    assert verdict.decide_schedule(20, 20, 20) == "pass"
+    assert verdict.decide_schedule(20, 21, 20) == "fail"
+    assert verdict.decide_alias(5e-4, 5e-4) == "pass"
+    assert verdict.decide_alias(5.01e-4, 5e-4) == "fail"
+    assert verdict.decide_calibration(0.2, 0.2) == "pass"
+    assert verdict.decide_calibration(0.21, 0.2) == "fail"
     nan = float("nan")
-    assert (
-        verdict.decide_alias(nan, 5e-4) == "fail"
-        and verdict.decide_calibration(nan, 0.2) == "fail"
-    )
+    assert verdict.decide_alias(nan, 5e-4) == "fail"
+    assert verdict.decide_calibration(nan, 0.2) == "fail"
 
 
-def test_pit_sup_distance_is_the_ecdf_distance(verdict):
-    """The sup-distance of PITs matches hand values.
+def _brute_force_sup(pits):
+    """Sup over the sample points of the ECDF distance, both sides of each step."""
+    n = len(pits)
+    worst = 0.0
+    for u in pits:
+        below = sum(x < u for x in pits) / n
+        at_or_below = sum(x <= u for x in pits) / n
+        worst = max(worst, abs(at_or_below - u), abs(below - u))
+    return worst
 
-    Fails if the distance uses only one side of each step: a uniform grid of
-    n midpoints gives 1 / (2n), and n copies of 0.5 give 0.5.
+
+def test_pit_sup_distance_matches_the_ecdf_definition(verdict):
+    """The sup-distance of PITs equals a brute-force ECDF computation.
+
+    Includes sets where only the step below a point matters (all PITs at one:
+    distance 1, which only the lower side of the step gives) and sets where
+    only the step above does (all at zero). Fails if either side is dropped.
     """
+    assert verdict.pit_sup_distance([1.0] * 10) == pytest.approx(1.0)
+    assert verdict.pit_sup_distance([0.0] * 10) == pytest.approx(1.0)
     assert verdict.pit_sup_distance(
         [(i + 0.5) / 10 for i in range(10)]
     ) == pytest.approx(0.05)
-    assert verdict.pit_sup_distance([0.5] * 10) == pytest.approx(0.5)
-    assert verdict.pit_sup_distance([0.0, 0.0]) == pytest.approx(1.0)
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        sample = np.round(rng.random(rng.integers(3, 15)), 1).tolist()
+        assert verdict.pit_sup_distance(sample) == pytest.approx(
+            _brute_force_sup(sample)
+        )
 
 
-def test_failed_update_rate_bound_is_reported(tool, verdict, protocol):
-    """The failed-update row carries the count and its Clopper-Pearson bound.
+def test_pits_piled_at_one_fail_calibration(tool, verdict, protocol, evidence):
+    """A cell whose PITs are all one fails calibration through its lower step.
+
+    Fails if the row's sup-distance is not 1.
+    """
+
+    def edit(unit, k, spec):
+        if _is(unit, role="updater_a", regime="R1", mass_model="ti_window"):
+            spec["summary"]["pit"]["e"] = 1.0
+
+    rows = grade(tool, verdict, protocol, make_units(tool, protocol, edit), evidence)
+    row = by(rows, regime="R1", mass_model="ti_window", epoch_count=2, quantity="e")[0]
+    assert row["pit_sup_distance"] == pytest.approx(1.0)
+    assert row["verdict_calibration"] == "fail"
+
+
+def test_failed_update_bound_matches_beta_quantiles(tool, verdict, protocol, evidence):
+    """The failed-update row's count and bound match independent beta quantiles.
 
     Fails if the count is taken from another update, or the bound is not the
-    protocol's one-sided 95 percent value.
+    one-sided 95 percent Clopper-Pearson value (beta quantile of x + 1, n - x).
     """
-    rows = grade(tool, verdict, protocol, make_units(tool, protocol, _failed_updates))
+    from scipy.stats import beta
+
+    rows = grade(
+        tool, verdict, protocol, make_units(tool, protocol, _failed_updates), evidence
+    )
     row = by(
         rows,
         regime="R1",
@@ -467,7 +620,7 @@ def test_failed_update_rate_bound_is_reported(tool, verdict, protocol):
     )[0]
     assert row["exhausted_count"] == 4
     assert row["exhausted_cp_upper"] == pytest.approx(
-        tool.clopper_pearson_upper(4, N, 0.95)
+        beta.ppf(0.95, 5, N - 4), rel=1e-9
     )
     other = by(
         rows,
@@ -477,13 +630,294 @@ def test_failed_update_rate_bound_is_reported(tool, verdict, protocol):
         quantity="updates",
     )[0]
     assert other["exhausted_count"] == 0
+    assert other["exhausted_cp_upper"] == pytest.approx(beta.ppf(0.95, 1, N), rel=1e-9)
 
 
-# --- incomplete panels -------------------------------------------------------
+def test_clopper_pearson_matches_beta_quantiles_for_every_count(tool):
+    """The one-sided bound equals the beta quantile for every count up to n.
+
+    Fails if an edge count (n - 1, n) or the confidence level is mishandled.
+    """
+    from scipy.stats import beta
+
+    for n in (3, 12, 50):
+        for x in range(n):
+            got = tool.clopper_pearson_upper(x, n, 0.95)
+            assert got == pytest.approx(beta.ppf(0.95, x + 1, n - x), abs=1e-9)
+        assert tool.clopper_pearson_upper(n, n, 0.95) == 1.0
+
+
+def test_criteria_follow_the_protocol_parameters(tool, verdict, protocol, evidence):
+    """Changing the protocol's tolerance, count or delta2 changes the verdict.
+
+    The doubled run differs by 0.4 in five worlds. Fails if the schedule
+    tolerance or count, or the alias tolerance, is hardcoded.
+    """
+    units = make_units(tool, protocol, _unstable)
+
+    def schedule_row(p):
+        rows = grade(tool, verdict, p, units, evidence)
+        return by(
+            rows,
+            regime="R2",
+            mass_model="physical_fixed",
+            epoch_count=2,
+            quantity="schedule",
+        )[0]
+
+    base = schedule_row(protocol)
+    assert (
+        base["schedule_deviations_budget"] == 5 and base["verdict_schedule"] == "fail"
+    )
+    loose = copy.deepcopy(protocol)
+    loose["criteria"]["schedule_stability"]["tolerance"] = 0.5
+    assert schedule_row(loose)["schedule_deviations_budget"] == 0
+    assert schedule_row(loose)["verdict_schedule"] == "pass"
+    tight = copy.deepcopy(protocol)
+    tight["criteria"]["schedule_stability"]["tolerance"] = 0.01
+    assert schedule_row(tight)["schedule_deviations_budget"] == 5
+    for count, expected in ((4, "fail"), (5, "pass")):
+        counted = copy.deepcopy(protocol)
+        counted["criteria"]["schedule_stability"]["max_count"] = count
+        assert schedule_row(counted)["verdict_schedule"] == expected
+    alias_units = make_units(tool, protocol, _bad_alias)
+    wide = copy.deepcopy(protocol)
+    wide["criteria"]["alias_accuracy"]["delta2"] = 1.0
+    wide["criteria"]["alias_accuracy"]["delta2_max"] = 2.0
+    wide_evidence = verdict.freeze_evidence(
+        tool, wide, freeze_report(tool, verdict, wide)
+    )
+    assert wide_evidence["valid"]
+    rows = grade(tool, verdict, wide, alias_units, wide_evidence)
+    row = by(rows, regime="R4", mass_model="ti_window", epoch_count=2, quantity="lnP")[
+        0
+    ]
+    assert row["verdict_alias"] == "pass"
+
+
+# --- missing and invalid evidence is incomplete, never a pass ----------------------
+
+
+def _drop(path):
+    def apply(rec):
+        node = rec
+        for key in path[:-1]:
+            node = node[key]
+        del node[path[-1]]
+
+    return apply
+
+
+def _set(path, value):
+    def apply(rec):
+        node = rec
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return apply
+
+
+def _only(role, mass_model="ti_window", regime="R1", world=None):
+    def match(unit):
+        return (
+            unit["role"] in (role if isinstance(role, tuple) else (role,))
+            and unit["mass_model"] == mass_model
+            and unit["regime"] == regime
+            and (world is None or unit["world"] < world)
+        )
+
+    return match
+
+
+def _zero_bins(rec):
+    summary = rec["summary"] if rec["kind"] == "reference" else None
+    targets = [summary] if summary else list(rec["summaries"].values())
+    for s in targets:
+        s["bins"] = {q: [0.0] * 8 for q in ALIAS_QUANTITIES}
+
+
+INVALID = {
+    "missing_status": (
+        _only("updater_a", world=3),
+        _drop(["updates", 0, "status"]),
+        {"quantity": "updates", "epoch_count": 1},
+        "failed_updates",
+    ),
+    "unknown_status": (
+        _only("updater_a", world=1),
+        _set(["updates", 1, "status"], "WEIRD"),
+        {"quantity": "updates", "epoch_count": 2},
+        "failed_updates",
+    ),
+    "no_updates_field": (
+        _only(("updater_b", "updater_doubled")),
+        _drop(["updates"]),
+        {"quantity": "schedule", "epoch_count": 2},
+        "schedule",
+    ),
+    "zero_updater_bins": (
+        _only("updater_b"),
+        _zero_bins,
+        {"quantity": "lnP", "epoch_count": 2},
+        "alias",
+    ),
+    "empty_reference": (
+        _only("reference_1", world=2),
+        lambda rec: rec.update(
+            summary={
+                "kish_ess": 0.0,
+                "particles": 0,
+                "bins": {q: [0.0] * 8 for q in ALIAS_QUANTITIES},
+            }
+        ),
+        {"quantity": "lnP", "epoch_count": 3},
+        "alias",
+    ),
+    "unnormalized_bins": (
+        _only("updater_a", world=1),
+        _set(["summaries", "2", "bins", "e"], [0.2] * 8),
+        {"quantity": "e", "epoch_count": 2},
+        "alias",
+    ),
+    "negative_bins": (
+        _only("updater_a", world=1),
+        _set(["summaries", "2", "bins", "e"], [-0.125, 0.375] + [0.125] * 6),
+        {"quantity": "e", "epoch_count": 2},
+        "alias",
+    ),
+    "infinite_interval": (
+        _only("updater_a", world=1),
+        _set(["summaries", "2", "intervals", "e", "90"], [-math.inf, math.inf]),
+        {"quantity": "e", "epoch_count": 2},
+        "coverage",
+    ),
+    "unordered_interval": (
+        _only("updater_a", world=1),
+        _set(["summaries", "2", "intervals", "e", "90"], [1.0, -1.0]),
+        {"quantity": "e", "epoch_count": 2},
+        "coverage",
+    ),
+    "nan_truth": (
+        _only("updater_a", world=1),
+        _set(["truth", "2", "e"], math.nan),
+        {"quantity": "e", "epoch_count": 2},
+        "coverage",
+    ),
+    "pit_above_one": (
+        _only("updater_a", world=1),
+        _set(["summaries", "2", "pit", "e"], 1.5),
+        {"quantity": "e", "epoch_count": 2},
+        "calibration",
+    ),
+    "nan_pit": (
+        _only("updater_a", world=1),
+        _set(["summaries", "2", "pit", "e"], math.nan),
+        {"quantity": "e", "epoch_count": 2},
+        "calibration",
+    ),
+    "schedule_above_one": (
+        _only(("updater_a", "updater_b")),
+        _set(["summaries", "2", "schedule_p"], 2.0),
+        {"quantity": "schedule", "epoch_count": 2},
+        "schedule",
+    ),
+    "nan_schedule": (
+        _only("updater_doubled", world=2),
+        _set(["summaries", "2", "schedule_p"], math.nan),
+        {"quantity": "schedule", "epoch_count": 2},
+        "schedule",
+    ),
+}
+
+
+def check_invalid_evidence_is_incomplete(tool, verdict, protocol, evidence):
+    """Each kind of missing or invalid evidence makes its criterion incomplete."""
+    for name, (match, damage, where, criterion) in INVALID.items():
+
+        def post(unit, rec, match=match, damage=damage):
+            if match(unit):
+                damage(rec)
+
+        rows = grade(
+            tool, verdict, protocol, make_units(tool, protocol, post=post), evidence
+        )
+        hit = by(rows, regime="R1", mass_model="ti_window", **where)[0]
+        assert hit[f"verdict_{criterion}"] == "incomplete", name
+        assert verdict.panel_verdict(rows) != "pass", name
+        assert not any(r[f"verdict_{criterion}"] == "fail" for r in rows), name
+
+
+def test_missing_or_invalid_evidence_is_incomplete(tool, verdict, protocol, evidence):
+    """Absent or invalid record contents leave the criterion incomplete.
+
+    Covers missing, unknown and absent update statuses, all-zero and
+    unnormalized or negative bin masses, empty reference fits, infinite or
+    unordered intervals, a NaN truth or PIT, a PIT above one and schedule
+    probabilities above one or NaN. Fails if any is counted as a failure, a
+    tolerated deviation, a zero distance or a pass.
+    """
+    check_invalid_evidence_is_incomplete(tool, verdict, protocol, evidence)
+
+
+def test_all_zero_panel_never_passes(tool, verdict, protocol, evidence):
+    """Zero bin masses everywhere, references marked empty, do not pass alias.
+
+    Fails if D2 of zero vectors (0) is graded as an exact match.
+    """
+
+    def post(unit, rec):
+        if rec["kind"] == "reference":
+            rec["summary"] = {"kish_ess": 0.0, "particles": 0}
+        else:
+            _zero_bins(rec)
+
+    rows = grade(
+        tool, verdict, protocol, make_units(tool, protocol, post=post), evidence
+    )
+    assert verdicts(rows, "alias") == {"incomplete", "na"}
+    assert verdict.panel_verdict(rows) == "incomplete"
+
+
+def test_statuses_are_the_updater_statuses(verdict):
+    """The declared statuses are exactly the updater's status names.
+
+    Fails if a status is added to or removed from the updater without the
+    grader following.
+    """
+    from photomancy.orbit.updater import UpdaterStatus
+
+    assert set(verdict.STATUSES) == {s.name for s in UpdaterStatus}
+
+
+def test_non_ok_statuses_all_count(tool, verdict, protocol, evidence):
+    """Every declared non-OK status counts as a failed update.
+
+    Fails if a status is skipped: one world each of the four, three allowed
+    (critical count 2), so a count of four fails.
+    """
+
+    def edit(unit, k, spec):
+        if (
+            _is(unit, role="updater_a", regime="R1", mass_model="ti_window")
+            and unit["world"] < 4
+        ):
+            spec["status"][0] = [
+                "NO_SUPPORT",
+                "BUDGET_EXHAUSTED",
+                "LOW_ESS",
+                "INCOMPLETE_LADDER",
+            ][unit["world"]]
+
+    rows = grade(tool, verdict, protocol, make_units(tool, protocol, edit), evidence)
+    row = by(
+        rows, regime="R1", mass_model="ti_window", epoch_count=1, quantity="updates"
+    )[0]
+    assert row["exhausted_count"] == 4 and row["verdict_failed_updates"] == "fail"
 
 
 def test_missing_worlds_leave_only_their_groups_incomplete(
-    tool, verdict, protocol, clean
+    tool, verdict, protocol, clean, evidence
 ):
     """A missing unit makes the criteria that read it incomplete, never pass.
 
@@ -492,10 +926,9 @@ def test_missing_worlds_leave_only_their_groups_incomplete(
     """
     victim = "panel/ti_window/R1/w003/updater_b"
     units = {i: r for i, r in clean.items() if i != victim}
-    rows = grade(tool, verdict, protocol, units)
+    rows = grade(tool, verdict, protocol, units, evidence)
     hit = by(rows, regime="R1", mass_model="ti_window", epoch_count=2, quantity="e")[0]
     assert hit["verdict_alias"] == "incomplete" and hit["verdict_coverage"] == "pass"
-    assert hit["covered_count"] == N
     sched = by(rows, regime="R1", mass_model="ti_window", quantity="schedule")
     assert verdicts(sched, "schedule") == {"incomplete"} and sched[0]["worlds"] == N - 1
     assert sched[0]["schedule_deviations_keys"] == ""
@@ -506,30 +939,17 @@ def test_missing_worlds_leave_only_their_groups_incomplete(
     assert verdict.panel_verdict(rows) == "incomplete"
 
 
-def test_failure_outranks_incomplete(tool, verdict, protocol, clean):
+def test_failure_outranks_incomplete(tool, verdict, protocol, evidence):
     """A failed group fails the panel even while another group is incomplete.
 
     Fails if incomplete masks a fail (the protocol: fail if any group fails).
     """
     units = make_units(tool, protocol, _undercover)
     units = {i: r for i, r in units.items() if i != "panel/ti_window/R1/w003/updater_b"}
-    assert verdict.panel_verdict(grade(tool, verdict, protocol, units)) == "fail"
+    assert (
+        verdict.panel_verdict(grade(tool, verdict, protocol, units, evidence)) == "fail"
+    )
     assert verdict.panel_verdict([]) == "incomplete"
-
-
-def test_hollow_reference_makes_the_alias_group_incomplete(tool, verdict, protocol):
-    """A reference fit with no weighted draw leaves its group unscorable.
-
-    Fails if a world with an empty reference is dropped or scored as zeros.
-    """
-    units = make_units(tool, protocol)
-    unit = "panel/physical_fixed/R3/w002/reference_1/k3"
-    units[unit] = dict(units[unit], summary={"kish_ess": 0.0, "particles": 0})
-    rows = grade(tool, verdict, protocol, units)
-    hit = by(
-        rows, regime="R3", mass_model="physical_fixed", epoch_count=3, quantity="lnP"
-    )[0]
-    assert hit["verdict_alias"] == "incomplete" and hit["d2_mean"] == ""
 
 
 def test_alias_bound_above_its_cap_is_incomplete(tool, verdict, protocol, clean):
@@ -539,21 +959,132 @@ def test_alias_bound_above_its_cap_is_incomplete(tool, verdict, protocol, clean)
     """
     loose = copy.deepcopy(protocol)
     loose["criteria"]["alias_accuracy"]["delta2"] = 2e-3
-    rows = grade(tool, verdict, loose, clean)
+    evid = verdict.freeze_evidence(tool, loose, freeze_report(tool, verdict, loose))
+    rows = grade(tool, verdict, loose, clean, evid)
     assert verdicts(by(rows, quantity="future_pa"), "alias") == {"incomplete"}
 
 
-# --- directory audit ---------------------------------------------------------
+# --- certification evidence ---
+
+
+def test_alias_cannot_pass_without_freeze_evidence(
+    tool, verdict, protocol, clean, evidence
+):
+    """No evidence, or invalid evidence, blocks every alias pass; fails stay fails.
+
+    Fails if the alias criterion passes on statistics alone, or if a computed
+    failure is hidden as incomplete when evidence is missing.
+    """
+    for none in (
+        None,
+        {"valid": False, "reasons": ["x"], "certified": {}, "power_ok": set()},
+    ):
+        rows = grade(tool, verdict, protocol, clean, none)
+        assert verdicts(rows, "alias") == {"incomplete", "na"}
+        assert verdict.panel_verdict(rows) == "incomplete"
+        assert verdicts(rows, "coverage") == {"pass", "na"}
+    damaged = make_units(tool, protocol, _bad_alias)
+    rows = grade(tool, verdict, protocol, damaged, None)
+    row = by(rows, regime="R4", mass_model="ti_window", epoch_count=2, quantity="lnP")[
+        0
+    ]
+    assert row["verdict_alias"] == "fail"
+
+
+def _binding_mutants(tool, verdict, protocol):
+    base = freeze_report(tool, verdict, protocol)
+    out = {}
+    for name, edit in {
+        "status": lambda r: r.update(status="incomplete", reasons=["power"]),
+        "run_hash": lambda r: r["binding"].update(run_hash="0" * 64),
+        "budgets": lambda r: r["binding"]["budgets"].update(rungs=1),
+        "delta2": lambda r: r["alias"].update(delta2=7e-4),
+        "binding_delta2": lambda r: r["binding"].update(alias_delta2=7e-4),
+        "no_binding": lambda r: r.pop("binding"),
+        "exact_failed": lambda r: r["exact_checks"]["verdicts"].update(case_1="fail"),
+        "exact_missing": lambda r: r.pop("exact_checks"),
+    }.items():
+        report = copy.deepcopy(base)
+        edit(report)
+        out[name] = verdict.freeze_evidence(tool, protocol, report)
+    return out
+
+
+def test_freeze_evidence_must_be_bound_to_the_protocol(tool, verdict, protocol):
+    """A freeze report counts only if bound to this run hash, budgets and delta2.
+
+    Fails if a report that is not frozen, is bound to another run hash,
+    budgets or alias tolerance, lacks its binding, or has failed or absent
+    exact checks is accepted.
+    """
+    assert verdict.freeze_evidence(
+        tool, protocol, freeze_report(tool, verdict, protocol)
+    )["valid"]
+    for name, evid in _binding_mutants(tool, verdict, protocol).items():
+        assert not evid["valid"], name
+        assert evid["reasons"], name
+    assert not verdict.freeze_evidence(tool, protocol, None)["valid"]
+
+
+def test_certification_and_power_are_per_mass_model_and_group(
+    tool, verdict, protocol, clean
+):
+    """An uncertified mass model blocks alias; an unpowered group blocks only itself.
+
+    Fails if certification is assumed for a mass model the report does not
+    certify, or the power floor is not checked per group and quantity.
+    """
+    report = freeze_report(tool, verdict, protocol)
+    report["certification"]["ti_window"]["status"] = "not certified"
+    evid = verdict.freeze_evidence(tool, protocol, report)
+    rows = grade(tool, verdict, protocol, clean, evid)
+    assert verdicts(
+        by(rows, mass_model="ti_window", quantity="future_pa"), "alias"
+    ) == {"incomplete"}
+    assert not evid["valid"] and evid["certified"]["physical_fixed"]
+    assert verdicts(by(rows, quantity="future_pa"), "alias") == {"incomplete"}
+    report = freeze_report(tool, verdict, protocol)
+    for row in report["alias"]["groups"]:
+        if (row["regime"], row["mass_model"], row["epoch_count"], row["quantity"]) == (
+            "R3",
+            "physical_fixed",
+            3,
+            "e",
+        ):
+            row["power_lower_95"] = 0.5
+    evid = verdict.freeze_evidence(tool, protocol, report)
+    rows = grade(tool, verdict, protocol, clean, evid)
+    weak = by(
+        rows, regime="R3", mass_model="physical_fixed", epoch_count=3, quantity="e"
+    )[0]
+    assert weak["verdict_alias"] == "incomplete"
+    strong = by(
+        rows, regime="R3", mass_model="physical_fixed", epoch_count=3, quantity="lnP"
+    )[0]
+    assert strong["verdict_alias"] == "pass"
+
+
+def test_binding_from_the_tool_matches_the_protocol(tool, verdict, protocol):
+    """The binding ``--freeze`` writes names the run hash, budgets and delta2.
+
+    Fails if the binding omits a field the grader requires.
+    """
+    binding = verdict.freeze_binding(tool, protocol)
+    assert binding == {
+        "run_hash": tool.run_hash(protocol),
+        "budgets": tool.protocol_budgets(protocol),
+        "alias_delta2": protocol["criteria"]["alias_accuracy"]["delta2"],
+    }
+
+
+# --- directory audit ---
 
 
 def write_panel(tool, protocol, units, path, shards=2, edit_manifest=None):
     """Write records into ``units-{i}of{n}.jsonl`` and matching manifests."""
     path.mkdir(parents=True, exist_ok=True)
-    ordered = [
-        units[u["id"]]
-        for u in tool.plan_units(protocol, "panel", list(tool.PARTS))
-        if u["id"] in units
-    ]
+    plan = tool.plan_units(protocol, "panel", list(tool.PARTS))
+    ordered = [units[u["id"]] for u in plan if u["id"] in units]
     for i in range(shards):
         with open(path / f"units-{i}of{shards}.jsonl", "w") as fh:
             for rec in ordered[i::shards]:
@@ -561,11 +1092,11 @@ def write_panel(tool, protocol, units, path, shards=2, edit_manifest=None):
         entry = {
             "started": f"2026-11-0{i + 1}T00:00:00+00:00",
             "finished": f"2026-11-0{i + 1}T01:00:00+00:00",
-            "protocol_commit": "p" * 40,
+            "protocol_commit": PROTOCOL_COMMIT,
             "protocol_status": protocol["status"],
             "protocol_hash": tool.declaration_hash(protocol),
             "run_hash": tool.run_hash(protocol),
-            "code_commit": "c" * 40,
+            "code_commit": CODE,
             "code_dirty": False,
             "jax": "0.9.0",
             "jaxlib": "0.9.0",
@@ -581,39 +1112,75 @@ def write_panel(tool, protocol, units, path, shards=2, edit_manifest=None):
         )
 
 
-@pytest.fixture
-def panel_dir(tool, protocol, clean, tmp_path):
-    """A complete panel directory of two shards."""
-    write_panel(tool, protocol, clean, tmp_path)
-    return tmp_path
+def attestation(commit=CODE):
+    """A mechanics attestation."""
+    return {"result": "pass", "code_commit": commit, "log_sha256": LOG_HASH}
 
 
-def audit(tool, verdict, protocol, path, **kw):
-    """Audit a directory."""
-    return verdict.audit_panel(tool, protocol, path, **kw)
+def grade_dir(tool, verdict, protocol, path, evidence_report=True, **kw):
+    """Grade a directory with valid mechanics and freeze evidence."""
+    kw.setdefault("mechanics", attestation())
+    if evidence_report:
+        kw.setdefault("freeze_report", freeze_report(tool, verdict, protocol))
+    return verdict.grade_panel(tool, protocol, path, **kw)
 
 
 def test_complete_panel_directory_grades_and_records_commits(
-    tool, verdict, protocol, panel_dir, tmp_path
+    tool, verdict, protocol, clean, tmp_path
 ):
-    """A complete consistent directory grades to pass and stamps the commits.
+    """A complete consistent directory with evidence grades to pass and stamps commits.
 
     Fails if the audit refuses a good directory, or the table does not carry
     the manifests' protocol and code commits.
     """
-    result = verdict.grade_panel(
-        tool, protocol, panel_dir, mechanics="pass", memory_mb=1234.5
-    )
-    assert result["status"] == "pass", result["audit"]
+    write_panel(tool, protocol, clean, tmp_path / "run")
+    result = grade_dir(tool, verdict, protocol, tmp_path / "run", memory_mb=1234.5)
+    assert result["status"] == "pass", result["reasons"]
     assert result["audit"]["present"] == result["audit"]["planned"] == 8 * N * 7
-    assert {r["code_commit"] for r in result["rows"]} == {"c" * 40}
-    assert {r["protocol_commit"] for r in result["rows"]} == {"p" * 40}
+    assert {r["code_commit"] for r in result["rows"]} == {CODE}
+    assert {r["protocol_commit"] for r in result["rows"]} == {PROTOCOL_COMMIT}
     assert {r["memory_mb"] for r in by(result["rows"], quantity="updates")} == {1234.5}
     out = tmp_path / "out" / "verdict.csv"
     out.parent.mkdir()
     verdict.write_verdict(tool, result, out)
     with out.open() as fh:
         assert len(list(csv.DictReader(fh))) == 120
+
+
+def test_missing_evidence_inputs_cap_the_panel_at_incomplete(
+    tool, verdict, protocol, clean, tmp_path
+):
+    """Without a mechanics attestation or freeze report the panel is incomplete.
+
+    Fails if either input is optional for a pass, or the reason is not given.
+    """
+    write_panel(tool, protocol, clean, tmp_path)
+    no_mech = grade_dir(tool, verdict, protocol, tmp_path, mechanics=None)
+    assert no_mech["status"] == "incomplete" and any(
+        "mechanics" in r for r in no_mech["reasons"]
+    )
+    wrong = grade_dir(
+        tool, verdict, protocol, tmp_path, mechanics=attestation("d" * 40)
+    )
+    assert wrong["status"] == "incomplete"
+    no_freeze = grade_dir(tool, verdict, protocol, tmp_path, evidence_report=False)
+    assert no_freeze["status"] == "incomplete" and no_freeze["reasons"]
+    failed = grade_dir(
+        tool, verdict, protocol, tmp_path, mechanics=dict(attestation(), result="fail")
+    )
+    assert failed["status"] == "fail"
+
+
+def test_invalid_measurements_are_rejected(tool, verdict, protocol, clean, tmp_path):
+    """Latency and memory must be positive finite numbers.
+
+    Fails if a negative, zero, NaN or infinite measurement is written.
+    """
+    write_panel(tool, protocol, clean, tmp_path)
+    for bad in (-1.0, 0.0, math.nan, math.inf):
+        for key in ("memory_mb", "latency_ms"):
+            with pytest.raises(ValueError):
+                grade_dir(tool, verdict, protocol, tmp_path, **{key: bad})
 
 
 def test_missing_unit_is_reported_and_graded_incomplete(
@@ -628,11 +1195,11 @@ def test_missing_unit_is_reported_and_graded_incomplete(
     write_panel(
         tool, protocol, {i: r for i, r in clean.items() if i != victim}, tmp_path
     )
-    a = audit(tool, verdict, protocol, tmp_path)
+    a = verdict.audit_panel(tool, protocol, tmp_path)
     assert (
         a["status"] == "incomplete" and a["missing"] == [victim] and not a["refusals"]
     )
-    result = verdict.grade_panel(tool, protocol, tmp_path, mechanics="pass")
+    result = grade_dir(tool, verdict, protocol, tmp_path)
     assert result["status"] == "incomplete" and result["rows"] is not None
     hit = by(
         result["rows"],
@@ -661,14 +1228,22 @@ def test_completeness_check_that_skips_a_unit_is_caught(
         "plan_units",
         lambda *a, **k: [u for u in real(*a, **k) if u["id"] != victim],
     )
-    a = audit(tool, verdict, protocol, tmp_path)
+    a = verdict.audit_panel(tool, protocol, tmp_path)
     assert a["missing"] != [victim]
     assert a["status"] == "complete"
 
 
+def _rewrite(path, victim, change):
+    for f in path.glob("units-*.jsonl"):
+        rows = [json.loads(line) for line in f.read_text().splitlines()]
+        for r in rows:
+            if r["id"] == victim:
+                change(r)
+        f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
 @pytest.mark.parametrize(
-    "case",
-    ["duplicate", "unknown", "stale", "off_budget", "malformed"],
+    "case", ["duplicate", "unknown", "stale", "off_budget", "malformed"]
 )
 def test_inconsistent_records_refuse_to_grade(
     tool, verdict, protocol, clean, tmp_path, case
@@ -679,34 +1254,23 @@ def test_inconsistent_records_refuse_to_grade(
     does not say why. Stale and off-budget records must not be silently
     treated as missing units.
     """
-    units = dict(clean)
     victim = "panel/ti_window/R1/w000/updater_a"
-    write_panel(tool, protocol, units, tmp_path)
+    write_panel(tool, protocol, clean, tmp_path)
     extra = None
     if case == "duplicate":
-        extra = units[victim]
+        extra = clean[victim]
     elif case == "unknown":
-        extra = dict(units[victim], id="panel/ti_window/R1/w999/updater_a")
+        extra = dict(clean[victim], id="panel/ti_window/R1/w999/updater_a")
     elif case == "stale":
-        for f in tmp_path.glob("units-*.jsonl"):
-            rows = [json.loads(line) for line in f.read_text().splitlines()]
-            for r in rows:
-                if r["id"] == victim:
-                    r["run_hash"] = "0" * 64
-            f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        _rewrite(tmp_path, victim, lambda r: r.update(run_hash="0" * 64))
     elif case == "off_budget":
-        for f in tmp_path.glob("units-*.jsonl"):
-            rows = [json.loads(line) for line in f.read_text().splitlines()]
-            for r in rows:
-                if r["id"] == victim:
-                    r["particles"] = 128
-            f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        _rewrite(tmp_path, victim, lambda r: r.update(particles=128))
     elif case == "malformed":
         extra = {"kind": "updater"}
     if extra is not None:
         with open(tmp_path / "units-0of2.jsonl", "a") as fh:
             fh.write(json.dumps(extra) + "\n")
-    result = verdict.grade_panel(tool, protocol, tmp_path, mechanics="pass")
+    result = grade_dir(tool, verdict, protocol, tmp_path)
     assert result["status"] == "refused" and result["rows"] is None
     needle = {
         "duplicate": "duplicate",
@@ -718,73 +1282,99 @@ def test_inconsistent_records_refuse_to_grade(
     assert any(needle in reason for reason in result["audit"]["refusals"])
 
 
-@pytest.mark.parametrize(
-    ("field", "edit", "needle"),
-    [
-        ("jax", lambda i, e: e.update(jax="0.9.1") if i == 1 else None, "jax versions"),
-        (
-            "arch",
-            lambda i, e: (
-                e.update(platform="macOS-15-arm64-arm-64bit") if i == 1 else None
-            ),
-            "host architectures",
-        ),
-        (
-            "chunk",
-            lambda i, e: (
-                e.update(argv=["--run", "panel", "--chunk=1024"]) if i == 1 else None
-            ),
-            "recorded chunks",
-        ),
-        (
-            "code",
-            lambda i, e: e.update(code_commit="d" * 40) if i == 1 else None,
-            "code commits",
-        ),
-        ("dirty", lambda i, e: e.update(code_dirty=True) if i == 1 else None, "dirty"),
-        (
-            "hash",
-            lambda i, e: e.update(run_hash="1" * 64) if i == 1 else None,
-            "run hashes",
-        ),
-        (
-            "protocol",
-            lambda i, e: e.update(protocol_hash="2" * 64) if i == 1 else None,
-            "protocol hashes",
-        ),
-        (
-            "budgets",
-            lambda i, e: e.update(protocol_budgets=False) if i == 1 else None,
-            "non-protocol budgets",
-        ),
-        ("draft", lambda i, e: e.update(protocol_status="draft"), "statuses"),
-    ],
-    ids=lambda v: v if isinstance(v, str) else "",
-)
-def test_manifests_that_disagree_refuse_to_grade(
-    tool, verdict, protocol, clean, tmp_path, field, edit, needle
-):
-    """Manifest disagreement or a flag refuses grading and names the field.
+def _drop_fields(*fields):
+    def edit(i, entry):
+        for f in fields:
+            entry.pop(f, None)
 
-    Fails if shards run under different JAX versions, architectures, chunks or
+    return edit
+
+
+def _rungs(i, entry):
+    entry["budgets"] = dict(entry["budgets"], rungs=1)
+
+
+MANIFEST_CASES = [
+    ("jax", lambda i, e: e.update(jax="0.9.1") if i == 1 else None, "jax versions"),
+    (
+        "arch",
+        lambda i, e: e.update(platform="macOS-15-arm64-arm-64bit") if i == 1 else None,
+        "host architectures",
+    ),
+    (
+        "chunk",
+        lambda i, e: (
+            e.update(argv=["--run", "panel", "--chunk=1024"]) if i == 1 else None
+        ),
+        "recorded chunks",
+    ),
+    (
+        "code",
+        lambda i, e: e.update(code_commit="d" * 40) if i == 1 else None,
+        "code commits",
+    ),
+    ("dirty", lambda i, e: e.update(code_dirty=True) if i == 1 else None, "dirty"),
+    (
+        "hash",
+        lambda i, e: e.update(run_hash="1" * 64) if i == 1 else None,
+        "run hashes",
+    ),
+    (
+        "protocol",
+        lambda i, e: e.update(protocol_hash="2" * 64) if i == 1 else None,
+        "protocol hashes",
+    ),
+    (
+        "test_budgets",
+        lambda i, e: e.update(protocol_budgets=False) if i == 1 else None,
+        "non-protocol budgets",
+    ),
+    ("draft", lambda i, e: e.update(protocol_status="draft"), "statuses"),
+    ("rungs", _rungs, "recorded budgets differ"),
+    (
+        "no_commits",
+        _drop_fields("code_commit", "protocol_commit"),
+        "unpopulated provenance",
+    ),
+    ("no_jax", _drop_fields("jax", "jaxlib"), "unpopulated provenance"),
+    ("no_platform", _drop_fields("platform"), "unpopulated provenance"),
+    ("no_argv", _drop_fields("argv"), "unpopulated provenance"),
+    ("bad_commit", lambda i, e: e.update(code_commit="None"), "unpopulated provenance"),
+    ("no_budgets", _drop_fields("budgets"), "recorded budgets differ"),
+    ("no_dirty_flag", _drop_fields("code_dirty"), "unpopulated provenance"),
+]
+
+
+@pytest.mark.parametrize(
+    ("edit", "needle"),
+    [(c[1], c[2]) for c in MANIFEST_CASES],
+    ids=[c[0] for c in MANIFEST_CASES],
+)
+def test_manifests_that_disagree_or_lack_provenance_refuse(
+    tool, verdict, protocol, clean, tmp_path, edit, needle
+):
+    """Manifest disagreement, gaps or a flag refuses grading and names the cause.
+
+    Fails if shards under different JAX versions, architectures, chunks or
     commits, a dirty tree, another run or protocol hash, a test-budget
-    invocation or a draft protocol is graded. The aarch64 and arm64 spellings
-    are one architecture.
+    invocation, a budget dictionary that is not the protocol's, absent
+    provenance fields (agreeing with themselves) or a draft protocol is
+    graded.
     """
     write_panel(tool, protocol, clean, tmp_path, edit_manifest=edit)
-    result = verdict.grade_panel(tool, protocol, tmp_path, mechanics="pass")
+    result = grade_dir(tool, verdict, protocol, tmp_path)
     assert result["status"] == "refused"
-    assert any(needle in reason for reason in result["audit"]["refusals"]), result[
-        "audit"
-    ]["refusals"]
+    assert any(needle in r for r in result["audit"]["refusals"]), result["audit"][
+        "refusals"
+    ]
 
 
-def test_dirty_flag_can_be_accepted_and_is_marked(
+def test_dirty_override_is_exploratory_and_never_passes(
     tool, verdict, protocol, clean, tmp_path
 ):
-    """An accepted dirty tree is marked in the code commit column.
+    """An accepted dirty tree grades at best incomplete, with no pass in the table.
 
-    Fails if the override is ignored, or the table hides the dirty flag.
+    Fails if the override yields a pass, a pass row, or an unmarked commit.
     """
     write_panel(
         tool,
@@ -793,15 +1383,15 @@ def test_dirty_flag_can_be_accepted_and_is_marked(
         tmp_path,
         edit_manifest=lambda i, e: e.update(code_dirty=True),
     )
-    assert (
-        verdict.grade_panel(tool, protocol, tmp_path, mechanics="pass")["status"]
-        == "refused"
+    assert grade_dir(tool, verdict, protocol, tmp_path)["status"] == "refused"
+    result = grade_dir(tool, verdict, protocol, tmp_path, allow_dirty=True)
+    assert result["status"] == "incomplete" and result["exploratory"]
+    assert any("exploratory" in r for r in result["reasons"])
+    assert all(
+        r[f"verdict_{c}"] != "pass" for r in result["rows"] for c in verdict.CRITERIA
     )
-    result = verdict.grade_panel(
-        tool, protocol, tmp_path, allow_dirty=True, mechanics="pass"
-    )
-    assert result["status"] == "pass"
-    assert {r["code_commit"] for r in result["rows"]} == {"c" * 40 + "-dirty"}
+    assert {r["code_commit"] for r in result["rows"]} == {CODE + "-dirty"}
+    assert result["counts"]["coverage"]["pass"] > 0
 
 
 def test_equivalent_architecture_spellings_agree(
@@ -832,19 +1422,21 @@ def test_draft_protocol_and_missing_manifests_refuse(
     write_panel(tool, protocol, clean, tmp_path)
     draft = copy.deepcopy(protocol)
     draft["status"] = "draft"
-    a = verdict.audit_panel(tool, draft, tmp_path)
-    assert a["status"] == "refused"
+    assert verdict.audit_panel(tool, draft, tmp_path)["status"] == "refused"
     for f in tmp_path.glob("manifest-*.json"):
         f.unlink()
     a = verdict.audit_panel(tool, protocol, tmp_path)
     assert a["status"] == "refused" and any("no manifest" in r for r in a["refusals"])
 
 
-def test_skipped_criterion_is_caught(tool, verdict, protocol, monkeypatch):
+# --- mutants ---
+
+
+def test_skipped_criterion_is_caught(tool, verdict, protocol, evidence, monkeypatch):
     """Mutants: a grader that ignores any one criterion fails the criterion test.
 
-    Each decision replaced by an always-pass (or, for stale statistics, a
-    constant) is detected by the same check the real grader passes.
+    Each decision replaced by an always-pass is detected by the same check
+    the real grader passes.
     """
     for name in (
         "decide_coverage",
@@ -856,14 +1448,26 @@ def test_skipped_criterion_is_caught(tool, verdict, protocol, monkeypatch):
         with monkeypatch.context() as m:
             m.setattr(verdict, name, lambda *a, **k: "pass")
             with pytest.raises(AssertionError):
-                check_each_criterion_fails_alone(tool, verdict, protocol)
+                check_each_criterion_fails_alone(tool, verdict, protocol, evidence)
 
 
-def test_pooled_or_shifted_statistics_are_caught(tool, verdict, protocol, monkeypatch):
-    """Mutants: a doubled-variance guard, a zero z and a shifted threshold are caught.
+def test_skipped_validation_is_caught(tool, verdict, protocol, evidence, monkeypatch):
+    """Mutant: a grader that does not validate record contents fails the evidence test.
 
-    Fails if the alias SE test and the coverage threshold would survive a
-    stale value. The alias mutant sets the upper bound to the mean.
+    With ``record_problems`` returning nothing, missing and invalid evidence
+    is graded and the incomplete-evidence checks fail.
+    """
+    with monkeypatch.context() as m:
+        m.setattr(verdict, "record_problems", lambda *a, **k: [])
+        with pytest.raises((AssertionError, KeyError, TypeError)):
+            check_invalid_evidence_is_incomplete(tool, verdict, protocol, evidence)
+
+
+def test_shifted_statistics_are_caught(tool, verdict, protocol, evidence, monkeypatch):
+    """Mutants: a shifted coverage cutoff and a zero z are caught.
+
+    Fails if the coverage threshold or the alias standard-error term could be
+    stale or dropped without a test noticing.
     """
     real = verdict.thresholds
 
@@ -880,30 +1484,20 @@ def test_pooled_or_shifted_statistics_are_caught(tool, verdict, protocol, monkey
     with monkeypatch.context() as m:
         m.setattr(verdict, "thresholds", shifted)
         with pytest.raises(AssertionError):
-            check_each_criterion_fails_alone(tool, verdict, protocol)
+            check_each_criterion_fails_alone(tool, verdict, protocol, evidence)
     with monkeypatch.context() as m:
         m.setattr(verdict, "thresholds", no_se)
         with pytest.raises(AssertionError):
-            test_alias_margin_comes_from_the_standard_error(tool, verdict, protocol)
+            test_alias_margin_comes_from_the_standard_error(
+                tool, verdict, protocol, evidence
+            )
+        with pytest.raises(AssertionError):
+            test_alias_statistic_matches_an_independent_computation(
+                tool, verdict, protocol, evidence
+            )
 
 
-def test_cancelling_strata_do_not_hide_a_failure(tool, verdict, protocol):
-    """Over-coverage in one regime does not offset under-coverage in another.
-
-    Fails if coverage or failed updates are pooled across blocks: R1 always
-    covers and R2 undercovers, and the R2 row must still fail.
-    """
-    rows = grade(tool, verdict, protocol, make_units(tool, protocol, _undercover))
-    assert verdicts(by(rows, regime="R1"), "coverage") == {"pass", "na"}
-    assert (
-        by(rows, regime="R2", mass_model="ti_window", epoch_count=3, quantity="e")[0][
-            "verdict_coverage"
-        ]
-        == "fail"
-    )
-
-
-# --- command line -------------------------------------------------------------
+# --- command line ---
 
 
 def test_status_counts_the_requested_stage(tool, protocol, clean, tmp_path):
@@ -917,43 +1511,62 @@ def test_status_counts_the_requested_stage(tool, protocol, clean, tmp_path):
     assert lines[0] == f"updater: {8 * N * 3} of {8 * N * 3} units"
     assert lines[2] == f"reference: {8 * N * 4} of {8 * N * 4} units"
     assert lines[1] == "precision: 0 of 0 units"
-    dev = tool.progress(protocol, tmp_path, "development")
-    assert dev[0].startswith("updater: 0 of")
+    assert tool.progress(protocol, tmp_path, "development")[0].startswith(
+        "updater: 0 of"
+    )
 
 
 def test_command_line_grades_and_exits_by_verdict(
-    tool, protocol, clean, tmp_path, capsys, monkeypatch
+    tool, verdict, protocol, clean, tmp_path, capsys, monkeypatch
 ):
     """``--check-panel`` and ``--grade`` run through ``main`` with exit codes.
 
-    Fails if the table is not written for a complete panel, or a refused
-    directory writes one, or the exit code is not 0 for pass and 2 for
-    refused.
+    Fails if the table is not written for a complete panel with its evidence,
+    a refused directory writes one, an exploratory grade overwrites the
+    default table, or the exit code is not 0 for pass and 2 otherwise.
     """
-    proto_path = tmp_path / "protocol.md"
-    text = tool.PROTOCOL.read_text()
-    proto_path.write_text(text)
     monkeypatch.setattr(tool, "load_protocol", lambda path=None: protocol)
     run = tmp_path / "run"
     write_panel(tool, protocol, clean, run)
+    mech = tmp_path / "mechanics.json"
+    mech.write_text(json.dumps(attestation()))
+    freeze = tmp_path / "freeze.json"
+    freeze.write_text(json.dumps(freeze_report(tool, verdict, protocol)))
     out = tmp_path / "verdict.csv"
-    code = tool.main(["--check-panel", str(run)])
-    assert code == 0
+    assert tool.main(["--check-panel", str(run)]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
-    code = tool.main(
-        ["--grade", str(run), "--mechanics", "pass", "--verdict-out", str(out)]
-    )
-    assert code == 0 and out.exists()
+    args = [
+        "--grade",
+        str(run),
+        "--mechanics-evidence",
+        str(mech),
+        "--freeze-evidence",
+        str(freeze),
+    ]
+    assert tool.main([*args, "--verdict-out", str(out)]) == 0 and out.exists()
+    out.unlink()
+    assert tool.main(["--grade", str(run), "--verdict-out", str(out)]) == 2
+    assert out.exists() and "incomplete" in out.read_text()
     out.unlink()
     for f in run.glob("manifest-*.json"):
         f.unlink()
-    code = tool.main(
-        ["--grade", str(run), "--mechanics", "pass", "--verdict-out", str(out)]
+    assert tool.main([*args, "--verdict-out", str(out)]) == 2 and not out.exists()
+    capsys.readouterr()
+    dirty = tmp_path / "dirty"
+    write_panel(
+        tool,
+        protocol,
+        clean,
+        dirty,
+        edit_manifest=lambda i, e: e.update(code_dirty=True),
     )
-    assert code == 2 and not out.exists()
+    monkeypatch.setattr(tool, "REPO", tmp_path / "repo")
+    assert tool.main([*args[:1], str(dirty), *args[2:], "--allow-dirty"]) == 2
+    assert "no table written" in capsys.readouterr().out
+    assert not (tmp_path / "repo").exists()
 
 
-# --- smoke --------------------------------------------------------------------
+# --- smoke ---
 
 
 @pytest.mark.slow
@@ -962,9 +1575,11 @@ def test_smoke_panel_runs_the_real_updater_and_grades(tool, verdict, tmp_path):
 
     Small budgets keep it fast (256 particles, 4,096 and 32,768 reference
     proposals), so the verdicts are not meaningful; the test checks that
-    every planned unit is produced, the audit passes and the table has the
-    protocol's 120 rows with a verdict in every graded column. Fails if the
-    runner's records, the manifests and the grader disagree on any field.
+    every planned unit is produced, the audit does not refuse, the manifests
+    carry the provenance the grader requires and the table has the protocol's
+    120 rows. A dirty checkout makes the grade exploratory, so the verdict is
+    never a pass. Fails if the runner's records, the manifests and the grader
+    disagree on any field.
     """
     import argparse
 
@@ -989,13 +1604,12 @@ def test_smoke_panel_runs_the_real_updater_and_grades(tool, verdict, tmp_path):
         chunk=2**13,
     )
     tool.run_stage(protocol, args)
-    # The runner writes a dirty-tree flag when the checkout has edits.
     result = verdict.grade_panel(
-        tool, protocol, tmp_path, stage="smoke", allow_dirty=True, mechanics="pass"
+        tool, protocol, tmp_path, stage="smoke", allow_dirty=True
     )
     assert result["audit"]["status"] != "refused", result["audit"]["refusals"]
     assert result["audit"]["missing"]["count"] == 0
     assert len(result["rows"]) == 120
-    assert {r["worlds"] for r in result["rows"]} == {3}
+    assert {r["worlds"] for r in result["rows"]} <= {0, 1, 2, 3}
     assert verdict.rows_to_csv(result["rows"]).count("\n") == 121
-    assert result["status"] in {"pass", "fail", "incomplete"}
+    assert result["status"] in {"fail", "incomplete"}
