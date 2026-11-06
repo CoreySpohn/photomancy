@@ -50,6 +50,12 @@ stated here under `stated`.
     "doubled_budget": "particles x 2, rungs and moves unchanged",
     "float": "float64"
   },
+  "updater_kernel": {
+    "low_ess_fraction": 0.1,
+    "target_cess_fraction": 0.9,
+    "proposal_scale": {"ti_window": 1.0, "physical_fixed": 0.3},
+    "alias_moves": true
+  },
   "regimes": [
     {"id": "R1", "name": "short arc", "cadence_days": [0.0, 30.0, 60.0],
      "sigma_mas": 3.5, "truncation": {}},
