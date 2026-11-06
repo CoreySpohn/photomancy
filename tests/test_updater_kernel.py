@@ -28,7 +28,10 @@ from photomancy.orbit.updater import (  # noqa: E402
     ThieleInnesTarget,
     UpdaterRecord,
     UpdaterStatus,
+    _collapsed_step,
+    _linear_gaussian,
     _metropolis_step,
+    _rest_log_prior,
 )
 
 LANES = 32
@@ -142,6 +145,132 @@ def test_metropolis_step_leaves_known_densities_invariant():
     se_x = 1.0 / math.sqrt(n)  # Exponential(1) has unit standard deviation
     assert abs(np.exp(with_jacobian).mean() - 1.0) < 4.0 * se_x
     assert abs(np.exp(without).mean() - 1.0) > 8.0 * se_x
+
+
+@pytest.mark.medium
+def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
+    """Collapsed moves keep exact TI posterior draws exact; window and weight matter.
+
+    Target: the default Thiele-Innes prior (with its implied-mass window), a
+    buffered record at full weight and a new record (correlation 0.3) at
+    temperature 0.3, errors 0.05 arcsec. Exact draws come from 2^22 prior
+    draws importance-weighted by the tempered likelihood (Kish ESS about
+    42,000) and resampled to N = 4000, so a moment's standard error is close
+    to the i.i.d. one with the reference's own error added: sd sqrt(1/N +
+    1/ESS) for a mean, sqrt((m4 - s^4)(1/N + 1/ESS)) for a variance. After
+    eight moves every coordinate's mean and variance must lie within 4 such
+    errors (the correct move reaches 1.5) and every draw inside the support.
+    Negative controls: a move that drops the window indicator from its
+    acceptance ratio leaves the window; a move that gives the new record full
+    weight (an error in the tempering weights of the conditional Gaussian and
+    of log Z) shifts some moment by more than 4 errors (it reaches 7.3).
+    Fails if the conditional Gaussian or log Z uses the wrong precision (a
+    tempering weight, the correlation or the prior scale), if the random walk
+    is not symmetric, or if proposals outside the window are accepted.
+    """
+    target = ThieleInnesTarget()
+    sigma, beta, n = 0.05, 0.3, 4000
+    records = RelativeAstromData(
+        times=jnp.array([0.0, 200.0]),
+        ra=jnp.array([0.08, -0.05]),
+        dec=jnp.array([0.06, 0.1]),
+        ra_err=jnp.full(2, sigma),
+        dec_err=jnp.full(2, sigma),
+        corr=jnp.array([0.0, 0.3]),
+        planet_id=jnp.zeros(2, dtype=int),
+        is_valid=jnp.ones(2, dtype=bool),
+    )
+    select = jnp.array([False, True])
+
+    def log_weight(theta):
+        ll_rest, ll_new = target.log_likelihood_split(theta, records, select)
+        inside = jnp.isfinite(target.log_prior(theta))
+        return jnp.where(inside, ll_rest + beta * ll_new, -jnp.inf)
+
+    @jax.jit
+    def reference(key):
+        x = target.sample_prior(key, 2**22)
+        chunks = x.reshape(64, -1, x.shape[1])
+        log_w = jax.lax.map(jax.vmap(log_weight), chunks).reshape(-1)
+        return x, jax.nn.softmax(log_w)
+
+    pool, w = (np.asarray(a) for a in reference(jax.random.key(0)))
+    ess = 1.0 / np.sum(w**2)
+    assert ess > 30_000
+    ref_sd = np.sqrt(w @ (pool - w @ pool) ** 2)
+    rng = np.random.default_rng(0)
+    start = jnp.asarray(pool[rng.choice(len(w), n, p=w / w.sum())])
+
+    def stats(x):
+        tau = 2.0 * np.pi * x[:, 2]
+        return np.column_stack([x[:, [0, 1, 3, 4, 5, 6]], np.cos(tau), np.sin(tau)])
+
+    ref_stats = stats(pool)
+    ref_m = w @ ref_stats
+    ref_var = w @ (ref_stats - ref_m) ** 2
+    m4 = w @ (ref_stats - ref_m) ** 4
+    factor = 1.0 / n + 1.0 / ess
+
+    def max_z(x):
+        out = stats(x)
+        z_mean = (out.mean(0) - ref_m) / np.sqrt(ref_var * factor)
+        z_var = (out.var(0) - ref_var) / np.sqrt((m4 - ref_var**2) * factor)
+        return max(np.max(np.abs(z_mean)), np.max(np.abs(z_var)))
+
+    e_max, lnp_lo, lnp_hi = 0.9, math.log(50.0), math.log(5000.0)
+
+    def no_window(theta):
+        inside = (theta[0] > 0.0) & (theta[0] < e_max)
+        inside &= (theta[1] > lnp_lo) & (theta[1] < lnp_hi)
+        return jnp.where(inside, 0.0, -jnp.inf)
+
+    def run(rest, new_weight):
+        weights = jnp.array([1.0, new_weight])
+
+        @jax.jit
+        def go(x):
+            def evaluate(theta):
+                lr, ln = target.log_likelihood_split(theta, records, select)
+                return target.log_prior(theta), lr, ln
+
+            aux = jax.vmap(evaluate)(x)
+            log_z = jax.vmap(
+                lambda t: _linear_gaussian(target, t, records, weights)[2]
+            )(x)
+            step = 0.8 * jnp.diag(jnp.asarray(ref_sd[:3])) / math.sqrt(3.0)
+
+            def body(i, carry):
+                x, aux, log_z = carry
+                x, aux, log_z, _ = _collapsed_step(
+                    jax.random.fold_in(_key(4), i),
+                    x,
+                    aux,
+                    log_z,
+                    step,
+                    target,
+                    records,
+                    weights,
+                    select,
+                    rest,
+                )
+                return x, aux, log_z
+
+            return jax.lax.fori_loop(0, 8, body, (x, aux, log_z))[0]
+
+        return np.asarray(go(start))
+
+    def exact(theta):
+        return _rest_log_prior(target, theta)
+
+    out = run(exact, beta)
+    assert np.mean(np.any(out != np.asarray(start), axis=1)) > 0.5  # the draws moved
+    assert np.all(np.isfinite(np.asarray(jax.vmap(target.log_prior)(jnp.asarray(out)))))
+    assert max_z(out) < 4.0
+
+    mutant = run(no_window, beta)
+    in_window = jax.vmap(target.log_prior)(jnp.asarray(mutant))
+    assert float(jnp.mean(jnp.isfinite(in_window))) < 0.9
+    assert max_z(run(exact, 1.0)) > 4.0
 
 
 class _PriorMovesUpdater(OrbitUpdater):
@@ -290,6 +419,16 @@ ORBIT_CASES = {
 }
 
 
+PREDICTIVE_LANES = 4
+
+
+def _lanes(tree):
+    """Broadcast a single record or target over the predictive lanes."""
+    return jax.tree.map(
+        lambda x: jnp.broadcast_to(x, (PREDICTIVE_LANES, *jnp.shape(x))), tree
+    )
+
+
 @pytest.mark.medium
 @pytest.mark.parametrize("name", ["ti", "physical"])
 def test_orbit_target_one_epoch_predictive_and_no_recompile(name):
@@ -297,45 +436,51 @@ def test_orbit_target_one_epoch_predictive_and_no_recompile(name):
 
     With a prior on the sky position hundreds of times wider than the 3.5 mas
     error, the one-epoch posterior of the predicted position at the record's
-    epoch is close to N(record, sigma^2) per axis. The weighted mean must lie
-    within sigma / 2 of the record and the weighted standard deviation within
-    20 percent of sigma (an estimate at ESS of order 1000 errs by about 3
-    percent). The same jitted update then assimilates a second record (a
-    different buffer count) and a record on a target with other array values.
-    Fails if the tempering applies the record twice (standard deviation
-    sigma / sqrt 2) or stops short of temperature 1 (too wide), if the
-    distance or chart conversion is dropped, or if a record count or target
-    value enters the program as a static value.
+    epoch is close to N(record, sigma^2) per axis (an importance reference
+    with 2^21 prior draws gives 0.96 and 1.02 sigma for the TI case). Over 4
+    independent lanes the weighted mean must lie within sigma / 2 of the
+    record and the lane-averaged weighted standard deviation within 15 percent
+    of sigma. A single lane at 1024 particles occasionally collapses to half
+    its distinct particles and reads 0.75 sigma, hence the lane average. The
+    same jitted update then assimilates a second record (a different buffer
+    count) and a record on a target with other array values. Fails if the
+    tempering or the collapsed move applies the record twice (standard
+    deviation sigma / sqrt 2) or stops short of temperature 1 (too wide), if
+    the distance or chart conversion is dropped, or if a record count or
+    target value enters the program as a static value.
     """
     target, theta = ORBIT_CASES[name]
-    records = _orbit_records(target, theta, seed=0)
+    records = [_lanes(r) for r in _orbit_records(target, theta, seed=0)]
     traces = []
 
     @eqx.filter_jit
-    def step(belief, record, key):
+    def step(belief, record, keys):
         traces.append(None)
-        return ORBIT_UPDATER.update(belief, record, key)
+        return jax.vmap(ORBIT_UPDATER.update)(belief, record, keys)
 
-    prior = ORBIT_UPDATER.prior_belief(target, _key(10))
-    belief, diag = step(prior, records[0], _key(11))
-    assert int(diag.status) == UpdaterStatus.OK
-    assert float(diag.temperature) == 1.0
-    ra, dec = jax.vmap(target.predict, in_axes=(0, None))(
+    keys = jax.random.split(_key(10), 3 * PREDICTIVE_LANES).reshape(3, -1)
+    prior = jax.vmap(ORBIT_UPDATER.prior_belief, in_axes=(None, 0))(
+        target, jax.random.split(_key(9), PREDICTIVE_LANES)
+    )
+    belief, diag = step(prior, records[0], keys[0])
+    assert bool(jnp.all(diag.status == UpdaterStatus.OK))
+    assert bool(jnp.all(diag.temperature == 1.0))
+    ra, dec = jax.vmap(jax.vmap(target.predict, in_axes=(0, None)), in_axes=(0, None))(
         belief.particles, ORBIT_TIMES[:1]
     )
     w = np.exp(np.asarray(belief.log_weights))
-    for pred, obs in ((ra[:, 0], records[0].ra), (dec[:, 0], records[0].dec)):
+    for pred, obs in ((ra[..., 0], records[0].ra[0]), (dec[..., 0], records[0].dec[0])):
         pred = np.asarray(pred)
-        mean = w @ pred
-        sd = math.sqrt(w @ (pred - mean) ** 2)
-        assert abs(mean - float(obs)) < 0.5 * ORBIT_SIGMA
-        assert 0.8 < sd / ORBIT_SIGMA < 1.2
+        mean = np.sum(w * pred, axis=1)
+        sd = np.sqrt(np.sum(w * (pred - mean[:, None]) ** 2, axis=1))
+        assert np.all(np.abs(mean - float(obs)) < 0.5 * ORBIT_SIGMA)
+        assert 0.85 < np.mean(sd) / ORBIT_SIGMA < 1.15
 
-    two, diag2 = step(belief, records[1], _key(12))
-    assert bool(diag2.applied)
-    assert int(two.n_records) == 2
-    other = eqx.tree_at(lambda t: t.dist_pc, target, 1.2 * target.dist_pc)
-    step(eqx.tree_at(lambda b: b.target, prior, other), records[2], _key(13))
+    two, diag2 = step(belief, records[1], keys[1])
+    assert bool(jnp.all(diag2.applied))
+    assert bool(jnp.all(two.n_records == 2))
+    other = eqx.tree_at(lambda t: t.dist_pc, prior.target, 1.2 * prior.target.dist_pc)
+    step(eqx.tree_at(lambda b: b.target, prior, other), records[2], keys[2])
     assert len(traces) == 1
 
 
@@ -371,13 +516,6 @@ def _period_masses(ln_period, log_weights):
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "random-walk moves cannot travel along the thin two-epoch Thiele-Innes "
-        "posterior, so resampling loses period lineages"
-    ),
-)
 def test_ti_two_epoch_period_masses_match_lambert_reference():
     """Two-epoch ln-period masses agree roughly with the Lambert reference.
 
@@ -388,7 +526,10 @@ def test_ti_two_epoch_period_masses_match_lambert_reference():
     about 0.05 over these 8 bins). The updater runs 8 independent lanes at
     8,192 particles, 32 rungs and 4 moves. Smoke tolerance: the total
     variation of the lane-averaged masses from the reference is at most 0.15.
-    Fails if the kernel drops period aliases or misweights them.
+    Fails if the kernel drops period aliases or misweights them; random-walk
+    moves over all seven coordinates fail it (total variation about 0.25),
+    because they cannot follow the thin two-epoch posterior and resampling
+    then loses period lineages.
     """
     data = _two_epoch_ti_data()
     a_max = (TI_MODEL.mu_hi * math.exp(TI_MODEL.lnP_hi) ** 2 / (4.0 * math.pi**2)) ** (
