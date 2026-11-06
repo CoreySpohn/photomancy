@@ -188,3 +188,215 @@ def test_exact_check_critical_value():
     values = tool.critical_values(protocol)
     assert values["exact_check_t_critical"] == pytest.approx(expected, abs=1e-9)
     assert round(expected, 3) == protocol["stated"]["exact_check_t_critical_3dp"]
+
+
+def test_development_plan_shards_disjointly_and_matches_the_tally():
+    """Shards partition the development units; the plan costs what the tally says.
+
+    Fails if two shards share a unit or a unit falls in no shard (the worker
+    would duplicate or drop work), if unit ids collide, or if the planned
+    updater runs and reference fits (doubled roles costing two) drift from
+    the protocol's compute tally.
+    """
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    units = tool.plan_units(
+        protocol, "development", ["updater", "reference", "certification"]
+    )
+    ids = [u["id"] for u in units]
+    assert len(set(ids)) == len(ids)
+    for n in (2, 3):
+        parts = [{u["id"] for u in tool.shard_units(units, (i, n))} for i in range(n)]
+        assert sum(len(p) for p in parts) == len(ids)
+        assert set().union(*parts) == set(ids)
+    tally = tool.compute_tally(protocol)
+
+    def cost(u):
+        return 2 if "doubled" in u["role"] else 1
+
+    upd = sum(cost(u) for u in units if u["role"] in tool.UPDATER_ROLES)
+    ref = sum(cost(u) for u in units if u["role"] not in tool.UPDATER_ROLES)
+    n_mass = len(protocol["panel"]["mass_models"])
+    n_updates = len(protocol["panel"]["updates"])
+    assert upd * n_updates == n_mass * tally["development_update_equivalents_per_pair"]
+    assert ref == n_mass * tally["development_reference_fit_equivalents_per_pair"]
+    with pytest.raises(ValueError):
+        tool.parse_shard("2/2")
+
+
+def test_run_resumes_after_a_kill_without_duplicate_work(tmp_path):
+    """A killed run restarts where it stopped; a torn last line is skipped.
+
+    The first run dies after three units, leaving half a record on the last
+    line. Fails if the restart reruns a finished unit, loses the unfinished
+    ones, appends its first record onto the torn line, or if two shards
+    writing to one directory skip each other's finished units incorrectly.
+    """
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    units = tool.plan_units(
+        protocol, "smoke", ["updater"], regimes=["R1"], mass_models=["ti_window"]
+    )
+    calls = []
+
+    class Killed(Exception):
+        pass
+
+    def dying(unit):
+        if len(calls) == 3:
+            raise Killed
+        calls.append(unit["id"])
+        return {"kind": "fake", "seconds": 0.0}
+
+    with pytest.raises(Killed):
+        tool.run_units(units, tmp_path, (0, 1), dying, log=lambda m: None)
+    path = tmp_path / "units-0of1.jsonl"
+    with open(path, "a") as fh:
+        fh.write('{"id": "torn')
+    first = list(calls)
+
+    def finishing(unit):
+        calls.append(unit["id"])
+        return {"kind": "fake", "seconds": 0.0}
+
+    counts = tool.run_units(units, tmp_path, (0, 1), finishing, log=lambda m: None)
+    assert counts == {"planned": len(units), "skipped": 3, "ran": len(units) - 3}
+    assert sorted(calls) == sorted(u["id"] for u in units)
+    assert set(calls[3:]).isdisjoint(first)
+    records, duplicates = tool.load_units(tmp_path)
+    assert set(records) == {u["id"] for u in units} and not duplicates
+    again = tool.run_units(units, tmp_path, (0, 1), finishing, log=lambda m: None)
+    assert again["ran"] == 0
+
+
+def test_freeze_precision_comes_from_key_to_key_disagreement(tmp_path):
+    """Freeze precision is key-to-key disagreement; a partial run is incomplete.
+
+    For multinomial pairs at size n over Dirichlet(0.7) masses, the implied
+    per-run variance (1 / size, the quantity the freeze simulation
+    reproduces) averages to 1 / n within 5 percent (2,000 pairs; its
+    standard error is about 1.5 percent). In assembled
+    records the kernel ESS (0.9 N by construction) never enters: two runs
+    that disagree get a small precision whatever the kernel reports. A run
+    directory missing development units freezes to ``incomplete`` with the
+    count of missing records. Fails if the freeze reads the kernel ESS,
+    mis-scales the variance estimate, or freezes a partial panel.
+    """
+    import numpy as np
+
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    rng = np.random.default_rng(0)
+    n = 500
+    sizes = []
+    for _ in range(2000):
+        p = rng.dirichlet(np.full(8, 0.7))
+        a, b = (rng.multinomial(n, p) / n for _ in range(2))
+        sizes.append(tool.key_to_key_ess(a, b, cap=10**6))
+    assert abs(n * np.mean(1.0 / np.asarray(sizes)) - 1.0) < 0.05
+
+    flat = [1.0 / 8] * 8
+    skew = [0.5, 0.5] + [0.0] * 6
+    units = {}
+    for role, masses in (("updater_a", flat), ("updater_b", skew)):
+        rid = tool.unit_id("development", "ti_window", "R1", 0, role)
+        units[rid] = {
+            "id": rid,
+            "kind": "updater",
+            "particles": 8192,
+            "updates": [{"kernel_ess": 7372.8}] * 3,
+            "summaries": {
+                str(k): {"bins": {q: masses for q in ("lnP", "e", "future_pa")}}
+                for k in (2, 3)
+            },
+        }
+    for role in ("reference_1", "reference_2"):
+        for k in (2, 3):
+            rid = tool.unit_id("development", "ti_window", "R1", 0, role, k)
+            units[rid] = {
+                "id": rid,
+                "kind": "reference",
+                "proposals": 2**20,
+                "summary": {
+                    "kish_ess": 900.0,
+                    "bins": {q: flat for q in ("lnP", "e", "future_pa")},
+                },
+            }
+    summary, missing = tool.assemble_freeze_summary(protocol, units)
+    group = next(g for g in summary["groups"] if g["worlds"])
+    world = group["worlds"][0]
+    assert world["kernel_ess"] == 7372.8
+    assert all(v < 10 for v in world["updater_ess"].values())
+    # Per world: two updater runs and two references at each of two epoch counts.
+    assert len(missing) == 6 * 8 * 38 - 6
+
+    for rec in units.values():
+        tool.append_record(tmp_path / "units-0of1.jsonl", rec)
+    report = tool.freeze_report(protocol, tmp_path)
+    assert report["status"] == "incomplete"
+    assert any("freeze records missing" in r for r in report["reasons"])
+    assert any("exact-check results not supplied" in r for r in report["reasons"])
+
+
+@pytest.mark.medium
+def test_units_write_complete_summaries_and_exact_physical_weights():
+    """One updater unit and one physical reference produce gradable records.
+
+    The updater record carries every update's status, kernel and Kish ESS
+    and timing, and per epoch count normalized bin masses, ordered interval
+    end points, a schedule probability and PITs in [0, 1]. The physical
+    reference conditioned on its one epoch (anchor weight rho^-2, anchor
+    likelihood excluded) must scatter the anchor position by sigma per axis
+    (2^15 proposals, ESS in the thousands; the measured ratio is within 3
+    percent of 1). Fails if a summary field is missing or unnormalized, the
+    interval rule inverts, or the reference counts the anchor epoch twice
+    (scatter sigma / sqrt 2, a ratio of 0.71).
+    """
+    import jax
+    import numpy as np
+
+    from photomancy.orbit.updater import UpdaterStatus
+
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    budgets = tool.protocol_budgets(
+        protocol, particles=256, ti_proposals=4096, physical_proposals=2**15
+    )
+    executor = tool.UnitExecutor(protocol, budgets, chunk=2**13)
+    unit = tool.plan_units(
+        protocol,
+        "smoke",
+        ["updater"],
+        mass_models=["physical_fixed"],
+        regimes=["R3"],
+        worlds=[0],
+    )[0]
+    record = executor(unit)
+    assert [u["update"] for u in record["updates"]] == [0, 1, 2]
+    for u in record["updates"]:
+        assert u["status"] in {s.name for s in UpdaterStatus}
+        assert u["kernel_ess"] > 0 and u["kish_ess"] > 0 and u["seconds"] > 0
+    for k in ("2", "3"):
+        s = record["summaries"][k]
+        for masses in s["bins"].values():
+            assert abs(sum(masses) - 1.0) < 1e-12
+        for ends in s["intervals"].values():
+            assert ends["90"][0] <= ends["50"][0] <= ends["50"][1] <= ends["90"][1]
+        assert 0.0 <= s["schedule_p"] <= 1.0
+        assert all(0.0 <= u <= 1.0 for u in s["pit"].values())
+        assert set(record["truth"][k]) == set(tool.QUANTITIES)
+
+    world = tool.world_data(protocol, "smoke", "physical_fixed", 2, 0)
+    key = jax.random.key(0, impl="threefry2x32")
+    q, lw, _ = executor.physical_reference(world, 1, key, 2**15, False, 0.0)
+    w = np.exp(lw - lw.max())
+    w /= w.sum()
+    assert 1.0 / np.sum(w**2) > 1000
+    for name, obs in (
+        ("future_east", world["ra"][0]),
+        ("future_north", world["dec"][0]),
+    ):
+        mean = w @ q[name]
+        sd = np.sqrt(w @ (q[name] - mean) ** 2)
+        assert abs(mean - obs) < 0.1 * world["sigma"]
+        assert abs(sd / world["sigma"] - 1.0) < 0.06
