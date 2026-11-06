@@ -86,19 +86,23 @@ def build_model(
         has_null: Whether null-detection data will be provided.
         has_imaging: Whether unified imaging data will be provided.
         custom_loglike: Optional JAX-compatible ``params -> scalar`` data
-            log-likelihood, added once with ``numpyro.factor``. Receives ``T``
+            log-likelihood (default None), added once with ``numpyro.factor``.
+            Return a scalar log-likelihood without prior terms; vector returns
+            raise ValueError. Receives ``T``
             and ``tp`` (days), ``a`` and ``Rp`` (AU), ``Mp`` and ``Ms`` (kg),
             ``dist_pc`` (parsec), ``e``, ``cos_i``, ``W`` (radians), ``cos_w``,
             ``sin_w``, ``M0`` (radians), ``Ag``, and ``Lambda = Ag * Rp**2``.
             Planet parameters are scalars for one planet and vectors otherwise.
             A custom likelihood activates the planet-scale priors automatically.
         custom_data: Pytree captured by the model closure and exposed to the
-            one-argument callback as ``params["custom_data"]``.
+            one-argument callback as ``params["custom_data"]``. Default None;
+            array leaves must support the callback's JAX transformations.
         sample_planet_scale: Sample ``log_Rp``, ``log_Ag`` and ``log_Mp`` even
             without built-in photometry or reflex channels. Default False;
             with no data or custom likelihood this gives a prior-only model.
         allow_overlap: Explicitly allow built-in channels alongside a custom
-            likelihood. Default False to prevent silent double counting.
+            likelihood. Default False; their combination raises ValueError
+            unless True, in which case all supplied likelihood terms are added.
         log_P_range: (min, max) for log10(period/days) uniform prior.
         log_Mp_range: (min, max) for log10(mass/M_earth) uniform prior.
         log_Rp_range: (min, max) for log10(Rp/AU) uniform prior.

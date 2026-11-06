@@ -11,11 +11,43 @@ from scipy.stats import kstest
 
 from photomancy.orbit.data import NullData, OrbitData, RelativeAstromData
 from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
-from photomancy.orbit.inference import build_orbit_logdensity
+from photomancy.orbit.inference import build_orbit_logdensity, to_unconstrained
 from photomancy.orbit.likelihoods import loglike_null, loglike_relative_astrom
 from photomancy.orbit.model import build_model
+from photomancy.posterior import SamplePosterior
 
 jax.config.update("jax_enable_x64", True)
+
+
+def test_physical_scale_samples_round_trip_through_unconstrained():
+    """Fails for the dropped-log_Rp/log_Ag mutant in to_unconstrained.
+
+    The mass round-trip test does not cover retained radius and albedo samples.
+    """
+    problem = build_orbit_logdensity(
+        Msun2kg, 10.0, sample_planet_scale=True, ecc_prior="disk"
+    )
+    log_radius = jnp.array([-4.02949, -3.82996])
+    log_albedo = jnp.array([-1.2, -0.4])
+    z = jax.vmap(
+        lambda rp, ag: problem.init_to_z({"log_Rp": rp[None], "log_Ag": ag[None]})
+    )(log_radius, log_albedo)
+    physical = jax.vmap(problem.to_physical)(z)
+    names = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp", "Mp", "Rp", "Ag")
+    post = SamplePosterior(
+        samples=jnp.stack([physical[name] for name in names], axis=1),
+        log_weights=jnp.log(jnp.array([0.3, 0.7])),
+        evidence=jnp.array(-2.0),
+        param_names=names,
+    )
+    converted = to_unconstrained(post, problem, Msun2kg)
+    recovered = jax.vmap(problem.to_physical)(converted.samples)
+    np.testing.assert_allclose(jnp.log10(recovered["Rp"]), log_radius, atol=1e-14)
+    np.testing.assert_allclose(jnp.log10(recovered["Ag"]), log_albedo, atol=1e-14)
+    np.testing.assert_allclose(recovered["Lambda"], physical["Lambda"], rtol=1e-12)
+    np.testing.assert_allclose(converted.samples, z, rtol=0.0, atol=1e-12)
+    np.testing.assert_array_equal(converted.log_weights, post.log_weights)
+    assert converted.evidence == post.evidence
 
 
 def test_planet_scale_prior_only_is_log_uniform():

@@ -24,13 +24,11 @@ from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import initialize_model
 
 from photomancy.orbit._numpyro_bridge import (
-    _get_or_build_cached,
+    _build_orbit_model,
     _init_dict_to_z_flat,
     make_constrain,
 )
-from photomancy.orbit.data import OrbitData
 from photomancy.orbit.init import elements_to_sites
-from photomancy.orbit.model import build_model
 from photomancy.posterior import SamplePosterior
 
 
@@ -101,17 +99,21 @@ def build_orbit_logdensity(
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
         custom_loglike: JAX-compatible ``params -> scalar`` data log-likelihood.
+            Default None. Return a scalar without prior terms, or a ValueError
+            is raised for a vector result.
             Receives physical orbit and planet-scale parameters, plus ``Ms``,
             ``dist_pc`` and ``custom_data``; see
             :func:`~photomancy.orbit.model.build_model` for keys, units and
             shapes. Absent built-in channels add no terms.
         custom_data: Pytree bound into the callback's parameter dictionary under
-            ``"custom_data"``. Each custom fit owns its model trace.
+            ``"custom_data"`` (default None). Array leaves must support the
+            callback's JAX transformations. Each custom fit owns its model trace.
         sample_planet_scale: Activate ``log_Rp``, ``log_Ag`` and ``log_Mp``
             without built-in channels, allowing prior-only fits. A custom
             likelihood also activates these sites. Default False.
         allow_overlap: Allow a custom likelihood together with any built-in
             channel. Default False; combining them otherwise raises ValueError.
+            With True, all supplied likelihood terms are added.
         log_P_range: ``(min, max)`` for the ``log10(period/days)`` prior.
         log_Mp_range: ``(min, max)`` for the ``log10(mass/M_earth)`` prior.
         log_Rp_range: ``(min, max)`` for the ``log10(Rp/AU)`` prior.
@@ -126,21 +128,19 @@ def build_orbit_logdensity(
     Returns:
         An :class:`OrbitProblem`.
     """
-    data = OrbitData(
-        rv=rv_data,
-        relative_astrom=relative_astrom_data,
-        stellar_astrom=stellar_astrom_data,
-        pm_anomaly=pm_anomaly_data,
-        null=null_data,
-        imaging=imaging_data,
-    )
-    model_config = dict(
-        has_rv=data.rv is not None,
-        has_relative_astrom=data.relative_astrom is not None,
-        has_stellar_astrom=data.stellar_astrom is not None,
-        has_pm_anomaly=data.pm_anomaly is not None,
-        has_null=data.null is not None,
-        has_imaging=data.imaging is not None,
+    model, model_args, cached = _build_orbit_model(
+        Ms,
+        dist_pc,
+        rv_data=rv_data,
+        relative_astrom_data=relative_astrom_data,
+        stellar_astrom_data=stellar_astrom_data,
+        pm_anomaly_data=pm_anomaly_data,
+        null_data=null_data,
+        imaging_data=imaging_data,
+        custom_loglike=custom_loglike,
+        custom_data=custom_data,
+        sample_planet_scale=sample_planet_scale,
+        allow_overlap=allow_overlap,
         log_P_range=log_P_range,
         log_Mp_range=log_Mp_range,
         log_Rp_range=log_Rp_range,
@@ -148,18 +148,9 @@ def build_orbit_logdensity(
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
         n_planets=n_planets,
+        seed=seed,
     )
-    model_args = (Ms, dist_pc, data.padded())
-    if custom_loglike is not None or sample_planet_scale:
-        # Custom closures must not enter the shared cache: their data and callable
-        # are not represented in its static configuration key.
-        model = build_model(
-            **model_config,
-            custom_loglike=custom_loglike,
-            custom_data=custom_data,
-            sample_planet_scale=sample_planet_scale,
-            allow_overlap=allow_overlap,
-        )
+    if cached is None:
         info = initialize_model(
             jax.random.PRNGKey(seed), model, dynamic_args=True, model_args=model_args
         )
@@ -176,12 +167,6 @@ def build_orbit_logdensity(
             z_template=z_template,
             unflatten=unflatten,
             param_names=tuple(sorted(z_template)),
-        )
-    else:
-        cached = _get_or_build_cached(
-            **model_config,
-            n_inst=rv_data.n_inst if rv_data is not None else 1,
-            seed=seed,
         )
 
     unflatten = cached["unflatten"]
@@ -228,7 +213,8 @@ def to_unconstrained(posterior, problem, Ms):
     each row -> raw sites -> ``z`` via ``problem.init_to_z`` (vmapped, no Python loop).
     A true-mass ``Mp`` column (kg) is included in the Kepler inversion and carried
     into the model's mass site. Mass-free rows use stellar mass, matching the
-    OFTI / grid_search orbit construction.
+    OFTI / grid_search orbit construction. Retained ``Rp`` (AU) and ``Ag``
+    columns are carried into their logarithmic model sites as well.
 
     Args:
         posterior: A physical :class:`~photomancy.posterior.SamplePosterior` whose
@@ -245,22 +231,18 @@ def to_unconstrained(posterior, problem, Ms):
     }
     period = 2.0 * jnp.pi * jnp.sqrt(cols["a"] ** 3 / (G * (Ms + cols.get("Mp", 0.0))))
 
-    def one(t, e, cos_i, w_node, cos_w, sin_w, tp, Mp):
-        sites = elements_to_sites(t, e, cos_i, w_node, cos_w, sin_w, tp, n_planets=1)
-        if "Mp" in cols:
-            sites["log_Mp"] = jnp.atleast_1d(jnp.log10(Mp / Mearth2kg))
+    def one(t, row):
+        sites = elements_to_sites(
+            t,
+            *(row[k] for k in ("e", "cos_i", "W", "cos_w", "sin_w", "tp")),
+            n_planets=1,
+        )
+        for name, unit in (("Mp", Mearth2kg), ("Rp", 1.0), ("Ag", 1.0)):
+            if name in row:
+                sites[f"log_{name}"] = jnp.atleast_1d(jnp.log10(row[name] / unit))
         return problem.init_to_z(sites)
 
-    z = jax.vmap(one)(
-        period,
-        cols["e"],
-        cols["cos_i"],
-        cols["W"],
-        cols["cos_w"],
-        cols["sin_w"],
-        cols["tp"],
-        cols.get("Mp", jnp.zeros_like(period)),
-    )
+    z = jax.vmap(one)(period, cols)
     return SamplePosterior(
         samples=z,
         log_weights=posterior.log_weights,
