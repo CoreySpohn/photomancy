@@ -49,6 +49,11 @@ posterior an unbounded sampler would return.
   - A6: how the references are executed in batches, the records the
     development runner writes, and the provenance the runner and the freeze
     enforce ("Reference method and budget", "Development runner").
+  - A7: the TI reference method (the collapsed prior importance sampler, in
+    place of the Lambert depth fit) and the TI sampler of certification check
+    3 (a frequency-mixture importance sampler with joint weights, at twice the
+    budget) ("TI reference", "Reference certification"). The physical
+    reference is unchanged.
 
 ## Parameter block
 
@@ -111,7 +116,7 @@ stated here under `stated`.
       "defaults": {"s_ti_au": 2.0, "e_max": 0.9, "period_days": [50.0, 5000.0],
                    "mass_window_msun": [0.3333333333333333, 3.0], "t_ref_days": 0.0},
       "likelihood": "independent Gaussian east and north offsets, known sigma",
-      "reference": "lambert_depth_fit"
+      "reference": "collapsed prior importance sampler (amendment A7)"
     },
     "physical_fixed": {
       "graded_by": "panel",
@@ -176,15 +181,16 @@ stated here under `stated`.
   },
   "reference": {
     "ti_window": {"proposals_per_fit": 1048576, "max_proposals_per_fit": 8388608,
-                  "allocation": "equal per Lambert family",
-                  "depth_half_width": "(1 + e_max) a_max",
-                  "max_revolutions": "ceil(baseline / P_lo)"},
+                  "method": "collapsed prior importance sampler",
+                  "independent_method": "frequency-mixture importance sampler with joint weights",
+                  "independent": {"prior_fraction": 0.5, "inflation": 1.25,
+                                  "budget_factor": 2}},
     "physical_fixed": {"proposals_per_fit": 4194304, "max_proposals_per_fit": 33554432,
                        "anchor": "highest-SNR valid epoch"},
     "repeat_noise": {"runs": 4, "bound_fraction_of_delta2": 0.25},
     "convergence": {"bound_fraction_of_delta2": 0.25},
     "cross_method": {"bound_fraction_of_delta2": 0.5,
-                     "ti_window": "admissible_region_fit, same model, budget and z_max_au",
+                     "ti_window": "frequency-mixture sampler, same model, twice the budget",
                      "physical_fixed": "same weights, anchor at the lowest-SNR valid epoch"},
     "exact_checks": {"sampler_repeats": 16, "family_alpha": 0.01,
                      "bins_per_case": 24, "interval_end_points_per_case": 4,
@@ -201,7 +207,7 @@ stated here under `stated`.
   "compute": {
     "source": "development runner on one slot (4 threads), arm64 macOS laptop, jax 0.12; tuning worlds; references at the protocol budget",
     "measured_seconds_per_update": {"ti_window": 0.645, "physical_fixed": 0.491},
-    "measured_reference_seconds_per_fit": {"ti_window": 28.2, "physical_fixed": 22.6}
+    "measured_reference_seconds_per_fit": {"ti_window": 1.57, "physical_fixed": 22.6}
   },
   "stated": {
     "coverage_critical_count": 339,
@@ -310,8 +316,8 @@ lanes) from orbit geometry.
   exact rejection sampling of the declared prior. (`TIBasisModel.sample_prior`
   is not used: it reseeds NumPy from a 31-bit integer and floors $e$ at
   $10^{-6}$.)
-- **Reference.** `few_epoch.lambert_depth_fit` on the same model instance (see
-  "Reference method and budget").
+- **Reference.** The collapsed prior importance sampler on the same target
+  (amendment A7; see "Reference method and budget").
 
 ### Physical pair (fixed mass)
 
@@ -391,34 +397,43 @@ mass model) with `tools/updater_tuning.py`; the record is
   bins as low as 9 in R3, where the eccentricity is near zero and the chart's
   angle is undefined); that too is what the panel measures.
 
-- **TI reference budget (measured, not met).** The budget was to be fixed
-  before the development run as the smallest power of two from $2^{20}$ to
-  $2^{23}$ whose worst tuning world reaches a Kish ESS of 200 (the smaller of
-  `reference_1` and `reference_2`). The floor follows from repeat-noise
-  certification: its bound of $0.25\,\delta_2$ on the mean of 152 worlds
-  tolerates one world near ESS 100 only if the others are in the thousands,
-  since a world's D2 variance grows as $1/\mathrm{ESS}^2$. The Lambert depth
-  fit on worlds 0 to 5 (`docs/updater-tuning.json`, `ti_reference_budget`):
+- **TI reference budget.** The budget is fixed before the development run as
+  the smallest power of two from $2^{20}$ to $2^{23}$ whose worst tuning world
+  reaches a Kish ESS of 200 (per world the smaller of two fits). The floor
+  follows from repeat-noise certification: its bound of $0.25\,\delta_2$ on
+  the mean of 152 worlds tolerates one world near ESS 100 only if the others
+  are in the thousands, since a world's D2 variance grows as
+  $1/\mathrm{ESS}^2$. Measured on worlds 0 to 5 (`docs/updater-tuning.json`,
+  `ti_reference_budget`), the Lambert depth fit meets it only in R2 at two
+  epochs and, its ESS growing about linearly with the budget, nowhere else
+  at any permitted budget:
 
-  | Regime, epochs | $2^{20}$ worst / median | $2^{21}$ worst / median |
+  | Lambert depth fit | $2^{20}$ worst / median | $2^{21}$ worst / median |
   |---|---|---|
-  | R2, 2 | 260 / 898 | 590 / 2,038 |
+  | R2, 2 epochs | 260 / 898 | 590 / 2,038 |
   | R2, 3 | 2.1 / 18 | 8.1 / 32 |
   | R3, 2 | 4.8 / 6.2 | 12.6 (one world) |
   | R3, 3 | 1.0 / 1.7 | 2.6 (one world) |
 
-  The ESS grows about linearly with the budget, so at $2^{23}$ the worst R2
-  three-epoch world would be near 30 and R3 below 100: no permitted budget
-  meets the floor, and the TI references cannot be certified with this
-  method. In R3 the truncation $e < 0.05$ removes almost every Lambert
-  proposal; in R2 at three epochs the third epoch's likelihood does. The
-  budget stays at the provisional $2^{20}$ and the TI reference method needs
-  an amendment before its development runs. A spike with the collapsed prior
-  importance sampler (prior draws of $(e, \ln P, \tau)$, the TI constants
-  from their conditional Gaussian, weight the marginal likelihood times the
-  window indicator; exact, as in the kernel tests) reached a worst ESS of 276
-  (R2, three epochs) and at least 4,200 elsewhere with $2^{20}$ draws, at about
-  3 s per fit on one thread.
+  Amendment A7 therefore replaces it. Worst / median Kish ESS of the A7
+  samplers (one fit per world, worlds 0 to 5), the collapsed prior reference
+  at $2^{20}$ and the check-3 frequency-mixture sampler at $2^{21}$:
+
+  | Regime, epochs | Collapsed, $2^{20}$ | Frequency mixture, $2^{21}$ |
+  |---|---|---|
+  | R1, 2 | 121,875 / 171,590 | 100,339 / 150,015 |
+  | R1, 3 | 78,720 / 164,309 | 69,462 / 137,872 |
+  | R2, 2 | 3,706 / 20,842 | 4,765 / 21,236 |
+  | R2, 3 | 251 / 1,185 | 241 / 1,172 |
+  | R3, 2 | 150,990 / 230,743 | 121,396 / 191,995 |
+  | R3, 3 | 29,740 / 58,330 | 25,234 / 47,550 |
+  | R4, 2 | 113,399 / 175,106 | 94,266 / 147,593 |
+  | R4, 3 | 14,940 / 51,894 | 12,407 / 44,425 |
+
+  Both meet the floor in every regime and epoch count; R2 at three epochs
+  sets both budgets, with little margin (251 and 241), so a development
+  world below the floor there is the expected trigger for the budget
+  doubling of "Provisional values".
 - **Tuning worlds are not held out.** The tuning worlds 0 to 5, with the same
   `updater_a` and `updater_b` keys, also enter the 38-world freeze summaries
   and the reference certification, so the development results on those six
@@ -440,34 +455,32 @@ $\mathrm{ESS} = 1 / \sum_i w_i^2$ for normalized weights $w_i$.
 
 ### TI reference
 
-`few_epoch.lambert_depth_fit` conditions on the first and last accepted epochs,
-samples their noise-free positions from the Gaussian error kernel (which
-cancels those epochs' likelihood exactly), samples two line-of-sight depths and
-the log gravitational parameter, solves the Lambert problem in every
-(revolutions, way, branch) family, and weights by prior, Jacobian and the
-likelihood of the remaining epoch. Exactness needs the proposal to cover the
-whole support, so the protocol sets the two arguments the defaults do not
-guarantee:
+*Amendment A7.* The TI reference is the **collapsed prior importance sampler**
+(`ti_collapsed_reference` in `tools/updater_panel.py`). Write a chart point as
+$(u, c)$ with $u = (e, \ln P, \tau)$ and $c$ the four TI constants. The
+target is $\pi(u, c) \propto p(u)\, N(c; 0, s^2 I)\, L(u, c)\, 1_W(u, c)$:
+the TI target's prior, its implied-mass window $W$ and the likelihood of every
+accepted epoch. Because the predictions are linear in $c$, the Gaussian prior
+times the likelihood is $Z(u)\, N(c; m(u), V(u))$ exactly. Each proposal draws
+$u$ from the prior $p(u)$ and $c$ from $N(m(u), V(u))$, so the importance
+weight is $Z(u)\, 1_W(u, c)$: exact, with Monte Carlo error only, and no
+support left uncovered (the proposal is the prior in $u$ and has full support
+in $c$). It replaces the Lambert depth fit, whose Kish ESS cannot reach the
+floor at any permitted budget (amendment A1, "TI reference budget"): in R3 the
+truncation $e < 0.05$ removes almost every Lambert proposal, and in R2 at
+three epochs the third epoch's likelihood does.
 
-- `z_max_au` $= (1 + e_\mathrm{max})\, a_\mathrm{max}$ with
-  $a_\mathrm{max} = (\mu_\mathrm{hi} P_\mathrm{hi}^2 / 4\pi^2)^{1/3}$, the
-  largest possible distance from the star. The default of 8 AU does not cover
-  the default prior (it needs 15.7 AU).
-- `n_max_rev` $= \lceil (t_\mathrm{last} - t_\mathrm{first}) / P_\mathrm{lo}
-  \rceil$, so every alias family that fits the baseline is enumerated.
-- `n_per_family` $= \lfloor N_\mathrm{prop} / F \rfloor$ with
-  $F = 2 + 4\,$`n_max_rev` families and *provisional* $N_\mathrm{prop} = 2^{20}$
-  = 1,048,576 proposals per fit, at most $2^{23}$.
+The budget is $N_\mathrm{prop} = 2^{20}$ = 1,048,576 proposals per fit
+(*provisional*, at most $2^{23}$): the smallest power of two whose worst
+tuning world reaches the ESS floor of 200 in every regime and epoch count (the
+table in amendment A1). A fit runs in batches of a fixed size, keyed by
+`fold_in(run_key, batch_index)`; the pooled draws are the same estimator as
+one call. The exact checks grade this sampler against quadrature on the
+reduced TI case ("Exact checks").
 
-The dry run prints both arguments for every regime and epoch count.
-
-*Amendment A6.* A fit is executed in batches so that its memory is bounded:
-the Lambert fit as successive calls with the same families and `n_per_family`
-equal to the batch size, keyed by `fold_in(run_key, batch_index)`, the last
-batch truncated per family so that every family receives exactly
-`n_per_family` proposals; the admissible-region and physical fits likewise in
-batches of a fixed number of proposals. The pooled particles are the same
-estimator as one call: independent proposals, equal allocation per family and
+*Amendment A6.* A fit is executed in batches so that its memory is bounded;
+the physical fit in batches of a fixed number of proposals. The pooled
+particles are the same estimator as one call: independent proposals and
 unchanged weights.
 
 ### Physical reference
@@ -518,11 +531,37 @@ $\overline{D2} + z\,\mathrm{SE}$ with a fraction of $\delta_2$.
 2. **Budget agreement.** Two runs at the budget against two runs at twice the
    budget; bound at most $\delta_2 / 4$.
 3. **Proposal agreement.** Two runs of a sampler with a different proposal and
-   the same target: for the TI pair `few_epoch.admissible_region_fit` (one
-   conditioned epoch, a velocity box proposal) on the same model instance,
-   budget and `z_max_au`; for the physical pair the same exact weights with the
-   anchor at the lowest signal-to-noise valid epoch. Bound at most
-   $\delta_2 / 2$.
+   the same target: for the TI pair the frequency-mixture sampler of
+   amendment A7 at twice the budget; for the physical pair the same exact
+   weights with the anchor at the lowest signal-to-noise valid epoch. Bound
+   at most $\delta_2 / 2$.
+
+   *Amendment A7.* The TI sampler of check 3
+   (`ti_frequency_reference`) is independent of the updater kernel and of
+   the primary reference in its proposal and in its weight. Its proposal for
+   $\ln P$ is a defensive mixture: with probability 0.5 the prior (uniform
+   in $\ln P$), otherwise uniform in frequency over the same range. Uniform
+   frequency is the data-independent form of a period-alias comb: the
+   aliases sit at $f_0 + k/\Delta$ with an offset $f_0$ that only the
+   observed positions fix, so a comb built from the epochs alone has a
+   uniform offset. $e$ and $\tau$ come from the prior, with draws of their
+   own (never the primary's draws, never updater particles). The TI
+   constants come from $N(m(u), \kappa^2 V(u))$ with $\kappa = 1.25$, and the
+   weight is the full posterior density (the target's prior with its window,
+   and its likelihood, evaluated directly) divided by the joint proposal
+   density, so it does not use the primary's marginal likelihood $Z(u)$ and
+   an error in that algebra shows as disagreement. Both proposal densities
+   are exact, so the sampler is exact. It runs at twice the TI budget
+   ($2^{21}$), the smallest at which its worst tuning world reaches the
+   floor of 200 (241, R2 at three epochs). A data-dependent proposal (a pilot
+   histogram over a grid of $(e, \ln P, \tau)$, with or without the alias
+   comb) was tried and rejected: when the pilot's own ESS is low it misses
+   modes and the defensive component alone covers them, which left the worst
+   R2 three-epoch world near ESS 10 at $2^{18}$.
+   `test_ti_independent_reference_catches_an_injected_bias` runs check 3's
+   statistic on six R3 worlds at two epochs: the two exact samplers pass, and
+   it fails when the primary drops the implied-mass window, or the check-3
+   sampler drops the proposal density of its TI-constant draw.
 4. **Exact checks** (next subsection) pass for the reference.
 
 *Amendment A4.* The runs of each check are, by purpose: repeat noise
@@ -530,7 +569,8 @@ $\overline{D2} + z\,\mathrm{SE}$ with a fraction of $\delta_2$.
 R_4$ in that order; budget agreement $D2_w = \sum_b (R_{1,b} - C_{1,b})(R_{2,b}
 - C_{2,b})$ with $C_1, C_2$ the runs `cert_doubled_1` and `cert_doubled_2` at
 twice the budget; proposal agreement the same with `cert_proposal_1` and
-`cert_proposal_2`. The critical value $z$ is the alias criterion's (3.078). A
+`cert_proposal_2` (for the TI pair at twice the budget, amendment A7). The
+critical value $z$ is the alias criterion's (3.078). A
 check is made per mass model, epoch count and alias quantity (6 bounds per check
 and mass model), and the reference is certified only when all 18 hold. The
 bound is computed against the frozen $\delta_2$; the freeze tool runs the checks
@@ -539,7 +579,8 @@ after computing it.
 Checks 2 and 3 are evidence, not bounds. Agreement between two budgets does not
 bound the bias of either without a convergence model, and the two proposals
 share the target code (the physical pair shares its weighting formula; the TI
-samplers share the model and support functions), so a shared error passes both.
+samplers share the target's prior, window and likelihood functions and the
+conditional Gaussian used as a proposal), so a shared error passes both.
 A mode that the updater and the reference both miss does not change $D2$ and is
 not detectable by the panel. The exact checks are the only accuracy anchor of
 the references. A reference that fails a check at its maximum budget is not
@@ -993,7 +1034,8 @@ precision replicates (amendment A3): 152 x 3 x 10 = 4,560 update-equivalents
 per pair. Each pair needs 4 x 400 x 2 x 2 = 6,400 reference fits (regimes, worlds,
 epoch counts, independent runs), and the development certification 3,040
 fit-equivalents more (four repeat runs, two runs at twice the budget and two
-other-proposal runs, for 152 worlds and two epoch counts). The certification
+other-proposal runs, for 152 worlds and two epoch counts; 3,648 for the TI
+pair, whose other-proposal runs are at twice the budget, amendment A7). The certification
 needs only the references, so it can run while the updater is being written.
 
 `tools/updater_latency_probe.py` times the vmapped astrometric likelihood over
@@ -1010,8 +1052,9 @@ verdict.
 *Amendment A5.* The likelihood-only prices (0.136 s per TI update and 0.179 s
 per physical update) understate a whole update by a factor of 3 to 5, and the
 per-proposal reference prices understate a fit by 1.4 (TI) and 2.3 (physical),
-because a fit also evaluates the graded quantities of every proposal. The
-parameter block's `compute` holds the measured cost on one slot of the
+because a fit also evaluates the graded quantities of every proposal. (The
+probe's TI reference price is the Lambert depth fit's, superseded by amendment
+A7.) The parameter block's `compute` holds the measured cost on one slot of the
 development machine: the mean warm wall time of an update of the tuned kernel
 over every update of the tuning runs (initializer, epoch 2 and epoch 3), and the
 wall time of a reference fit at the protocol budget through the development
@@ -1019,19 +1062,21 @@ runner. `--dry-run` reprices the tally from it:
 
 | Pair | s per update | s per reference fit | Updater, development | Reference, development | Updater, panel | Reference, panel |
 |---|---|---|---|---|---|---|
-| ti_window | 0.645 | 28.2 | 0.8 h | 23.8 h | 3.4 h | 50.1 h |
+| ti_window | 0.645 | 1.57 | 0.8 h | 1.6 h | 3.4 h | 2.8 h |
 | physical_fixed | 0.491 | 22.6 | 0.6 h | 19.1 h | 2.6 h | 40.2 h |
 
-The development stage (updater runs with the precision replicates, and
-reference certification) is about 44 single-slot hours and the panel about
-96; two slots halve both. Every cost is at
+The TI price is the collapsed prior reference of amendment A7 through the
+development runner (mean over 64 fits on worlds 0 and 1 of every regime; the
+Lambert depth fit it replaces cost 28.2 s). The check-3 frequency-mixture fit
+at twice the budget measured 2.6 s and a doubled-budget collapsed fit 2.9 s;
+both are priced as two fits, and the TI development stage holds 3,648
+fit-equivalents per pair against the physical pair's 3,040. The development
+stage (updater runs with the precision replicates, and reference
+certification) is about 22 single-slot hours, 19 of them the physical
+reference, and the panel about 49; two slots halve both. Every cost is at
 the provisional reference budgets; each doubling of a budget doubles that pair's
 reference hours. The doubled-budget updater run is priced at twice an update.
-The TI reference cannot reach its ESS floor at any permitted budget with the
-Lambert depth fit (amendment A1, "TI reference budget"), so its hours stand at
-$2^{20}$ only until the method is amended.
-The TI reference cost is dominated by R2, whose Lambert fit enumerates 62
-families.
+The physical reference dominates the reference hours.
 
 ## Verdict table
 

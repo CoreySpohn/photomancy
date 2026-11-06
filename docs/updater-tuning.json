@@ -4471,7 +4471,7 @@
  },
  "tool": "tools/updater_tuning.py",
  "ti_reference_budget": {
-  "note": "Kish ESS of the TI reference on the tuning worlds (development worlds 0 to 5, ti_window), per world the smaller of reference_1 and reference_2. Floor: 200 in the worst world (the repeat-noise certification bound of 0.25 delta2 over 152 worlds tolerates one world near ESS 100 when the rest are in the thousands). The Lambert depth fit meets it in R2 at two epochs only; its ESS grows about linearly with the budget, so no budget up to 2^23 meets it in R2 at three epochs or in R3. The collapsed prior importance sampler (one run of 2^20 draws per world, a spike, not the protocol method) meets it everywhere.",
+  "note": "Kish ESS of TI reference fits on the tuning worlds (development worlds 0 to 5, ti_window). Floor: 200 in the worst world (the repeat-noise certification bound of 0.25 delta2 over 152 worlds tolerates one world near ESS 100 only when the rest are in the thousands). lambert_depth_fit: per world the smaller of reference_1 and reference_2; it meets the floor in R2 at two epochs only, and its ESS grows about linearly with the budget, so no budget up to 2^23 meets it in R2 at three epochs or in R3. Amendment A7 replaces it by the collapsed prior importance sampler (one fit per world at 2^20) and adds the frequency-mixture sampler for certification check 3 (one fit per world at 2^21); both meet the floor everywhere, with R2 at three epochs the tightest (251 and 241).",
   "lambert_depth_fit": {
    "R2/k2/2^20": {
     "kish_ess_per_world_min_of_two_fits": {
@@ -4560,72 +4560,224 @@
     "median": 2.6
    }
   },
-  "collapsed_prior_importance_sampler_2^20": {
-   "R1/k2": [
-    122688,
-    183235,
-    207550,
-    158196,
-    197025,
-    123355
-   ],
-   "R1/k3": [
-    164236,
-    201735,
-    134335,
-    163836,
-    164896,
-    79637
-   ],
-   "R2/k2": [
-    71924,
-    23595,
-    4238,
-    9886,
-    18654,
-    67184
-   ],
-   "R2/k3": [
-    11245,
-    276,
-    979,
-    5863,
-    514,
-    1479
-   ],
-   "R3/k2": [
-    211784,
-    311243,
-    283353,
-    248796,
-    151266,
-    212778
-   ],
-   "R3/k3": [
-    44006,
-    33558,
-    72891,
-    29576,
-    75619,
-    89469
-   ],
-   "R4/k2": [
-    235497,
-    210573,
-    114104,
-    140404,
-    118713,
-    244776
-   ],
-   "R4/k3": [
-    30220,
-    40777,
-    64231,
-    85521,
-    15030,
-    145515
-   ],
-   "seconds_per_fit_one_thread": 3.1
+  "collapsed_prior_2^20": {
+   "R1/k2": {
+    "kish_ess_per_world": [
+     121875.3,
+     183383.9,
+     207754.7,
+     159796.7,
+     196844.8,
+     124790.2
+    ],
+    "worst": 121875.3,
+    "median": 171590.3,
+    "sampler_seconds_per_fit_4_threads": 0.505
+   },
+   "R1/k3": {
+    "kish_ess_per_world": [
+     164417.3,
+     202939.4,
+     134653.1,
+     164311.8,
+     164306.7,
+     78719.7
+    ],
+    "worst": 78719.7,
+    "median": 164309.25,
+    "sampler_seconds_per_fit_4_threads": 0.745
+   },
+   "R2/k2": {
+    "kish_ess_per_world": [
+     73609.5,
+     23397.9,
+     3706.4,
+     10188.2,
+     18286.0,
+     68554.1
+    ],
+    "worst": 3706.4,
+    "median": 20841.95,
+    "sampler_seconds_per_fit_4_threads": 0.595
+   },
+   "R2/k3": {
+    "kish_ess_per_world": [
+     11077.5,
+     251.0,
+     907.7,
+     5885.0,
+     591.8,
+     1462.3
+    ],
+    "worst": 251.0,
+    "median": 1185.0,
+    "sampler_seconds_per_fit_4_threads": 0.585
+   },
+   "R3/k2": {
+    "kish_ess_per_world": [
+     211970.5,
+     311039.0,
+     282744.1,
+     248424.0,
+     150989.7,
+     213062.0
+    ],
+    "worst": 150989.7,
+    "median": 230743.0,
+    "sampler_seconds_per_fit_4_threads": 0.815
+   },
+   "R3/k3": {
+    "kish_ess_per_world": [
+     44148.2,
+     33688.4,
+     72511.6,
+     29739.5,
+     75385.0,
+     89550.2
+    ],
+    "worst": 29739.5,
+    "median": 58329.9,
+    "sampler_seconds_per_fit_4_threads": 0.805
+   },
+   "R4/k2": {
+    "kish_ess_per_world": [
+     235600.0,
+     210443.4,
+     113399.1,
+     139768.5,
+     119233.9,
+     244619.0
+    ],
+    "worst": 113399.1,
+    "median": 175105.95,
+    "sampler_seconds_per_fit_4_threads": 0.545
+   },
+   "R4/k3": {
+    "kish_ess_per_world": [
+     29945.4,
+     40450.1,
+     63338.1,
+     85279.5,
+     14940.2,
+     145928.1
+    ],
+    "worst": 14940.2,
+    "median": 51894.1,
+    "sampler_seconds_per_fit_4_threads": 0.83
+   }
+  },
+  "frequency_mixture_2^21": {
+   "R1/k2": {
+    "kish_ess_per_world": [
+     100338.9,
+     169565.9,
+     187625.1,
+     136253.0,
+     163776.2,
+     106595.9
+    ],
+    "worst": 100338.9,
+    "median": 150014.6,
+    "sampler_seconds_per_fit_4_threads": 1.28
+   },
+   "R1/k3": {
+    "kish_ess_per_world": [
+     137146.9,
+     173756.2,
+     120174.6,
+     139675.1,
+     138598.0,
+     69462.4
+    ],
+    "worst": 69462.4,
+    "median": 137872.45,
+    "sampler_seconds_per_fit_4_threads": 1.27
+   },
+   "R2/k2": {
+    "kish_ess_per_world": [
+     74677.9,
+     23044.7,
+     4765.2,
+     9466.8,
+     19427.4,
+     70090.9
+    ],
+    "worst": 4765.2,
+    "median": 21236.050000000003,
+    "sampler_seconds_per_fit_4_threads": 1.4
+   },
+   "R2/k3": {
+    "kish_ess_per_world": [
+     11123.9,
+     240.6,
+     933.2,
+     5696.5,
+     623.2,
+     1411.2
+    ],
+    "worst": 240.6,
+    "median": 1172.2,
+    "sampler_seconds_per_fit_4_threads": 1.6549999999999998
+   },
+   "R3/k2": {
+    "kish_ess_per_world": [
+     182350.6,
+     261638.6,
+     232172.9,
+     201639.7,
+     121396.1,
+     171954.0
+    ],
+    "worst": 121396.1,
+    "median": 191995.15000000002,
+    "sampler_seconds_per_fit_4_threads": 1.6349999999999998
+   },
+   "R3/k3": {
+    "kish_ess_per_world": [
+     37132.9,
+     28535.9,
+     57966.7,
+     25234.5,
+     60515.2,
+     72073.4
+    ],
+    "worst": 25234.5,
+    "median": 47549.8,
+    "sampler_seconds_per_fit_4_threads": 1.585
+   },
+   "R4/k2": {
+    "kish_ess_per_world": [
+     199994.7,
+     180008.1,
+     94266.4,
+     115177.8,
+     100929.5,
+     214598.4
+    ],
+    "worst": 94266.4,
+    "median": 147592.95,
+    "sampler_seconds_per_fit_4_threads": 1.4049999999999998
+   },
+   "R4/k3": {
+    "kish_ess_per_world": [
+     26807.3,
+     36429.8,
+     52420.9,
+     71365.1,
+     12407.2,
+     118246.7
+    ],
+    "worst": 12407.2,
+    "median": 44425.350000000006,
+    "sampler_seconds_per_fit_4_threads": 1.64
+   }
+  },
+  "runner_seconds_per_fit": {
+   "note": "development runner, one slot (4 threads), worlds 0 and 1 of every regime, both epoch counts",
+   "collapsed_2^20": 1.57,
+   "collapsed_doubled_2^21": 2.94,
+   "frequency_mixture_2^21": 2.57,
+   "lambert_depth_fit_2^20_superseded": 28.2
   }
  }
 }
