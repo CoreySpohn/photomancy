@@ -146,7 +146,8 @@ class UpdaterDiagnostics(eqx.Module):
         applied: Whether the record changed the belief.
         duplicate: Whether the record's id was already in the buffer.
         ess: Kish effective sample size of the reweighted particles (of the
-            current particles when nothing was applied).
+            current particles when nothing was applied; 0 when no particle has
+            weight).
         log_evidence_increment: Log of the record's marginal likelihood under
             the incoming belief (0 when nothing was applied).
         rungs_used: Tempering rungs used.
@@ -447,7 +448,8 @@ class FixedMassTarget(AbstractUpdateTarget):
         ln_a, h, k, cos_i = theta[0], theta[1], theta[2], theta[3]
         e = h**2 + k**2
         in_support = (
-            (ln_a >= ln_a_lo)
+            jnp.all(jnp.isfinite(theta))
+            & (ln_a >= ln_a_lo)
             & (ln_a <= ln_a_hi)
             & (e < self.e_max)
             & (jnp.abs(cos_i) <= 1.0)
@@ -522,8 +524,32 @@ class UpdaterBelief(eqx.Module):
 
 
 def _kish_ess(log_weights):
-    """Kish effective sample size of normalized log weights."""
-    return 1.0 / jnp.sum(jnp.exp(2.0 * log_weights))
+    """Kish effective sample size of normalized log weights (0 if all -inf)."""
+    total = jnp.sum(jnp.exp(2.0 * log_weights))
+    return jnp.where(total > 0.0, 1.0 / jnp.where(total > 0.0, total, 1.0), 0.0)
+
+
+def _normalize(log_weights):
+    """Normalize log weights in max-shifted form.
+
+    NaN counts as zero weight. Shifting by the largest weight before the
+    log-sum-exp keeps the normalized weights exact when every weight carries
+    a large common offset (a log likelihood of order -1e17 has a float spacing
+    larger than ``log n``).
+
+    Returns:
+        Tuple ``(normalized, log_total, no_support)``: normalized log weights
+        (all ``-inf`` when nothing is supported), the log of the unnormalized
+        total, and whether no weight is finite.
+    """
+    log_weights = jnp.where(jnp.isnan(log_weights), -jnp.inf, log_weights)
+    peak = jnp.max(log_weights)
+    no_support = ~jnp.isfinite(peak)
+    shifted = log_weights - jnp.where(no_support, 0.0, peak)
+    lse = logsumexp(shifted)
+    normalized = jnp.where(no_support, -jnp.inf, shifted - lse)
+    log_total = jnp.where(no_support, -jnp.inf, peak + lse)
+    return normalized, log_total, no_support
 
 
 def _systematic_indices(key, log_weights, n):
@@ -616,10 +642,9 @@ class OrbitUpdater(eqx.Module):
         _check_key(key)
         particles = target.sample_prior(key, self.n_particles)
         log_prior = jax.vmap(target.log_prior)(particles)
-        log_w = jnp.where(jnp.isfinite(log_prior), 0.0, -jnp.inf)
-        lse = logsumexp(log_w)
-        no_support = ~jnp.isfinite(lse)
-        log_w = log_w - jnp.where(no_support, 0.0, lse)
+        log_w, _, no_support = _normalize(
+            jnp.where(jnp.isfinite(log_prior), 0.0, -jnp.inf)
+        )
         status = jnp.where(no_support, UpdaterStatus.NO_SUPPORT, UpdaterStatus.OK)
         return UpdaterBelief(
             target=target,
@@ -698,13 +723,9 @@ class OrbitUpdater(eqx.Module):
         log_like = jax.vmap(target.log_likelihood, in_axes=(0, None))(
             belief.particles, record.as_data()
         )
-        log_w = belief.log_weights + log_like
-        log_w = jnp.where(jnp.isnan(log_w), -jnp.inf, log_w)
-        lse = logsumexp(log_w)
-        no_support = ~jnp.isfinite(lse)
-        log_w = log_w - jnp.where(no_support, 0.0, lse)
+        log_w, log_total, no_support = _normalize(belief.log_weights + log_like)
         ess = _kish_ess(log_w)
-        log_z = jnp.where(no_support, 0.0, lse - logsumexp(belief.log_weights))
+        log_z = jnp.where(no_support, 0.0, log_total - logsumexp(belief.log_weights))
 
         idx = _systematic_indices(key, log_w, self.n_particles)
         i = belief.n_records
