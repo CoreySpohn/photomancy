@@ -13,9 +13,11 @@ import equinox as eqx  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from hwoutils.constants import G  # noqa: E402
+from hwoutils.constants import G, Msun2kg  # noqa: E402
+from scipy import stats  # noqa: E402
 
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.orbit.few_epoch import TIBasisModel  # noqa: E402
 from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.likelihoods import loglike_relative_astrom  # noqa: E402
 from photomancy.orbit.updater import (  # noqa: E402
@@ -272,25 +274,16 @@ def _buffer(times, ra, dec, sigma):
     )
 
 
-def test_fixed_mass_chart_likelihood_and_measure():
-    """The physical chart predicts like the element forward model, with OFTI's measure.
+def test_fixed_mass_chart_matches_element_forward_model():
+    """The physical chart predicts like the element forward model.
 
     Fails if the chart conversion is wrong (an M_ref sign, a node or periastron
-    swap), the distance or mass is dropped, or the chart prior misses its
-    Jacobian: log_prior minus the element-space log density and the log
-    Jacobian determinant of the chart-to-elements map must be one constant.
+    swap) or the distance or mass is dropped.
     """
     target = FixedMassTarget(t_ref_day=20.0)
-    elements = jnp.array(
-        [
-            [1.3, 0.21, 0.4, 2.0, 0.7, 4.1],
-            [0.6, 0.55, -0.8, 5.5, 3.9, 0.2],
-            [4.0, 0.02, 0.1, 0.3, 6.0, 2.5],
-        ]
-    )
     times = jnp.array([0.0, 60.0, 400.0])
     data = _buffer(times, [0.05, -0.02, 0.1], [0.08, 0.01, -0.04], 0.0035)
-    for el in elements:
+    for el in ELEMENTS:
         a, e, cos_i, W, omega, m_ref = el
         tp = 20.0 - m_ref / jnp.sqrt(G * target.Ms_kg / a**3)
         ra, dec = predict_relative_astrometry(
@@ -313,27 +306,157 @@ def test_fixed_mass_chart_likelihood_and_measure():
             rtol=1e-10,
         )
 
-    def element_log_density(el):
-        a, e = el[0], el[1]
-        ln_lo, ln_hi = target.ln_a_bounds()
-        log_e = jax.scipy.stats.beta.logpdf(e, 0.867, 3.03) - jnp.log(
-            jax.scipy.special.betainc(0.867, 3.03, 0.9)
-        )
-        # Uniform in ln a: density in a is 1 / (a (ln_hi - ln_lo)).
-        return log_e - jnp.log(a) - jnp.log(ln_hi - ln_lo)
 
-    def physical_coords(theta):
-        el = target.to_physical(theta)
+ELEMENTS = jnp.array(
+    [
+        [1.3, 0.21, 0.4, 2.0, 0.7, 4.1],
+        [0.6, 0.25, -0.8, 5.5, 3.9, 0.2],
+        [4.0, 0.02, 0.1, 0.3, 6.0, 2.5],
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    ("e_max", "mass_msun", "period_day"),
+    [(0.9, 1.0, (50.0, 5000.0)), (0.3, 0.6, (100.0, 800.0)), (0.5, 2.0, (20.0, 200.0))],
+)
+def test_fixed_mass_prior_is_normalized_density(e_max, mass_msun, period_day):
+    """The chart prior is OFTI's normalized element density times the Jacobian.
+
+    The expectation is built independently: SciPy's Beta density over its CDF
+    at e_max, uniform ln a between Kepler semimajor axes, 1/2 for cos_i and
+    1/(2 pi) for each of W, omega and M_ref, times the autodiff Jacobian of the
+    chart-to-elements map. Fails if the chart Jacobian constant (log 2), an
+    angle or inclination constant or the truncation normalizer is dropped, if
+    the mass or period bounds are ignored, or if a non-finite angle is
+    accepted as on support.
+    """
+    ms_kg = mass_msun * Msun2kg
+    target = FixedMassTarget(
+        Ms_kg=ms_kg,
+        period_lo_day=period_day[0],
+        period_hi_day=period_day[1],
+        e_max=e_max,
+    )
+    a_lo, a_hi = (
+        (G * ms_kg * (p / (2.0 * np.pi)) ** 2) ** (1.0 / 3.0) for p in period_day
+    )
+
+    def chart_to_elements(theta):
         _, h, k, cos_i, W, lam = theta
         omega = jnp.arctan2(k, h)
-        return jnp.array([el[0], el[1], cos_i, W, omega, lam - omega])
+        return jnp.array([jnp.exp(theta[0]), h**2 + k**2, cos_i, W, omega, lam - omega])
 
-    offsets = []
-    for el in elements:
+    for row, frac in zip(ELEMENTS, (0.2, 0.5, 0.9), strict=True):
+        a = a_lo * (a_hi / a_lo) ** frac
+        el = row.at[0].set(a).at[1].set(row[1] * e_max / 0.9)
+        e = float(el[1])
+        log_elements = (
+            -np.log(a * np.log(a_hi / a_lo))
+            + np.log(
+                stats.beta.pdf(e, 0.867, 3.03) / stats.beta.cdf(e_max, 0.867, 3.03)
+            )
+            - np.log(2.0)
+            - 3.0 * np.log(2.0 * np.pi)
+        )
         theta = target.from_physical(el)
-        _, logdet = jnp.linalg.slogdet(jax.jacfwd(physical_coords)(theta))
-        offsets.append(target.log_prior(theta) - element_log_density(el) - logdet)
-    np.testing.assert_allclose(offsets, offsets[0], atol=1e-10)
+        _, logdet = jnp.linalg.slogdet(jax.jacfwd(chart_to_elements)(theta))
+        np.testing.assert_allclose(
+            target.log_prior(theta), log_elements + logdet, rtol=0, atol=1e-10
+        )
+        for i in (4, 5):  # W and lambda_ref
+            assert target.log_prior(theta.at[i].set(jnp.nan)) == -jnp.inf
+
+
+def test_wrap_maps_periodic_coordinates_only():
+    """Periodic coordinates wrap into [0, period); predictions are invariant.
+
+    Fails if a period is wrong (the physical angles at pi instead of 2 pi, TI
+    tau at anything but 1), if a non-periodic coordinate is wrapped, or if
+    negative or multi-period inputs are mishandled.
+    """
+    two_pi = 2.0 * np.pi
+    times = jnp.array([0.0, 75.0, 300.0])
+
+    ti = ThieleInnesTarget()
+    theta = jnp.array([0.3, 6.0, 0.25, -3.2, 1.0, -0.4, 0.8])
+    for shift in (-1.0, 3.0):
+        out = ti.wrap(theta.at[2].add(shift))
+        np.testing.assert_allclose(out, theta, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(
+            ti.predict(theta.at[2].add(shift), times),
+            ti.predict(theta, times),
+            rtol=0,
+            atol=1e-12,
+        )
+
+    for tau, expect in ((-0.25, 0.75), (2.6, 0.6)):
+        np.testing.assert_allclose(
+            ti.wrap(theta.at[2].set(tau)), theta.at[2].set(expect), rtol=0, atol=1e-12
+        )
+
+    phys = FixedMassTarget()
+    theta = phys.from_physical(jnp.array([1.3, 0.21, -0.4, 2.0, 0.7, 4.1]))
+    theta = theta.at[1].set(-0.3)  # negative non-periodic coordinates stay put
+    for shift in (-two_pi, 3.0 * two_pi):
+        moved = theta.at[4].add(shift).at[5].add(-shift)
+        np.testing.assert_allclose(phys.wrap(moved), theta, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(
+            phys.predict(phys.wrap(moved), times),
+            phys.predict(theta, times),
+            rtol=0,
+            atol=1e-12,
+        )
+    np.testing.assert_allclose(
+        phys.wrap(theta.at[4].set(-1.0).at[5].set(-7.0)),
+        theta.at[4].set(two_pi - 1.0).at[5].set(2.0 * two_pi - 7.0),
+        rtol=0,
+        atol=1e-12,
+    )
+
+
+def test_large_common_likelihood_offset_keeps_ess():
+    """Identical particles under a huge finite log likelihood keep full ESS.
+
+    Fails if weights are normalized by subtracting a log-sum-exp at the scale
+    of the offset (-5e17 has a float spacing of 64, above log 16), which
+    reports ESS 1/16 and LOW_ESS for an exactly uniform posterior.
+    """
+    updater = OrbitUpdater(n_particles=16, n_rungs=1, n_moves=1, record_capacity=2)
+    key = jax.random.key(0, impl="threefry2x32")
+    belief = updater.prior_belief(TARGET, key)
+    belief = eqx.tree_at(lambda b: b.particles, belief, jnp.zeros((16, 2)))
+    record = UpdaterRecord(
+        time=0.0, ra=1e8, dec=0.0, ra_err=0.1, dec_err=0.1, record_id=1
+    )
+    out, diag = updater.update(belief, record, key)
+    assert int(diag.status) == UpdaterStatus.OK
+    np.testing.assert_allclose(diag.ess, 16.0, rtol=1e-12)
+    np.testing.assert_allclose(jnp.exp(out.log_weights), 1.0 / 16.0, rtol=1e-12)
+
+
+def test_unsupported_prior_reports_zero_ess():
+    """A prior with no supported draw reports ESS 0, never infinity.
+
+    Fails if the Kish ESS divides by a zero total weight, at initialization,
+    in a later no-support update or in a padded no-op.
+    """
+    updater = OrbitUpdater(n_particles=16, n_rungs=1, n_moves=1, record_capacity=2)
+    key = jax.random.key(0, impl="threefry2x32")
+    target = ThieleInnesTarget(TIBasisModel(mu_lo=1.0, mu_hi=0.5))
+    belief = updater.prior_belief(target, key)
+    assert int(belief.diagnostics.status) == UpdaterStatus.NO_SUPPORT
+    assert float(belief.diagnostics.ess) == 0.0
+    record = UpdaterRecord(
+        time=0.0, ra=0.1, dec=0.0, ra_err=0.0035, dec_err=0.0035, record_id=1
+    )
+    for valid, status in ((True, UpdaterStatus.NO_SUPPORT), (False, UpdaterStatus.OK)):
+        out, diag = updater.update(
+            belief, eqx.tree_at(lambda r: r.is_valid, record, jnp.asarray(valid)), key
+        )
+        assert int(diag.status) == status
+        assert float(diag.ess) == 0.0
+        _assert_bitwise_equal(out, belief)
 
 
 def test_orbit_targets_initialize_with_status():
