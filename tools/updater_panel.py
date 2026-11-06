@@ -679,6 +679,65 @@ def print_tally(protocol, prices):
             )
         print(line)
     print(f"  panel total {total:.1f} h on one slot (likelihood-only updater price)")
+    measured = measured_tally(protocol)
+    if measured is None:
+        return
+    print(f"Repriced at measured cost ({measured['source']})")
+    for pair, row in measured["pairs"].items():
+        print(
+            f"  {pair}: {row['seconds_per_update']:.3g} s/update, "
+            f"{row['reference_seconds_per_fit']:.3g} s/fit; updater panel "
+            f"{row['updater_panel_h']:.1f} h, updater development "
+            f"{row['updater_development_h']:.1f} h, reference panel "
+            f"{row['reference_panel_h']:.1f} h, reference development "
+            f"{row['reference_development_h']:.1f} h"
+        )
+    print(
+        f"  development {measured['development_h']:.1f} h, panel "
+        f"{measured['panel_h']:.1f} h, on one slot"
+    )
+
+
+def measured_tally(protocol):
+    """Hours per pair at the measured full-kernel and reference costs.
+
+    The protocol's ``compute`` block holds warm seconds per update (the whole
+    tempered kernel at the budget ceiling, not the likelihood alone) and
+    seconds per reference fit at the protocol budget, measured on one slot.
+    Returns None when the block is absent.
+    """
+    block = protocol.get("compute")
+    if not block:
+        return None
+    tally = compute_tally(protocol)
+    pairs = {}
+    dev_h = panel_h = 0.0
+    for pair in protocol["panel"]["mass_models"]:
+        s_upd = block["measured_seconds_per_update"][pair]
+        s_fit = block["measured_reference_seconds_per_fit"][pair]
+        row = {
+            "seconds_per_update": s_upd,
+            "reference_seconds_per_fit": s_fit,
+            "updater_panel_h": _hours(
+                tally["panel_update_equivalents_per_pair"] * s_upd
+            ),
+            "updater_development_h": _hours(
+                tally["development_update_equivalents_per_pair"] * s_upd
+            ),
+            "reference_panel_h": _hours(tally["panel_reference_fits_per_pair"] * s_fit),
+            "reference_development_h": _hours(
+                tally["development_reference_fit_equivalents_per_pair"] * s_fit
+            ),
+        }
+        dev_h += row["updater_development_h"] + row["reference_development_h"]
+        panel_h += row["updater_panel_h"] + row["reference_panel_h"]
+        pairs[pair] = row
+    return {
+        "source": block["source"],
+        "pairs": pairs,
+        "development_h": dev_h,
+        "panel_h": panel_h,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1655,15 +1714,19 @@ class UnitExecutor:
         from photomancy.orbit.updater import OrbitUpdater
 
         kernel = self.protocol["updater_kernel"]
+
+        def per_model(value):
+            return value[mass_model] if isinstance(value, dict) else value
+
         return OrbitUpdater(
             n_particles=particles,
             n_rungs=self.budgets["rungs"],
             n_moves=self.budgets["moves_per_rung"],
             record_capacity=len(self.protocol["regimes"][0]["cadence_days"]),
-            low_ess_fraction=kernel["low_ess_fraction"],
-            target_cess_fraction=kernel["target_cess_fraction"],
-            proposal_scale=kernel["proposal_scale"][mass_model],
-            alias_moves=kernel["alias_moves"],
+            low_ess_fraction=per_model(kernel["low_ess_fraction"]),
+            target_cess_fraction=per_model(kernel["target_cess_fraction"]),
+            proposal_scale=per_model(kernel["proposal_scale"]),
+            alias_moves=per_model(kernel["alias_moves"]),
         )
 
     def updater_unit(self, unit, world):
