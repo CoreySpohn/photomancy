@@ -55,6 +55,14 @@ Kernel (fixed-particle tempered SMC with a fixed loop count):
   circle for periodic coordinates), so the Hastings ratio is the ratio of the
   tempered target densities; any chart Jacobian already sits in
   :meth:`AbstractUpdateTarget.log_prior`.
+- A target with a linear block (``linear_index``; the Thiele-Innes constants)
+  gets a collapsed move instead: the random walk acts on the other
+  coordinates only, the linear block is redrawn from its conditional Gaussian
+  given them and the tempered records, and the acceptance ratio uses the
+  marginal likelihood with the block integrated out (exact; see
+  :func:`_collapsed_step`). The posterior that one or two astrometric epochs
+  leave is a thin curved region in the full chart, which a random walk over
+  every coordinate cannot follow.
 - The sum over rungs of the log mean incremental weight is the log marginal
   likelihood of the record given the buffered records.
 """
@@ -242,12 +250,21 @@ class AbstractUpdateTarget(eqx.Module):
     :func:`~photomancy.orbit.likelihoods.loglike_relative_astrom` of the
     predictions against the valid entries of a record buffer.
 
+    A target may declare a linear block, ``linear_index`` (class constant):
+    chart coordinates ``c`` in which :meth:`predict` is linear and homogeneous
+    and whose prior is an independent zero-mean Gaussian of scale
+    :meth:`linear_prior_scale`, possibly times an indicator. The kernel then
+    moves the other coordinates by random walk and redraws ``c`` from its
+    conditional Gaussian (a collapsed move); with no linear block (the
+    default) it moves every coordinate by random walk.
+
     Array fields of a target are traced, not static, so a target with new
     values (a different truncation, say) reuses the compiled update.
     """
 
     param_names: AbstractClassVar[tuple[str, ...]]
     periods: AbstractClassVar[tuple[float, ...]]
+    linear_index: ClassVar[tuple[int, ...]] = ()
 
     @abstractmethod
     def sample_prior(self, key, n):
@@ -289,12 +306,39 @@ class AbstractUpdateTarget(eqx.Module):
             :meth:`log_likelihood`.
         """
         ra, dec = self.predict(theta, records.times)
+        return _split_loglike(ra, dec, records, select)
 
-        def part(mask):
-            masked = eqx.tree_at(lambda r: r.is_valid, records, records.is_valid & mask)
-            return loglike_relative_astrom(ra, dec, masked)
+    def linear_design(self, theta, times):
+        """Design matrices of the linear block: ``predict = (H_ra c, H_dec c)``.
 
-        return part(~select), part(select)
+        Valid only for a target whose :meth:`predict` is linear and homogeneous
+        in the coordinates ``linear_index`` (``c``). Column ``j`` is the
+        prediction at the ``j``-th unit vector of ``c``, the other coordinates
+        of ``theta`` held fixed; under ``vmap`` the work that does not depend
+        on ``c`` (a Kepler solve, say) runs once.
+
+        Args:
+            theta: Chart point (its linear coordinates are ignored). Shape
+                ``(d,)``.
+            times: Epochs (days). Shape ``(K,)``.
+
+        Returns:
+            Tuple ``(H_ra, H_dec)``, each shape ``(K, p)``.
+        """
+        idx = jnp.asarray(self.linear_index)
+        units = jnp.eye(len(self.linear_index))
+        ra, dec = jax.vmap(lambda u: self.predict(theta.at[idx].set(u), times))(units)
+        return ra.T, dec.T
+
+    def linear_prior_scale(self):
+        """Standard deviation of the zero-mean Gaussian prior of the linear block.
+
+        A target that declares ``linear_index`` must have :meth:`log_prior`
+        equal to ``log p_rest(theta) - |c|^2 / (2 s^2)`` up to a constant, where
+        ``s`` is this scale and ``p_rest`` (which may contain a support
+        indicator depending on ``c``) is everything else.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no linear block.")
 
     def wrap(self, theta):
         """Map the periodic coordinates of ``theta`` into ``[0, period)``."""
@@ -368,6 +412,8 @@ class ThieleInnesTarget(AbstractUpdateTarget):
     The chart is ``theta = (e, lnP, tau, east_X, east_Y, north_X, north_Y)`` of
     :class:`~photomancy.orbit.few_epoch.TIBasisModel`, whose priors, support
     and forward model are used unchanged; ``tau`` is periodic with period 1.
+    The four TI constants are the linear block: the predictions are linear in
+    them and their prior is Gaussian times the implied-mass window.
     The model's bounds are stored as arrays, so lanes may carry different
     truncations.
 
@@ -381,6 +427,7 @@ class ThieleInnesTarget(AbstractUpdateTarget):
 
     param_names: ClassVar[tuple[str, ...]] = TI_PARAM_NAMES
     periods: ClassVar[tuple[float, ...]] = (0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+    linear_index: ClassVar[tuple[int, ...]] = (3, 4, 5, 6)
 
     def __init__(self, model=None, dist_pc=10.0):
         """Store the model with array-valued bounds."""
@@ -411,6 +458,10 @@ class ThieleInnesTarget(AbstractUpdateTarget):
         """Model offsets in arcsec (AU divided by the distance in parsec)."""
         east_au, north_au = self.model.forward_au(theta, times)
         return east_au / self.dist_pc, north_au / self.dist_pc
+
+    def linear_prior_scale(self):
+        """The TI constants' prior scale ``s_ti`` (AU); the window is the indicator."""
+        return self.model.s_ti
 
 
 class FixedMassTarget(AbstractUpdateTarget):
@@ -761,6 +812,154 @@ def _metropolis_step(key, particles, aux, step_chol, wrap, evaluate, log_target)
     )
 
 
+def _split_loglike(ra, dec, records, select):
+    """Astrometric log likelihood outside and inside ``select`` (two scalars)."""
+
+    def part(mask):
+        masked = eqx.tree_at(lambda r: r.is_valid, records, records.is_valid & mask)
+        return loglike_relative_astrom(ra, dec, masked)
+
+    return part(~select), part(select)
+
+
+def _linear_gaussian(target, theta, records, weights):
+    """Conditional Gaussian of a target's linear block and its log marginal.
+
+    With design matrices ``H_ra``, ``H_dec`` (``predict = H c``), per-record
+    precision ``w_k Sigma_k^-1`` (``Sigma_k`` the record's 2 x 2 error
+    covariance, ``w_k`` its tempering weight) and prior ``N(0, s^2 I)``:
+    ``P = I / s^2 + sum_k w_k H_k^T Sigma_k^-1 H_k``,
+    ``b = sum_k w_k H_k^T Sigma_k^-1 d_k``, conditional mean ``m = P^-1 b`` and
+    covariance ``P^-1``, and the log of the tempered marginal likelihood with
+    ``c`` integrated out, ``-log det(P) / 2 + b^T m / 2``, up to terms that do
+    not depend on the nonlinear coordinates (they cancel in a Metropolis
+    ratio at a fixed temperature).
+
+    Args:
+        target: Target with a linear block.
+        theta: Chart point (its linear coordinates are ignored). Shape ``(d,)``.
+        records: Record buffer, ``K`` slots.
+        weights: Tempering weight of each slot (0 for an invalid slot). Shape
+            ``(K,)``.
+
+    Returns:
+        Tuple ``(mean, chol, log_marginal, h_ra, h_dec)``: ``chol`` is the
+        lower Cholesky factor of ``P``.
+    """
+    h_ra, h_dec = target.linear_design(theta, records.times)
+    live = weights > 0.0
+    sx = jnp.where(live, records.ra_err, 1.0)
+    sy = jnp.where(live, records.dec_err, 1.0)
+    rho = jnp.where(live, records.corr, 0.0)
+    scale = weights / jnp.clip(1.0 - rho**2, 1e-30)
+    pxx = scale / sx**2
+    pyy = scale / sy**2
+    pxy = -scale * rho / (sx * sy)
+    ra = jnp.where(live, records.ra, 0.0)
+    dec = jnp.where(live, records.dec, 0.0)
+    a = (
+        h_ra.T @ (pxx[:, None] * h_ra)
+        + h_ra.T @ (pxy[:, None] * h_dec)
+        + h_dec.T @ (pxy[:, None] * h_ra)
+        + h_dec.T @ (pyy[:, None] * h_dec)
+    )
+    b = h_ra.T @ (pxx * ra + pxy * dec) + h_dec.T @ (pxy * ra + pyy * dec)
+    p = len(target.linear_index)
+    precision = a + jnp.eye(p) / target.linear_prior_scale() ** 2
+    chol = jnp.linalg.cholesky(precision)
+    mean = jax.scipy.linalg.cho_solve((chol, True), b)
+    log_marginal = -jnp.sum(jnp.log(jnp.diag(chol))) + 0.5 * b @ mean
+    return mean, chol, log_marginal, h_ra, h_dec
+
+
+def _rest_log_prior(target, theta):
+    """``log p_rest``: the target's log prior without its Gaussian linear block."""
+    c = theta[jnp.asarray(target.linear_index)]
+    return (
+        target.log_prior(theta) + 0.5 * jnp.sum(c**2) / target.linear_prior_scale() ** 2
+    )
+
+
+def _collapsed_step(
+    key, particles, aux, log_marginal, step_chol, target, records, weights, select, rest
+):
+    """One collapsed Metropolis-Hastings move of every particle.
+
+    Write a chart point as ``(u, c)``: ``u`` the nonlinear coordinates and
+    ``c`` the target's linear block. The tempered target is
+    ``pi(u, c) = p_rest(u, c) N(c; 0, s^2 I) prod_k L_k(u, c)^(w_k)``, where
+    ``p_rest`` may hold an indicator in ``c`` (a support window). Because the
+    predictions are linear in ``c``, the Gaussian prior times the tempered
+    Gaussian likelihoods is ``Z(u) N(c; m(u), V(u))`` exactly, with ``Z(u)``
+    the tempered marginal likelihood (see :func:`_linear_gaussian`).
+
+    The proposal is ``q(u', c' | u, c) = g(u' - u) N(c'; m(u'), V(u'))``: a
+    symmetric random-walk step in ``u`` (wrapped where periodic) and a fresh
+    draw of ``c`` from its conditional Gaussian, ignoring the indicator. Then
+    ``pi(u, c) / N(c; m(u), V(u)) = p_rest(u, c) Z(u)``, so the Hastings ratio
+    ``pi(u', c') q(u, c | u', c') / (pi(u, c) q(u', c' | u, c))`` reduces to
+    ``p_rest(u', c') Z(u') / (p_rest(u, c) Z(u))``. A proposal outside the
+    indicator has ``p_rest = 0`` and is rejected. The move is exact: it leaves
+    the tempered target invariant without any approximation of the window.
+
+    Args:
+        key: Typed PRNG key.
+        particles: Chart points. Shape ``(n, d)``.
+        aux: Cached ``(log_prior, ll_rest, ll_new)``, each shape ``(n,)``.
+        log_marginal: Cached ``log Z(u)`` of the particles at these weights.
+            Shape ``(n,)``.
+        step_chol: Random-walk factor over the nonlinear coordinates, scale
+            included. Shape ``(d - p, d - p)``.
+        target: Target with a linear block.
+        records: Record buffer.
+        weights: Tempering weight of each slot. Shape ``(K,)``.
+        select: Mask of the slot whose likelihood is ``ll_new``. Shape ``(K,)``.
+        rest: ``log p_rest`` of one chart point (normally
+            :func:`_rest_log_prior` of the target).
+
+    Returns:
+        Tuple ``(particles, aux, log_marginal, accepted)``.
+    """
+    k_step, k_draw, k_acc = jax.random.split(key, 3)
+    n, d = particles.shape
+    lin = jnp.asarray(target.linear_index)
+    nonlinear = jnp.asarray([i for i in range(d) if i not in target.linear_index])
+    p = len(target.linear_index)
+    steps = jax.random.normal(k_step, (n, d - p)) @ step_chol.T
+    moved = jax.vmap(target.wrap)(particles.at[:, nonlinear].add(steps))
+    noise = jax.random.normal(k_draw, (n, p))
+
+    def propose(theta, z):
+        mean, chol, log_z, h_ra, h_dec = _linear_gaussian(
+            target, theta, records, weights
+        )
+        c = mean + jax.scipy.linalg.solve_triangular(chol.T, z, lower=False)
+        theta = theta.at[lin].set(c)
+        ll_rest, ll_new = _split_loglike(h_ra @ c, h_dec @ c, records, select)
+        aux = (
+            _finite_or_neg_inf(target.log_prior(theta)),
+            _finite_or_neg_inf(ll_rest),
+            _finite_or_neg_inf(ll_new),
+        )
+        return theta, aux, _finite_or_neg_inf(log_z), _finite_or_neg_inf(rest(theta))
+
+    proposal, aux_prop, log_z_prop, rest_prop = jax.vmap(propose)(moved, noise)
+    rest_now = jax.vmap(rest)(particles)
+    log_alpha = _finite_or_neg_inf((rest_prop + log_z_prop) - (rest_now + log_marginal))
+    accepted = jnp.log(jax.random.uniform(k_acc, (n,))) < log_alpha
+
+    def pick(new, old):
+        mask = accepted.reshape((n,) + (1,) * (new.ndim - 1))
+        return jnp.where(mask, new, old)
+
+    return (
+        pick(proposal, particles),
+        jax.tree.map(pick, aux_prop, aux),
+        pick(log_z_prop, log_marginal),
+        accepted,
+    )
+
+
 def _count_unique(particles, log_weights):
     """Number of distinct particles with positive weight (0 if none)."""
     positive = jnp.isfinite(log_weights)
@@ -809,11 +1008,14 @@ class OrbitUpdater(eqx.Module):
         target_cess_fraction: Conditional ESS, as a fraction of
             ``n_particles``, that each adaptive rung's temperature increment
             is bisected to. Must exceed ``low_ess_fraction``. Default 0.5.
-        proposal_scale: Random-walk step in units of the particle covariance,
-            divided by ``sqrt(d)``. Default 0.3, well below the 2.38 that is
+        proposal_scale: Random-walk step in units of the particle covariance
+            of the coordinates that move by random walk (all of them, or all
+            but a target's linear block), divided by the square root of their
+            number. Default 0.3, well below the 2.38 that is
             optimal for a Gaussian target: one or two astrometric epochs
-            confine the orbit posteriors to thin curved regions where larger
-            steps are almost always rejected.
+            confine the orbit posteriors to thin curved regions where a random
+            walk over every coordinate rejects larger steps. A collapsed move,
+            whose random walk skips the linear block, tolerates larger steps.
         n_bisect: Bisection iterations per rung (static). The smallest
             temperature increment a rung can take is ``(1 - beta) / 2^n_bisect``.
             Default 40.
@@ -981,6 +1183,23 @@ class OrbitUpdater(eqx.Module):
         log_prior, ll_rest, ll_new = aux
         return log_prior + ll_rest + beta * ll_new
 
+    def _collapsed_move(
+        self, key, particles, aux, log_z, step_chol, target, records, weights, select
+    ):
+        """One collapsed move (see :func:`_collapsed_step`) at slot ``weights``."""
+        return _collapsed_step(
+            key,
+            particles,
+            aux,
+            log_z,
+            step_chol,
+            target,
+            records,
+            weights,
+            select,
+            lambda theta: _rest_log_prior(target, theta),
+        )
+
     def _increment(self, log_weights, shifted, beta):
         """Temperature increment of one rung by fixed-count bisection.
 
@@ -1027,7 +1246,10 @@ class OrbitUpdater(eqx.Module):
         )
         is_new = jnp.arange(self.record_capacity) == slot
         periods = jnp.asarray(target.periods, dtype=float)
-        step_scale = self.proposal_scale / math.sqrt(len(target.periods))
+        d = len(target.periods)
+        collapsed = len(target.linear_index) > 0
+        moving = jnp.asarray([i for i in range(d) if i not in target.linear_index])
+        step_scale = self.proposal_scale / math.sqrt(len(moving))
 
         def evaluate(theta):
             ll_rest, ll_new = target.log_likelihood_split(theta, records, is_new)
@@ -1072,28 +1294,58 @@ class OrbitUpdater(eqx.Module):
                 state = reweight(state, delta, peak, shifted)
                 beta = jnp.where(reaches_one, 1.0, jnp.minimum(state.beta + delta, 1.0))
                 step_chol = step_scale * _weighted_cholesky(
-                    state.particles, state.log_weights, periods
+                    state.particles[:, moving], state.log_weights, periods[moving]
                 )
                 idx = _systematic_indices(k_resample, state.log_weights, n)
                 particles = state.particles[idx]
                 aux = (state.log_prior[idx], state.ll_rest[idx], state.ll_new[idx])
+                zero = jnp.asarray(0, dtype=int)
 
-                def move(m, carry):
-                    particles, aux, accepted = carry
-                    particles, aux, acc = _metropolis_step(
-                        jax.random.fold_in(k_move, m),
-                        particles,
-                        aux,
-                        step_chol,
-                        target.wrap,
-                        evaluate,
-                        lambda a: self._move_log_density(a, beta),
+                if collapsed:
+                    weights = jnp.where(
+                        records.is_valid, jnp.where(is_new, beta, 1.0), 0.0
                     )
-                    return particles, aux, accepted + jnp.sum(acc)
 
-                particles, aux, accepted = jax.lax.fori_loop(
-                    0, self.n_moves, move, (particles, aux, jnp.asarray(0, dtype=int))
-                )
+                    def log_z_of(theta):
+                        return _linear_gaussian(target, theta, records, weights)[2]
+
+                    def move(m, carry):
+                        particles, aux, log_z, accepted = carry
+                        particles, aux, log_z, acc = self._collapsed_move(
+                            jax.random.fold_in(k_move, m),
+                            particles,
+                            aux,
+                            log_z,
+                            step_chol,
+                            target,
+                            records,
+                            weights,
+                            is_new,
+                        )
+                        return particles, aux, log_z, accepted + jnp.sum(acc)
+
+                    log_z = _finite_or_neg_inf(jax.vmap(log_z_of)(particles))
+                    particles, aux, _, accepted = jax.lax.fori_loop(
+                        0, self.n_moves, move, (particles, aux, log_z, zero)
+                    )
+                else:
+
+                    def move(m, carry):
+                        particles, aux, accepted = carry
+                        particles, aux, acc = _metropolis_step(
+                            jax.random.fold_in(k_move, m),
+                            particles,
+                            aux,
+                            step_chol,
+                            target.wrap,
+                            evaluate,
+                            lambda a: self._move_log_density(a, beta),
+                        )
+                        return particles, aux, accepted + jnp.sum(acc)
+
+                    particles, aux, accepted = jax.lax.fori_loop(
+                        0, self.n_moves, move, (particles, aux, zero)
+                    )
                 return _Ladder(
                     particles=particles,
                     log_weights=jnp.full(n, -jnp.log(n)),
