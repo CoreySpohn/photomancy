@@ -607,7 +607,10 @@ the freeze refuses records left over from before an amendment.
 $\delta_2$, runs certification checks 1 to 3 against it and reads the
 exact-check verdicts; it reports `frozen` only when every development record
 exists at the protocol budgets and every check passes, and otherwise
-`incomplete` with each reason. The exact checks have their own runner,
+`incomplete` with each reason. A reference fit that keeps no weighted draw is
+an empty fit: its world cannot be scored, the freeze names it and stays
+`incomplete`, and the remedy is the budget doubling of the reference rules. The
+exact checks have their own runner,
 `tools/updater_exact_checks.py`, whose refinement tables are committed with the
 freeze.
 
