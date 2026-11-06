@@ -156,8 +156,10 @@ stated here under `stated`.
     "cross_method": {"bound_fraction_of_delta2": 0.5,
                      "ti_window": "admissible_region_fit, same model, budget and z_max_au",
                      "physical_fixed": "same weights, anchor at the lowest-SNR valid epoch"},
-    "exact_checks": {"sampler_repeats": 8, "monte_carlo_z": 3.0,
-                     "quadrature_error_factor": 2.0}
+    "exact_checks": {"sampler_repeats": 16, "family_alpha": 0.01,
+                     "bins_per_case": 24, "interval_end_points_per_case": 4,
+                     "cases": 2, "quadrature_error_factor": 2.0,
+                     "bin_mass_floor": 0.002}
   },
   "provisional": [
     "criteria.alias_accuracy.delta2",
@@ -171,7 +173,9 @@ stated here under `stated`.
     "dkw_epsilon_5dp": 0.09904,
     "alias_z_3dp": 3.078,
     "failed_updates_critical_count": 17,
-    "certification_miss_probability_3dp": 0.046
+    "certification_miss_probability_3dp": 0.046,
+    "exact_check_compared_values": 56,
+    "exact_check_t_critical_3dp": 4.938
   }
 }
 ```
@@ -433,11 +437,26 @@ central 90 percent intervals of the future east and north positions.
   twice the change between the two finest levels; the finest level must change
   the value by less than the previous refinement did.
 - **Comparison.** The sampler (reference, and the updater for information) runs
-  8 times with independent keys at its budget. A value passes when
-  $|\bar x - x_q| \le \epsilon_q + 3\,s_x/\sqrt 8$, with $\bar x$ and $s_x$ the
-  mean and standard deviation over the 8 runs and $x_q$ the finest quadrature
-  value. The tolerance follows from the quadrature error and the measured
-  Monte Carlo spread, not from the astrometric error.
+  16 times with independent keys at its budget. The compared values are, per
+  case, the 24 bin masses (8 bins of 3 quantities) and the 4 interval end
+  points, so $m = 56$ over the two cases. A value passes when
+  $|\bar x - x_q| \le \epsilon_q + \max(t^\star s_x/\sqrt{16},\ f)$, with
+  $\bar x$ and $s_x$ the mean and standard deviation over the 16 runs, $x_q$
+  the finest quadrature value, and $f = 0.002$ for bin masses ($f = 0$ for end
+  points). The critical value is the Student $t$ quantile with 15
+  degrees of freedom at $1 - 0.01/(2m)$, $t^\star$ = **4.938** (Bonferroni at
+  family level 0.01), so a correct sampler with Gaussian Monte Carlo errors
+  and negligible quadrature error fails the whole set of exact checks with
+  probability at most 0.01. The floor $f$ handles nearly empty bins, whose
+  estimates are far from Gaussian (all 16 runs can return zero); eight bins
+  each off by 0.002 add only $3.2\times 10^{-5}$ to $D2$, far below
+  $\delta_2$. `--sizing` runs a seeded control (multinomial bin estimates from
+  Dirichlet(0.7) masses and Gaussian end points, 20,000 simulated sets): the
+  family rejection rate is 0.0099 at ESS 1,000. Limitation: at lower ESS the
+  bin estimates are less Gaussian and the rate rises (0.015 at ESS 300), so the
+  0.01 calibration holds only for sampler runs with ESS of about 1,000 or more. The tolerance follows
+  from the quadrature error and the measured Monte Carlo spread, not from the
+  astrometric error. Every value must pass.
 
 ## Worlds, seeds and random numbers
 
@@ -661,8 +680,10 @@ gate.
    otherwise the alias criterion is `incomplete` for the groups that miss. The
    calculation is `python tools/updater_panel.py --freeze SUMMARY.json`:
    - *Inputs*: exactly one entry for each of the 16 groups (the tool refuses a
-     missing, duplicate or unknown group), each listing its development worlds;
-     a world carries its updater ESS, its reference ESS and its reference bin
+     missing, duplicate or unknown group), each listing all of its development
+     worlds by id, exactly the ids 0 to 37 (the tool refuses a missing,
+     duplicate or unknown id and sorts the worlds by id before resampling); a
+     world carries its updater ESS, its reference ESS and its reference bin
      masses for each alias quantity.
    - *Aggregation*: 400 simulated panels per group and quantity; each panel
      resamples 400 whole development worlds with replacement, keeping each

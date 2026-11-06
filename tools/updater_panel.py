@@ -132,6 +132,35 @@ def upper_tail_critical_count(n, rate, alpha):
     return min(c for c in range(n + 1) if binom_sf(c, n, rate) <= alpha)
 
 
+def student_t_cdf(t, dof):
+    """CDF of Student's t with an integer number of degrees of freedom."""
+    theta = math.atan(t / math.sqrt(dof))
+    c, s = math.cos(theta), math.sin(theta)
+    if dof % 2 == 1:
+        term, total = c, (c if dof > 1 else 0.0)
+        for k in range(3, dof - 1, 2):
+            term *= c * c * (k - 1) / k
+            total += term
+        return 0.5 + (theta + s * total) / math.pi
+    term, total = 1.0, 1.0
+    for k in range(2, dof - 1, 2):
+        term *= c * c * (k - 1) / k
+        total += term
+    return 0.5 + 0.5 * s * total
+
+
+def student_t_ppf(q, dof):
+    """Quantile of Student's t (integer degrees of freedom) by bisection."""
+    lo, hi = -1e3, 1e3
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if student_t_cdf(mid, dof) < q:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 def clopper_pearson_lower(x, n, confidence=0.95):
     """One-sided Clopper-Pearson lower bound on a binomial rate."""
     if x <= 0:
@@ -184,6 +213,12 @@ def critical_values(protocol):
     )
     cert_miss = (1.0 - damaged) ** cert_worlds
 
+    ex = protocol["reference"]["exact_checks"]
+    exact_m = ex["cases"] * (ex["bins_per_case"] + ex["interval_end_points_per_case"])
+    t_crit = student_t_ppf(
+        1.0 - ex["family_alpha"] / (2.0 * exact_m), ex["sampler_repeats"] - 1
+    )
+
     return {
         "cells": n_cells,
         "coverage_alpha": alpha_cell,
@@ -201,6 +236,9 @@ def critical_values(protocol):
         "certification_worlds_per_mass_model": cert_worlds,
         "certification_miss_probability": cert_miss,
         "certification_miss_probability_3dp": round(cert_miss, 3),
+        "exact_check_compared_values": exact_m,
+        "exact_check_t_critical": t_crit,
+        "exact_check_t_critical_3dp": round(t_crit, 3),
     }
 
 
@@ -798,8 +836,14 @@ def canonical_groups(protocol):
 
 
 def validate_summary(protocol, summary):
-    """Map each canonical group to its entry; refuse missing or extra groups."""
+    """Map each canonical group to its entry, worlds sorted by id.
+
+    Refuses a missing, duplicate or unknown group, and a group whose world ids
+    are not exactly the development ids (0 to n - 1, each once).
+    """
     expected = canonical_groups(protocol)
+    n_dev = protocol["panel"]["development_worlds_per_regime_and_mass_model"]
+    expected_ids = set(range(n_dev))
     seen = {}
     for entry in summary["groups"]:
         ident = (entry["regime"], entry["mass_model"], entry["epoch_count"])
@@ -807,9 +851,19 @@ def validate_summary(protocol, summary):
             raise ValueError(f"unknown group {ident}")
         if ident in seen:
             raise ValueError(f"duplicate group {ident}")
-        if not entry["worlds"]:
-            raise ValueError(f"group {ident} has no development worlds")
-        seen[ident] = entry
+        ids = [w["world"] for w in entry["worlds"]]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"group {ident} repeats a development world id")
+        if set(ids) != expected_ids:
+            missing_ids = sorted(expected_ids - set(ids))
+            unknown_ids = sorted(set(ids) - expected_ids)
+            raise ValueError(
+                f"group {ident} development worlds: missing {missing_ids}, "
+                f"unknown {unknown_ids}"
+            )
+        seen[ident] = dict(
+            entry, worlds=sorted(entry["worlds"], key=lambda w: w["world"])
+        )
     missing = [g for g in expected if g not in seen]
     if missing:
         raise ValueError(f"missing groups {missing}")
@@ -821,12 +875,12 @@ def freeze_alias(protocol, summary, panels=None):
 
     ``summary["groups"]`` holds exactly one entry per canonical group with
     ``regime``, ``mass_model``, ``epoch_count`` and ``worlds``; each world has
-    ``updater_ess``, ``reference_ess`` and ``bin_masses`` (a dict from alias
-    quantity to an eight-vector). Whole worlds are resampled, so masses and both
-    ESS values stay together. Returns the candidate ``delta2``, per-group
-    standard errors, power with its one-sided 95 percent lower bound, the
-    exact-updater pass rate with its 95 percent interval, and ``status``
-    (``frozen`` or ``incomplete``) with the reasons.
+    its id ``world``, ``updater_ess``, ``reference_ess`` and ``bin_masses`` (a
+    dict from alias quantity to an eight-vector). Whole worlds are resampled,
+    so masses and both ESS values stay together. Returns the candidate
+    ``delta2``, per-group standard errors, power with its one-sided 95 percent
+    lower bound, the exact-updater pass rate with its 95 percent interval, and
+    ``status`` (``frozen`` or ``incomplete``) with the reasons.
     """
     import numpy as np
 
@@ -975,6 +1029,52 @@ def sizing(protocol):
             moved=alias["alternative"]["moved_mass"],
         )
         print(f"  delta2 {d2:g}, updater ESS {ess}, damaged fraction {f}: {rate:.3f}")
+    rate, lo, hi = exact_check_control(protocol)
+    print(
+        f"Exact checks: m = {values['exact_check_compared_values']}, "
+        f"t* = {values['exact_check_t_critical']:.4f}; control family rejection "
+        f"{rate:.4f} (95 percent interval {lo:.4f} to {hi:.4f})"
+    )
+
+
+def exact_check_control(protocol, sims=20000, ess=1000):
+    """Seeded control of the exact-check family false-rejection rate.
+
+    A correct sampler is simulated: per case, three eight-bin marginals with
+    Dirichlet(0.7) masses estimated by multinomials at ``ess``, and four
+    Gaussian interval end points; ``sampler_repeats`` runs each. Returns the
+    fraction of simulated sets with any value outside its tolerance (zero
+    quadrature error, the bin-mass floor applied) and a two-sided 95 percent
+    Clopper-Pearson interval.
+    """
+    import numpy as np
+
+    ex = protocol["reference"]["exact_checks"]
+    values = critical_values(protocol)
+    t_crit = values["exact_check_t_critical"]
+    reps = ex["sampler_repeats"]
+    n_marg = ex["cases"] * ex["bins_per_case"] // 8
+    n_end = ex["cases"] * ex["interval_end_points_per_case"]
+    root = protocol["prng"]["root_seed"]
+    rng = np.random.default_rng(
+        [root, protocol["prng"]["simulation_seeds"]["sizing"], 99]
+    )
+    masses = rng.dirichlet(np.full(8, 0.7), size=n_marg)
+    bins = rng.multinomial(ess, masses, size=(sims, reps, n_marg)) / ess
+    bins = bins.reshape(sims, reps, -1)
+    ends = rng.standard_normal((sims, reps, n_end))
+    x = np.concatenate([bins, ends], axis=2)
+    truth = np.concatenate([masses.reshape(-1), np.zeros(n_end)])
+    dev = np.abs(x.mean(axis=1) - truth)
+    tol = t_crit * x.std(axis=1, ddof=1) / math.sqrt(reps)
+    n_bins = bins.shape[2]
+    tol[:, :n_bins] = np.maximum(tol[:, :n_bins], ex["bin_mass_floor"])
+    fails = int((dev > tol).any(axis=1).sum())
+    return (
+        fails / sims,
+        clopper_pearson_lower(fails, sims, 0.975),
+        clopper_pearson_upper(fails, sims, 0.975),
+    )
 
 
 def main(argv=None):

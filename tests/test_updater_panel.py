@@ -109,14 +109,16 @@ def test_truths_respect_the_declared_truncation():
 MASSES = [0.4, 0.3, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
 
 
-def _summary(tool, protocol, updater_ess):
+def _summary(tool, protocol, updater_ess, ids=None):
+    ids = range(len(updater_ess)) if ids is None else ids
     worlds = [
         {
-            "updater_ess": ess,
+            "world": i,
+            "updater_ess": updater_ess[i],
             "reference_ess": 20000,
             "bin_masses": {q: MASSES for q in ("lnP", "e", "future_pa")},
         }
-        for ess in updater_ess
+        for i in ids
     ]
     return {
         "groups": [
@@ -129,26 +131,60 @@ def _summary(tool, protocol, updater_ess):
 def test_freeze_never_loosens_the_alias_gate():
     """Imprecise or partial development summaries never yield a looser gate.
 
-    Fails if the freeze drops a group, summarizes ESS by its median (two worlds
-    at ESS 30 among four at 5,000 need a delta2 above the cap), or freezes a
-    tolerance whose power lower bound is below the floor.
+    Fails if the freeze drops a group, drops or reorders development worlds
+    (12 worlds at ESS 30 among 26 at 5,000 need a delta2 above the cap, and
+    removing those 12 must be refused, not frozen), or freezes a tolerance whose
+    power lower bound is below the floor.
     """
     tool = _load_tool()
     protocol = tool.load_protocol()
     alias = protocol["criteria"]["alias_accuracy"]
+    mixed_ess = [30] * 12 + [5000] * 26
 
-    partial = _summary(tool, protocol, [5000] * 6)
+    partial = _summary(tool, protocol, [5000] * 38)
     partial["groups"] = partial["groups"][:1]
     with pytest.raises(ValueError, match="missing groups"):
         tool.freeze_alias(protocol, partial, panels=24)
 
-    mixed = tool.freeze_alias(
-        protocol, _summary(tool, protocol, [30, 30, 5000, 5000, 5000, 5000]), panels=24
-    )
+    dropped = _summary(tool, protocol, mixed_ess, ids=range(12, 38))
+    with pytest.raises(ValueError, match="missing"):
+        tool.freeze_alias(protocol, dropped, panels=24)
+    duplicated = _summary(tool, protocol, mixed_ess, ids=[*range(38), 37])
+    with pytest.raises(ValueError, match="repeats"):
+        tool.freeze_alias(protocol, duplicated, panels=24)
+
+    shuffled = _summary(tool, protocol, mixed_ess, ids=reversed(range(38)))
+    in_order = _summary(tool, protocol, mixed_ess)
+    mixed = tool.freeze_alias(protocol, shuffled, panels=8)
+    assert mixed == tool.freeze_alias(protocol, in_order, panels=8)
     assert mixed["status"] == "incomplete"
     assert mixed["delta2"] > alias["delta2_max"]
 
-    tight = tool.freeze_alias(protocol, _summary(tool, protocol, [5000] * 6), panels=24)
+    tight = tool.freeze_alias(
+        protocol, _summary(tool, protocol, [5000] * 38), panels=24
+    )
     assert tight["status"] == "frozen", tight["reasons"]
     assert tight["delta2"] == alias["delta2"]
     assert all(g["power_lower_95"] >= alias["min_power"] for g in tight["groups"])
+
+
+def test_exact_check_critical_value():
+    """The exact-check critical value is t_15 at 1 - 0.01 / (2 m), m = 56.
+
+    Fails if the compared-value count, the repeat count or the Student t
+    quantile drift from the protocol (a normal quantile, 3.75, would reject a
+    correct sampler far more often than 1 percent with 16 repeats).
+    """
+    from scipy import stats
+
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    ex = protocol["reference"]["exact_checks"]
+    m = ex["cases"] * (ex["bins_per_case"] + ex["interval_end_points_per_case"])
+    assert m == protocol["stated"]["exact_check_compared_values"] == 56
+    expected = stats.t.ppf(
+        1.0 - ex["family_alpha"] / (2 * m), ex["sampler_repeats"] - 1
+    )
+    values = tool.critical_values(protocol)
+    assert values["exact_check_t_critical"] == pytest.approx(expected, abs=1e-9)
+    assert round(expected, 3) == protocol["stated"]["exact_check_t_critical_3dp"]
