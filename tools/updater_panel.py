@@ -191,12 +191,23 @@ def group_counts(protocol):
     }
 
 
+_CRITICAL_VALUES = {}
+
+
 def critical_values(protocol):
     """Recompute every derived threshold of the protocol from its formula.
 
     Returns a dict with the exact values and their rounded forms, keyed like the
-    protocol's ``stated`` block for the rounded ones.
+    protocol's ``stated`` block for the rounded ones. Cached per protocol
+    content (the binomial critical counts take a third of a second).
     """
+    key = json.dumps(protocol, sort_keys=True, default=str)
+    if key not in _CRITICAL_VALUES:
+        _CRITICAL_VALUES[key] = _critical_values(protocol)
+    return dict(_CRITICAL_VALUES[key])
+
+
+def _critical_values(protocol):
     g = group_counts(protocol)
     crit = protocol["criteria"]
     n = protocol["panel"]["worlds_per_cell"]
@@ -1273,6 +1284,38 @@ def chart_quantities(mass_model, target, particles, t_f):
     return dict(zip(QUANTITIES, (np.asarray(x) for x in out), strict=True))
 
 
+def finite_chart_quantities(mass_model, target, particles, log_weights, t_f, chunk):
+    """Graded quantities and log weights of the finite-weight particles.
+
+    The quantities are evaluated in blocks of ``chunk`` particles (the last
+    block padded), so the compiled quantity function sees one shape and the
+    memory stays bounded; selecting the finite-weight particles first would
+    compile once per distinct count.
+    """
+    import numpy as np
+
+    particles = np.asarray(particles)
+    log_weights = np.asarray(log_weights)
+    n = len(particles)
+    parts = {name: [] for name in QUANTITIES}
+    for start in range(0, n, chunk):
+        fin = np.isfinite(log_weights[start : start + chunk])
+        if not fin.any():
+            continue
+        block = particles[start : start + chunk]
+        if len(block) < chunk:
+            block = np.concatenate(
+                [block, np.repeat(block[-1:], chunk - len(block), 0)]
+            )
+        q = chart_quantities(mass_model, target, block, t_f)
+        for name in QUANTITIES:
+            parts[name].append(np.asarray(q[name])[: len(fin)][fin])
+    lw = log_weights[np.isfinite(log_weights)]
+    if not len(lw):
+        return {name: np.zeros(0) for name in QUANTITIES}, lw
+    return {name: np.concatenate(v) for name, v in parts.items()}, lw
+
+
 def _physical_rows_fn():
     import jax
     import jax.numpy as jnp
@@ -1727,6 +1770,9 @@ def _record_definitions():
         _collapsed_draws,
         ti_collapsed_reference,
         ti_frequency_reference,
+        frequency_mixture_ln_period,
+        frequency_mixture_log_ratio,
+        inflated_conditional_draw,
         _jitted,
         reference_budget_factor,
         physical_semimajor_range,
@@ -1744,6 +1790,7 @@ def _record_definitions():
         world_data,
         astrometry,
         _chart_quantities_fn,
+        finite_chart_quantities,
         chart_quantities,
         _physical_rows_fn,
         truth_quantities,
@@ -1817,7 +1864,7 @@ def run_hash(protocol):
     for key in ("status", "criteria", "provisional", "stated", "limits", "compute"):
         body.pop(key, None)
     for pair in ("ti_window", "physical_fixed"):
-        for key in ("proposals_per_fit", "max_proposals_per_fit"):
+        for key in ("proposals_per_fit", "max_proposals_per_fit", "ess_floor"):
             body.get("reference", {}).get(pair, {}).pop(key, None)
     return declaration_hash(
         {
@@ -2042,8 +2089,6 @@ class UnitExecutor:
         The collapsed prior sampler, or for the independent-proposal check the
         frequency-mixture sampler.
         """
-        import numpy as np
-
         data = astrometry(world, k)
         target = world["target"]
         if proposal:
@@ -2055,14 +2100,11 @@ class UnitExecutor:
         else:
             theta, lw = ti_collapsed_reference(target, data, key, n_prop, self.chunk)
             method = "ti_collapsed_prior"
-        fin = np.isfinite(lw)
-        parts = {name: [] for name in QUANTITIES}
-        weights = []
-        if fin.any():
-            q = chart_quantities("ti_window", target, theta[fin], t_f)
-            for name in QUANTITIES:
-                parts[name].append(np.asarray(q[name]))
-            weights.append(lw[fin])
+        q, lw = finite_chart_quantities(
+            "ti_window", target, theta, lw, t_f, min(self.chunk, n_prop)
+        )
+        parts = {name: [q[name]] if len(lw) else [] for name in QUANTITIES}
+        weights = [lw] if len(lw) else []
         return (*_concat(parts, weights), method)
 
     def physical_reference(self, world, k, key, n_prop, lowest_snr, t_f):
@@ -2221,6 +2263,61 @@ def ti_frequency_reference(target, data, key, n_prop, chunk, config=None):
     return np.concatenate(thetas), np.concatenate(log_ws)
 
 
+def frequency_mixture_ln_period(target, k_mix, k_f, prior_ln_period, prior_fraction):
+    """The check-3 mixture's ln P: the prior draw, or uniform in frequency.
+
+    With probability ``prior_fraction`` the given prior draw is kept;
+    otherwise ``ln P = -ln f`` with ``f`` uniform on the prior's frequency
+    range.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    m = target.model
+    n = prior_ln_period.shape[0]
+    f = jax.random.uniform(
+        k_f, (n,), minval=jnp.exp(-m.lnP_hi), maxval=jnp.exp(-m.lnP_lo)
+    )
+    use_prior = jax.random.uniform(k_mix, (n,)) < prior_fraction
+    return jnp.where(use_prior, prior_ln_period, -jnp.log(f))
+
+
+def frequency_mixture_log_ratio(target, ln_period, prior_fraction):
+    """``log q(ln P) / p(ln P)`` of the check-3 mixture, ``p`` the prior.
+
+    ``p = 1 / (lnP_hi - lnP_lo)``; uniform frequency has density ``f / (f_hi
+    - f_lo)`` in ln P, so ``q / p = a + (1 - a) span f / (f_hi - f_lo)``.
+    """
+    import jax.numpy as jnp
+
+    m = target.model
+    f_lo, f_hi = jnp.exp(-m.lnP_hi), jnp.exp(-m.lnP_lo)
+    span = m.lnP_hi - m.lnP_lo
+    f = jnp.exp(-ln_period)
+    return jnp.log(prior_fraction + (1.0 - prior_fraction) * span * f / (f_hi - f_lo))
+
+
+def inflated_conditional_draw(mean, chol, z, kappa):
+    """A draw from ``N(mean, kappa^2 P^-1)`` and its normalized log density.
+
+    ``chol`` is the lower Cholesky factor of the precision ``P`` and ``z`` a
+    standard normal vector: ``c = mean + kappa L^-T z``, whose density is
+    ``-|z|^2 / 2 - d log(kappa) + log det L - d log(2 pi) / 2``.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    d = mean.shape[0]
+    c = mean + kappa * jax.scipy.linalg.solve_triangular(chol.T, z, lower=False)
+    log_q = (
+        -0.5 * jnp.sum(z**2)
+        - d * jnp.log(kappa)
+        + jnp.sum(jnp.log(jnp.diag(chol)))
+        - 0.5 * d * jnp.log(2.0 * jnp.pi)
+    )
+    return c, log_q
+
+
 _JITTED = {}
 
 
@@ -2246,34 +2343,20 @@ def _jitted(name):
 
     @eqx.filter_jit
     def frequency(target, data, key, batch, prior_fraction, kappa):
-        m = target.model
-        f_lo, f_hi = jnp.exp(-m.lnP_hi), jnp.exp(-m.lnP_lo)
-        span = m.lnP_hi - m.lnP_lo
         weights = data.is_valid.astype(float)
         k_mix, k_prior, k_f, k_z = jax.random.split(key, 4)
         u = _ti_prior_u(target, k_prior, batch)
-        f = jax.random.uniform(k_f, (batch,), minval=f_lo, maxval=f_hi)
-        use_prior = jax.random.uniform(k_mix, (batch,)) < prior_fraction
-        u = u.at[:, 1].set(jnp.where(use_prior, u[:, 1], -jnp.log(f)))
-        # q(ln P) / p(ln P) for the mixture, with p uniform in ln P.
-        f_u = jnp.exp(-u[:, 1])
-        log_ratio = jnp.log(
-            prior_fraction + (1.0 - prior_fraction) * span * f_u / (f_hi - f_lo)
+        u = u.at[:, 1].set(
+            frequency_mixture_ln_period(target, k_mix, k_f, u[:, 1], prior_fraction)
         )
+        log_ratio = frequency_mixture_log_ratio(target, u[:, 1], prior_fraction)
         z = jax.random.normal(k_z, (batch, 4))
 
         def one(ui, zi):
             theta = jnp.concatenate([ui, jnp.zeros(4)])
             mean, chol, _, _, _ = _linear_gaussian(target, theta, data, weights)
-            c = mean + kappa * jax.scipy.linalg.solve_triangular(
-                chol.T, zi, lower=False
-            )
+            c, log_q_c = inflated_conditional_draw(mean, chol, zi, kappa)
             theta = theta.at[3:].set(c)
-            log_q_c = (
-                -0.5 * jnp.sum(zi**2)
-                - 4.0 * jnp.log(kappa)
-                + jnp.sum(jnp.log(jnp.diag(chol)))
-            )
             log_post = target.log_prior(theta) + target.log_likelihood(theta, data)
             return theta, log_post - log_q_c
 
@@ -2622,6 +2705,13 @@ def freeze_report(protocol, path, exact_path=None):
                 f"{len(absent)} of {len(planned)} planned development units "
                 f"missing or incompatible; first: {absent[:3]}"
             )
+        low = ess_floor_violations(protocol, units)
+        if low:
+            reasons.append(
+                f"{len(low)} reference fits below their ESS floor (double that "
+                "method's budget and rerun them; id, proposals, ESS): "
+                f"{low[:5]}"
+            )
         summary, _ = assemble_freeze_summary(protocol, units)
         empty = summary["empty_references"]
         if empty:
@@ -2672,6 +2762,64 @@ def freeze_report(protocol, path, exact_path=None):
     return report
 
 
+REFERENCE_GROUPS = {
+    "primary": ("reference_1", "reference_2", "reference_3", "reference_4"),
+    "doubled": ("cert_doubled_1", "cert_doubled_2"),
+    "independent": ("cert_proposal_1", "cert_proposal_2"),
+}
+
+
+def _reference_group(role):
+    return next(g for g, roles in REFERENCE_GROUPS.items() if role in roles)
+
+
+def ess_floor_violations(protocol, units):
+    """Reference fits below their pair's ``ess_floor``: ``(id, proposals, ess)``.
+
+    Every reference role counts (primary, doubled and independent-proposal
+    runs); a pair without a floor in the parameter block is not checked.
+    """
+    out = []
+    for unit_id_, rec in units.items():
+        if rec.get("kind") != "reference":
+            continue
+        pair = unit_id_.split("/")[1]
+        floor = protocol["reference"].get(pair, {}).get("ess_floor")
+        ess = rec.get("summary", {}).get("kish_ess", 0.0)
+        if floor is not None and ess < floor:
+            out.append((unit_id_, rec.get("proposals"), round(float(ess), 1)))
+    return sorted(out)
+
+
+def ess_table(protocol, units):
+    """Worst and median Kish ESS per pair, regime, epoch count and reference group.
+
+    Returns a dict keyed ``"pair regime k=K group"`` with ``fits``, ``worst``,
+    ``median``, the ``floor`` and the ids below it.
+    """
+    import statistics
+
+    rows = {}
+    for unit_id_, rec in units.items():
+        if rec.get("kind") != "reference":
+            continue
+        _, pair, regime, _, role, k = unit_id_.split("/")
+        key = f"{pair} {regime} {k.replace('k', 'k=')} {_reference_group(role)}"
+        rows.setdefault(key, []).append((rec["summary"]["kish_ess"], unit_id_))
+    out = {}
+    for key in sorted(rows):
+        ess = [e for e, _ in rows[key]]
+        floor = protocol["reference"].get(key.split()[0], {}).get("ess_floor")
+        out[key] = {
+            "fits": len(ess),
+            "worst": round(min(ess), 1),
+            "median": round(statistics.median(ess), 1),
+            "floor": floor,
+            "below_floor": sorted(i for e, i in rows[key] if floor and e < floor),
+        }
+    return out
+
+
 def _exact_reasons(protocol, exact_path, report):
     """Re-assess the exact checks from their run directory; return reasons.
 
@@ -2698,10 +2846,12 @@ def _exact_reasons(protocol, exact_path, report):
         "verdicts": exact["verdicts"],
         "reasons": {c: e["reasons"] for c, e in exact["cases"].items()},
     }
+    # Every case is required; the binding-window case feeds the TI verdict.
     return [
-        f"{mass_model} exact checks: {exact['verdicts'].get(mass_model, 'missing')}"
-        for mass_model in protocol["panel"]["mass_models"]
-        if exact["verdicts"].get(mass_model) != "pass"
+        f"{exact_tool.CASE_MASS_MODEL[case]} exact checks ({case}): "
+        f"{exact['verdicts'].get(case, 'missing')}"
+        for case in exact_tool.CASES
+        if exact["verdicts"].get(case) != "pass"
     ]
 
 
@@ -2797,6 +2947,15 @@ def main(argv=None):
         help="reference proposals per compiled batch",
     )
     parser.add_argument("--status", type=Path, default=None, help="print run progress")
+    parser.add_argument(
+        "--roles", default=None, help="comma list: run only these run roles"
+    )
+    parser.add_argument(
+        "--ess",
+        type=Path,
+        default=None,
+        help="run directory: print the reference ESS table against the floors",
+    )
     args = parser.parse_args(argv)
     protocol = load_protocol(args.protocol)
     if args.freeze is not None:
@@ -2809,11 +2968,20 @@ def main(argv=None):
         sizing(protocol)
     if args.status is not None:
         print("\n".join(progress(protocol, args.status)))
+    if args.ess is not None:
+        print(json.dumps(ess_table(protocol, load_units(args.ess)[0]), indent=1))
     if args.run is not None:
         if args.out is None:
             parser.error("--run needs --out")
         run_stage(protocol, args)
-    if not (args.dry_run or args.sizing or args.freeze or args.run or args.status):
+    if not (
+        args.dry_run
+        or args.sizing
+        or args.freeze
+        or args.run
+        or args.status
+        or args.ess
+    ):
         parser.error("nothing to do")
     return 0
 
@@ -2832,6 +3000,9 @@ def run_stage(protocol, args):
         regimes=args.regimes.split(",") if args.regimes else None,
         worlds=parse_worlds(args.worlds) if args.worlds else None,
     )
+    if args.roles:
+        roles = set(args.roles.split(","))
+        units = [u for u in units if u["role"] in roles]
     entry = manifest_entry(protocol, None, budgets)
     entry["protocol_budgets"] = budgets_match_protocol(protocol, budgets)
     entry["shard"] = args.shard

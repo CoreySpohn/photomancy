@@ -193,14 +193,70 @@ def test_physical_quadrature_matches_the_reference_sampler_coarsely():
         )
 
 
+@pytest.mark.medium
+def test_binding_window_case_grades_a_shared_window_error():
+    """In the binding-window case both TI samplers pass and a lost window fails.
+
+    The case's mass window removes most of the prior volume, so a sampler
+    that omits it is far off. Four runs each of the anchor (2^20 prior
+    draws weighted by likelihood and window directly), the collapsed
+    reference (2^17) and the check-3 frequency-mixture sampler (2^18) are
+    graded with the protocol's comparison against the anchor's table. Fails
+    if either production sampler fails a value, or if the collapsed
+    reference run on the same data without the binding window (the reduced
+    case's wide window) passes every value: the wide-window case could not
+    see that error.
+    """
+    protocol = ex.panel.load_protocol()
+    setup = ex.case_setup(protocol, "ti_binding")
+    vis = ex.panel.visibility_mas(protocol)
+
+    def run(sampler, r):
+        key = jax.random.fold_in(jax.random.key(11), r)
+        q, lw = sampler(key)
+        summary = ex.panel.summarize_posterior(q, lw, setup["edges"], vis)
+        return {"kish_ess": summary["kish_ess"], "values": ex.summary_values(summary)}
+
+    wide = dict(
+        setup,
+        target=type(setup["target"])(
+            ex.ti_reduced_model(protocol), protocol["distance_pc"]
+        ),
+    )
+    samplers = {
+        "anchor": lambda k: ex.anchor_sample(setup, k, 2**20),
+        "reference": lambda k: ex.reference_sample(protocol, setup, k, 2**17),
+        "independent": lambda k: ex.independent_sample(protocol, setup, k, 2**18),
+        "no_window": lambda k: ex.reference_sample(protocol, wide, k, 2**17),
+    }
+    runs = {name: [run(fn, r) for r in range(4)] for name, fn in samplers.items()}
+    t_crit = ex.panel.critical_values(protocol)["exact_check_t_critical"]
+    table = ex.anchor_table(protocol, runs["anchor"], t_crit)
+    for name in ("reference", "independent"):
+        rows = ex.compare(protocol, table, runs[name], t_crit)
+        failed = {n: r for n, r in rows.items() if not r["pass"]}
+        assert not failed, (name, failed)
+    rows = ex.compare(protocol, table, runs["no_window"], t_crit)
+    assert not all(r["pass"] for r in rows.values())
+
+
 def _write_units(
-    tool, out_dir, offset=0.0, drop=None, stall=False, tamper=None, protocol=None
+    tool,
+    out_dir,
+    offset=0.0,
+    drop=None,
+    stall=False,
+    tamper=None,
+    protocol=None,
+    offset_at=("physical_fixed", "reference"),
 ):
     """Synthetic exact records carrying the current run hash and budgets.
 
-    ``tamper`` corrupts the evidence: ``"budget"`` gives one reference repeat
-    one proposal, ``"stale"`` gives one an old run hash, ``"duplicate"``
-    writes one repeat twice.
+    Every graded sampler of every case and the binding case's anchor are
+    written; ``offset`` moves one bin mass of the ``offset_at`` (case,
+    sampler) runs. ``tamper`` corrupts the evidence: ``"budget"`` gives one
+    reference repeat one proposal, ``"stale"`` gives one an old run hash,
+    ``"duplicate"`` writes one repeat twice.
     """
     panel = tool.panel
     protocol = protocol or panel.load_protocol()
@@ -212,7 +268,7 @@ def _write_units(
     }
     path = Path(out_dir) / "units-0of1.jsonl"
     for case in tool.CASES:
-        for level in range(3):
+        for level in range(3) if case != "ti_binding" else ():
             uid = f"exact/{case}/quadrature/L{level}"
             if uid == drop:
                 continue
@@ -232,22 +288,28 @@ def _write_units(
             if case == "ti_window":
                 rec["window_bound"] = 1e-12
             panel.append_record(path, rec)
-        for r in range(16):
+        samplers = [s for s in tool.CASE_SAMPLERS[case] if s != "updater"]
+        for sampler, r in ((s, r) for s in samplers for r in range(16)):
             values = {
                 n: v + 1.11e-3 + 1e-3 * rng.standard_normal() for n, v in truth.items()
             }
-            if case == "physical_fixed":
+            if (case, sampler) == offset_at:
                 values["e_bin3"] += offset
-            uid = f"exact/{case}/reference/r{r:02d}"
+            uid = f"exact/{case}/{sampler}/r{r:02d}"
+            if uid == drop:
+                continue
             rec = {
                 "id": uid,
-                "kind": "reference",
+                "kind": sampler,
                 "repeat": r,
                 "kish_ess": 1e4,
                 "values": values,
                 "run_hash": current,
                 **tool.expected_budget(protocol, tool.unit_of(uid)),
             }
+            if sampler != "reference":
+                panel.append_record(path, rec)
+                continue
             if r == 3 and tamper == "budget":
                 rec["proposals"] = 1
             if r == 3 and tamper == "stale":
@@ -270,12 +332,17 @@ def test_report_flags_offsets_and_missing_units(tmp_path):
     content (run hash), or one written twice must not pass; nor may levels
     other than three consecutive refinements. The freeze re-assesses the
     exact checks from their run directory: a passing directory adds no exact
-    reason, a tampered one does, and a results file is refused.
+    reason, a tampered one does, and a results file is refused. The check-3
+    sampler is graded in both TI cases (an offset in its runs alone fails the
+    case) and the binding case's anchor is required.
     """
     protocol = ex.panel.load_protocol()
     cases = {
         "good": {},
         "offset": {"offset": 0.01},
+        "independent": {"offset": 0.01, "offset_at": ("ti_window", "independent")},
+        "binding": {"offset": 0.01, "offset_at": ("ti_binding", "independent")},
+        "no_anchor": {"drop": "exact/ti_binding/anchor/r05"},
         "missing": {"drop": "exact/ti_window/quadrature/L1"},
         "stall": {"stall": True},
         "budget": {"tamper": "budget"},
@@ -288,10 +355,15 @@ def test_report_flags_offsets_and_missing_units(tmp_path):
         out.mkdir()
         _write_units(ex, out, protocol=protocol, **kwargs)
         verdicts[label] = ex.report(protocol, out)["verdicts"]
-    assert verdicts["good"] == {"ti_window": "pass", "physical_fixed": "pass"}
-    assert verdicts["offset"] == {"ti_window": "pass", "physical_fixed": "fail"}
+    good = {"ti_window": "pass", "physical_fixed": "pass", "ti_binding": "pass"}
+    assert verdicts["good"] == good
+    assert verdicts["offset"] == {**good, "physical_fixed": "fail"}
+    assert verdicts["independent"] == {**good, "ti_window": "fail"}
+    assert verdicts["binding"] == {**good, "ti_binding": "fail"}
+    assert verdicts["no_anchor"] == {**good, "ti_binding": "incomplete"}
     assert verdicts["missing"]["ti_window"] == "incomplete"
     assert verdicts["stall"] == {
+        **good,
         "ti_window": "incomplete",
         "physical_fixed": "incomplete",
     }
@@ -299,6 +371,7 @@ def test_report_flags_offsets_and_missing_units(tmp_path):
         assert verdicts[label]["ti_window"] == "incomplete", label
     for levels in ((1, 2, 3), (0, 2, 4)):
         assert ex.report(protocol, tmp_path / "good", levels=levels)["verdicts"] == {
+            **good,
             "ti_window": "incomplete",
             "physical_fixed": "incomplete",
         }
@@ -312,7 +385,12 @@ def test_report_flags_offsets_and_missing_units(tmp_path):
 
     assert exact_reasons(tmp_path / "good") == []
     assert any(
-        "exact checks: incomplete" in r for r in exact_reasons(tmp_path / "stale")
+        "exact checks (ti_window): incomplete" in r
+        for r in exact_reasons(tmp_path / "stale")
+    )
+    assert any(
+        "exact checks (ti_binding): incomplete" in r
+        for r in exact_reasons(tmp_path / "no_anchor")
     )
     results = tmp_path / "exact-checks.json"
     results.write_text('{"verdicts": {"ti_window": "pass", "physical_fixed": "pass"}}')

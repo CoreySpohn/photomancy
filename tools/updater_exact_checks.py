@@ -2,29 +2,36 @@
 """Exact checks of the updater references against numerical quadrature.
 
 The protocol (``docs/updater-protocol.md``, "Exact checks") anchors the
-accuracy of both reference samplers on two low-dimensional cases integrated to
-a demonstrated accuracy:
+accuracy of both reference samplers on low-dimensional cases, two integrated
+to a demonstrated accuracy and one graded against a brute-force sampler:
 
 - **physical_fixed**: one epoch at t = 0 (3.5 mas), regime R1 support, future
   epoch 30 days;
 - **ti_window**: the TI model with periods of 200 to 400 days and the mass
   window ``reference.exact_checks.ti_mass_window_msun`` of the parameter
-  block, epochs at 0 and 60 days (3.5 mas), future epoch 120 days.
+  block, epochs at 0 and 60 days (3.5 mas), future epoch 120 days;
+- **ti_binding**: the same periods and epochs with a mass window that cuts
+  the posterior (``reference.exact_checks.binding_case``) and large errors,
+  graded against the mean of ``sampler_repeats`` runs of the anchor sampler,
+  which draws every coordinate from the prior and weights by the likelihood
+  and the window indicator directly.
 
 Each case has 28 graded values: the eight-bin masses of ln P, e and the future
 position angle (east of north), and the end points of the central 90 percent
 intervals of the future east and north offsets. The quadrature is evaluated at
 three refinement levels, each doubling the nodes of every dimension; the
 quadrature error of a value is twice the change between the two finest levels,
-and that change must be smaller than the previous one. The reference sampler
-(and the updater, for information) runs ``sampler_repeats`` times with
-independent keys, and a value passes when
+and that change must be smaller than the previous one. The graded samplers
+(the reference and, for the TI cases, the check-3 frequency-mixture sampler
+at twice the budget; the updater for information) run ``sampler_repeats``
+times with independent keys, and a value passes when
 ``|mean - x_q| <= eps_q + max(t* s / sqrt(R), f)``.
 
 Usage::
 
     python tools/updater_exact_checks.py --out DIR [--levels 0,1,2]
-        [--cases ti_window,physical_fixed] [--samplers reference,updater]
+        [--cases ti_window,physical_fixed,ti_binding]
+        [--samplers anchor,reference,independent,updater]
         [--repeats 16] [--shard i/n]
     python tools/updater_exact_checks.py --report DIR [--write EXACT.json]
 
@@ -50,17 +57,18 @@ von Mises kernel; with ``y = 2 sqrt(K) sin(x / 2)`` each arc integral is a
 normal CDF plus a small smooth correction integrated by a Gauss rule in
 ``y``.
 
-Quadrature, TI case. Given ``(e, ln P, tau)`` the predictions are linear in
-the four TI constants with a Gaussian prior, so they are integrated
-analytically: each node carries its marginal likelihood and a Gaussian future
-position. Gauss rules in ``e`` and ``ln P`` are split at the bin edges, the
-``tau`` rule is a periodic trapezoid; angle-bin masses are exact Gaussian
-wedge probabilities (Owen's T), and the end points come from the Gaussian
-mixture CDF. The mass window is bounded per node: a ball of radius ``r``
-around the conditional mean lies in the window when its image interval does
-(``|c| / sqrt 2 <= a <= |c|``), and the mass outside is at most the chi-square
-(4 degrees of freedom) tail at ``r^2 / lambda_max``; the weighted sum of the
-bounds must be below ``1e-6``.
+Quadrature, TI case. Given ``(e, ln P, tau)`` the predictions are linear in the
+four TI constants with a Gaussian prior, so they are integrated analytically
+from dense normal equations (a code path separate from the updater's Cholesky
+helper, which the collapsed reference uses): each node carries its marginal
+likelihood and a Gaussian future position. Gauss rules in ``e`` and ``ln P``
+are split at the bin edges, the ``tau`` rule is a periodic trapezoid; angle-bin
+masses are exact Gaussian wedge probabilities (Owen's T), and the end points
+come from the Gaussian mixture CDF. The mass window is bounded per node: a ball
+of radius ``r`` around the conditional mean lies in the window when its image
+interval does (``|c| / sqrt 2 <= a <= |c|``), and the mass outside is at most
+the chi-square (4 degrees of freedom) tail at ``r^2 / lambda_max``; the
+weighted sum of the bounds must be below ``1e-6``.
 """
 
 import argparse
@@ -72,8 +80,22 @@ import time
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
-CASES = ("ti_window", "physical_fixed")
-SAMPLERS = ("reference", "updater")
+CASES = ("ti_window", "physical_fixed", "ti_binding")
+SAMPLERS = ("anchor", "reference", "independent", "updater")
+# Samplers run per case; "anchor" is the binding case's brute-force grading
+# reference, "reference" and "independent" are graded (amendment A7).
+CASE_SAMPLERS = {
+    "ti_window": ("reference", "independent", "updater"),
+    "physical_fixed": ("reference", "updater"),
+    "ti_binding": ("anchor", "reference", "independent"),
+}
+GRADED = ("reference", "independent")
+# The mass model whose verdict each case feeds.
+CASE_MASS_MODEL = {
+    "ti_window": "ti_window",
+    "physical_fixed": "physical_fixed",
+    "ti_binding": "ti_window",
+}
 WINDOW_BOUND_MAX = 1e-6
 # Physical case: the anchor kernel is integrated over |y| <= Y_CAP (mass
 # beyond is below 1e-18 of the total), which needs K >= K_MIN for a smooth
@@ -146,6 +168,24 @@ def ti_reduced_model(protocol=None):
     )
 
 
+def ti_binding_model(protocol):
+    """The binding-window TI case: P 200 to 400 days, a narrow mass window."""
+    from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel
+
+    window = protocol["reference"]["exact_checks"]["binding_case"]["mass_window_msun"]
+    return TIBasisModel(
+        lnP_lo=math.log(200.0),
+        lnP_hi=math.log(400.0),
+        mu_lo=window[0] * MU_SUN,
+        mu_hi=window[1] * MU_SUN,
+    )
+
+
+def _key_slot(case):
+    """(mass model, regime index) of a case's exact-stage keys."""
+    return ("ti_window", 1) if case == "ti_binding" else (case, 0)
+
+
 def case_setup(protocol, case):
     """Truth, records, support and grading edges of one exact-check case."""
     import jax
@@ -157,8 +197,9 @@ def case_setup(protocol, case):
     panel.enable_x64()
     r1 = protocol["regimes"][0]
     sigma = r1["sigma_mas"] * mas2arcsec
-    truth_key = panel.draw_key(protocol, "exact", case, 0, 0, "truth", 0)
-    noise_key = panel.draw_key(protocol, "exact", case, 0, 0, "noise", 0)
+    slot = _key_slot(case)
+    truth_key = panel.draw_key(protocol, "exact", *slot, 0, "truth", 0)
+    noise_key = panel.draw_key(protocol, "exact", *slot, 0, "noise", 0)
     if case == "physical_fixed":
         target = panel.update_target(protocol, r1, "physical_fixed")
         truth = target.from_physical(panel.physical_truth(protocol, r1, truth_key))
@@ -166,7 +207,12 @@ def case_setup(protocol, case):
         t_f = 30.0
         p_lo, p_hi, e_max = panel.regime_bounds(protocol, r1, "physical_fixed")
     else:
-        model = ti_reduced_model(protocol)
+        if case == "ti_binding":
+            model = ti_binding_model(protocol)
+            binding = protocol["reference"]["exact_checks"]["binding_case"]
+            sigma = binding["sigma_mas"] * mas2arcsec
+        else:
+            model = ti_reduced_model(protocol)
         target = ThieleInnesTarget(model, protocol["distance_pc"])
         truth = panel.ti_truth(model, truth_key)
         times = np.array([0.0, 60.0])
@@ -322,13 +368,13 @@ def ti_quadrature(setup, counts, chunk=2**15):
     from scipy.special import ndtr  # noqa: F401  (used by wedge_masses)
 
     from photomancy.orbit.few_epoch import ti_semimajor_axis
-    from photomancy.orbit.updater import _linear_gaussian
 
     target = setup["target"]
     model = target.model
     edges = setup["edges"]
-    data = records(setup)
-    weights_rec = jnp.ones(len(setup["times"]))
+    times = jnp.asarray(setup["times"])
+    obs = jnp.concatenate([jnp.asarray(setup["ra"]), jnp.asarray(setup["dec"])])
+    prec_obs = jnp.full(obs.shape, 1.0 / setup["sigma"] ** 2)
     e_x, e_w, e_bin = gauss_pieces(edges["e"], counts["e_per_bin"])
     p_x, p_w, p_bin = gauss_pieces(edges["lnP"], counts["lnP_per_bin"])
     t_x, t_w = periodic_nodes(counts["tau"], 1.0)
@@ -343,14 +389,27 @@ def ti_quadrature(setup, counts, chunk=2**15):
     t_f = jnp.asarray([setup["t_f"]])
     two_pi = 2.0 * math.pi
 
+    def design(u, at):
+        # Columns: the forward model at each unit TI vector (predictions are
+        # linear in the constants), stacked (east rows, then north rows).
+        cols = []
+        for j in range(4):
+            ra, dec = target.predict(jnp.concatenate([u, jnp.eye(4)[j]]), at)
+            cols.append(jnp.concatenate([ra, dec]))
+        return jnp.stack(cols, axis=1)
+
     @jax.jit
     def node(u):
-        theta = jnp.concatenate([u, jnp.zeros(4)])
-        mean, chol, log_z, _, _ = _linear_gaussian(target, theta, data, weights_rec)
-        h_ra, h_dec = target.linear_design(theta, t_f)
-        hf = jnp.concatenate([h_ra, h_dec], axis=0)
-        inv_chol = jax.scipy.linalg.solve_triangular(chol, jnp.eye(4), lower=True)
-        cov_c = inv_chol.T @ inv_chol
+        # The Gaussian marginal and conditional of the TI constants from dense
+        # normal equations, a code path independent of the updater's
+        # Cholesky-based helper that the collapsed reference uses.
+        h = design(u, times)
+        precision = jnp.eye(4) / model.s_ti**2 + h.T @ (prec_obs[:, None] * h)
+        b = h.T @ (prec_obs * obs)
+        mean = jnp.linalg.solve(precision, b)
+        cov_c = jnp.linalg.inv(precision)
+        log_z = -0.5 * jnp.linalg.slogdet(precision)[1] + 0.5 * b @ mean
+        hf = design(u, t_f)
         lam_max = jnp.linalg.eigvalsh(cov_c)[-1]
         norm_m = jnp.linalg.norm(mean)
         period = jnp.exp(u[1])
@@ -745,16 +804,17 @@ def reference_sample(protocol, setup, key, n_prop, chunk=2**16):
     t_f = setup["t_f"]
     parts = {q: [] for q in panel.QUANTITIES}
     weights = []
-    if setup["case"] == "ti_window":
+    if setup["case"] != "physical_fixed":
         # The panel's TI reference (amendment A7): collapsed prior sampler.
         theta, lw = panel.ti_collapsed_reference(
             setup["target"], records(setup), key, n_prop, chunk
         )
-        fin = np.isfinite(lw)
-        q = panel.chart_quantities("ti_window", setup["target"], theta[fin], t_f)
+        q, lw = panel.finite_chart_quantities(
+            "ti_window", setup["target"], theta, lw, t_f, min(chunk, n_prop)
+        )
         for name in panel.QUANTITIES:
             parts[name].append(q[name])
-        weights.append(lw[fin])
+        weights.append(lw)
     else:
         import equinox as eqx
 
@@ -788,6 +848,75 @@ def reference_sample(protocol, setup, key, n_prop, chunk=2**16):
                 parts[name].append(np.asarray(v)[fin])
             weights.append(lw[fin])
     return {k: np.concatenate(v) for k, v in parts.items()}, np.concatenate(weights)
+
+
+def independent_sample(protocol, setup, key, n_prop, chunk=2**16):
+    """The TI check-3 sampler (frequency mixture, joint weights) on the case."""
+    config = protocol["reference"]["ti_window"]["independent"]
+    theta, lw = panel.ti_frequency_reference(
+        setup["target"], records(setup), key, n_prop, chunk, config
+    )
+    return panel.finite_chart_quantities(
+        "ti_window", setup["target"], theta, lw, setup["t_f"], min(chunk, n_prop)
+    )
+
+
+def anchor_sample(setup, key, n_prop, chunk=2**16):
+    """Brute-force prior sampler: the binding case's grading reference.
+
+    Every coordinate, the TI constants included, comes from the prior, and
+    the weight is the likelihood times the support (window) indicator,
+    evaluated directly: no conditional Gaussian and no marginal likelihood,
+    so it shares no algebra with the samplers it grades. Exact, and efficient
+    only because the binding case's errors are large.
+    """
+    import equinox as eqx
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    target, data = setup["target"], records(setup)
+    batch = min(chunk, n_prop)
+
+    @eqx.filter_jit
+    def run(kb):
+        theta = target.sample_prior(kb, batch)
+        inside = jnp.isfinite(jax.vmap(target.log_prior)(theta))
+        ll = jax.vmap(lambda t: target.log_likelihood(t, data))(theta)
+        return theta, jnp.where(inside, ll, -jnp.inf)
+
+    thetas, lws = [], []
+    for j in range(-(-n_prop // batch)):
+        theta, lw = run(jax.random.fold_in(key, j))
+        take = min(batch, n_prop - j * batch)
+        thetas.append(np.asarray(theta)[:take])
+        lws.append(np.asarray(lw)[:take])
+    theta, lw = np.concatenate(thetas), np.concatenate(lws)
+    return panel.finite_chart_quantities(
+        "ti_window", target, theta, lw, setup["t_f"], batch
+    )
+
+
+def anchor_table(protocol, runs, t_crit=None):
+    """Grading table of the binding case from its anchor runs.
+
+    Each value's reference is the mean of the anchor runs and its error term
+    ``eps_q`` is ``t* s / sqrt(R)``, the anchor's own Monte Carlo error at
+    the exact checks' critical value.
+    """
+    import numpy as np
+
+    t_crit = t_crit or panel.critical_values(protocol)["exact_check_t_critical"]
+    table = {}
+    for name in value_names():
+        x = np.array([r["values"][name] for r in runs])
+        sd = float(x.std(ddof=1)) if len(x) > 1 else math.inf
+        table[name] = {
+            "levels": [float(x.mean())],
+            "eps_q": t_crit * sd / math.sqrt(len(x)),
+            "converged": True,
+        }
+    return table
 
 
 def updater_sample(protocol, setup, key, particles):
@@ -843,7 +972,7 @@ def plan(cases, levels, samplers, repeats):
     """Work units: one per case and level, and per case, sampler and repeat."""
     units = []
     for case in cases:
-        for level in levels:
+        for level in levels if case != "ti_binding" else ():
             units.append(
                 {
                     "id": f"exact/{case}/quadrature/L{level}",
@@ -852,7 +981,7 @@ def plan(cases, levels, samplers, repeats):
                     "level": level,
                 }
             )
-        for sampler in samplers:
+        for sampler in (s for s in samplers if s in CASE_SAMPLERS[case]):
             for r in range(repeats):
                 units.append(
                     {
@@ -889,10 +1018,16 @@ def _exact_definitions():
         illinois,
         summary_values,
         reference_sample,
+        independent_sample,
+        anchor_sample,
+        ti_binding_model,
+        _key_slot,
+        expected_budget,
         updater_sample,
         plan,
         ExactExecutor,
         ("constants", PHYSICAL_BASE, TI_BASE, TI_MASS_WINDOW_MSUN, Y_CAP, K_MIN),
+        ("samplers", CASE_SAMPLERS, CASE_MASS_MODEL),
         ("rho_window_sigma", RHO_WINDOW_SIGMA),
     )
 
@@ -913,9 +1048,16 @@ def expected_budget(protocol, unit, proposals=None, particles=None):
     if unit["kind"] == "quadrature":
         base = TI_BASE if unit["case"] == "ti_window" else PHYSICAL_BASE
         return {"counts": level_counts(base, unit["level"])}
+    pair = CASE_MASS_MODEL[unit["case"]]
+    default = protocol["reference"][pair]["proposals_per_fit"]
+    base = proposals.get(pair, default)
     if unit["kind"] == "reference":
-        default = protocol["reference"][unit["case"]]["proposals_per_fit"]
-        return {"proposals": proposals.get(unit["case"], default)}
+        return {"proposals": base}
+    if unit["kind"] == "independent":
+        return {"proposals": 2 * base}
+    if unit["kind"] == "anchor":
+        binding = protocol["reference"]["exact_checks"]["binding_case"]
+        return {"proposals": proposals.get("anchor", binding["anchor_proposals"])}
     return {"particles": particles or protocol["updater_budget"]["particles"]}
 
 
@@ -971,15 +1113,29 @@ class ExactExecutor:
             record.update(fn(setup, counts))
         else:
             key = panel.draw_key(
-                self.protocol, "exact", unit["case"], 0, 0, "exact_run", unit["repeat"]
+                self.protocol,
+                "exact",
+                *_key_slot(unit["case"]),
+                0,
+                "exact_run",
+                unit["repeat"],
+            )
+            budget = expected_budget(
+                self.protocol, unit, self.proposals, self.particles
             )
             if unit["kind"] == "reference":
-                n_prop = self.proposals.get(
-                    unit["case"],
-                    self.protocol["reference"][unit["case"]]["proposals_per_fit"],
+                q, lw = reference_sample(self.protocol, setup, key, budget["proposals"])
+            elif unit["kind"] == "independent":
+                q, lw = independent_sample(
+                    self.protocol,
+                    setup,
+                    jax.random.fold_in(key, 2),
+                    budget["proposals"],
                 )
-                q, lw = reference_sample(self.protocol, setup, key, n_prop)
-                budget = {"proposals": n_prop}
+            elif unit["kind"] == "anchor":
+                q, lw = anchor_sample(
+                    setup, jax.random.fold_in(key, 3), budget["proposals"]
+                )
             else:
                 q, lw = updater_sample(
                     self.protocol, setup, jax.random.fold_in(key, 1), self.particles
@@ -1080,6 +1236,7 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
     records, duplicates = panel.load_units(out_dir)
     current = exact_run_hash(protocol)
     repeats = protocol["reference"]["exact_checks"]["sampler_repeats"]
+    t_crit = panel.critical_values(protocol)["exact_check_t_critical"]
     code_commits, protocol_commits = _manifest_commits(out_dir)
     result = {
         "provenance": {
@@ -1095,7 +1252,7 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
     consecutive = len(levels) == 3 and levels == list(range(levels[0], levels[0] + 3))
     for case in cases:
         reasons = []
-        if not consecutive:
+        if not consecutive and case != "ti_binding":
             reasons.append(f"levels {levels} are not three consecutive refinements")
         mine = {i: r for i, r in records.items() if i.split("/")[1] == case}
         dup = sorted({i for i in duplicates if i.split("/")[1] == case})
@@ -1110,9 +1267,11 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
                 f"budgets: {invalid[:3]}"
             )
         units = {i: r for i, r in mine.items() if i not in invalid}
-        quad = [units.get(f"exact/{case}/quadrature/L{lv}") for lv in levels]
+        has_quad = case != "ti_binding"
+        quad_levels = levels if has_quad else []
+        quad = [units.get(f"exact/{case}/quadrature/L{lv}") for lv in quad_levels]
         entry = {"quadrature": {}}
-        for lv, rec in zip(levels, quad, strict=True):
+        for lv, rec in zip(quad_levels, quad, strict=True):
             if rec is None:
                 reasons.append(f"quadrature level {lv} missing")
             else:
@@ -1127,14 +1286,26 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
                     )
                 )
         table = None
-        if consecutive and all(q is not None for q in quad):
+        if not has_quad:
+            anchors = [
+                units.get(f"exact/{case}/anchor/r{r:02d}") for r in range(repeats)
+            ]
+            anchors = [a for a in anchors if a is not None]
+            entry["anchor_runs"] = len(anchors)
+            if len(anchors) < repeats:
+                reasons.append(f"anchor repeats {len(anchors)} of {repeats}")
+            else:
+                entry["anchor_kish_ess"] = [a["kish_ess"] for a in anchors]
+                table = anchor_table(protocol, anchors, t_crit)
+                entry["refinement"] = table
+        elif consecutive and all(q is not None for q in quad):
             table = refinement([q["values"] for q in quad])
             entry["refinement"] = table
             unconverged = [n for n, t in table.items() if not t["converged"]]
             if unconverged:
                 reasons.append(f"refinement not converging for {unconverged}")
         verdict_fail = False
-        for sampler in SAMPLERS:
+        for sampler in (s for s in CASE_SAMPLERS[case] if s != "anchor"):
             runs = [
                 units.get(f"exact/{case}/{sampler}/r{r:02d}") for r in range(repeats)
             ]
@@ -1143,14 +1314,14 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
             if have:
                 entry[f"{sampler}_kish_ess"] = [r["kish_ess"] for r in have]
             if table is not None and len(have) >= 2:
-                rows = compare(protocol, table, have)
+                rows = compare(protocol, table, have, t_crit)
                 entry[f"{sampler}_comparison"] = rows
                 failed = [n for n, r in rows.items() if not r["pass"]]
                 entry[f"{sampler}_failed"] = failed
-                if sampler == "reference" and failed:
-                    verdict_fail = len(have) == repeats
-            if sampler == "reference" and len(have) < repeats:
-                reasons.append(f"reference repeats {len(have)} of {repeats}")
+                if sampler in GRADED and failed and len(have) == repeats:
+                    verdict_fail = True
+            if sampler in GRADED and len(have) < repeats:
+                reasons.append(f"{sampler} repeats {len(have)} of {repeats}")
         if verdict_fail and not reasons:
             verdict = "fail"
         elif reasons:

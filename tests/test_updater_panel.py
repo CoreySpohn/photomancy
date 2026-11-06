@@ -169,7 +169,7 @@ def test_freeze_never_loosens_the_alias_gate():
 
 
 def test_exact_check_critical_value():
-    """The exact-check critical value is t_15 at 1 - 0.01 / (2 m), m = 56.
+    """The exact-check critical value is t_15 at 1 - 0.01 / (2 m), m = 140.
 
     Fails if the compared-value count, the repeat count or the Student t
     quantile drift from the protocol (a normal quantile, 3.75, would reject a
@@ -181,7 +181,7 @@ def test_exact_check_critical_value():
     protocol = tool.load_protocol()
     ex = protocol["reference"]["exact_checks"]
     m = ex["cases"] * (ex["bins_per_case"] + ex["interval_end_points_per_case"])
-    assert m == protocol["stated"]["exact_check_compared_values"] == 56
+    assert m == protocol["stated"]["exact_check_compared_values"] == 140
     expected = stats.t.ppf(
         1.0 - ex["family_alpha"] / (2 * m), ex["sampler_repeats"] - 1
     )
@@ -452,19 +452,21 @@ def test_estimated_precision_does_not_loosen_the_alias_tolerance():
 
 
 def test_freeze_requires_every_planned_development_unit(tmp_path):
-    """A run directory missing one planned role is incomplete, not frozen.
+    """A run missing one planned role, or one reference below its floor, is incomplete.
 
     Every planned development unit is present at the protocol budgets under
     the current run hash except the 304 ``updater_doubled`` runs, which no
-    freeze statistic reads. Fails if the freeze grades a directory that does
-    not hold the complete canonical development plan.
+    freeze statistic reads. Then with every unit present, one primary TI
+    reference at ESS 199 and one check-3 reference at 150 must each be named
+    with its budget against the floor of 200. Fails if the freeze grades a
+    directory that does not hold the complete canonical development plan, or
+    accepts a reference fit below the ESS floor.
     """
     tool = _load_tool()
     protocol = tool.load_protocol()
     roles = {r for part in tool.PARTS.values() for r in part} - {"updater_doubled"}
-    units = _fake_records(
-        tool, protocol, roles, set(range(38)), run_hash=tool.run_hash(protocol)
-    )
+    current = tool.run_hash(protocol)
+    units = _fake_records(tool, protocol, roles, set(range(38)), run_hash=current)
     path = tmp_path / "units-0of1.jsonl"
     path.write_text("".join(tool.json.dumps(r) + "\n" for r in units.values()))
     report = tool.freeze_report(protocol, tmp_path)
@@ -472,6 +474,33 @@ def test_freeze_requires_every_planned_development_unit(tmp_path):
     reason = next(r for r in report["reasons"] if "planned development" in r)
     assert reason.startswith("304 of ") and "updater_doubled" in reason
     assert "alias" not in report
+    assert not any("ESS floor" in r for r in report["reasons"])
+
+    # Every planned unit present, one primary TI fit at ESS 199 and one
+    # check-3 fit at 150: the floor of 200 rejects both, by id and budget.
+    units.update(
+        _fake_records(
+            tool, protocol, {"updater_doubled"}, set(range(38)), run_hash=current
+        )
+    )
+    low = tool.unit_id("development", "ti_window", "R2", 7, "reference_1", 3)
+    cert = tool.unit_id("development", "ti_window", "R3", 0, "cert_proposal_2", 2)
+    units[low]["summary"] = dict(units[low]["summary"], kish_ess=199.0)
+    units[cert]["summary"] = dict(units[cert]["summary"], kish_ess=150.0)
+    path.write_text("".join(tool.json.dumps(r) + "\n" for r in units.values()))
+    # Few simulated panels: only the reasons are under test here.
+    alias = dict(protocol["criteria"]["alias_accuracy"], freeze_panels=2)
+    quick = dict(protocol, criteria=dict(protocol["criteria"], alias_accuracy=alias))
+    report = tool.freeze_report(quick, tmp_path)
+    assert not any("planned development" in r for r in report["reasons"])
+    floor = next(r for r in report["reasons"] if "ESS floor" in r)
+    assert floor.startswith("2 reference fits")
+    ti_budget = protocol["reference"]["ti_window"]["proposals_per_fit"]
+    assert f"('{low}', {ti_budget}, 199.0)" in floor
+    assert f"('{cert}', {2 * ti_budget}, 150.0)" in floor
+    table = tool.ess_table(protocol, units)
+    assert table["ti_window R2 k=3 primary"]["below_floor"] == [low]
+    assert table["ti_window R3 k=2 independent"]["below_floor"] == [cert]
 
 
 def test_resume_refuses_incompatible_records_and_manifests_survive_kills(tmp_path):
@@ -709,3 +738,60 @@ def test_ti_independent_reference_catches_an_injected_bias():
     assert all(check3().values())
     assert not all(check3(ti_collapsed_reference=no_window).values())
     assert not all(check3(ti_frequency_reference=no_constants_density).values())
+
+
+def test_check3_proposal_densities_match_their_draws():
+    """The check-3 sampler's proposal densities are the densities it draws from.
+
+    ln P: 2^18 draws of the mixture (half prior, half uniform frequency) over
+    40 equal ln P bins match the density ``p(ln P) exp(log_ratio)`` within 5
+    standard errors per bin; the same draws against the prior density alone
+    (the mixture correction removed) miss by more than 20. TI constants: the
+    log density returned with an inflated conditional draw equals the
+    multivariate normal ``N(m, kappa^2 P^-1)`` log density to 1e-10 for
+    kappa 1.25 and 1; dropping its kappa terms is off by ``4 log kappa``.
+    Fails if either proposal correction is wrong or removed.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from scipy.stats import multivariate_normal
+
+    from photomancy.orbit.few_epoch import TIBasisModel
+    from photomancy.orbit.updater import ThieleInnesTarget
+
+    tool = _load_tool()
+    tool.enable_x64()
+    target = ThieleInnesTarget(TIBasisModel(lnP_hi=math.log(500.0)))
+    m = target.model
+    n = 2**18
+    k_p, k_mix, k_f = jax.random.split(jax.random.key(0), 3)
+    prior = jax.random.uniform(k_p, (n,), minval=m.lnP_lo, maxval=m.lnP_hi)
+    draws = np.asarray(tool.frequency_mixture_ln_period(target, k_mix, k_f, prior, 0.5))
+    edges = np.linspace(m.lnP_lo, m.lnP_hi, 41)
+    counts = np.histogram(draws, edges)[0]
+    fine = np.linspace(m.lnP_lo, m.lnP_hi, 40 * 64 + 1)
+    centers = 0.5 * (fine[1:] + fine[:-1])
+    ratio = np.exp(np.asarray(tool.frequency_mixture_log_ratio(target, centers, 0.5)))
+    span = m.lnP_hi - m.lnP_lo
+    expected = n * (ratio / span * np.diff(fine)).reshape(40, 64).sum(axis=1)
+    prior_only = np.full(40, n / 40.0)
+    assert np.max(np.abs(counts - expected) / np.sqrt(expected)) < 5.0
+    assert np.max(np.abs(counts - prior_only) / np.sqrt(prior_only)) > 20.0
+
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=(4, 4))
+    precision = a @ a.T + 4.0 * np.eye(4)
+    chol = np.linalg.cholesky(precision)
+    mean = rng.normal(size=4)
+    for kappa in (1.25, 1.0):
+        for _ in range(3):
+            z = rng.normal(size=4)
+            c, log_q = tool.inflated_conditional_draw(
+                jnp.asarray(mean), jnp.asarray(chol), jnp.asarray(z), kappa
+            )
+            cov = kappa**2 * np.linalg.inv(precision)
+            exact = multivariate_normal(mean, cov).logpdf(np.asarray(c))
+            assert abs(float(log_q) - exact) < 1e-10
+            if kappa != 1.0:
+                assert abs(float(log_q) + 4.0 * math.log(kappa) - exact) > 0.5

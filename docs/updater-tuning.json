@@ -4778,6 +4778,262 @@
    "collapsed_doubled_2^21": 2.94,
    "frequency_mixture_2^21": 2.57,
    "lambert_depth_fit_2^20_superseded": 28.2
+  },
+  "preflight": {
+   "note": "Amendment A7 preflight: every development world (38 per regime), both epoch counts and both reference keys (reference_1, reference_2 for the primary; cert_proposal_1, cert_proposal_2 for check 3), ti_window, at the protocol budgets; a fit below the ESS floor of 200 doubles that method's budget and the preflight is repeated, up to 2^23. Regimes without a failure at the starting budgets (R1, R3) are not rerun at the larger ones. Cells are regime/epoch count with fits, worst and median Kish ESS and the fits below the floor. Seconds are wall time per fit through the development runner on one 4-thread slot, beside a second job.",
+   "result": {
+    "ti_window_proposals_per_fit": 4194304,
+    "check3_proposals_per_fit": 8388608,
+    "doubled_proposals_per_fit": 8388608,
+    "escalation": "preflight, no in-campaign escalation"
+   },
+   "stages": {
+    "collapsed_2^20_all_regimes": {
+     "proposals": [
+      1048576
+     ],
+     "mean_seconds_per_fit": 1.34,
+     "cells": {
+      "R1/k2": {
+       "fits": 76,
+       "worst": 4158.8,
+       "median": 183458.5,
+       "below_floor": []
+      },
+      "R1/k3": {
+       "fits": 76,
+       "worst": 6254.3,
+       "median": 147824.8,
+       "below_floor": []
+      },
+      "R2/k2": {
+       "fits": 76,
+       "worst": 2260.1,
+       "median": 25152.6,
+       "below_floor": []
+      },
+      "R2/k3": {
+       "fits": 76,
+       "worst": 94.5,
+       "median": 5181.6,
+       "below_floor": [
+        "R2/w009/reference_1/k3",
+        "R2/w009/reference_2/k3",
+        "R2/w015/reference_1/k3",
+        "R2/w015/reference_2/k3",
+        "R2/w023/reference_1/k3",
+        "R2/w023/reference_2/k3"
+       ]
+      },
+      "R3/k2": {
+       "fits": 76,
+       "worst": 150866.7,
+       "median": 248418.7,
+       "below_floor": []
+      },
+      "R3/k3": {
+       "fits": 76,
+       "worst": 3455.0,
+       "median": 48204.2,
+       "below_floor": []
+      },
+      "R4/k2": {
+       "fits": 76,
+       "worst": 5238.3,
+       "median": 151811.4,
+       "below_floor": []
+      },
+      "R4/k3": {
+       "fits": 76,
+       "worst": 186.5,
+       "median": 66643.5,
+       "below_floor": [
+        "R4/w014/reference_2/k3"
+       ]
+      }
+     }
+    },
+    "frequency_mixture_2^21_all_regimes": {
+     "proposals": [
+      2097152
+     ],
+     "mean_seconds_per_fit": 2.61,
+     "cells": {
+      "R1/k2": {
+       "fits": 76,
+       "worst": 3579.2,
+       "median": 159358.5,
+       "below_floor": []
+      },
+      "R1/k3": {
+       "fits": 76,
+       "worst": 5976.5,
+       "median": 126644.2,
+       "below_floor": []
+      },
+      "R2/k2": {
+       "fits": 76,
+       "worst": 2130.3,
+       "median": 27712.9,
+       "below_floor": []
+      },
+      "R2/k3": {
+       "fits": 76,
+       "worst": 84.4,
+       "median": 4707.7,
+       "below_floor": [
+        "R2/w009/cert_proposal_1/k3",
+        "R2/w009/cert_proposal_2/k3",
+        "R2/w015/cert_proposal_1/k3",
+        "R2/w015/cert_proposal_2/k3",
+        "R2/w023/cert_proposal_1/k3",
+        "R2/w023/cert_proposal_2/k3"
+       ]
+      },
+      "R3/k2": {
+       "fits": 76,
+       "worst": 122112.2,
+       "median": 209670.9,
+       "below_floor": []
+      },
+      "R3/k3": {
+       "fits": 76,
+       "worst": 3605.6,
+       "median": 39629.9,
+       "below_floor": []
+      },
+      "R4/k2": {
+       "fits": 76,
+       "worst": 4248.1,
+       "median": 135750.0,
+       "below_floor": []
+      },
+      "R4/k3": {
+       "fits": 76,
+       "worst": 156.8,
+       "median": 55420.3,
+       "below_floor": [
+        "R4/w014/cert_proposal_1/k3",
+        "R4/w014/cert_proposal_2/k3"
+       ]
+      }
+     }
+    },
+    "collapsed_2^21_R2_R4": {
+     "proposals": [
+      2097152
+     ],
+     "mean_seconds_per_fit": 2.9,
+     "cells": {
+      "R2/k2": {
+       "fits": 76,
+       "worst": 4478.2,
+       "median": 50873.8,
+       "below_floor": []
+      },
+      "R2/k3": {
+       "fits": 76,
+       "worst": 197.2,
+       "median": 10389.1,
+       "below_floor": [
+        "R2/w009/reference_1/k3"
+       ]
+      },
+      "R4/k2": {
+       "fits": 76,
+       "worst": 10406.8,
+       "median": 305509.3,
+       "below_floor": []
+      },
+      "R4/k3": {
+       "fits": 76,
+       "worst": 390.1,
+       "median": 133456.8,
+       "below_floor": []
+      }
+     }
+    },
+    "collapsed_2^22_R2": {
+     "proposals": [
+      4194304
+     ],
+     "mean_seconds_per_fit": 6.43,
+     "cells": {
+      "R2/k2": {
+       "fits": 76,
+       "worst": 9076.4,
+       "median": 101519.0,
+       "below_floor": []
+      },
+      "R2/k3": {
+       "fits": 76,
+       "worst": 403.2,
+       "median": 20727.4,
+       "below_floor": []
+      }
+     }
+    },
+    "collapsed_2^22_R4": {
+     "proposals": [
+      4194304
+     ],
+     "mean_seconds_per_fit": 5.02,
+     "cells": {
+      "R4/k2": {
+       "fits": 76,
+       "worst": 20967.0,
+       "median": 610766.7,
+       "below_floor": []
+      },
+      "R4/k3": {
+       "fits": 76,
+       "worst": 732.1,
+       "median": 266658.3,
+       "below_floor": []
+      }
+     }
+    },
+    "frequency_mixture_2^23_R2": {
+     "proposals": [
+      8388608
+     ],
+     "mean_seconds_per_fit": 9.39,
+     "cells": {
+      "R2/k2": {
+       "fits": 76,
+       "worst": 7948.8,
+       "median": 108872.6,
+       "below_floor": []
+      },
+      "R2/k3": {
+       "fits": 76,
+       "worst": 414.2,
+       "median": 18793.3,
+       "below_floor": []
+      }
+     }
+    },
+    "frequency_mixture_2^23_R4": {
+     "proposals": [
+      8388608
+     ],
+     "mean_seconds_per_fit": 8.37,
+     "cells": {
+      "R4/k2": {
+       "fits": 76,
+       "worst": 16721.1,
+       "median": 542731.5,
+       "below_floor": []
+      },
+      "R4/k3": {
+       "fits": 76,
+       "worst": 629.7,
+       "median": 220245.1,
+       "below_floor": []
+      }
+     }
+    }
+   }
   }
  }
 }
