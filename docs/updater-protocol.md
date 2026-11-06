@@ -32,7 +32,8 @@ posterior an unbounded sampler would return.
   with its label. They change no cap and no minimum-power rule.
   - A1: the updater kernel block (`updater_kernel`): conditional-ESS target,
     proposal scale per target and the period-alias move, tuned on the tuning
-    worlds only ("Updater kernel").
+    worlds only; the TI reference budget study on the same worlds; and the
+    statement that those worlds are not held out ("Updater kernel").
   - A2: the definitions of the update statuses that count as failed updates
     ("Failed updates").
   - A3: the updater precision used by the alias freeze is measured from the
@@ -390,6 +391,34 @@ mass model) with `tools/updater_tuning.py`; the record is
   bins as low as 9 in R3, where the eccentricity is near zero and the chart's
   angle is undefined); that too is what the panel measures.
 
+- **TI reference budget (measured, not met).** The budget was to be fixed
+  before the development run as the smallest power of two from $2^{20}$ to
+  $2^{23}$ whose worst tuning world reaches a Kish ESS of 200 (the smaller of
+  `reference_1` and `reference_2`). The floor follows from repeat-noise
+  certification: its bound of $0.25\,\delta_2$ on the mean of 152 worlds
+  tolerates one world near ESS 100 only if the others are in the thousands,
+  since a world's D2 variance grows as $1/\mathrm{ESS}^2$. The Lambert depth
+  fit on worlds 0 to 5 (`docs/updater-tuning.json`, `ti_reference_budget`):
+
+  | Regime, epochs | $2^{20}$ worst / median | $2^{21}$ worst / median |
+  |---|---|---|
+  | R2, 2 | 260 / 898 | 590 / 2,038 |
+  | R2, 3 | 2.1 / 18 | 8.1 / 32 |
+  | R3, 2 | 4.8 / 6.2 | 12.6 (one world) |
+  | R3, 3 | 1.0 / 1.7 | 2.6 (one world) |
+
+  The ESS grows about linearly with the budget, so at $2^{23}$ the worst R2
+  three-epoch world would be near 30 and R3 below 100: no permitted budget
+  meets the floor, and the TI references cannot be certified with this
+  method. In R3 the truncation $e < 0.05$ removes almost every Lambert
+  proposal; in R2 at three epochs the third epoch's likelihood does. The
+  budget stays at the provisional $2^{20}$ and the TI reference method needs
+  an amendment before its development runs. A spike with the collapsed prior
+  importance sampler (prior draws of $(e, \ln P, \tau)$, the TI constants
+  from their conditional Gaussian, weight the marginal likelihood times the
+  window indicator; exact, as in the kernel tests) reached a worst ESS of 276
+  (R2, three epochs) and at least 4,200 elsewhere with $2^{20}$ draws, at about
+  3 s per fit on one thread.
 - **Tuning worlds are not held out.** The tuning worlds 0 to 5, with the same
   `updater_a` and `updater_b` keys, also enter the 38-world freeze summaries
   and the reference certification, so the development results on those six
@@ -959,7 +988,9 @@ development panel; the budget ceiling may not be raised.
 Per key and model pair, the panel makes 4 regimes x 400 worlds x 3 updates =
 4,800 updates. Two independent keys and one doubled-budget run (which costs two)
 give 19,200 update-equivalents per pair, each priced at that pair's measured
-cost. Each pair needs 4 x 400 x 2 x 2 = 6,400 reference fits (regimes, worlds,
+cost. The development stage makes the same runs for 152 worlds plus six
+precision replicates (amendment A3): 152 x 3 x 10 = 4,560 update-equivalents
+per pair. Each pair needs 4 x 400 x 2 x 2 = 6,400 reference fits (regimes, worlds,
 epoch counts, independent runs), and the development certification 3,040
 fit-equivalents more (four repeat runs, two runs at twice the budget and two
 other-proposal runs, for 152 worlds and two epoch counts). The certification
@@ -988,13 +1019,17 @@ runner. `--dry-run` reprices the tally from it:
 
 | Pair | s per update | s per reference fit | Updater, development | Reference, development | Updater, panel | Reference, panel |
 |---|---|---|---|---|---|---|
-| ti_window | 0.645 | 28.2 | 0.3 h | 23.8 h | 3.4 h | 50.1 h |
-| physical_fixed | 0.491 | 22.6 | 0.2 h | 19.1 h | 2.6 h | 40.2 h |
+| ti_window | 0.645 | 28.2 | 0.8 h | 23.8 h | 3.4 h | 50.1 h |
+| physical_fixed | 0.491 | 22.6 | 0.6 h | 19.1 h | 2.6 h | 40.2 h |
 
-The development stage (updater runs and reference certification) is about 44
-single-slot hours and the panel about 96; two slots halve both. Every cost is at
+The development stage (updater runs with the precision replicates, and
+reference certification) is about 44 single-slot hours and the panel about
+96; two slots halve both. Every cost is at
 the provisional reference budgets; each doubling of a budget doubles that pair's
 reference hours. The doubled-budget updater run is priced at twice an update.
+The TI reference cannot reach its ESS floor at any permitted budget with the
+Lambert depth fit (amendment A1, "TI reference budget"), so its hours stand at
+$2^{20}$ only until the method is amended.
 The TI reference cost is dominated by R2, whose Lambert fit enumerates 62
 families.
 

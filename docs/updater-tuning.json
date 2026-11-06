@@ -4469,5 +4469,163 @@
    }
   }
  },
- "tool": "tools/updater_tuning.py"
+ "tool": "tools/updater_tuning.py",
+ "ti_reference_budget": {
+  "note": "Kish ESS of the TI reference on the tuning worlds (development worlds 0 to 5, ti_window), per world the smaller of reference_1 and reference_2. Floor: 200 in the worst world (the repeat-noise certification bound of 0.25 delta2 over 152 worlds tolerates one world near ESS 100 when the rest are in the thousands). The Lambert depth fit meets it in R2 at two epochs only; its ESS grows about linearly with the budget, so no budget up to 2^23 meets it in R2 at three epochs or in R3. The collapsed prior importance sampler (one run of 2^20 draws per world, a spike, not the protocol method) meets it everywhere.",
+  "lambert_depth_fit": {
+   "R2/k2/2^20": {
+    "kish_ess_per_world_min_of_two_fits": {
+     "w000": 1795.1,
+     "w001": 1288.9,
+     "w002": 260.0,
+     "w003": 471.2,
+     "w004": 2030.4,
+     "w005": 507.8
+    },
+    "worst": 260.0,
+    "median": 898.35
+   },
+   "R2/k2/2^21": {
+    "kish_ess_per_world_min_of_two_fits": {
+     "w000": 3778.1,
+     "w001": 2454.7,
+     "w002": 590.1,
+     "w003": 737.0,
+     "w004": 5926.9,
+     "w005": 1620.4
+    },
+    "worst": 590.1,
+    "median": 2037.55
+   },
+   "R2/k3/2^20": {
+    "kish_ess_per_world_min_of_two_fits": {
+     "w000": 17.3,
+     "w001": 18.1,
+     "w002": 14.4,
+     "w003": 145.5,
+     "w004": 18.4,
+     "w005": 2.1
+    },
+    "worst": 2.1,
+    "median": 17.700000000000003
+   },
+   "R2/k3/2^21": {
+    "kish_ess_per_world_min_of_two_fits": {
+     "w000": 46.1,
+     "w001": 25.3,
+     "w002": 22.7,
+     "w003": 368.1,
+     "w004": 37.7,
+     "w005": 8.1
+    },
+    "worst": 8.1,
+    "median": 31.5
+   },
+   "R3/k2/2^20": {
+    "kish_ess_per_world_min_of_two_fits": {
+     "w000": 4.8,
+     "w001": 9.9,
+     "w002": 10.7,
+     "w003": 5.0,
+     "w004": 5.6,
+     "w005": 6.8
+    },
+    "worst": 4.8,
+    "median": 6.199999999999999
+   },
+   "R3/k2/2^21": {
+    "kish_ess_per_world_min_of_two_fits": {
+     "w000": 12.6
+    },
+    "worst": 12.6,
+    "median": 12.6
+   },
+   "R3/k3/2^20": {
+    "kish_ess_per_world_min_of_two_fits": {
+     "w000": 2.5,
+     "w001": 1.0,
+     "w002": 1.1,
+     "w003": 2.0,
+     "w004": 3.5,
+     "w005": 1.4
+    },
+    "worst": 1.0,
+    "median": 1.7
+   },
+   "R3/k3/2^21": {
+    "kish_ess_per_world_min_of_two_fits": {
+     "w000": 2.6
+    },
+    "worst": 2.6,
+    "median": 2.6
+   }
+  },
+  "collapsed_prior_importance_sampler_2^20": {
+   "R1/k2": [
+    122688,
+    183235,
+    207550,
+    158196,
+    197025,
+    123355
+   ],
+   "R1/k3": [
+    164236,
+    201735,
+    134335,
+    163836,
+    164896,
+    79637
+   ],
+   "R2/k2": [
+    71924,
+    23595,
+    4238,
+    9886,
+    18654,
+    67184
+   ],
+   "R2/k3": [
+    11245,
+    276,
+    979,
+    5863,
+    514,
+    1479
+   ],
+   "R3/k2": [
+    211784,
+    311243,
+    283353,
+    248796,
+    151266,
+    212778
+   ],
+   "R3/k3": [
+    44006,
+    33558,
+    72891,
+    29576,
+    75619,
+    89469
+   ],
+   "R4/k2": [
+    235497,
+    210573,
+    114104,
+    140404,
+    118713,
+    244776
+   ],
+   "R4/k3": [
+    30220,
+    40777,
+    64231,
+    85521,
+    15030,
+    145515
+   ],
+   "seconds_per_fit_one_thread": 3.1
+  }
+ }
 }
