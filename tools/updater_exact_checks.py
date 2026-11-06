@@ -746,36 +746,15 @@ def reference_sample(protocol, setup, key, n_prop, chunk=2**16):
     parts = {q: [] for q in panel.QUANTITIES}
     weights = []
     if setup["case"] == "ti_window":
-        from photomancy.orbit.few_epoch import lambert_depth_fit
-
-        model = setup["target"].model
-        p_hi = math.exp(model.lnP_hi)
-        a_max = (model.mu_hi * (p_hi / (2.0 * math.pi)) ** 2) ** (1.0 / 3.0)
-        times = setup["times"]
-        n_max_rev = math.ceil((times[-1] - times[0]) / math.exp(model.lnP_lo))
-        families = 2 + 4 * n_max_rev
-        n_pf = n_prop // families
-        step = max(1, min(n_pf, chunk // families))
-        data = records(setup)
-        for j in range(-(-n_pf // step)):
-            post = lambert_depth_fit(
-                data,
-                dist_pc=float(setup["target"].dist_pc),
-                model=model,
-                key=jax.random.fold_in(key, j),
-                n_per_family=step,
-                n_max_rev=n_max_rev,
-                z_max_au=(1.0 + model.e_max) * a_max,
-            )
-            take = min(step, n_pf - j * step)
-            theta = np.asarray(post.samples).reshape(families, step, 7)[:, :take]
-            lw = np.asarray(post.log_weights).reshape(families, step)[:, :take]
-            theta, lw = theta.reshape(-1, 7), lw.reshape(-1)
-            fin = np.isfinite(lw)
-            q = panel.chart_quantities("ti_window", setup["target"], theta[fin], t_f)
-            for name in panel.QUANTITIES:
-                parts[name].append(q[name])
-            weights.append(lw[fin])
+        # The panel's TI reference (amendment A7): collapsed prior sampler.
+        theta, lw = panel.ti_collapsed_reference(
+            setup["target"], records(setup), key, n_prop, chunk
+        )
+        fin = np.isfinite(lw)
+        q = panel.chart_quantities("ti_window", setup["target"], theta[fin], t_f)
+        for name in panel.QUANTITIES:
+            parts[name].append(q[name])
+        weights.append(lw[fin])
     else:
         import equinox as eqx
 

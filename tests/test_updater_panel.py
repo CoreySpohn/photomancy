@@ -210,14 +210,21 @@ def test_development_plan_shards_disjointly_and_matches_the_tally():
     tally = tool.compute_tally(protocol)
 
     def cost(u):
-        return 2 if "doubled" in u["role"] else 1
+        if u["role"] in tool.ALL_UPDATER_ROLES:
+            return 2 if "doubled" in u["role"] else 1
+        return tool.reference_budget_factor(u["mass_model"], u["role"])
 
     upd = sum(cost(u) for u in units if u["role"] in tool.ALL_UPDATER_ROLES)
-    ref = sum(cost(u) for u in units if u["role"] not in tool.ALL_UPDATER_ROLES)
     n_mass = len(protocol["panel"]["mass_models"])
     n_updates = len(protocol["panel"]["updates"])
     assert upd * n_updates == n_mass * tally["development_update_equivalents_per_pair"]
-    assert ref == n_mass * tally["development_reference_fit_equivalents_per_pair"]
+    for pair in protocol["panel"]["mass_models"]:
+        ref = sum(
+            cost(u)
+            for u in units
+            if u["role"] not in tool.ALL_UPDATER_ROLES and u["mass_model"] == pair
+        )
+        assert ref == tally["development_reference_fit_equivalents_per_pair"][pair]
     with pytest.raises(ValueError):
         tool.parse_shard("2/2")
 
@@ -287,7 +294,8 @@ def _fake_records(tool, protocol, roles, worlds, masses=None, run_hash=None):
         else:
             rec = {
                 "kind": "reference",
-                "proposals": budgets[unit["mass_model"]] * doubled,
+                "proposals": budgets[unit["mass_model"]]
+                * tool.reference_budget_factor(unit["mass_model"], unit["role"]),
                 "summary": {"kish_ess": 900.0, "bins": bins},
             }
         out[unit["id"]] = dict(rec, id=unit["id"], run_hash=run_hash)
@@ -616,3 +624,88 @@ def test_units_write_complete_summaries_and_exact_physical_weights():
         sd = np.sqrt(w @ (q[name] - mean) ** 2)
         assert abs(mean - obs) < 0.1 * world["sigma"]
         assert abs(sd / world["sigma"] - 1.0) < 0.06
+
+
+@pytest.mark.medium
+def test_ti_independent_reference_catches_an_injected_bias():
+    """Certification check 3 for TI passes two exact references, fails a biased one.
+
+    Six R3 development worlds at two epochs (the implied-mass window binds
+    there): the collapsed prior reference (``reference_1``, ``reference_2``,
+    2^15 proposals) against the frequency-mixture reference
+    (``cert_proposal_1``, ``cert_proposal_2``, 2^16). The check statistic is
+    the protocol's: per world ``sum_b (R1 - C1)(R2 - C2)``, pooled, with
+    ``mean + z SE`` (z = 3.078) against half the provisional delta2. The two
+    exact references pass for every alias quantity (largest upper bound
+    8e-5 against 2.5e-4). Each injected bias makes some quantity fail: the
+    primary reference without the implied-mass window (ln P upper bound
+    0.2), and the independent reference without the proposal density of its
+    TI-constant draw (its Jacobian). Fails if either TI reference is biased,
+    or if check 3 cannot see a window or proposal-density error in one
+    method.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    from photomancy.orbit.updater import ThieleInnesTarget, _linear_gaussian
+
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    budgets = tool.protocol_budgets(protocol, particles=64, ti_proposals=2**15)
+    roles = {"reference_1", "reference_2", "cert_proposal_1", "cert_proposal_2"}
+    units = [
+        u
+        for u in tool.plan_units(
+            protocol,
+            "development",
+            ["reference", "certification"],
+            mass_models=["ti_window"],
+            regimes=["R3"],
+            worlds=range(6),
+        )
+        if u["role"] in roles and u["epoch_count"] == 2
+    ]
+
+    class NoWindowTI(ThieleInnesTarget):
+        def log_prior(self, theta):
+            m = self.model
+            box = (theta[0] > 0) & (theta[0] < m.e_max)
+            box &= (theta[1] > m.lnP_lo) & (theta[1] < m.lnP_hi)
+            return jnp.where(box, m.log_prior_ti(theta), -jnp.inf)
+
+    collapsed, frequency = tool.ti_collapsed_reference, tool.ti_frequency_reference
+
+    def no_window(target, data, key, n_prop, chunk):
+        mutant = NoWindowTI(target.model, target.dist_pc)
+        return collapsed(mutant, data, key, n_prop, chunk)
+
+    def no_constants_density(target, data, key, n_prop, chunk, config=None):
+        # Undo the weight's division by the TI constants' proposal density.
+        theta, lw = frequency(target, data, key, n_prop, chunk, config)
+        kappa, weights = config["inflation"], data.is_valid.astype(float)
+
+        def log_q_c(t):
+            mean, chol, _, _, _ = _linear_gaussian(target, t, data, weights)
+            r = chol.T @ (t[3:] - mean) / kappa
+            return -0.5 * r @ r + jnp.sum(jnp.log(jnp.diag(chol)))
+
+        return theta, lw + np.asarray(jax.vmap(log_q_c)(jnp.asarray(theta)))
+
+    def check3(**patch):
+        for name, fn in patch.items():
+            setattr(tool, name, fn)
+        try:
+            executor = tool.UnitExecutor(protocol, budgets, chunk=2**16)
+            records = {u["id"]: dict(executor(u), id=u["id"]) for u in units}
+        finally:
+            tool.ti_collapsed_reference = collapsed
+            tool.ti_frequency_reference = frequency
+        cert = tool.certify_references(protocol, records, 5e-4)["ti_window"]
+        rows = [r for r in cert["checks"] if r["check"] == "proposal_agreement"]
+        assert len(rows) == 3 and all(r["worlds"] == 6 for r in rows)
+        return {r["quantity"]: r["pass"] for r in rows}
+
+    assert all(check3().values())
+    assert not all(check3(ti_collapsed_reference=no_window).values())
+    assert not all(check3(ti_frequency_reference=no_constants_density).values())

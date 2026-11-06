@@ -302,26 +302,6 @@ def semimajor_axis_au(period_days, mu):
     return (mu * (period_days / (2.0 * math.pi)) ** 2) ** (1.0 / 3.0)
 
 
-def ti_reference_arguments(protocol, regime, epoch_count):
-    """Arguments of the TI reference fit for one regime and epoch count."""
-    from hwoutils.constants import G, Msun2kg
-
-    p_lo, p_hi, e_max = regime_bounds(protocol, regime, "ti_window")
-    window = protocol["model_pairs"]["ti_window"]["defaults"]["mass_window_msun"]
-    mu_hi = window[1] * float(G) * float(Msun2kg)
-    z_max = (1.0 + e_max) * semimajor_axis_au(p_hi, mu_hi)
-    times = regime["cadence_days"][:epoch_count]
-    n_max_rev = math.ceil((times[-1] - times[0]) / p_lo)
-    families = 2 + 4 * n_max_rev
-    n_prop = protocol["reference"]["ti_window"]["proposals_per_fit"]
-    return {
-        "z_max_au": z_max,
-        "n_max_rev": n_max_rev,
-        "families": families,
-        "n_per_family": n_prop // families,
-    }
-
-
 def physical_semimajor_range(protocol, regime):
     """Semimajor-axis range (AU) of the physical prior under a regime."""
     from hwoutils.constants import G, Msun2kg
@@ -588,9 +568,17 @@ def compute_tally(protocol):
     ref_runs = 2
     fits = g["regimes"] * panel["alias_subset_worlds"] * g["epoch_counts"] * ref_runs
     # Certification: repeat-noise runs, two runs at twice the budget (cost four)
-    # and two other-proposal runs, priced at the reference's cost per fit.
-    cert_units = protocol["reference"]["repeat_noise"]["runs"] + 4 + 2
-    dev_fits = g["regimes"] * dev_worlds * g["epoch_counts"] * cert_units
+    # and two other-proposal runs (at twice the budget for the TI pair, whose
+    # independent reference is the less efficient one; amendment A7), priced
+    # at the reference's cost per fit.
+    dev_fits = {}
+    for pair in panel["mass_models"]:
+        proposal_units = sum(
+            reference_budget_factor(pair, r)
+            for r in ("cert_proposal_1", "cert_proposal_2")
+        )
+        cert_units = protocol["reference"]["repeat_noise"]["runs"] + 4 + proposal_units
+        dev_fits[pair] = g["regimes"] * dev_worlds * g["epoch_counts"] * cert_units
     return {
         "panel_update_equivalents_per_pair": upd_panel,
         "development_update_equivalents_per_pair": upd_dev,
@@ -646,7 +634,7 @@ def priced_tally(protocol, prices):
                 tally["panel_reference_fits_per_pair"] * per_fit
             )
             row["reference_development_h"] = _hours(
-                tally["development_reference_fit_equivalents_per_pair"] * per_fit
+                tally["development_reference_fit_equivalents_per_pair"][pair] * per_fit
             )
         out[pair] = row
     return out, []
@@ -657,7 +645,11 @@ def print_tally(protocol, prices):
     tally = compute_tally(protocol)
     print("Compute tally")
     for k, v in tally.items():
-        print(f"  {k}: {v:,}")
+        if isinstance(v, dict):
+            v = ", ".join(f"{pair} {n:,}" for pair, n in v.items())
+            print(f"  {k}: {v}")
+        else:
+            print(f"  {k}: {v:,}")
     if prices is None:
         upd = tally["panel_update_equivalents_per_pair"]
         for s in (0.1, 0.3, 1.0):
@@ -730,7 +722,7 @@ def measured_tally(protocol):
             ),
             "reference_panel_h": _hours(tally["panel_reference_fits_per_pair"] * s_fit),
             "reference_development_h": _hours(
-                tally["development_reference_fit_equivalents_per_pair"] * s_fit
+                tally["development_reference_fit_equivalents_per_pair"][pair] * s_fit
             ),
         }
         dev_h += row["updater_development_h"] + row["reference_development_h"]
@@ -806,15 +798,13 @@ def dry_run(protocol, prices=None):
         f"{sched['max_count']} of {protocol['panel']['worlds_per_cell']} worlds fails"
     )
 
-    print("\nTI reference arguments (lambert_depth_fit)")
-    for regime in protocol["regimes"]:
-        for k in protocol["panel"]["epoch_counts"]:
-            args = ti_reference_arguments(protocol, regime, k)
-            print(
-                f"  {regime['id']} epochs={k}: z_max_au={args['z_max_au']:.3f} "
-                f"n_max_rev={args['n_max_rev']} families={args['families']} "
-                f"n_per_family={args['n_per_family']}"
-            )
+    ti_ref = protocol["reference"]["ti_window"]
+    print(
+        f"\nTI reference (amendment A7): {ti_ref['method']}, "
+        f"{ti_ref['proposals_per_fit']:,} proposals per fit (at most "
+        f"{ti_ref['max_proposals_per_fit']:,}); independent-proposal check: "
+        f"{ti_ref['independent_method']} at twice the budget"
+    )
     ref = protocol["reference"]
     phys = ref["physical_fixed"]
     print(
@@ -1732,7 +1722,13 @@ def _record_definitions():
         regime_bounds,
         model_declaration,
         semimajor_axis_au,
-        ti_reference_arguments,
+        TI_FREQUENCY,
+        _ti_prior_u,
+        _collapsed_draws,
+        ti_collapsed_reference,
+        ti_frequency_reference,
+        _jitted,
+        reference_budget_factor,
         physical_semimajor_range,
         visibility_mas,
         future_epoch,
@@ -2000,8 +1996,8 @@ class UnitExecutor:
     def reference_unit(self, unit, world):
         """One reference fit (any certification variant) for one epoch count."""
         mass_model, k = unit["mass_model"], unit["epoch_count"]
-        n_prop = self.budgets[mass_model] * (
-            2 if unit["role"].startswith("cert_doubled") else 1
+        n_prop = self.budgets[mass_model] * reference_budget_factor(
+            mass_model, unit["role"]
         )
         proposal = unit["role"].startswith("cert_proposal")
         regime = self.protocol["regimes"][unit["r_index"]]
@@ -2041,63 +2037,32 @@ class UnitExecutor:
         }
 
     def ti_reference(self, regime, world, k, key, n_prop, proposal, t_f):
-        """TI reference: Lambert depth fit, or the admissible-region proposal."""
-        import jax
+        """TI reference fit (amendment A7).
+
+        The collapsed prior sampler, or for the independent-proposal check the
+        frequency-mixture sampler.
+        """
         import numpy as np
 
-        from photomancy.orbit.few_epoch import admissible_region_fit, lambert_depth_fit
-
-        model = ti_model(self.protocol, regime)
-        args = ti_reference_arguments(self.protocol, regime, k)
         data = astrometry(world, k)
-        dist = self.protocol["distance_pc"]
         target = world["target"]
+        if proposal:
+            config = self.protocol["reference"]["ti_window"]["independent"]
+            theta, lw = ti_frequency_reference(
+                target, data, key, n_prop, self.chunk, config
+            )
+            method = "ti_frequency_mixture_joint_weights"
+        else:
+            theta, lw = ti_collapsed_reference(target, data, key, n_prop, self.chunk)
+            method = "ti_collapsed_prior"
+        fin = np.isfinite(lw)
         parts = {name: [] for name in QUANTITIES}
         weights = []
-
-        def keep(theta, lw):
-            fin = np.isfinite(lw)
-            if fin.any():
-                q = chart_quantities("ti_window", target, theta[fin], t_f)
-                for name in QUANTITIES:
-                    parts[name].append(q[name])
-                weights.append(lw[fin])
-
-        if proposal:
-            chunk = min(self.chunk, n_prop)
-            for j in range(-(-n_prop // chunk)):
-                post = admissible_region_fit(
-                    data,
-                    dist_pc=dist,
-                    model=model,
-                    key=jax.random.fold_in(key, j),
-                    n_particles=chunk,
-                    z_max_au=args["z_max_au"],
-                )
-                take = min(chunk, n_prop - j * chunk)
-                keep(
-                    np.asarray(post.samples)[:take], np.asarray(post.log_weights)[:take]
-                )
-            method = "admissible_region_fit"
-        else:
-            families = args["families"]
-            n_pf = n_prop // families
-            chunk = max(1, min(n_pf, self.chunk // families))
-            for j in range(-(-n_pf // chunk)):
-                post = lambert_depth_fit(
-                    data,
-                    dist_pc=dist,
-                    model=model,
-                    key=jax.random.fold_in(key, j),
-                    n_per_family=chunk,
-                    n_max_rev=args["n_max_rev"],
-                    z_max_au=args["z_max_au"],
-                )
-                take = min(chunk, n_pf - j * chunk)
-                theta = np.asarray(post.samples).reshape(families, chunk, 7)[:, :take]
-                lw = np.asarray(post.log_weights).reshape(families, chunk)[:, :take]
-                keep(theta.reshape(-1, 7), lw.reshape(-1))
-            method = "lambert_depth_fit"
+        if fin.any():
+            q = chart_quantities("ti_window", target, theta[fin], t_f)
+            for name in QUANTITIES:
+                parts[name].append(np.asarray(q[name]))
+            weights.append(lw[fin])
         return (*_concat(parts, weights), method)
 
     def physical_reference(self, world, k, key, n_prop, lowest_snr, t_f):
@@ -2157,6 +2122,167 @@ class UnitExecutor:
             f"scale_and_rotate_exact_{'lowest' if lowest_snr else 'highest'}_snr_anchor"
         )
         return (*_concat(parts, weights), method)
+
+
+# TI references (amendment A7). Both are exact self-normalized importance
+# samplers of the TI target's posterior (prior, implied-mass window and every
+# epoch's likelihood); they differ in their proposals and in how the weight is
+# computed.
+TI_FREQUENCY = {"prior_fraction": 0.5, "inflation": 1.25}
+
+
+def _ti_prior_u(target, key, n):
+    """Prior draws of the nonlinear TI coordinates (e, ln P, tau)."""
+    return target.sample_prior(key, n)[:, :3]
+
+
+def _collapsed_draws(target, data, u, z):
+    """TI constants from their conditional Gaussian; log Z(u) times the window.
+
+    Returns ``(theta, log_w)`` with ``log_w = log Z(u)`` (up to a constant)
+    where the completed point lies in the support, else ``-inf``.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from photomancy.orbit.updater import _linear_gaussian
+
+    weights = data.is_valid.astype(float)
+
+    def one(ui, zi):
+        theta = jnp.concatenate([ui, jnp.zeros(4)])
+        mean, chol, log_z, _, _ = _linear_gaussian(target, theta, data, weights)
+        c = mean + jax.scipy.linalg.solve_triangular(chol.T, zi, lower=False)
+        theta = theta.at[3:].set(c)
+        inside = jnp.isfinite(target.log_prior(theta)) & jnp.isfinite(log_z)
+        return theta, jnp.where(inside, log_z, -jnp.inf)
+
+    return jax.vmap(one)(u, z)
+
+
+def ti_collapsed_reference(target, data, key, n_prop, chunk):
+    """Primary TI reference: the collapsed prior importance sampler.
+
+    ``(e, ln P, tau)`` come from the prior, the TI constants from their
+    conditional Gaussian given every epoch, and the weight is the marginal
+    likelihood ``Z(u)`` times the support (implied-mass window) indicator:
+    the proposal ``p(u) N(c; m(u), V(u))`` against the target ``p(u) N(c;
+    0, s^2) L(u, c) 1_W(u, c)`` leaves exactly that ratio.
+
+    Returns:
+        Tuple ``(theta, log_w)`` of NumPy arrays, ``n_prop`` rows.
+    """
+    import jax
+    import numpy as np
+
+    batch = min(chunk, n_prop)
+    run = _jitted("collapsed")
+    thetas, log_ws = [], []
+    for j in range(-(-n_prop // batch)):
+        theta, log_w = run(target, data, jax.random.fold_in(key, j), batch)
+        take = min(batch, n_prop - j * batch)
+        thetas.append(np.asarray(theta)[:take])
+        log_ws.append(np.asarray(log_w)[:take])
+    return np.concatenate(thetas), np.concatenate(log_ws)
+
+
+def ti_frequency_reference(target, data, key, n_prop, chunk, config=None):
+    """Independent TI reference for certification check 3 (amendment A7).
+
+    Its proposal differs from the primary's in both blocks. ``ln P`` comes
+    from a defensive mixture: with probability ``prior_fraction`` the prior
+    (uniform in ln P), otherwise uniform in frequency over the same range,
+    the data-independent limit of a period-alias comb whose offset is
+    unknown; ``e`` and ``tau`` come from the prior. The TI constants come
+    from the conditional Gaussian with its covariance inflated by
+    ``inflation^2``, and the weight is the full posterior density (the
+    target's prior, window included, and likelihood evaluated directly) over
+    the joint proposal density, so it never uses the primary's
+    marginal-likelihood algebra. Both proposal densities are exact, so the
+    sampler is exact.
+
+    Returns:
+        Tuple ``(theta, log_w)`` of NumPy arrays, ``n_prop`` rows.
+    """
+    import jax
+    import numpy as np
+
+    cfg = dict(TI_FREQUENCY, **(config or {}))
+    cfg.pop("budget_factor", None)
+    batch = min(chunk, n_prop)
+    run = _jitted("frequency")
+    static = (batch, float(cfg["prior_fraction"]), float(cfg["inflation"]))
+    thetas, log_ws = [], []
+    for j in range(-(-n_prop // batch)):
+        theta, log_w = run(target, data, jax.random.fold_in(key, j), *static)
+        take = min(batch, n_prop - j * batch)
+        thetas.append(np.asarray(theta)[:take])
+        log_ws.append(np.asarray(log_w)[:take])
+    return np.concatenate(thetas), np.concatenate(log_ws)
+
+
+_JITTED = {}
+
+
+def _jitted(name):
+    """Module-level compiled TI reference batches, built once per process.
+
+    Built lazily so that importing the tool does not import JAX; the batch
+    size, grid shape, defensive weight and inflation are static arguments.
+    """
+    if name in _JITTED:
+        return _JITTED[name]
+    import equinox as eqx
+    import jax
+    import jax.numpy as jnp
+
+    from photomancy.orbit.updater import _linear_gaussian
+
+    @eqx.filter_jit
+    def collapsed(target, data, key, batch):
+        k_u, k_z = jax.random.split(key)
+        u = _ti_prior_u(target, k_u, batch)
+        return _collapsed_draws(target, data, u, jax.random.normal(k_z, (batch, 4)))
+
+    @eqx.filter_jit
+    def frequency(target, data, key, batch, prior_fraction, kappa):
+        m = target.model
+        f_lo, f_hi = jnp.exp(-m.lnP_hi), jnp.exp(-m.lnP_lo)
+        span = m.lnP_hi - m.lnP_lo
+        weights = data.is_valid.astype(float)
+        k_mix, k_prior, k_f, k_z = jax.random.split(key, 4)
+        u = _ti_prior_u(target, k_prior, batch)
+        f = jax.random.uniform(k_f, (batch,), minval=f_lo, maxval=f_hi)
+        use_prior = jax.random.uniform(k_mix, (batch,)) < prior_fraction
+        u = u.at[:, 1].set(jnp.where(use_prior, u[:, 1], -jnp.log(f)))
+        # q(ln P) / p(ln P) for the mixture, with p uniform in ln P.
+        f_u = jnp.exp(-u[:, 1])
+        log_ratio = jnp.log(
+            prior_fraction + (1.0 - prior_fraction) * span * f_u / (f_hi - f_lo)
+        )
+        z = jax.random.normal(k_z, (batch, 4))
+
+        def one(ui, zi):
+            theta = jnp.concatenate([ui, jnp.zeros(4)])
+            mean, chol, _, _, _ = _linear_gaussian(target, theta, data, weights)
+            c = mean + kappa * jax.scipy.linalg.solve_triangular(
+                chol.T, zi, lower=False
+            )
+            theta = theta.at[3:].set(c)
+            log_q_c = (
+                -0.5 * jnp.sum(zi**2)
+                - 4.0 * jnp.log(kappa)
+                + jnp.sum(jnp.log(jnp.diag(chol)))
+            )
+            log_post = target.log_prior(theta) + target.log_likelihood(theta, data)
+            return theta, log_post - log_q_c
+
+        theta, log_w = jax.vmap(one)(u, z)
+        log_w = log_w - log_ratio
+        return theta, jnp.where(jnp.isfinite(log_w), log_w, -jnp.inf)
+
+    _JITTED.update(collapsed=collapsed, frequency=frequency)
+    return _JITTED[name]
 
 
 def _concat(parts, weights):
@@ -2590,9 +2716,22 @@ def record_at_budgets(budgets, record):
         return record["particles"] == budgets["particles"] * (2 if doubled else 1)
     if record.get("kind") != "reference":
         return False
-    mass_model = record["id"].split("/")[1]
-    doubled = record["id"].split("/")[4].startswith("cert_doubled")
-    return record.get("proposals") == budgets[mass_model] * (2 if doubled else 1)
+    mass_model, role = record["id"].split("/")[1], record["id"].split("/")[4]
+    factor = reference_budget_factor(mass_model, role)
+    return record.get("proposals") == budgets[mass_model] * factor
+
+
+def reference_budget_factor(mass_model, role):
+    """Budget multiple of a reference role.
+
+    2 for the doubled-budget runs and, for the TI pair, for the
+    independent-proposal runs (amendment A7); 1 otherwise.
+    """
+    if role.startswith("cert_doubled"):
+        return 2
+    if role.startswith("cert_proposal") and mass_model == "ti_window":
+        return 2
+    return 1
 
 
 def progress(protocol, out_dir, stage="development"):
