@@ -193,8 +193,18 @@ def test_physical_quadrature_matches_the_reference_sampler_coarsely():
         )
 
 
-def _write_units(tool, out_dir, offset=0.0, drop=None, stall=False):
+def _write_units(
+    tool, out_dir, offset=0.0, drop=None, stall=False, tamper=None, protocol=None
+):
+    """Synthetic exact records carrying the current run hash and budgets.
+
+    ``tamper`` corrupts the evidence: ``"budget"`` gives one reference repeat
+    one proposal, ``"stale"`` gives one an old run hash, ``"duplicate"``
+    writes one repeat twice.
+    """
     panel = tool.panel
+    protocol = protocol or panel.load_protocol()
+    current = tool.exact_run_hash(protocol)
     rng = np.random.default_rng(0)
     names = tool.value_names()
     truth = {
@@ -211,7 +221,14 @@ def _write_units(tool, out_dir, offset=0.0, drop=None, stall=False):
             if stall:
                 shift = 1e-4 * level
             values = {n: v + shift for n, v in truth.items()}
-            rec = {"id": uid, "kind": "quadrature", "level": level, "values": values}
+            rec = {
+                "id": uid,
+                "kind": "quadrature",
+                "level": level,
+                "values": values,
+                "run_hash": current,
+                **tool.expected_budget(protocol, tool.unit_of(uid)),
+            }
             if case == "ti_window":
                 rec["window_bound"] = 1e-12
             panel.append_record(path, rec)
@@ -221,14 +238,23 @@ def _write_units(tool, out_dir, offset=0.0, drop=None, stall=False):
             }
             if case == "physical_fixed":
                 values["e_bin3"] += offset
+            uid = f"exact/{case}/reference/r{r:02d}"
             rec = {
-                "id": f"exact/{case}/reference/r{r:02d}",
+                "id": uid,
                 "kind": "reference",
                 "repeat": r,
                 "kish_ess": 1e4,
                 "values": values,
+                "run_hash": current,
+                **tool.expected_budget(protocol, tool.unit_of(uid)),
             }
+            if r == 3 and tamper == "budget":
+                rec["proposals"] = 1
+            if r == 3 and tamper == "stale":
+                rec["run_hash"] = "0" * 16
             panel.append_record(path, rec)
+            if r == 3 and tamper == "duplicate":
+                panel.append_record(path, rec)
 
 
 def test_report_flags_offsets_and_missing_units(tmp_path):
@@ -239,7 +265,12 @@ def test_report_flags_offsets_and_missing_units(tmp_path):
     Fails if that sampler does not pass, if a planted offset of 0.01 in one
     bin mass (five times the floor) does not fail, if a missing quadrature
     level does not make the verdict incomplete, or if a refinement whose
-    finest change is not smaller than the previous one is accepted.
+    finest change is not smaller than the previous one is accepted. Evidence
+    with one record at one proposal, one from another code or protocol
+    content (run hash), or one written twice must not pass; nor may levels
+    other than three consecutive refinements. The freeze re-assesses the
+    exact checks from their run directory: a passing directory adds no exact
+    reason, a tampered one does, and a results file is refused.
     """
     protocol = ex.panel.load_protocol()
     cases = {
@@ -247,12 +278,15 @@ def test_report_flags_offsets_and_missing_units(tmp_path):
         "offset": {"offset": 0.01},
         "missing": {"drop": "exact/ti_window/quadrature/L1"},
         "stall": {"stall": True},
+        "budget": {"tamper": "budget"},
+        "stale": {"tamper": "stale"},
+        "duplicate": {"tamper": "duplicate"},
     }
     verdicts = {}
     for label, kwargs in cases.items():
         out = tmp_path / label
         out.mkdir()
-        _write_units(ex, out, **kwargs)
+        _write_units(ex, out, protocol=protocol, **kwargs)
         verdicts[label] = ex.report(protocol, out)["verdicts"]
     assert verdicts["good"] == {"ti_window": "pass", "physical_fixed": "pass"}
     assert verdicts["offset"] == {"ti_window": "pass", "physical_fixed": "fail"}
@@ -261,3 +295,25 @@ def test_report_flags_offsets_and_missing_units(tmp_path):
         "ti_window": "incomplete",
         "physical_fixed": "incomplete",
     }
+    for label in ("budget", "stale", "duplicate"):
+        assert verdicts[label]["ti_window"] == "incomplete", label
+    for levels in ((1, 2, 3), (0, 2, 4)):
+        assert ex.report(protocol, tmp_path / "good", levels=levels)["verdicts"] == {
+            "ti_window": "incomplete",
+            "physical_fixed": "incomplete",
+        }
+
+    dev = tmp_path / "dev"
+    dev.mkdir()
+
+    def exact_reasons(exact_path):
+        report = ex.panel.freeze_report(protocol, dev, exact_path)
+        return [r for r in report["reasons"] if "exact" in r]
+
+    assert exact_reasons(tmp_path / "good") == []
+    assert any(
+        "exact checks: incomplete" in r for r in exact_reasons(tmp_path / "stale")
+    )
+    results = tmp_path / "exact-checks.json"
+    results.write_text('{"verdicts": {"ti_window": "pass", "physical_fixed": "pass"}}')
+    assert any("not a run directory" in r for r in exact_reasons(results))

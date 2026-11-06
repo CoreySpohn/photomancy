@@ -200,9 +200,7 @@ def test_development_plan_shards_disjointly_and_matches_the_tally():
     """
     tool = _load_tool()
     protocol = tool.load_protocol()
-    units = tool.plan_units(
-        protocol, "development", ["updater", "reference", "certification"]
-    )
+    units = tool.plan_units(protocol, "development", list(tool.PARTS))
     ids = [u["id"] for u in units]
     assert len(set(ids)) == len(ids)
     for n in (2, 3):
@@ -214,8 +212,8 @@ def test_development_plan_shards_disjointly_and_matches_the_tally():
     def cost(u):
         return 2 if "doubled" in u["role"] else 1
 
-    upd = sum(cost(u) for u in units if u["role"] in tool.UPDATER_ROLES)
-    ref = sum(cost(u) for u in units if u["role"] not in tool.UPDATER_ROLES)
+    upd = sum(cost(u) for u in units if u["role"] in tool.ALL_UPDATER_ROLES)
+    ref = sum(cost(u) for u in units if u["role"] not in tool.ALL_UPDATER_ROLES)
     n_mass = len(protocol["panel"]["mass_models"])
     n_updates = len(protocol["panel"]["updates"])
     assert upd * n_updates == n_mass * tally["development_update_equivalents_per_pair"]
@@ -269,23 +267,50 @@ def test_run_resumes_after_a_kill_without_duplicate_work(tmp_path):
     assert again["ran"] == 0
 
 
-def test_freeze_precision_comes_from_key_to_key_disagreement(tmp_path):
-    """Freeze precision is key-to-key disagreement; a partial run is incomplete.
+def _fake_records(tool, protocol, roles, worlds, masses=None, run_hash=None):
+    """Development records at the protocol budgets for the given roles."""
+    budgets = tool.protocol_budgets(protocol)
+    flat = masses or [1.0 / 8] * 8
+    bins = {q: flat for q in ("lnP", "e", "future_pa")}
+    out = {}
+    for unit in tool.plan_units(protocol, "development", list(tool.PARTS)):
+        if unit["role"] not in roles or unit["world"] not in worlds:
+            continue
+        doubled = 2 if "doubled" in unit["role"] else 1
+        if unit["role"] in tool.ALL_UPDATER_ROLES:
+            rec = {
+                "kind": "updater",
+                "particles": budgets["particles"] * doubled,
+                "updates": [{"kernel_ess": 7372.8}] * 3,
+                "summaries": {str(k): {"bins": bins} for k in (2, 3)},
+            }
+        else:
+            rec = {
+                "kind": "reference",
+                "proposals": budgets[unit["mass_model"]] * doubled,
+                "summary": {"kish_ess": 900.0, "bins": bins},
+            }
+        out[unit["id"]] = dict(rec, id=unit["id"], run_hash=run_hash)
+    return out
 
-    For multinomial pairs at size n over Dirichlet(0.7) masses, the implied
-    per-run variance (1 / size, the quantity the freeze simulation
-    reproduces) averages to 1 / n within 5 percent (2,000 pairs; its
-    standard error is about 1.5 percent). In assembled
-    records the kernel ESS (0.9 N by construction) never enters: two runs
-    that disagree get a small precision whatever the kernel reports. A run
-    directory missing development units freezes to ``incomplete`` with the
-    count of missing records, and records run under other protocol content
-    are flagged (the run hash ignores the status, so the freeze commit does
-    not orphan them, but not the kernel). Fails if the freeze reads the
-    kernel ESS, mis-scales the variance estimate, freezes a partial panel, or
-    reuses stale records after an amendment. A world whose reference fit
-    kept no weighted draw is left out and named (fails if an empty fit
-    crashes the freeze or is scored).
+
+def test_freeze_precision_is_unbiased_in_inverse_square_size(tmp_path):
+    """Freeze precision comes from replicate spread, unbiased where D2 needs it.
+
+    The D2 variance is quadratic in the per-run covariance, so the estimate
+    must be unbiased in 1 / n^2. For eight multinomial runs at size n = 500
+    over Dirichlet(0.7) masses, n^2 mean(1 / size^2) is within 6 percent of
+    1 (2,000 worlds; standard error about 1.5 percent); for one pair of
+    two-bin runs it is within 15 percent (4,000 worlds, standard error about
+    3 percent), where ``tr M / s^2`` (``key_to_key_ess``) is three times too
+    large. In assembled records the kernel ESS (0.9 N by construction) never
+    enters: runs that disagree get a small precision whatever the kernel
+    reports. A partial run directory freezes to ``incomplete`` and names the
+    records run under other code or protocol content; the run hash ignores
+    the status but changes with the kernel, the summary bins and the source
+    of a record-defining function. Fails if the freeze reads the kernel ESS,
+    estimates 1 / n rather than 1 / n^2, freezes a partial panel, or reuses
+    records after a change to the kernel, the bins or the code.
     """
     import numpy as np
 
@@ -293,71 +318,240 @@ def test_freeze_precision_comes_from_key_to_key_disagreement(tmp_path):
     protocol = tool.load_protocol()
     rng = np.random.default_rng(0)
     n = 500
-    sizes = []
+    inv2 = []
     for _ in range(2000):
         p = rng.dirichlet(np.full(8, 0.7))
-        a, b = (rng.multinomial(n, p) / n for _ in range(2))
-        sizes.append(tool.key_to_key_ess(a, b, cap=10**6))
-    assert abs(n * np.mean(1.0 / np.asarray(sizes)) - 1.0) < 0.05
+        runs = rng.multinomial(n, p, size=8) / n
+        inv2.append(tool.replicate_ess(runs, cap=10**6) ** -2.0)
+    assert abs(n**2 * np.mean(inv2) - 1.0) < 0.06
+    pair, linear = [], []
+    for _ in range(4000):
+        p = np.zeros(8)
+        p[:2] = rng.dirichlet([2.0, 2.0])
+        a, b = rng.multinomial(n, p, size=2) / n
+        pair.append(tool.replicate_ess([a, b], cap=10**6) ** -2.0)
+        linear.append(tool.key_to_key_ess(a, b, cap=10**6) ** -2.0)
+    assert abs(n**2 * np.mean(pair) - 1.0) < 0.15
+    assert n**2 * np.mean(linear) > 2.0
 
-    flat = [1.0 / 8] * 8
     skew = [0.5, 0.5] + [0.0] * 6
-    units = {}
-    for w, role, masses in (
-        (w, role, masses)
-        for w in (0, 1)
-        for role, masses in (("updater_a", flat), ("updater_b", skew))
-    ):
-        rid = tool.unit_id("development", "ti_window", "R1", w, role)
-        units[rid] = {
-            "id": rid,
-            "kind": "updater",
-            "particles": 8192,
-            "updates": [{"kernel_ess": 7372.8}] * 3,
-            "summaries": {
-                str(k): {"bins": {q: masses for q in ("lnP", "e", "future_pa")}}
+    units = _fake_records(
+        tool,
+        protocol,
+        set(tool.PARTS["updater"])
+        | set(tool.PRECISION_ROLES)
+        | {"reference_1", "reference_2"},
+        {0, 1},
+        run_hash=tool.run_hash(protocol),
+    )
+    for rid, rec in units.items():
+        if any(f"/{r}" in rid for r in ("updater_b", *tool.PRECISION_ROLES[:3])):
+            rec["summaries"] = {
+                str(k): {"bins": {q: skew for q in ("lnP", "e", "future_pa")}}
                 for k in (2, 3)
-            },
-        }
-    for w in (0, 1):
-        for role in ("reference_1", "reference_2"):
-            for k in (2, 3):
-                rid = tool.unit_id("development", "ti_window", "R1", w, role, k)
-                units[rid] = {
-                    "id": rid,
-                    "kind": "reference",
-                    "proposals": 2**20,
-                    "summary": {
-                        "kish_ess": 900.0,
-                        "bins": {q: flat for q in ("lnP", "e", "future_pa")},
-                    },
-                }
-    hollow = tool.unit_id("development", "ti_window", "R1", 1, "reference_1", 2)
-    units[hollow]["summary"] = {"kish_ess": 0.0, "particles": 0}
+            }
+    group_id = tool.unit_id("development", "ti_window", "R1", 1, "reference_1", 2)
+    units[group_id]["summary"] = {"kish_ess": 0.0, "particles": 0}
     summary, missing = tool.assemble_freeze_summary(protocol, units)
-    assert summary["empty_references"] == [hollow]
-    group = next(g for g in summary["groups"] if g["worlds"])
-    world = group["worlds"][0]
+    assert summary["empty_references"] == [group_id]
+    world = next(g for g in summary["groups"] if g["worlds"])["worlds"][0]
     assert world["kernel_ess"] == 7372.8
     assert all(v < 10 for v in world["updater_ess"].values())
-    # Per world: two updater runs and two references at each of two epoch counts.
-    assert len(missing) == 6 * 8 * 38 - 12
+    assert missing
 
+    stale = tool.unit_id("development", "physical_fixed", "R4", 0, "updater_a")
+    units[stale]["run_hash"] = None
     for rec in units.values():
         tool.append_record(tmp_path / "units-0of1.jsonl", rec)
     report = tool.freeze_report(protocol, tmp_path)
     assert report["status"] == "incomplete"
-    assert any("freeze records missing" in r for r in report["reasons"])
+    assert any("planned development units missing" in r for r in report["reasons"])
     assert any("kept no weighted draw" in r for r in report["reasons"])
     assert any("exact-check results not supplied" in r for r in report["reasons"])
-    # The fake records carry no run hash, as if run under another protocol.
-    assert any("another protocol content" in r for r in report["reasons"])
-    frozen = dict(protocol, status="frozen")
-    assert tool.run_hash(frozen) == tool.run_hash(protocol)
+    # One record carries no run hash, as if run under other code.
+    assert any("other code or protocol content" in r for r in report["reasons"])
+    current = tool.run_hash(protocol)
+    assert tool.run_hash(dict(protocol, status="frozen")) == current
     kernel = dict(protocol["updater_kernel"], alias_moves=False)
-    assert tool.run_hash(dict(protocol, updater_kernel=kernel)) != tool.run_hash(
-        protocol
+    assert tool.run_hash(dict(protocol, updater_kernel=kernel)) != current
+    alias = dict(protocol["criteria"]["alias_accuracy"], bins=16)
+    criteria = dict(protocol["criteria"], alias_accuracy=alias)
+    assert tool.run_hash(dict(protocol, criteria=criteria)) != current
+    definitions = tool._record_definitions
+    tool._record_definitions = lambda: (*definitions(), _fake_records)
+    assert tool.run_hash(protocol) != current
+
+
+def test_estimated_precision_does_not_loosen_the_alias_tolerance():
+    """The freeze with estimated precision is no looser than with known precision.
+
+    Reproduction of the case that exposed the one-pair estimate: 38 two-bin
+    worlds per group, true updater size 300, reference size 20,000. With
+    precision estimated from eight replicates the largest and the mean
+    per-group SE0 stay within 15 percent of their values at the known size
+    (measured +7 and -2 percent); one pair through ``key_to_key_ess``
+    inflates the largest by more than 30 percent (measured +156). Fails if
+    estimation noise in the updater precision can widen the frozen
+    tolerance.
+    """
+    import numpy as np
+
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    rng = np.random.default_rng(0)
+    n = 300
+    worlds = {"known": [], "replicates": [], "pair": []}
+    for _ in tool.canonical_groups(protocol):
+        rows = {key: [] for key in worlds}
+        for w in range(38):
+            masses, est = {}, {key: {} for key in worlds}
+            for q in ("lnP", "e", "future_pa"):
+                p = np.zeros(8)
+                p[:2] = rng.dirichlet([2.0, 2.0])
+                runs = rng.multinomial(n, p, size=8) / n
+                masses[q] = p.tolist()
+                est["known"][q] = n
+                est["replicates"][q] = tool.replicate_ess(runs, 8192)
+                est["pair"][q] = tool.key_to_key_ess(runs[0], runs[1], 8192)
+            for key in worlds:
+                rows[key].append(
+                    {
+                        "world": w,
+                        "updater_ess": est[key],
+                        "reference_ess": 20000,
+                        "bin_masses": masses,
+                    }
+                )
+        for key in worlds:
+            worlds[key].append(rows[key])
+
+    def se0(key):
+        summary = {
+            "groups": [
+                {"regime": r, "mass_model": m, "epoch_count": k, "worlds": ws}
+                for (r, m, k), ws in zip(
+                    tool.canonical_groups(protocol), worlds[key], strict=True
+                )
+            ]
+        }
+        out = tool.freeze_alias(protocol, summary, panels=25)
+        values = np.array([g["se0"] for g in out["groups"]])
+        return values.max(), values.mean()
+
+    known, replicates, pair = se0("known"), se0("replicates"), se0("pair")
+    assert replicates[0] < 1.15 * known[0] and replicates[1] < 1.15 * known[1]
+    assert pair[0] > 1.3 * known[0]
+
+
+def test_freeze_requires_every_planned_development_unit(tmp_path):
+    """A run directory missing one planned role is incomplete, not frozen.
+
+    Every planned development unit is present at the protocol budgets under
+    the current run hash except the 304 ``updater_doubled`` runs, which no
+    freeze statistic reads. Fails if the freeze grades a directory that does
+    not hold the complete canonical development plan.
+    """
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    roles = {r for part in tool.PARTS.values() for r in part} - {"updater_doubled"}
+    units = _fake_records(
+        tool, protocol, roles, set(range(38)), run_hash=tool.run_hash(protocol)
     )
+    path = tmp_path / "units-0of1.jsonl"
+    path.write_text("".join(tool.json.dumps(r) + "\n" for r in units.values()))
+    report = tool.freeze_report(protocol, tmp_path)
+    assert report["status"] == "incomplete"
+    reason = next(r for r in report["reasons"] if "planned development" in r)
+    assert reason.startswith("304 of ") and "updater_doubled" in reason
+    assert "alias" not in report
+
+
+def test_resume_refuses_incompatible_records_and_manifests_survive_kills(tmp_path):
+    """Resume refuses a directory it cannot reuse; manifests are crash-safe.
+
+    A directory holding one updater record at 64 particles is refused by a
+    protocol-budget run before anything runs or any manifest is written. A
+    manifest write killed before its rename leaves the previous manifest
+    intact and no temporary file; the run writes its manifest before the
+    first unit (a run killed in that unit leaves its provenance), and so does
+    the exact-check runner. Fails if a stale record is skipped as done, a
+    kill can truncate a manifest, or a killed run leaves no provenance.
+    """
+    import os
+
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    out = tmp_path / "dev"
+    out.mkdir()
+    stale = _fake_records(tool, protocol, {"updater_a"}, {0}, run_hash=None)
+    rid = tool.unit_id("development", "ti_window", "R1", 0, "updater_a")
+    rec = dict(stale[rid], particles=64, run_hash=tool.run_hash(protocol))
+    tool.append_record(out / "units-0of1.jsonl", rec)
+    args = ["--run", "development", "--out", str(out), "--worlds", "0"]
+    args += ["--regimes", "R1", "--mass-models", "ti_window", "--parts", "updater"]
+    with pytest.raises(SystemExit, match="refusing to resume"):
+        tool.main(args)
+    assert not list(out.glob("manifest-*"))
+
+    tool.write_manifest(out, (0, 1), {"started": "a"})
+    before = (out / "manifest-0of1.json").read_text()
+    real_fsync = os.fsync
+
+    def killed(fd):
+        raise KeyboardInterrupt
+
+    os.fsync = killed
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            tool.write_manifest(out, (0, 1), {"started": "b"})
+    finally:
+        os.fsync = real_fsync
+    assert (out / "manifest-0of1.json").read_text() == before
+    assert sorted(p.name for p in out.iterdir()) == [
+        "manifest-0of1.json",
+        "units-0of1.jsonl",
+    ]
+
+    class Killed(Exception):
+        pass
+
+    def dying(unit):
+        raise Killed
+
+    entry = {"started": "c", "finished": None}
+    units = tool.plan_units(protocol, "smoke", ["updater"], regimes=["R2"])
+    with pytest.raises(Killed):
+        tool.run_units(
+            units,
+            tmp_path / "smoke",
+            (0, 1),
+            tool._ManifestFirst(dying, tmp_path / "smoke", (0, 1), entry),
+        )
+    written = tool.json.loads((tmp_path / "smoke" / "manifest-0of1.json").read_text())
+    assert written["invocations"][-1] == entry
+
+    spec = importlib.util.spec_from_file_location(
+        "updater_exact_checks", TOOL.parent / "updater_exact_checks.py"
+    )
+    exact = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(exact)
+
+    class DyingExact:
+        run_hash = "x"
+
+        def __init__(self, *args):
+            pass
+
+        def __call__(self, unit):
+            raise Killed
+
+    exact.ExactExecutor = DyingExact
+    with pytest.raises(Killed):
+        exact.main(["--out", str(tmp_path / "exact"), "--levels", "0"])
+    manifest = exact.panel.json.loads(
+        (tmp_path / "exact" / "manifest-0of1.json").read_text()
+    )
+    assert manifest["invocations"][-1]["finished"] is None
 
 
 @pytest.mark.medium

@@ -886,6 +886,80 @@ def plan(cases, levels, samplers, repeats):
     return units
 
 
+def _exact_definitions():
+    """Functions and constants of this tool that determine an exact record."""
+    return (
+        value_names,
+        level_counts,
+        ti_reduced_model,
+        case_setup,
+        records,
+        gauss_pieces,
+        periodic_nodes,
+        wedge_masses,
+        bivariate_normal_cdf,
+        mixture_quantile,
+        ti_quadrature,
+        _arc_half_mass,
+        _wrap_angle,
+        _cumulative,
+        _arc_mass,
+        physical_outer_nodes,
+        physical_nodes,
+        physical_quadrature,
+        illinois,
+        summary_values,
+        reference_sample,
+        updater_sample,
+        plan,
+        ExactExecutor,
+        ("constants", PHYSICAL_BASE, TI_BASE, TI_MASS_WINDOW_MSUN, Y_CAP, K_MIN),
+        ("rho_window_sigma", RHO_WINDOW_SIGMA),
+    )
+
+
+def exact_run_hash(protocol):
+    """Hash of the protocol content and code that determine an exact record."""
+    return panel.declaration_hash(
+        {
+            "panel": panel.run_hash(protocol),
+            "exact": panel.source_fingerprint(_exact_definitions()),
+        }
+    )
+
+
+def expected_budget(protocol, unit, proposals=None, particles=None):
+    """The budget fields an exact record must carry (overrides for test runs)."""
+    proposals = proposals or {}
+    if unit["kind"] == "quadrature":
+        base = TI_BASE if unit["case"] == "ti_window" else PHYSICAL_BASE
+        return {"counts": level_counts(base, unit["level"])}
+    if unit["kind"] == "reference":
+        default = protocol["reference"][unit["case"]]["proposals_per_fit"]
+        return {"proposals": proposals.get(unit["case"], default)}
+    return {"particles": particles or protocol["updater_budget"]["particles"]}
+
+
+def unit_of(record_id):
+    """The unit description encoded in an exact unit id."""
+    _, case, kind, tail = record_id.split("/")
+    if kind == "quadrature":
+        return {"id": record_id, "case": case, "kind": kind, "level": int(tail[1:])}
+    return {"id": record_id, "case": case, "kind": kind, "repeat": int(tail[1:])}
+
+
+def record_valid(protocol, record, run_hash, proposals=None, particles=None):
+    """Whether an exact record matches the current code, protocol and budget."""
+    if record.get("run_hash") != run_hash:
+        return False
+    try:
+        unit = unit_of(record["id"])
+    except (KeyError, ValueError):
+        return False
+    budget = expected_budget(protocol, unit, proposals, particles)
+    return all(record.get(k) == v for k, v in budget.items())
+
+
 class ExactExecutor:
     """Runs exact-check units; caches each case's setup."""
 
@@ -896,6 +970,7 @@ class ExactExecutor:
         self.proposals = proposals or {}
         self.particles = particles or protocol["updater_budget"]["particles"]
         self._setups = {}
+        self.run_hash = exact_run_hash(protocol)
 
     def setup(self, case):
         """The case setup (truth, records, edges), built once."""
@@ -942,6 +1017,7 @@ class ExactExecutor:
                 **budget,
             }
         record["seconds"] = time.perf_counter() - start
+        record["run_hash"] = self.run_hash
         return record
 
 
@@ -1002,13 +1078,59 @@ def compare(protocol, table, runs, t_crit=None):
     return rows
 
 
+def _manifest_commits(out_dir):
+    """Distinct code and protocol commits recorded by the run's manifests."""
+    code, proto = set(), set()
+    for path in sorted(Path(out_dir).glob("manifest-*.json")):
+        for entry in json.loads(path.read_text()).get("invocations", []):
+            code.add(str(entry.get("code_commit")))
+            proto.add(str(entry.get("protocol_commit")))
+    return sorted(code), sorted(proto)
+
+
 def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
-    """Assemble the exact-check results and verdicts from a run directory."""
-    units, duplicates = panel.load_units(out_dir)
+    """Assemble the exact-check results and verdicts from a run directory.
+
+    Only records run under the current code and protocol content
+    (``exact_run_hash``) at the protocol budgets count as evidence; a case
+    with a duplicate record, a stale or off-budget record, levels that are
+    not three consecutive refinements, or a missing reference repeat cannot
+    pass. The provenance block reports the run hash the records must carry
+    and the commits the run's manifests recorded.
+    """
+    records, duplicates = panel.load_units(out_dir)
+    current = exact_run_hash(protocol)
     repeats = protocol["reference"]["exact_checks"]["sampler_repeats"]
-    result = {"protocol_commit": panel.protocol_commit(), "cases": {}, "verdicts": {}}
+    code_commits, protocol_commits = _manifest_commits(out_dir)
+    result = {
+        "provenance": {
+            "run_hash": current,
+            "manifest_code_commits": code_commits,
+            "manifest_protocol_commits": protocol_commits,
+        },
+        "levels": list(levels),
+        "cases": {},
+        "verdicts": {},
+    }
+    levels = [int(lv) for lv in levels]
+    consecutive = len(levels) == 3 and levels == list(range(levels[0], levels[0] + 3))
     for case in cases:
         reasons = []
+        if not consecutive:
+            reasons.append(f"levels {levels} are not three consecutive refinements")
+        mine = {i: r for i, r in records.items() if i.split("/")[1] == case}
+        dup = sorted({i for i in duplicates if i.split("/")[1] == case})
+        if dup:
+            reasons.append(f"{len(dup)} duplicate records: {dup[:3]}")
+        invalid = sorted(
+            i for i, r in mine.items() if not record_valid(protocol, r, current)
+        )
+        if invalid:
+            reasons.append(
+                f"{len(invalid)} records from other code, protocol content or "
+                f"budgets: {invalid[:3]}"
+            )
+        units = {i: r for i, r in mine.items() if i not in invalid}
         quad = [units.get(f"exact/{case}/quadrature/L{lv}") for lv in levels]
         entry = {"quadrature": {}}
         for lv, rec in zip(levels, quad, strict=True):
@@ -1018,7 +1140,7 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
                 entry["quadrature"][f"L{lv}"] = {
                     k: v for k, v in rec.items() if k != "id"
                 }
-        if case == "ti_window" and quad[-1] is not None:
+        if case == "ti_window" and quad and quad[-1] is not None:
             if quad[-1]["window_bound"] >= WINDOW_BOUND_MAX:
                 reasons.append(
                     "window bound {:.2e} not below {}".format(
@@ -1026,7 +1148,7 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
                     )
                 )
         table = None
-        if all(q is not None for q in quad) and len(quad) == 3:
+        if consecutive and all(q is not None for q in quad):
             table = refinement([q["values"] for q in quad])
             entry["refinement"] = table
             unconverged = [n for n, t in table.items() if not t["converged"]]
@@ -1110,17 +1232,36 @@ def main(argv=None):
                 "particles": args.particles or "protocol",
             },
         )
-        counts = panel.run_units(
-            units, args.out, shard, executor, log=lambda m: print(m, flush=True)
-        )
-        entry.update(counts)
+        entry["exact_run_hash"] = executor.run_hash
+        entry["finished"] = None
+
+        def compatible(record):
+            return record_valid(
+                protocol, record, executor.run_hash, proposals, args.particles
+            )
+
+        try:
+            counts = panel.run_units(
+                units,
+                args.out,
+                shard,
+                panel._ManifestFirst(executor, args.out, shard, entry),
+                log=lambda m: print(m, flush=True),
+                compatible=compatible,
+            )
+        except panel.IncompatibleRunError as err:
+            raise SystemExit(f"refusing to resume: {err}") from None
+        import datetime
+
+        entry.update(counts, finished=datetime.datetime.now(datetime.UTC).isoformat())
         panel.write_manifest(args.out, shard, entry)
         print(json.dumps(counts))
     if args.report is not None:
-        result = report(protocol, args.report, cases)
+        levels = [int(x) for x in args.levels.split(",")]
+        result = report(protocol, args.report, cases, levels)
         text = json.dumps(result, indent=2, sort_keys=True)
         if args.write is not None:
-            args.write.write_text(text + "\n")
+            panel.atomic_write_text(args.write, text + "\n")
         print(
             json.dumps(
                 {

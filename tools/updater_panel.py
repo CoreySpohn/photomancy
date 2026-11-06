@@ -30,6 +30,7 @@ verdict table is not implemented yet.
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import statistics
@@ -422,7 +423,8 @@ def run_roles(protocol):
     base += [
         (p, e) for p in ("reference_1", "reference_2", "pit") for e in epoch_indices
     ]
-    cert = [
+    cert = [(p, u) for p in PRECISION_ROLES for u in updates]
+    cert += [
         (p, e)
         for p in (
             "reference_3",
@@ -576,11 +578,13 @@ def compute_tally(protocol):
     """Update-equivalents and reference fits per model pair."""
     g = group_counts(protocol)
     panel = protocol["panel"]
-    # Two independent keys plus one doubled-budget run that costs two.
+    # Two independent keys plus one doubled-budget run that costs two; the
+    # development stage adds the precision replicates.
     run_units = 4
     upd_panel = g["regimes"] * panel["worlds_per_cell"] * g["updates"] * run_units
     dev_worlds = panel["development_worlds_per_regime_and_mass_model"]
-    upd_dev = g["regimes"] * dev_worlds * g["updates"] * run_units
+    dev_units = run_units + len(PRECISION_ROLES)
+    upd_dev = g["regimes"] * dev_worlds * g["updates"] * dev_units
     ref_runs = 2
     fits = g["regimes"] * panel["alias_subset_worlds"] * g["epoch_counts"] * ref_runs
     # Certification: repeat-noise runs, two runs at twice the budget (cost four)
@@ -1406,6 +1410,10 @@ def summarize_posterior(q, log_weights, edges, visibility, truth=None, pit_v=Non
 # ---------------------------------------------------------------------------
 
 UPDATER_ROLES = ("updater_a", "updater_b", "updater_doubled")
+# Six more nominal-budget updater runs per development world: with updater_a
+# and updater_b they give eight replicates for the freeze's precision estimate.
+PRECISION_ROLES = tuple(f"updater_rep_{i}" for i in range(1, 7))
+ALL_UPDATER_ROLES = UPDATER_ROLES + PRECISION_ROLES
 REFERENCE_ROLES = ("reference_1", "reference_2")
 CERTIFICATION_ROLES = (
     "reference_3",
@@ -1417,9 +1425,11 @@ CERTIFICATION_ROLES = (
 )
 PARTS = {
     "updater": UPDATER_ROLES,
+    "precision": PRECISION_ROLES,
     "reference": REFERENCE_ROLES,
     "certification": CERTIFICATION_ROLES,
 }
+DEVELOPMENT_ONLY_PARTS = ("precision", "certification")
 
 
 def unit_id(stage, mass_model, regime_id, world, role, epoch_count=None):
@@ -1433,7 +1443,8 @@ def plan_units(protocol, stage, parts, mass_models=None, regimes=None, worlds=No
 
     An updater unit runs the three updates of one world and one run role; a
     reference unit runs one reference fit for one world, role and epoch
-    count. Certification roles exist on the development stage only.
+    count. Precision and certification roles exist on the development stage
+    only.
     """
     panel = protocol["panel"]
     mass_models = mass_models or panel["mass_models"]
@@ -1441,7 +1452,7 @@ def plan_units(protocol, stage, parts, mass_models=None, regimes=None, worlds=No
     worlds = range(stage_worlds(protocol, stage)) if worlds is None else worlds
     roles = []
     for part in parts:
-        if part == "certification" and stage != "development":
+        if part in DEVELOPMENT_ONLY_PARTS and stage != "development":
             continue
         roles += PARTS[part]
     out = []
@@ -1453,7 +1464,9 @@ def plan_units(protocol, stage, parts, mass_models=None, regimes=None, worlds=No
                 continue
             for world in worlds:
                 for role in roles:
-                    counts = [None] if role in UPDATER_ROLES else panel["epoch_counts"]
+                    counts = (
+                        [None] if role in ALL_UPDATER_ROLES else panel["epoch_counts"]
+                    )
                     for k in counts:
                         out.append(
                             {
@@ -1547,12 +1560,19 @@ def append_record(path, record):
         os.fsync(fh.fileno())
 
 
-def run_units(units, out_dir, shard, execute, log=print):
+class IncompatibleRunError(RuntimeError):
+    """A run directory holds records that the current run cannot reuse."""
+
+
+def run_units(units, out_dir, shard, execute, log=print, compatible=None):
     """Run the units of one shard that no unit file in ``out_dir`` holds yet.
 
     Each finished unit is appended to ``units-{i}of{n}.jsonl`` at once, so a
     killed run loses at most the unit in progress, and a restart skips every
-    unit any shard has completed.
+    unit any shard has completed. With ``compatible`` (a predicate on a
+    record), a directory holding any record it rejects is refused before
+    anything runs (``IncompatibleRunError``), so an earlier test override, a
+    budget change or a code change cannot be skipped over silently.
 
     Returns:
         Dict with the counts ``planned``, ``skipped`` and ``ran``.
@@ -1560,7 +1580,17 @@ def run_units(units, out_dir, shard, execute, log=print):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     mine = shard_units(units, shard)
-    done = set(load_units(out_dir)[0])
+    existing = load_units(out_dir)[0]
+    if compatible is not None:
+        bad = sorted(i for i, rec in existing.items() if not compatible(rec))
+        if bad:
+            raise IncompatibleRunError(
+                f"{out_dir} holds {len(bad)} records this run cannot reuse "
+                "(another code or protocol content, or other budgets); first: "
+                f"{bad[:3]}. Use a fresh directory or rerun with the same "
+                "code, protocol and budget arguments."
+            )
+    done = set(existing)
     todo = [u for u in mine if u["id"] not in done]
     path = out_dir / f"units-{shard[0]}of{shard[1]}.jsonl"
     for n, unit in enumerate(todo, 1):
@@ -1608,7 +1638,29 @@ def write_manifest(out_dir, shard, entry):
         runs[-1] = entry
     else:
         runs.append(entry)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+
+
+def atomic_write_text(path, text):
+    """Replace ``path`` with ``text`` through a synced temporary file.
+
+    The rename is atomic, so a kill at any point leaves either the old file
+    or the new one, never a truncated one.
+    """
+    import os
+    import tempfile
+
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def manifest_entry(protocol, args, budgets):
@@ -1660,24 +1712,124 @@ def protocol_budgets(
     }
 
 
-def run_hash(protocol):
-    """Hash of the protocol content that determines what a work unit computes.
+# Library modules whose source determines what a unit computes (the updater
+# and its targets, the reference samplers and the forward model).
+RECORD_MODULES = (
+    "photomancy.orbit.updater",
+    "photomancy.orbit.few_epoch",
+    "photomancy.orbit.ofti",
+    "photomancy.orbit.forward",
+    "photomancy.orbit.data",
+    "photomancy.orbit.likelihoods",
+    "photomancy.orbit.thiele_innes",
+    "photomancy.posterior",
+)
 
-    Excludes the status, the grading criteria, the provisional list, the
-    stated values, the limits and the reference budgets (a record carries its
-    own budget, checked separately), so freezing or re-sizing the block does
+
+def _record_definitions():
+    """Functions of this tool whose source determines what a unit computes."""
+    return (
+        regime_bounds,
+        model_declaration,
+        semimajor_axis_au,
+        ti_reference_arguments,
+        physical_semimajor_range,
+        visibility_mas,
+        future_epoch,
+        root_key,
+        world_key,
+        draw_keys,
+        draw_key,
+        ti_model,
+        ti_truth,
+        physical_truth,
+        stellar_mass_kg,
+        update_target,
+        world_data,
+        astrometry,
+        _chart_quantities_fn,
+        chart_quantities,
+        _physical_rows_fn,
+        truth_quantities,
+        alias_edges,
+        weighted_quantile,
+        summarize_posterior,
+        unit_id,
+        UnitExecutor,
+        _concat,
+    )
+
+
+def source_fingerprint(extra=()):
+    """Hash of the implementation that determines what a work unit computes.
+
+    Covers the source text of ``RECORD_MODULES``, of this tool's
+    record-defining functions and of ``extra`` (functions, classes, or plain
+    values hashed by ``repr``). Freeze and grading code is outside it, so a
+    fix there does not orphan finished records; any edit to the updater, the
+    targets, the reference samplers, the world draws or the summaries does.
+    """
+    digest = hashlib.sha256()
+    for name in RECORD_MODULES:
+        origin = importlib.util.find_spec(name).origin
+        digest.update(name.encode() + b"\0" + Path(origin).read_bytes())
+    for obj in (*_record_definitions(), *extra):
+        digest.update(_source_text(obj).encode() + b"\0")
+    return digest.hexdigest()[:16]
+
+
+def _source_text(obj):
+    """Source of a function, of every function of a class, or a value's repr.
+
+    A class is read method by method because ``inspect.getsource`` of a class
+    needs its module registered in ``sys.modules``, which a tool loaded from
+    its file path is not.
+    """
+    import inspect
+
+    if isinstance(obj, type):
+        parts = [obj.__qualname__]
+        for name, member in sorted(vars(obj).items()):
+            func = getattr(member, "__func__", member)
+            if inspect.isfunction(func):
+                parts.append(inspect.getsource(func))
+            elif not name.startswith("__"):
+                parts.append(f"{name}={member!r}")
+        return "\n".join(parts)
+    if inspect.isfunction(obj):
+        return inspect.getsource(obj)
+    return repr(obj)
+
+
+def run_hash(protocol):
+    """Hash of what determines a work unit's result: protocol content and code.
+
+    The protocol part excludes the status, the grading criteria (but keeps
+    the alias bins and quantities, which define the summaries), the
+    provisional list, the stated values, the limits, the compute prices and
+    the reference budgets (each record carries its own budget, checked
+    separately against the protocol), so freezing or re-sizing the block does
     not orphan development records, while a change to the regimes, the model
-    pairs, the seeds, the kernel or the reference method does.
+    pairs, the seeds, the kernel, the reference method or the summary bins
+    does. The code part is ``source_fingerprint``.
     """
     import copy
 
     body = copy.deepcopy(protocol)
+    alias = body.get("criteria", {}).get("alias_accuracy", {})
+    summary_definition = {k: alias.get(k) for k in ("bins", "quantities")}
     for key in ("status", "criteria", "provisional", "stated", "limits", "compute"):
         body.pop(key, None)
     for pair in ("ti_window", "physical_fixed"):
         for key in ("proposals_per_fit", "max_proposals_per_fit"):
             body.get("reference", {}).get(pair, {}).pop(key, None)
-    return declaration_hash(body)
+    return declaration_hash(
+        {
+            "protocol": body,
+            "summary_definition": summary_definition,
+            "source": source_fingerprint(),
+        }
+    )
 
 
 def budgets_match_protocol(protocol, budgets):
@@ -1718,7 +1870,7 @@ class UnitExecutor:
             unit["world"],
         )
         start = time.perf_counter()
-        if unit["role"] in UPDATER_ROLES:
+        if unit["role"] in ALL_UPDATER_ROLES:
             record = self.updater_unit(unit, world)
         else:
             record = self.reference_unit(unit, world)
@@ -2043,6 +2195,33 @@ def key_to_key_ess(bins_a, bins_b, cap):
     return float(min(max(spread / s2, 1.0), cap))
 
 
+def replicate_ess(runs, cap):
+    """Effective multinomial size from K independent runs, matched in 1 / n^2.
+
+    The panel's D2 variance is quadratic in the per-run covariance, so the
+    freeze needs an unbiased ``1 / n^2``, not ``1 / n``. With ``p`` the mean
+    of the runs' bin masses, ``M = diag(p) - p p^T`` (so a multinomial of
+    size ``n`` has covariance ``M / n``) and ``T`` the trace of the sample
+    covariance of the runs on ``nu = K - 1`` degrees of freedom, a Gaussian
+    approximation gives ``E[T^2] = ((tr M)^2 + 2 tr(M^2) / nu) / n^2``; so
+    ``n = sqrt((tr M)^2 + 2 tr(M^2) / nu) / T`` has ``E[1 / n^2] = 1 / n^2``.
+    (``tr M / T``, unbiased in ``1 / n`` only, inflates ``1 / n^2`` by up
+    to ``1 + 2 / nu``: threefold for one pair of two-bin runs.) Capped at
+    ``cap`` (the particle count) and floored at 1.
+    """
+    import numpy as np
+
+    x = np.asarray(runs, float)
+    nu = x.shape[0] - 1
+    p = x.mean(axis=0)
+    t = float(np.sum(x.var(axis=0, ddof=1)))
+    if t <= 0.0:
+        return float(cap)
+    m = np.diag(p) - np.outer(p, p)
+    scale = math.sqrt(float(np.trace(m)) ** 2 + 2.0 * float(np.sum(m * m)) / nu)
+    return float(min(max(scale / t, 1.0), cap))
+
+
 def _bins(record, k, quantity):
     if record is None:
         return None
@@ -2060,8 +2239,9 @@ def assemble_freeze_summary(protocol, units, stage="development"):
 
     Each world carries its reference bin masses (the mean of ``reference_1``
     and ``reference_2``), its reference ESS (the smaller Kish ESS of the
-    two) and its updater precision per alias quantity from the disagreement
-    of ``updater_a`` and ``updater_b`` (``key_to_key_ess``).
+    two) and its updater precision per alias quantity from the spread of its
+    eight nominal-budget updater runs (``updater_a``, ``updater_b`` and the
+    precision replicates; ``replicate_ess``).
 
     A world whose reference fit kept no weighted draw (an empty fit, where the
     budget is too small for that world) cannot be scored; it is left out and
@@ -2087,7 +2267,13 @@ def assemble_freeze_summary(protocol, units, stage="development"):
                     role,
                     k if role.startswith("ref") else None,
                 )
-                for role in ("updater_a", "updater_b", "reference_1", "reference_2")
+                for role in (
+                    "updater_a",
+                    "updater_b",
+                    *PRECISION_ROLES,
+                    "reference_1",
+                    "reference_2",
+                )
             }
             recs = {role: units.get(i) for role, i in ids.items()}
             absent = [ids[r] for r, rec in recs.items() if rec is None]
@@ -2107,9 +2293,11 @@ def assemble_freeze_summary(protocol, units, stage="development"):
                 {
                     "world": w,
                     "updater_ess": {
-                        q: key_to_key_ess(
-                            _bins(recs["updater_a"], k, q),
-                            _bins(recs["updater_b"], k, q),
+                        q: replicate_ess(
+                            [
+                                _bins(recs[r], k, q)
+                                for r in ("updater_a", "updater_b", *PRECISION_ROLES)
+                            ],
                             cap,
                         )
                         for q in alias_q
@@ -2252,77 +2440,85 @@ def certify_references(protocol, units, delta2, stage="development"):
 def freeze_report(protocol, path, exact_path=None):
     """The freeze decision from a summary file or a development run directory.
 
-    A directory is assembled into a summary first. The freeze is ``frozen``
-    only when every development unit exists at the protocol's budgets, the
-    alias tolerance meets its bound and power floor, both references pass
-    certification checks 1 to 3 against it, and the exact-check results
-    (``exact_path``) pass for both mass models. Otherwise the report is
-    ``incomplete`` and lists every reason.
+    A directory is checked against the complete canonical development plan:
+    only records run under the current code and protocol content (run hash)
+    at the protocol budgets count, every planned unit must have one, and
+    duplicates and unknown ids are reasons. The compatible records are then
+    assembled into a summary. The freeze is ``frozen`` only when the plan is
+    complete, the alias tolerance meets its bound and power floor, both
+    references pass certification checks 1 to 3 against it, and the exact
+    checks, re-assessed from their run directory (``exact_path``), pass for
+    both mass models. Otherwise the report is ``incomplete`` and lists every
+    reason.
     """
     path = Path(path)
     reasons = []
     report = {}
+    incomplete = False
+    units = None
     if path.is_dir():
-        units, duplicates = load_units(path)
+        records, duplicates = load_units(path)
         if duplicates:
             reasons.append(f"{len(duplicates)} duplicate unit records (first kept)")
         current = run_hash(protocol)
-        stale = sum(r.get("run_hash") != current for r in units.values())
+        stale = sorted(i for i, r in records.items() if r.get("run_hash") != current)
         if stale:
-            hashes = sorted({str(r.get("run_hash")) for r in units.values()})
+            hashes = sorted({str(records[i].get("run_hash")) for i in stale})
             reasons.append(
-                f"{stale} records were run under another protocol content "
-                f"(run hashes {hashes}, current {current}); rerun them into a "
-                "fresh directory"
+                f"{len(stale)} records were run under other code or protocol "
+                f"content (run hashes {hashes}, current {current}); rerun them "
+                "into a fresh directory"
             )
         off_budget = sorted(
             {
                 (r.get("kind"), r.get("particles", r.get("proposals")))
-                for r in units.values()
+                for r in records.values()
                 if not _record_at_protocol_budget(protocol, r)
             }
         )
         if off_budget:
             reasons.append(f"records at non-protocol budgets: {off_budget}")
-        summary, missing = assemble_freeze_summary(protocol, units)
+        units = {
+            i: r
+            for i, r in records.items()
+            if r.get("run_hash") == current and _record_at_protocol_budget(protocol, r)
+        }
+        planned = [u["id"] for u in plan_units(protocol, "development", list(PARTS))]
+        unknown = sorted(set(records) - set(planned))
+        if unknown:
+            reasons.append(
+                f"{len(unknown)} records are not development units: {unknown[:3]}"
+            )
+        absent = [i for i in planned if i not in units]
+        if absent:
+            incomplete = True
+            reasons.append(
+                f"{len(absent)} of {len(planned)} planned development units "
+                f"missing or incompatible; first: {absent[:3]}"
+            )
+        summary, _ = assemble_freeze_summary(protocol, units)
         empty = summary["empty_references"]
         if empty:
+            incomplete = True
             reasons.append(
                 f"{len(empty)} reference fits kept no weighted draw (the proposal "
                 "budget is too small for those worlds; double it); first empty: "
                 f"{empty[:3]}"
             )
-        if missing or empty:
-            panel = protocol["panel"]
-            needed = (
-                stage_worlds(protocol, "development")
-                * len(protocol["regimes"])
-                * len(panel["mass_models"])
-                * (2 + 2 * len(panel["epoch_counts"]))
-            )
-            if missing:
-                reasons.append(
-                    f"{len(missing)} of {needed} freeze records missing (updater_a, "
-                    "updater_b, reference_1 and reference_2 for every development "
-                    f"world of every group); first missing: {missing[:3]}"
-                )
+        if incomplete:
             report["worlds_complete_per_group"] = {
                 "{regime} {mass_model} k={epoch_count}".format(**g): len(g["worlds"])
                 for g in summary["groups"]
             }
+            # For information only: the certification statistics of whatever
+            # compatible records exist, bounded by the provisional delta2.
+            provisional = protocol["criteria"]["alias_accuracy"]["delta2"]
+            report["certification_partial_vs_provisional_delta2"] = certify_references(
+                protocol, units, provisional
+            )
     else:
-        units = None
         summary = json.loads(path.read_text())
-        missing = []
-        empty = []
-    if (missing or empty) and units:
-        # For information only: the certification statistics of whatever
-        # records exist, bounded by the provisional delta2.
-        provisional = protocol["criteria"]["alias_accuracy"]["delta2"]
-        report["certification_partial_vs_provisional_delta2"] = certify_references(
-            protocol, units, provisional
-        )
-    if not missing and not empty:
+    if not incomplete:
         try:
             alias = freeze_alias(protocol, summary)
         except ValueError as err:
@@ -2344,28 +2540,59 @@ def freeze_report(protocol, path, exact_path=None):
                 reasons.append(
                     "certification needs the run directory, not a summary file"
                 )
-    if exact_path is None:
-        reasons.append("exact-check results not supplied (--exact)")
-    else:
-        exact = json.loads(Path(exact_path).read_text())
-        report["exact_checks"] = exact.get("verdicts", exact)
-        for mass_model in protocol["panel"]["mass_models"]:
-            verdict = exact.get("verdicts", {}).get(mass_model)
-            if verdict != "pass":
-                reasons.append(f"{mass_model} exact checks: {verdict or 'missing'}")
+    reasons += _exact_reasons(protocol, exact_path, report)
     report["status"] = "incomplete" if reasons else "frozen"
     report["reasons"] = reasons
     return report
 
 
+def _exact_reasons(protocol, exact_path, report):
+    """Re-assess the exact checks from their run directory; return reasons.
+
+    The verdicts are recomputed from the unit records (provenance, budgets,
+    uniqueness and the required levels and repeats are validated there), never
+    read from a results file, which could be stale or edited.
+    """
+    if exact_path is None:
+        return ["exact-check results not supplied (--exact EXACT_RUN_DIR)"]
+    exact_path = Path(exact_path)
+    if not exact_path.is_dir():
+        return [
+            f"--exact {exact_path} is not a run directory; the freeze re-assesses "
+            "the exact checks from their unit records"
+        ]
+    spec = importlib.util.spec_from_file_location(
+        "updater_exact_checks",
+        Path(__file__).resolve().parent / "updater_exact_checks.py",
+    )
+    exact_tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(exact_tool)
+    exact = exact_tool.report(protocol, exact_path)
+    report["exact_checks"] = {
+        "verdicts": exact["verdicts"],
+        "reasons": {c: e["reasons"] for c, e in exact["cases"].items()},
+    }
+    return [
+        f"{mass_model} exact checks: {exact['verdicts'].get(mass_model, 'missing')}"
+        for mass_model in protocol["panel"]["mass_models"]
+        if exact["verdicts"].get(mass_model) != "pass"
+    ]
+
+
 def _record_at_protocol_budget(protocol, record):
-    budgets = protocol_budgets(protocol)
+    return record_at_budgets(protocol_budgets(protocol), record)
+
+
+def record_at_budgets(budgets, record):
+    """Whether a unit record was run at ``budgets`` (doubled roles at twice)."""
     if record.get("kind") == "updater":
         doubled = record["id"].split("/")[4] == "updater_doubled"
         return record["particles"] == budgets["particles"] * (2 if doubled else 1)
+    if record.get("kind") != "reference":
+        return False
     mass_model = record["id"].split("/")[1]
     doubled = record["id"].split("/")[4].startswith("cert_doubled")
-    return record["proposals"] == budgets[mass_model] * (2 if doubled else 1)
+    return record.get("proposals") == budgets[mass_model] * (2 if doubled else 1)
 
 
 def progress(protocol, out_dir, stage="development"):
@@ -2410,8 +2637,8 @@ def main(argv=None):
     parser.add_argument("--out", type=Path, default=None, help="run directory")
     parser.add_argument(
         "--parts",
-        default="updater,reference,certification",
-        help="comma list of updater, reference, certification",
+        default="updater,precision,reference,certification",
+        help="comma list of updater, precision, reference, certification",
     )
     parser.add_argument(
         "--shard", default="0/1", help="i/n: run every n-th unit from i"
@@ -2470,16 +2697,55 @@ def run_stage(protocol, args):
     entry["protocol_budgets"] = budgets_match_protocol(protocol, budgets)
     entry["shard"] = args.shard
     entry["finished"] = None
-    write_manifest(args.out, shard, entry)
     executor = UnitExecutor(protocol, budgets, chunk=args.chunk)
-    counts = run_units(
-        units, args.out, shard, executor, log=lambda m: print(m, flush=True)
-    )
+
+    def compatible(record):
+        return record.get("run_hash") == executor.run_hash and record_at_budgets(
+            budgets, record
+        )
+
+    try:
+        counts = run_units(
+            units,
+            args.out,
+            shard,
+            _ManifestFirst(executor, args.out, shard, entry),
+            log=lambda m: print(m, flush=True),
+            compatible=compatible,
+        )
+    except IncompatibleRunError as err:
+        raise SystemExit(f"refusing to resume: {err}") from None
     import datetime
 
     entry.update(counts, finished=datetime.datetime.now(datetime.UTC).isoformat())
     write_manifest(args.out, shard, entry)
     print(json.dumps(counts))
+
+
+class _ManifestFirst:
+    """Executor wrapper that writes the manifest entry once, before any unit.
+
+    The entry goes in after the compatibility check (a refused directory is
+    left untouched) and before the first unit, so a killed run still leaves
+    its provenance.
+    """
+
+    def __init__(self, execute, out_dir, shard, entry):
+        """Wrap ``execute``; write ``entry`` on the first call."""
+        self.execute, self.out_dir, self.shard, self.entry = (
+            execute,
+            out_dir,
+            shard,
+            entry,
+        )
+        self.written = False
+
+    def __call__(self, unit):
+        """Write the manifest entry if not yet written, then run ``unit``."""
+        if not self.written:
+            write_manifest(self.out_dir, self.shard, self.entry)
+            self.written = True
+        return self.execute(unit)
 
 
 if __name__ == "__main__":
