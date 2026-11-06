@@ -1616,6 +1616,7 @@ def manifest_entry(protocol, args, budgets):
         "protocol_commit": protocol_commit(),
         "protocol_status": protocol["status"],
         "protocol_hash": declaration_hash(protocol),
+        "run_hash": run_hash(protocol),
         "code_commit": head,
         "code_dirty": dirty,
         "jax": jax.__version__,
@@ -1649,6 +1650,26 @@ def protocol_budgets(
     }
 
 
+def run_hash(protocol):
+    """Hash of the protocol content that determines what a work unit computes.
+
+    Excludes the status, the grading criteria, the provisional list, the
+    stated values, the limits and the reference budgets (a record carries its
+    own budget, checked separately), so freezing or re-sizing the block does
+    not orphan development records, while a change to the regimes, the model
+    pairs, the seeds, the kernel or the reference method does.
+    """
+    import copy
+
+    body = copy.deepcopy(protocol)
+    for key in ("status", "criteria", "provisional", "stated", "limits", "compute"):
+        body.pop(key, None)
+    for pair in ("ti_window", "physical_fixed"):
+        for key in ("proposals_per_fit", "max_proposals_per_fit"):
+            body.get("reference", {}).get(pair, {}).pop(key, None)
+    return declaration_hash(body)
+
+
 def budgets_match_protocol(protocol, budgets):
     """Whether a run's budgets are the protocol's (overrides make it a test run)."""
     return budgets == protocol_budgets(protocol)
@@ -1673,6 +1694,7 @@ class UnitExecutor:
         self.visibility = visibility_mas(protocol)
         self._compiled = set()
         self._physical_rows = None
+        self.run_hash = run_hash(protocol)
 
     def __call__(self, unit):
         """Run one unit and return its record (``seconds`` included)."""
@@ -1691,6 +1713,7 @@ class UnitExecutor:
         else:
             record = self.reference_unit(unit, world)
         record["seconds"] = time.perf_counter() - start
+        record["run_hash"] = self.run_hash
         return record
 
     def _pit_v(self, unit, epoch_count):
@@ -2212,6 +2235,15 @@ def freeze_report(protocol, path, exact_path=None):
         units, duplicates = load_units(path)
         if duplicates:
             reasons.append(f"{len(duplicates)} duplicate unit records (first kept)")
+        current = run_hash(protocol)
+        stale = sum(r.get("run_hash") != current for r in units.values())
+        if stale:
+            hashes = sorted({str(r.get("run_hash")) for r in units.values()})
+            reasons.append(
+                f"{stale} records were run under another protocol content "
+                f"(run hashes {hashes}, current {current}); rerun them into a "
+                "fresh directory"
+            )
         off_budget = sorted(
             {
                 (r.get("kind"), r.get("particles", r.get("proposals")))
@@ -2243,6 +2275,13 @@ def freeze_report(protocol, path, exact_path=None):
         units = None
         summary = json.loads(path.read_text())
         missing = []
+    if missing and units:
+        # For information only: the certification statistics of whatever
+        # records exist, bounded by the provisional delta2.
+        provisional = protocol["criteria"]["alias_accuracy"]["delta2"]
+        report["certification_partial_vs_provisional_delta2"] = certify_references(
+            protocol, units, provisional
+        )
     if not missing:
         try:
             alias = freeze_alias(protocol, summary)
