@@ -32,7 +32,9 @@ from photomancy.orbit.updater import (  # noqa: E402
     UpdaterRecord,
     UpdaterStatus,
     _alias_step,
+    _collapsed_accept,
     _collapsed_step,
+    _epoch_lattice,
     _linear_gaussian,
     _metropolis_step,
     _rest_log_prior,
@@ -381,34 +383,69 @@ class _NoJacobianTI(ThieleInnesTarget):
         return new, 0.0
 
 
-@pytest.mark.medium
-def test_alias_jump_leaves_tempered_ti_posterior_invariant():
-    """Alias jumps keep exact draws exact; the Jacobian is load-bearing.
+class _PositiveJumpTI(ThieleInnesTarget):
+    """Mutant that only ever jumps up in frequency (an asymmetric proposal)."""
 
-    Target: the TI model truncated to periods of 50 to 500 days (the
-    multi-revolution regime), records of an 80-day orbit at 0, 365 and 730
-    days with 5 mas errors, the last at temperature 0.5. Epochs on a 365-day
-    lattice make the period aliases f + k / 365 exact likelihood copies, so
-    the posterior has separated period modes from 55 to about 200 days.
-    Exact draws come from a collapsed importance sampler (2^21 draws, Kish
-    ESS about 28,000) resampled to N = 4000 (errors as in the collapsed-move
-    test). One jump accepts about 9 percent of proposals. Eight alias jumps
-    alone, which must move at least 20 percent of the draws to another
-    alias, keep every mean and
-    variance within 4 errors; a mutant that drops the map's Jacobian f / f'
-    drifts in ln P by more than 4. On a lattice whose anchor differs from
-    t_ref, jumps by k and -k are inverse with opposite log Jacobians and
-    leave the predictions at every lattice epoch unchanged; a jump to a
-    negative frequency is non-finite. Fails if the alias ratio omits or
-    inverts the Jacobian, the phase shift breaks the lattice, the proposal is
-    not reversible, or the redraw of the TI constants uses the wrong
-    conditional.
+    def alias_jump(self, theta, k, spacing, t_anchor):
+        return super().alias_jump(theta, jnp.abs(k), spacing, t_anchor)
+
+
+class _NoTrefPhaseTI(ThieleInnesTarget):
+    """Mutant whose phase shift leaves ``t_ref`` out (k t_anchor / spacing)."""
+
+    def alias_jump(self, theta, k, spacing, t_anchor):
+        new, log_jac = super().alias_jump(theta, k, spacing, t_anchor)
+        return new.at[2].set(jnp.mod(theta[2] + k * t_anchor / spacing, 1.0)), log_jac
+
+
+def _alias_step_without_marginal(
+    key, particles, aux, log_marginal, target, records, weights, select, rest
+):
+    """Mutant alias step that assumes Z(u') = Z(u) (true on a lattice only)."""
+    k_mag, k_sign, k_draw, k_acc = jax.random.split(key, 4)
+    n = particles.shape[0]
+    spacing, t_anchor = _epoch_lattice(records)
+    magnitude = jax.random.randint(k_mag, (n,), 1, target.alias_k_max(spacing) + 1)
+    sign = jnp.where(jax.random.bernoulli(k_sign, 0.5, (n,)), 1, -1)
+    k = (sign * magnitude).astype(float)
+    moved, log_jac = jax.vmap(
+        lambda theta, kk: target.alias_jump(theta, kk, spacing, t_anchor)
+    )(particles, k)
+    log_z = jax.vmap(lambda t: _linear_gaussian(target, t, records, weights)[2])(moved)
+    cancel = jnp.where(jnp.isfinite(log_z), log_z - log_marginal, jnp.inf)
+    return _collapsed_accept(
+        k_draw,
+        k_acc,
+        particles,
+        aux,
+        log_marginal,
+        moved,
+        log_jac - cancel,
+        target,
+        records,
+        weights,
+        select,
+        rest,
+    )
+
+
+def _alias_case(offset):
+    """A TI posterior with separated period aliases and its exact draws.
+
+    The TI model is truncated to periods of 50 to 500 days (the
+    multi-revolution regime) with ``t_ref`` = 150 days; records of an 80-day
+    orbit at 0, 365 and 730 + ``offset`` days with 5 mas errors, the last at
+    temperature 0.5. Exact draws come from a collapsed importance sampler
+    (2^21 draws) resampled to N = 4000. Returns the model, records, weights,
+    selection, the exact draws and ``run(alias_target, step, rest)``, which
+    applies eight alias steps to the exact draws and returns the result and
+    the mean acceptance rate.
     """
-    model = TIBasisModel(lnP_hi=math.log(500.0))
+    model = TIBasisModel(lnP_hi=math.log(500.0), t_ref=150.0)
     target = ThieleInnesTarget(model)
     sigma, beta, n = 0.005, 0.5, 4000
     truth = jnp.array([0.2, math.log(80.0), 0.3, 0.3, -0.2, 0.1, 0.35])
-    times = jnp.array([0.0, 365.0, 730.0])
+    times = jnp.array([0.0, 365.0, 730.0 + offset])
     ra, dec = target.predict(truth, times)
     noise = sigma * jax.random.normal(jax.random.key(1), (2, 3))
     records = RelativeAstromData(
@@ -424,9 +461,10 @@ def test_alias_jump_leaves_tempered_ti_posterior_invariant():
     select = jnp.array([False, False, True])
     weights = jnp.array([1.0, 1.0, beta])
     ref = _exact_ti_draws(target, records, select, beta, n, pool=2**21, collapsed=True)
-    assert ref.ess > 10_000
 
-    def run(alias_target):
+    def run(alias_target, step=_alias_step, rest=None):
+        rest = rest or (lambda t: _rest_log_prior(alias_target, t))
+
         @jax.jit
         def go(x):
             def evaluate(theta):
@@ -440,7 +478,7 @@ def test_alias_jump_leaves_tempered_ti_posterior_invariant():
 
             def body(i, carry):
                 x, aux, log_z, acc = carry
-                x, aux, log_z, a = _alias_step(
+                x, aux, log_z, a = step(
                     jax.random.fold_in(_key(6), i),
                     x,
                     aux,
@@ -449,7 +487,7 @@ def test_alias_jump_leaves_tempered_ti_posterior_invariant():
                     records,
                     weights,
                     select,
-                    lambda t: _rest_log_prior(alias_target, t),
+                    rest,
                 )
                 return x, aux, log_z, acc + jnp.mean(a)
 
@@ -459,15 +497,53 @@ def test_alias_jump_leaves_tempered_ti_posterior_invariant():
         x, acc = go(ref.start)
         return np.asarray(x), float(acc)
 
+    def z_lnp(x):
+        return (x[:, 1].mean() - ref.ref_m[1]) / np.sqrt(ref.ref_var[1] * ref.factor)
+
+    return model, target, ref, run, z_lnp
+
+
+@pytest.mark.medium
+def test_alias_jump_leaves_tempered_ti_posterior_invariant_on_a_lattice():
+    """Alias jumps keep exact draws exact; Jacobian, symmetry, window, phase.
+
+    Case: :func:`_alias_case` with epochs on a 365-day lattice, so the
+    aliases f + k / 365 are exact likelihood copies and the posterior has
+    separated period modes from 55 to about 200 days (Kish ESS about 27,000;
+    errors as in the collapsed-move test). Eight alias jumps (about 11
+    percent accepted) must move at least 20 percent of the draws and keep
+    every mean and variance within 4 errors (measured 2.3). Mutants, each
+    measured far beyond its threshold: dropping the Jacobian f / f' drifts ln
+    P by more than 4 errors (7.8); proposing only upward jumps (an asymmetric
+    k) by more than 10 (29); dropping the implied-mass window from the
+    acceptance puts more than 20 percent of draws outside it (42 percent);
+    leaving ``t_ref`` out of the phase shift breaks the lattice copies, so
+    fewer than half as many jumps are accepted (1.5 percent). On a lattice
+    whose anchor differs from ``t_ref``, jumps by k and -k are inverse with
+    opposite log Jacobians and leave the predictions at every lattice epoch
+    unchanged (the ``t_ref`` mutant does not); a jump to a negative frequency
+    is non-finite. Fails if the alias ratio omits or inverts the Jacobian,
+    the k proposal is not symmetric, the window is not enforced, the phase
+    shift omits ``t_ref`` or breaks the lattice, or the redraw of the TI
+    constants uses the wrong conditional.
+    """
+    model, target, ref, run, z_lnp = _alias_case(0.0)
+    assert ref.ess > 10_000
     jumped, acc = run(target)
     assert np.mean(np.abs(jumped[:, 1] - np.asarray(ref.start)[:, 1]) > 1e-9) > 0.2
     assert ref.max_z(jumped) < 4.0
-    mutant = _NoJacobianTI(model)
-    no_jacobian, _ = run(mutant)
-    z_lnp = (no_jacobian[:, 1].mean() - ref.ref_m[1]) / np.sqrt(
-        ref.ref_var[1] * ref.factor
-    )
-    assert abs(z_lnp) > 4.0, (acc, z_lnp)
+    assert abs(z_lnp(run(_NoJacobianTI(model))[0])) > 4.0
+    assert abs(z_lnp(run(_PositiveJumpTI(model))[0])) > 10.0
+
+    def box_only(theta):
+        inside = (theta[0] > 0.0) & (theta[0] < model.e_max)
+        inside &= (theta[1] > model.lnP_lo) & (theta[1] < model.lnP_hi)
+        return jnp.where(inside, 0.0, -jnp.inf)
+
+    no_window = run(target, rest=box_only)[0]
+    inside = jax.vmap(target.log_prior)(jnp.asarray(no_window))
+    assert float(jnp.mean(jnp.isfinite(inside))) < 0.8
+    assert run(_NoTrefPhaseTI(model))[1] < 0.5 * acc
 
     theta = ORBIT_CASES["ti"][1]
     lattice = 37.0 + 365.0 * jnp.arange(3.0)
@@ -481,6 +557,32 @@ def test_alias_jump_leaves_tempered_ti_posterior_invariant():
         np.testing.assert_allclose(
             target.predict(new, lattice), target.predict(theta, lattice), atol=1e-12
         )
+    mutant = _NoTrefPhaseTI(model).alias_jump(theta, 1.0, 365.0, 37.0)[0]
+    shift = np.abs(
+        np.subtract(target.predict(mutant, lattice), target.predict(theta, lattice))
+    )
+    assert shift.max() > 1e-3
+
+
+@pytest.mark.medium
+def test_alias_jump_reweights_by_the_marginal_off_the_lattice():
+    """Off the lattice the alias ratio must carry Z(u') / Z(u).
+
+    Case: :func:`_alias_case` with the last epoch 20 days off the 365-day
+    lattice, so an alias is no longer a likelihood copy and the marginal
+    likelihood changes under the jump (Kish ESS about 14,000). Eight alias
+    jumps (about 3 percent accepted) must move at least 10 percent of the
+    draws and keep every mean and variance within 4 errors (measured 1.5); a
+    mutant that assumes Z(u') = Z(u), exact only on a lattice, drifts ln P by
+    more than 6 errors (17). Fails if the alias step omits or stales the
+    marginal-likelihood correction.
+    """
+    _, target, ref, run, z_lnp = _alias_case(20.0)
+    assert ref.ess > 5_000
+    jumped, _ = run(target)
+    assert np.mean(np.abs(jumped[:, 1] - np.asarray(ref.start)[:, 1]) > 1e-9) > 0.1
+    assert ref.max_z(jumped) < 4.0
+    assert abs(z_lnp(run(target, step=_alias_step_without_marginal)[0])) > 6.0
 
 
 class _PriorMovesUpdater(OrbitUpdater):
