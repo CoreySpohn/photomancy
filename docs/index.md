@@ -110,6 +110,14 @@ how-to/migrate-sky-convention
 
 ```{toctree}
 :maxdepth: 1
+:caption: Validation
+:hidden:
+
+updater-protocol
+```
+
+```{toctree}
+:maxdepth: 1
 :caption: Examples
 :hidden:
 
