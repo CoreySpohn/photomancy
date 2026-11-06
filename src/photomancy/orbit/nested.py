@@ -28,8 +28,7 @@ from numpyro.infer.reparam import Reparam
 from numpyro.infer.util import log_density
 
 from photomancy.backends.nested import _to_jaxns_prior
-from photomancy.orbit.data import OrbitData
-from photomancy.orbit.model import build_model
+from photomancy.orbit._numpyro_bridge import _build_orbit_model
 from photomancy.posterior import SamplePosterior
 from photomancy.priors import Uniform
 
@@ -46,7 +45,8 @@ class OrbitNestedPosterior(SamplePosterior):
     ``evidence_tolerance``), ``weight_ess`` (Kish ESS before resampling),
     ``num_iterations`` (jaxns goal iterations), ``num_distinct`` (distinct
     physical rows after resampling), and the jaxns ``termination_reason``.
-    A hard stop, including exhausted storage, is not convergence.
+    ``converged`` evaluates the evidence criterion independently of the stopping
+    reason; it can be true even when storage is exhausted at the same boundary.
 
     References:
         Skilling (2006), Bayesian Analysis 1(4), 833-859 (nested evidence).
@@ -129,17 +129,20 @@ def orbit_nested_sampling(
             :class:`~photomancy.orbit.data.PMAnomalyData`, or ``None``.
         null_data: A :class:`~photomancy.orbit.data.NullData`, or ``None``.
         imaging_data: An :class:`~photomancy.orbit.data.ImagingData`, or ``None``.
-        custom_loglike: JAX-compatible ``params -> scalar`` data log-likelihood,
-            using the same :func:`~photomancy.orbit.model.build_model` route as
+        custom_loglike: JAX-compatible ``params -> scalar`` data log-likelihood
+            with no prior terms (default None). Vector returns raise ValueError.
+            Uses the same :func:`~photomancy.orbit.model.build_model` route as
             :func:`~photomancy.orbit.inference.build_orbit_logdensity`. Receives
             physical orbit and planet-scale parameters, ``Ms``, ``dist_pc`` and
             ``custom_data``. No term is added for an absent built-in channel.
-        custom_data: Pytree bound into ``params["custom_data"]`` in the callback.
+        custom_data: Pytree bound into ``params["custom_data"]`` in the callback
+            (default None). Array leaves must support JAX transformations.
         sample_planet_scale: Sample ``log_Rp``, ``log_Ag`` and ``log_Mp`` even
             without built-in data, allowing prior-only fits. Custom likelihoods
             also activate these sites. Default False.
         allow_overlap: Explicitly permit built-in channels with a custom
-            likelihood. Default False to prevent silent double counting.
+            likelihood. Default False; combining them otherwise raises ValueError.
+            With True, all supplied likelihood terms are added.
         log_P_range: ``(min, max)`` for the ``log10(period/days)`` prior.
         log_Mp_range: ``(min, max)`` for the ``log10(mass/M_earth)`` prior.
         log_Rp_range: ``(min, max)`` for the ``log10(Rp/AU)`` prior.
@@ -173,14 +176,16 @@ def orbit_nested_sampling(
         raise ValueError("orbit_nested_sampling requires a PRNG key.")
     if not 0.0 < evidence_tolerance < 1.0:
         raise ValueError("evidence_tolerance must lie in (0, 1).")
-    model = build_model(
+    model, model_args, _ = _build_orbit_model(
+        Ms,
+        dist_pc,
         n_planets=1,
-        has_rv=rv_data is not None,
-        has_relative_astrom=relative_astrom_data is not None,
-        has_stellar_astrom=stellar_astrom_data is not None,
-        has_pm_anomaly=pm_anomaly_data is not None,
-        has_null=null_data is not None,
-        has_imaging=imaging_data is not None,
+        rv_data=rv_data,
+        relative_astrom_data=relative_astrom_data,
+        stellar_astrom_data=stellar_astrom_data,
+        pm_anomaly_data=pm_anomaly_data,
+        null_data=null_data,
+        imaging_data=imaging_data,
         custom_loglike=custom_loglike,
         custom_data=custom_data,
         sample_planet_scale=sample_planet_scale,
@@ -192,19 +197,10 @@ def orbit_nested_sampling(
         ecc_prior=ecc_prior,
         jitter_scale=jitter_scale,
     )
+    from jaxns.algorithm.depth import _depth_condition_reached
     from jaxns.core import NestedSampler
     from jaxns.depth_condition import DepthCondition
     from jaxns.model import Model
-
-    data = OrbitData(
-        rv=rv_data,
-        relative_astrom=relative_astrom_data,
-        stellar_astrom=stellar_astrom_data,
-        pm_anomaly=pm_anomaly_data,
-        null=null_data,
-        imaging=imaging_data,
-    )
-    model_args = (Ms, dist_pc, data)
 
     trace_key, run_key, sample_key, predict_key = jax.random.split(key, 4)
     prototype = trace(seed(model, trace_key)).get_trace(*model_args)
@@ -242,6 +238,7 @@ def orbit_nested_sampling(
     )
     state = ns.run(key=run_key, args=model_args)
     results = state.to_result().trim()
+    converged = _depth_condition_reached(state, ns.depth_condition)
     unit_draws = results.resample(num_samples, key=sample_key).X_samples
     unit_draws = {
         f"{name}_base": jnp.reshape(unit_draws[f"{name}_base"], (num_samples, *shape))
@@ -266,7 +263,7 @@ def orbit_nested_sampling(
         diagnostics=dict(
             log_evidence=jnp.asarray(results.log_Z_mean),
             log_evidence_error=jnp.asarray(results.log_Z_uncert),
-            converged=jnp.asarray(results.termination_reason == 0),
+            converged=jnp.asarray(converged),
             weight_ess=jnp.asarray(results.ess),
             num_iterations=jnp.asarray(state.goal_loop_iter),
             num_distinct=jnp.asarray(jnp.unique(samples, axis=0).shape[0]),

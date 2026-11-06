@@ -37,6 +37,65 @@ from photomancy.orbit.model import build_model
 _MODEL_CACHE: dict[tuple, dict] = {}
 
 
+def _build_orbit_model(
+    Ms,
+    dist_pc,
+    *,
+    rv_data=None,
+    relative_astrom_data=None,
+    stellar_astrom_data=None,
+    pm_anomaly_data=None,
+    null_data=None,
+    imaging_data=None,
+    custom_loglike=None,
+    custom_data=None,
+    sample_planet_scale=False,
+    allow_overlap=False,
+    seed=0,
+    **prior_config,
+):
+    """Share model construction, channel flags and padding across inference routes.
+
+    Return the model, its bound arguments, and cached trace metadata when safe.
+    Custom closures bypass the shared cache because its key contains neither
+    the callback nor its data.
+    """
+    data = OrbitData(
+        rv=rv_data,
+        relative_astrom=relative_astrom_data,
+        stellar_astrom=stellar_astrom_data,
+        pm_anomaly=pm_anomaly_data,
+        null=null_data,
+        imaging=imaging_data,
+    )
+    model_config = dict(
+        has_rv=data.rv is not None,
+        has_relative_astrom=data.relative_astrom is not None,
+        has_stellar_astrom=data.stellar_astrom is not None,
+        has_pm_anomaly=data.pm_anomaly is not None,
+        has_null=data.null is not None,
+        has_imaging=data.imaging is not None,
+        **prior_config,
+    )
+    if custom_loglike is not None or sample_planet_scale:
+        model = build_model(
+            **model_config,
+            custom_loglike=custom_loglike,
+            custom_data=custom_data,
+            sample_planet_scale=sample_planet_scale,
+            allow_overlap=allow_overlap,
+        )
+        cached = None
+    else:
+        cached = _get_or_build_cached(
+            **model_config,
+            n_inst=rv_data.n_inst if rv_data is not None else 1,
+            seed=seed,
+        )
+        model = cached["model"]
+    return model, (Ms, dist_pc, data.padded()), cached
+
+
 def _cache_key(
     has_rv,
     has_relative_astrom,

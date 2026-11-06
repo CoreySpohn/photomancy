@@ -26,6 +26,36 @@ matched to its job:
   parameters. The design matrix stays well conditioned at any eccentricity;
   the classical angles are extracted only afterwards.
 
+## Custom likelihoods and planet scales
+
+{py:func}`~photomancy.orbit.model.build_model`,
+{py:func}`~photomancy.orbit.inference.build_orbit_logdensity`, and
+{py:func}`~photomancy.orbit.nested.orbit_nested_sampling` accept the same
+custom-likelihood and planet-scale arguments:
+
+- `custom_loglike=None`: a JAX-compatible callable taking one parameter dictionary
+  and returning a scalar data log-likelihood without prior terms. It runs once
+  per model evaluation, including for multiple planets. The dictionary contains
+  `T`, `tp` (days), `a`, `Rp` (AU), `Mp`, `Ms` (kg), `dist_pc` (parsec), `e`,
+  `cos_i`, `W`, `M0` (radians), `cos_w`, `sin_w`, `Ag`, and
+  `Lambda = Ag * Rp**2`. Planet parameters are scalars for one planet and vectors
+  for multiple planets. Nested sampling currently fits one planet.
+- `custom_data=None`: a pytree available as `params["custom_data"]` inside the
+  callback. Use array leaves that support the callback's JAX transformations.
+  Custom fits use separate model traces so their bound data stay isolated.
+- `sample_planet_scale=False`: activate independent uniform priors on `log_Rp`,
+  `log_Ag`, and `log_Mp` even without built-in observations. A custom likelihood
+  activates these sites automatically. With no likelihood this is a prior-only
+  fit. The ranges are set by `log_Rp_range` (`log10(Rp/AU)`), `log_Ag_range`
+  (`log10(Ag)`), and `log_Mp_range` (`log10(Mp/M_earth)`).
+- `allow_overlap=False`: reject custom likelihoods combined with any supplied
+  built-in channel. Set True explicitly to add all supplied likelihood terms.
+  Absent built-in channels contribute no likelihood terms.
+
+The log-density and nested-sampling entry points share model and data
+construction. Nested posteriors retain `Rp`, `Ag`, and `Lambda` when active;
+conversion to unconstrained coordinates preserves the sampled radius and albedo.
+
 ## The geometry of the circular limit
 
 The classical pair $(e, \omega)$ degenerates as $e \to 0$: the argument of

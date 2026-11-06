@@ -1,12 +1,20 @@
 """End-to-end custom likelihood inference across independent sampler routes."""
 
+from dataclasses import replace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+import numpyro
+import numpyro.distributions as dist
 import pytest
 from hwoutils.constants import Msun2kg
+from jaxctx import ScopedDict, transform
 
 from photomancy.backends import NUTSBackend
+from photomancy.orbit import _numpyro_bridge
+from photomancy.orbit import inference as inference_module
+from photomancy.orbit import nested as nested_module
 from photomancy.orbit.data import NullData, RelativeAstromData
 from photomancy.orbit.inference import build_orbit_logdensity
 from photomancy.orbit.nested import orbit_nested_sampling
@@ -14,12 +22,173 @@ from photomancy.posterior import SamplePosterior
 
 jax.config.update("jax_enable_x64", True)
 
+from jaxns.algorithm.depth import _depth_condition_reached  # noqa: E402
+from jaxns.algorithm.initialisation import _build_init_state  # noqa: E402
+from jaxns.core import NestedSampler  # noqa: E402
+
 
 def _toy_loglike(params):
     """Independent Gaussian observations of log radius and log albedo."""
     data = params["custom_data"]
     x = jnp.array([jnp.log10(params["Rp"]), jnp.log10(params["Ag"])])
     return -0.5 * jnp.sum(((x - data["mean"]) / data["sigma"]) ** 2)
+
+
+@pytest.fixture
+def capped_nested_run(monkeypatch):
+    """Isolate diagnostics with a one-site model and a real jaxns root state.
+
+    The full orbit model is covered by the sampler integration test below;
+    fixed radius roots avoid compiling the unrelated constrained sampler.
+    """
+
+    def build_diagnostic_model(**config):
+        def model(Ms, dist_pc, data):
+            log_rp = numpyro.sample("log_Rp", dist.Uniform(-5.0, -2.5).expand((1,)))
+            params = {"Rp": 10.0**log_rp, "Ag": jnp.full(1, 0.2)}
+            params["Lambda"] = params["Ag"] * params["Rp"] ** 2
+            for name in ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp"):
+                numpyro.deterministic(name, jnp.zeros(1))
+            for name, value in params.items():
+                numpyro.deterministic(name, value)
+            numpyro.factor(
+                "ll_custom",
+                config["custom_loglike"](
+                    {k: jnp.squeeze(v) for k, v in params.items()}
+                    | {"custom_data": config["custom_data"]}
+                ),
+            )
+
+        return model
+
+    monkeypatch.setattr(_numpyro_bridge, "build_model", build_diagnostic_model)
+    # The old independent path must receive the same reduced model as well.
+    monkeypatch.setattr(
+        nested_module, "build_model", build_diagnostic_model, raising=False
+    )
+    captured = {}
+
+    def capture(self, *, key, args):
+        unit = jnp.linspace(0.1, 0.9, 8, dtype=jnp.float32)[:, None]
+        log_radius = -5.0 + 2.5 * unit[:, 0].astype(jnp.float64)
+        loglike = -0.5 * ((log_radius + 3.8) ** 2 + (jnp.log10(0.2) + 0.8) ** 2)
+        state = _build_init_state(
+            self.model,
+            args,
+            None,
+            ScopedDict({"log_Rp_base": unit}),
+            loglike,
+            jnp.ones(8, dtype=jnp.int64),
+            sample_capacity=8,
+            num_phantom=0,
+        )
+        state = replace(state, termination_reason=jnp.array(1))
+        captured.update(state=state, condition=self.depth_condition)
+        return state
+
+    monkeypatch.setattr(NestedSampler, "run", capture)
+    post = orbit_nested_sampling(
+        Msun2kg,
+        10.0,
+        custom_loglike=_toy_loglike,
+        custom_data={"mean": jnp.array([-3.8, -0.8]), "sigma": jnp.ones(2)},
+        ecc_prior="disk",
+        num_live_points=8,
+        max_samples=8,
+        num_samples=16,
+        evidence_tolerance=0.9,
+        key=jax.random.key(0),
+    )
+    return post, captured["state"], captured["condition"]
+
+
+def test_nested_convergence_evaluates_evidence_at_storage_cap(capped_nested_run):
+    """Fails for the termination-code-only convergence mutant.
+
+    The existing capped test covers a cap before convergence, not a simultaneous
+    cap and satisfied evidence criterion. Eight roots suffice for this boundary.
+    """
+    post, state, condition = capped_nested_run
+    assert int(state.num_samples) == 8
+    assert int(post.diagnostics["termination_reason"]) != 0
+    assert bool(_depth_condition_reached(state, condition))
+    assert bool(post.diagnostics["converged"])
+
+
+def test_nested_weight_ess_uses_importance_weights_before_resampling(capped_nested_run):
+    """Fails for the ESS-after-resampling mutant with uniform posterior weights.
+
+    Replaces the range-only ESS guard with equality to the raw Kish ESS.
+    """
+    post, state, _ = capped_nested_run
+    log_importance_weights = state.to_result().trim().log_dp
+    expected = 1.0 / jnp.sum(jax.nn.softmax(log_importance_weights) ** 2)
+    np.testing.assert_allclose(post.diagnostics["weight_ess"], expected, rtol=1e-13)
+    assert float(expected) < 8.0
+    assert float(expected) != pytest.approx(len(post.samples))
+
+
+def test_nested_and_logdensity_share_model_construction(monkeypatch):
+    """Fails for the independent-construction mutant even when densities agree.
+
+    Also retains the 7e-15 density agreement guard after the cube Jacobian.
+    Stops before sampling so construction has a unit-test compile budget.
+    """
+    constructed = []
+    build = _numpyro_bridge._build_orbit_model
+
+    def record_build(*args, **kwargs):
+        kwargs.setdefault("seed", 0)
+        constructed.append((args, kwargs))
+        return build(*args, **kwargs)
+
+    captured = {}
+
+    class ConstructionCaptured(Exception):
+        pass
+
+    def capture_run(self, *, key, args):
+        captured.update(model=self.model, args=args)
+        raise ConstructionCaptured
+
+    monkeypatch.setattr(
+        inference_module, "_build_orbit_model", record_build, raising=False
+    )
+    monkeypatch.setattr(
+        nested_module, "_build_orbit_model", record_build, raising=False
+    )
+    monkeypatch.setattr(NestedSampler, "run", capture_run)
+    config = dict(
+        custom_loglike=_toy_loglike,
+        custom_data={"mean": jnp.array([-3.8, -0.8]), "sigma": jnp.ones(2)},
+        sample_planet_scale=True,
+        log_P_range=(2.0, 3.0),
+        log_Mp_range=(-1.0, 2.0),
+        log_Rp_range=(-4.5, -3.0),
+        log_Ag_range=(-1.8, -0.1),
+        ecc_prior="disk",
+    )
+    problem = build_orbit_logdensity(Msun2kg, 10.0, **config)
+    with pytest.raises(ConstructionCaptured):
+        orbit_nested_sampling(Msun2kg, 10.0, **config, key=jax.random.key(0))
+    assert len(constructed) == 2
+    assert constructed[0] == constructed[1]
+    z = jnp.linspace(-0.7, 0.8, len(problem.param_names))
+    unit = {
+        f"{name}_base": jax.nn.sigmoid(raw).reshape(-1)
+        for name, raw in problem.unflatten(z).items()
+    }
+    cube_loglike = (
+        transform(captured["model"].prior_model, base_dtype=jnp.float64)
+        .apply(None, {"U": ScopedDict(unit)}, *captured["args"])
+        .fn_val
+    )
+    # All priors in this disk-eccentricity model are uniform: their widths
+    # cancel the support transforms, leaving the logistic cube Jacobian.
+    log_jac = jnp.sum(jax.nn.log_sigmoid(z) + jax.nn.log_sigmoid(-z))
+    np.testing.assert_allclose(
+        problem.logdensity(z), cube_loglike + log_jac, rtol=0.0, atol=7e-15
+    )
 
 
 @pytest.mark.medium
@@ -77,7 +246,6 @@ def test_custom_nested_and_generic_backend_agree_with_gaussian_posterior():
         diag["log_evidence_error"]
     )
     assert float(diag["log_evidence_error"]) > 0
-    assert 1 < float(diag["weight_ess"]) <= 6000
     assert int(diag["num_iterations"]) > 0
     assert (
         int(diag["num_distinct"])
