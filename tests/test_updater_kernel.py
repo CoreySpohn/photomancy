@@ -7,6 +7,8 @@ two-epoch comparison with the Lambert importance reference.
 """
 
 import math
+from collections.abc import Callable
+from typing import NamedTuple
 
 import jax
 
@@ -29,6 +31,7 @@ from photomancy.orbit.updater import (  # noqa: E402
     ThieleInnesTarget,
     UpdaterRecord,
     UpdaterStatus,
+    _alias_step,
     _collapsed_step,
     _linear_gaussian,
     _metropolis_step,
@@ -148,6 +151,82 @@ def test_metropolis_step_leaves_known_densities_invariant():
     assert abs(np.exp(without).mean() - 1.0) > 8.0 * se_x
 
 
+class _ExactDraws(NamedTuple):
+    start: jax.Array
+    max_z: Callable
+    ref_m: np.ndarray
+    ref_var: np.ndarray
+    factor: float
+    ref_sd: np.ndarray
+    ess: float
+
+
+def _exact_ti_draws(target, records, select, beta, n, pool=2**22, collapsed=False):
+    """Exact draws of a tempered TI posterior and a moment check against them.
+
+    ``pool`` prior draws are importance-weighted by the tempered likelihood
+    (buffer at full weight, the ``select`` slot at ``beta``) and resampled to
+    ``n`` starting points. With ``collapsed``, the TI constants of each draw
+    are instead drawn from their conditional Gaussian and the weight is the
+    marginal likelihood times the window indicator, an exact importance
+    sampler whose efficiency does not degrade with tight errors.
+    ``max_z(x)`` is the largest standardized deviation of the means and
+    variances of e, ln P, the TI constants and the phase
+    (as cos and sin of 2 pi tau) of ``x`` from the weighted pool, each error
+    being ``sqrt(1/n + 1/ESS)`` times the i.i.d. one.
+    """
+
+    def log_weight(theta):
+        ll_rest, ll_new = target.log_likelihood_split(theta, records, select)
+        inside = jnp.isfinite(target.log_prior(theta))
+        return jnp.where(inside, ll_rest + beta * ll_new, -jnp.inf)
+
+    weights = jnp.where(select, beta, 1.0) * records.is_valid
+
+    def collapsed_draw(theta, z):
+        mean, chol, log_z, _, _ = _linear_gaussian(target, theta, records, weights)
+        c = mean + jax.scipy.linalg.solve_triangular(chol.T, z, lower=False)
+        theta = theta.at[3:].set(c)
+        return theta, jnp.where(jnp.isfinite(target.log_prior(theta)), log_z, -jnp.inf)
+
+    @jax.jit
+    def reference(key):
+        k_prior, k_lin = jax.random.split(key)
+        x = target.sample_prior(k_prior, pool)
+        chunks = x.reshape(64, -1, x.shape[1])
+        if collapsed:
+            z = jax.random.normal(k_lin, (64, pool // 64, 4))
+            x, log_w = jax.lax.map(lambda a: jax.vmap(collapsed_draw)(*a), (chunks, z))
+            x = x.reshape(-1, x.shape[-1])
+        else:
+            log_w = jax.lax.map(jax.vmap(log_weight), chunks)
+        return x, jax.nn.softmax(log_w.reshape(-1))
+
+    pool_x, w = (np.asarray(a) for a in reference(jax.random.key(0)))
+    ess = 1.0 / np.sum(w**2)
+    ref_sd = np.sqrt(w @ (pool_x - w @ pool_x) ** 2)
+    rng = np.random.default_rng(0)
+    start = jnp.asarray(pool_x[rng.choice(len(w), n, p=w / w.sum())])
+
+    def stats(x):
+        tau = 2.0 * np.pi * x[:, 2]
+        return np.column_stack([x[:, [0, 1, 3, 4, 5, 6]], np.cos(tau), np.sin(tau)])
+
+    ref_stats = stats(pool_x)
+    ref_m = w @ ref_stats
+    ref_var = w @ (ref_stats - ref_m) ** 2
+    m4 = w @ (ref_stats - ref_m) ** 4
+    factor = 1.0 / n + 1.0 / ess
+
+    def max_z(x):
+        out = stats(x)
+        z_mean = (out.mean(0) - ref_m) / np.sqrt(ref_var * factor)
+        z_var = (out.var(0) - ref_var) / np.sqrt((m4 - ref_var**2) * factor)
+        return max(np.max(np.abs(z_mean)), np.max(np.abs(z_var)))
+
+    return _ExactDraws(start, max_z, ref_m, ref_var, factor, ref_sd, ess)
+
+
 @pytest.mark.medium
 def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
     """Collapsed moves keep exact TI posterior draws exact; window and weight matter.
@@ -196,40 +275,9 @@ def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
     )
     select = jnp.array([False, True])
 
-    def log_weight(theta):
-        ll_rest, ll_new = target.log_likelihood_split(theta, records, select)
-        inside = jnp.isfinite(target.log_prior(theta))
-        return jnp.where(inside, ll_rest + beta * ll_new, -jnp.inf)
-
-    @jax.jit
-    def reference(key):
-        x = target.sample_prior(key, 2**22)
-        chunks = x.reshape(64, -1, x.shape[1])
-        log_w = jax.lax.map(jax.vmap(log_weight), chunks).reshape(-1)
-        return x, jax.nn.softmax(log_w)
-
-    pool, w = (np.asarray(a) for a in reference(jax.random.key(0)))
-    ess = 1.0 / np.sum(w**2)
-    assert ess > 30_000
-    ref_sd = np.sqrt(w @ (pool - w @ pool) ** 2)
-    rng = np.random.default_rng(0)
-    start = jnp.asarray(pool[rng.choice(len(w), n, p=w / w.sum())])
-
-    def stats(x):
-        tau = 2.0 * np.pi * x[:, 2]
-        return np.column_stack([x[:, [0, 1, 3, 4, 5, 6]], np.cos(tau), np.sin(tau)])
-
-    ref_stats = stats(pool)
-    ref_m = w @ ref_stats
-    ref_var = w @ (ref_stats - ref_m) ** 2
-    m4 = w @ (ref_stats - ref_m) ** 4
-    factor = 1.0 / n + 1.0 / ess
-
-    def max_z(x):
-        out = stats(x)
-        z_mean = (out.mean(0) - ref_m) / np.sqrt(ref_var * factor)
-        z_var = (out.var(0) - ref_var) / np.sqrt((m4 - ref_var**2) * factor)
-        return max(np.max(np.abs(z_mean)), np.max(np.abs(z_var)))
+    ref = _exact_ti_draws(target, records, select, beta, n)
+    assert ref.ess > 30_000
+    start, max_z, ref_sd = ref.start, ref.max_z, ref.ref_sd
 
     e_max, lnp_lo, lnp_hi = 0.9, math.log(50.0), math.log(5000.0)
 
@@ -323,6 +371,116 @@ def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
         np.testing.assert_allclose(log_z, log_z_now, rtol=1e-12, atol=1e-12)
         for cached, now in zip(aux, aux_now, strict=True):
             np.testing.assert_allclose(cached, now, rtol=1e-10, atol=1e-9)
+
+
+class _NoJacobianTI(ThieleInnesTarget):
+    """Mutant whose alias map reports a zero log Jacobian."""
+
+    def alias_jump(self, theta, k, spacing, t_anchor):
+        new, _ = super().alias_jump(theta, k, spacing, t_anchor)
+        return new, 0.0
+
+
+@pytest.mark.medium
+def test_alias_jump_leaves_tempered_ti_posterior_invariant():
+    """Alias jumps keep exact draws exact; the Jacobian is load-bearing.
+
+    Target: the TI model truncated to periods of 50 to 500 days (the
+    multi-revolution regime), records of an 80-day orbit at 0, 365 and 730
+    days with 5 mas errors, the last at temperature 0.5. Epochs on a 365-day
+    lattice make the period aliases f + k / 365 exact likelihood copies, so
+    the posterior has separated period modes from 55 to about 200 days.
+    Exact draws come from a collapsed importance sampler (2^21 draws, Kish
+    ESS about 28,000) resampled to N = 4000 (errors as in the collapsed-move
+    test). One jump accepts about 9 percent of proposals. Eight alias jumps
+    alone, which must move at least 20 percent of the draws to another
+    alias, keep every mean and
+    variance within 4 errors; a mutant that drops the map's Jacobian f / f'
+    drifts in ln P by more than 4. On a lattice whose anchor differs from
+    t_ref, jumps by k and -k are inverse with opposite log Jacobians and
+    leave the predictions at every lattice epoch unchanged; a jump to a
+    negative frequency is non-finite. Fails if the alias ratio omits or
+    inverts the Jacobian, the phase shift breaks the lattice, the proposal is
+    not reversible, or the redraw of the TI constants uses the wrong
+    conditional.
+    """
+    model = TIBasisModel(lnP_hi=math.log(500.0))
+    target = ThieleInnesTarget(model)
+    sigma, beta, n = 0.005, 0.5, 4000
+    truth = jnp.array([0.2, math.log(80.0), 0.3, 0.3, -0.2, 0.1, 0.35])
+    times = jnp.array([0.0, 365.0, 730.0])
+    ra, dec = target.predict(truth, times)
+    noise = sigma * jax.random.normal(jax.random.key(1), (2, 3))
+    records = RelativeAstromData(
+        times=times,
+        ra=ra + noise[0],
+        dec=dec + noise[1],
+        ra_err=jnp.full(3, sigma),
+        dec_err=jnp.full(3, sigma),
+        corr=jnp.zeros(3),
+        planet_id=jnp.zeros(3, dtype=int),
+        is_valid=jnp.ones(3, dtype=bool),
+    )
+    select = jnp.array([False, False, True])
+    weights = jnp.array([1.0, 1.0, beta])
+    ref = _exact_ti_draws(target, records, select, beta, n, pool=2**21, collapsed=True)
+    assert ref.ess > 10_000
+
+    def run(alias_target):
+        @jax.jit
+        def go(x):
+            def evaluate(theta):
+                lr, ln = alias_target.log_likelihood_split(theta, records, select)
+                return alias_target.log_prior(theta), lr, ln
+
+            aux = jax.vmap(evaluate)(x)
+            log_z = jax.vmap(
+                lambda t: _linear_gaussian(alias_target, t, records, weights)[2]
+            )(x)
+
+            def body(i, carry):
+                x, aux, log_z, acc = carry
+                x, aux, log_z, a = _alias_step(
+                    jax.random.fold_in(_key(6), i),
+                    x,
+                    aux,
+                    log_z,
+                    alias_target,
+                    records,
+                    weights,
+                    select,
+                    lambda t: _rest_log_prior(alias_target, t),
+                )
+                return x, aux, log_z, acc + jnp.mean(a)
+
+            x, _, _, acc = jax.lax.fori_loop(0, 8, body, (x, aux, log_z, 0.0))
+            return x, acc / 8
+
+        x, acc = go(ref.start)
+        return np.asarray(x), float(acc)
+
+    jumped, acc = run(target)
+    assert np.mean(np.abs(jumped[:, 1] - np.asarray(ref.start)[:, 1]) > 1e-9) > 0.2
+    assert ref.max_z(jumped) < 4.0
+    mutant = _NoJacobianTI(model)
+    no_jacobian, _ = run(mutant)
+    z_lnp = (no_jacobian[:, 1].mean() - ref.ref_m[1]) / np.sqrt(
+        ref.ref_var[1] * ref.factor
+    )
+    assert abs(z_lnp) > 4.0, (acc, z_lnp)
+
+    theta = ORBIT_CASES["ti"][1]
+    lattice = 37.0 + 365.0 * jnp.arange(3.0)
+    bad = target.alias_jump(theta, -1.0, 365.0, 37.0)[0]
+    assert not bool(jnp.all(jnp.isfinite(bad)))
+    for k in (1.0, 2.0, 5.0):
+        new, log_jac = target.alias_jump(theta, k, 365.0, 37.0)
+        back, back_jac = target.alias_jump(new, -k, 365.0, 37.0)
+        np.testing.assert_allclose(back, theta, rtol=0, atol=1e-12)
+        assert abs(float(log_jac + back_jac)) < 1e-12
+        np.testing.assert_allclose(
+            target.predict(new, lattice), target.predict(theta, lattice), atol=1e-12
+        )
 
 
 class _PriorMovesUpdater(OrbitUpdater):
