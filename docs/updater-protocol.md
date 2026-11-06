@@ -36,17 +36,18 @@ posterior an unbounded sampler would return.
   - A2: the definitions of the update statuses that count as failed updates
     ("Failed updates").
   - A3: the updater precision used by the alias freeze is measured from the
-    disagreement of the two independent-key runs, never from the kernel's own
-    ESS ("Provisional values").
+    spread of eight independent nominal-budget runs per development world,
+    estimated without bias in $1/n^2$, never from the kernel's own ESS
+    ("Provisional values").
   - A4: the run pairs of the certification checks and their critical value;
     for the exact checks, the repeat indices, the updater key, the reduced TI
     case's mass window and the sharper window bound ("Reference
     certification", "Exact checks", "Worlds, seeds and random numbers").
   - A5: the compute tally repriced at the measured cost of a whole update and
     of a reference fit (`compute`; "Compute").
-  - A6: how the references are executed in batches, and the records the
-    development runner writes ("Reference method and budget", "Development
-    runner").
+  - A6: how the references are executed in batches, the records the
+    development runner writes, and the provenance the runner and the freeze
+    enforce ("Reference method and budget", "Development runner").
 
 ## Parameter block
 
@@ -150,7 +151,9 @@ stated here under `stated`.
       "updater_doubled": 4, "reference_1": 5, "reference_2": 6,
       "reference_3": 7, "reference_4": 8, "pit": 9,
       "cert_doubled_1": 10, "cert_doubled_2": 11,
-      "cert_proposal_1": 12, "cert_proposal_2": 13, "exact_run": 14
+      "cert_proposal_1": 12, "cert_proposal_2": 13, "exact_run": 14,
+      "updater_rep_1": 15, "updater_rep_2": 16, "updater_rep_3": 17,
+      "updater_rep_4": 18, "updater_rep_5": 19, "updater_rep_6": 20
     },
     "simulation_seeds": {"sizing": 6, "alias_freeze": 7}
   },
@@ -368,9 +371,12 @@ mass model) with `tools/updater_tuning.py`; the record is
   phase so that the mean anomaly at every epoch of the lattice is unchanged
   modulo $2\pi$, and redraws the TI constants from their conditional Gaussian.
   The acceptance ratio carries the map's Jacobian $f/f'$, so the move is an
-  exact Metropolis-Hastings kernel for the rung's target
-  (`test_alias_jump_leaves_tempered_ti_posterior_invariant`, with a mutant
-  that drops the Jacobian). On the panel's equal-step cadences the jump leaves
+  exact Metropolis-Hastings kernel for the rung's target, on or off the
+  lattice (`test_alias_jump_leaves_tempered_ti_posterior_invariant_on_a_lattice`
+  and `test_alias_jump_reweights_by_the_marginal_off_the_lattice`, with a
+  nonzero `t_ref` and mutants that drop the Jacobian, propose only one sign
+  of $k$, drop the implied-mass window, omit $t_\mathrm{ref}$ from the phase
+  shift, or assume the marginal likelihood unchanged). On the panel's equal-step cadences the jump leaves
   every prediction unchanged and so crosses between period aliases; in R1 no
   alias lies inside the prior, so it is never accepted there.
 - **Residual spread.** On the R2 tuning worlds with 8 independent keys each
@@ -383,6 +389,15 @@ mass model) with `tools/updater_tuning.py`; the record is
   physical pair's precision is lower and more uneven (two-key ESS of the e
   bins as low as 9 in R3, where the eccentricity is near zero and the chart's
   angle is undefined); that too is what the panel measures.
+
+- **Tuning worlds are not held out.** The tuning worlds 0 to 5, with the same
+  `updater_a` and `updater_b` keys, also enter the 38-world freeze summaries
+  and the reference certification, so the development results on those six
+  worlds are not held-out estimates of the tuned kernel. This is a known,
+  deliberate choice: the development panel exists to size the tolerance and
+  certify the references, not to grade the kernel, and splitting off six of
+  its 38 worlds would weaken both. The graded panel is a separate stage with
+  its own seeds (stage `panel`), so no tuning world or key reaches a verdict.
 
 The low-ESS floor stays at 0.1 of the particles. The budget ceiling (8,192
 particles, 32 rungs, 4 moves per rung) is unchanged; a rung budget that ends
@@ -581,7 +596,9 @@ central 90 percent intervals of the future east and north positions.
 runs the development stage as independent work units:
 
 - an updater unit runs the three updates of one world for one run role
-  (`updater_a`, `updater_b`, `updater_doubled`) and records, per update, the
+  (`updater_a`, `updater_b`, `updater_doubled`, and on the development stage
+  the precision replicates `updater_rep_1` to `updater_rep_6`) and records,
+  per update, the
   status, the kernel's `ess`, the Kish ESS of the returned weights, the
   distinct-particle count, the rungs used, the temperature, the acceptance
   rates and the warm wall time, and, after epochs 2 and 3, the graded summary;
@@ -599,20 +616,36 @@ it finishes; a restart skips every unit present in any unit file of `DIR`, and
 two processes or machines share one stage without overlap. Every invocation
 appends its provenance (protocol and code commits, a dirty-tree flag, JAX
 version, host, budgets and arguments) to `DIR/manifest-{i}of{n}.json`, and
-every record carries a hash of the protocol content that determines what it
-computes (everything but the status, the criteria, the provisional list, the
-stated values, the limits, the compute prices and the reference budgets), so
-the freeze refuses records left over from before an amendment.
-`--freeze DIR --exact EXACT.json` assembles the freeze input, computes
-$\delta_2$, runs certification checks 1 to 3 against it and reads the
-exact-check verdicts; it reports `frozen` only when every development record
-exists at the protocol budgets and every check passes, and otherwise
-`incomplete` with each reason. A reference fit that keeps no weighted draw is
+every record carries a run hash of what determines its result: the protocol
+content (everything but the status, the criteria other than the alias bins
+and quantities, the provisional list, the stated values, the limits, the
+compute prices and the reference budgets) and a fingerprint of the source of
+the library modules and tool functions that compute a record (the updater and
+its targets, the reference samplers, the forward model, the world draws and
+the summaries; freeze and grading code is outside it). Budgets are a separate
+field, checked against the protocol. A resumed run refuses, before running or
+writing anything, a directory holding any record with another run hash or
+other budgets than its own; the manifest entry is written before the first
+unit, and every manifest is replaced through a synced temporary file and an
+atomic rename.
+`--freeze DIR --exact EXACT_DIR` counts only records with the current run
+hash at the protocol budgets, compares them with the complete canonical
+development plan (every role of every development world, `updater_doubled`
+included), assembles the freeze input, computes $\delta_2$, runs
+certification checks 1 to 3 against it, and re-assesses the exact checks from
+their run directory rather than reading a results file; it reports `frozen`
+only when the plan is complete and every check passes, and otherwise
+`incomplete` with each reason (duplicates, stale or off-budget records and
+unknown ids among them). A reference fit that keeps no weighted draw is
 an empty fit: its world cannot be scored, the freeze names it and stays
 `incomplete`, and the remedy is the budget doubling of the reference rules. The
-exact checks have their own runner,
-`tools/updater_exact_checks.py`, whose refinement tables are committed with the
-freeze.
+exact checks have their own runner, `tools/updater_exact_checks.py`, whose
+refinement tables are committed with the freeze. Its records carry their own
+run hash (the panel's plus the exact-check code) and budgets; its report, and
+the freeze through it, accept as evidence only records with the current hash
+at the protocol budgets, refuse a case with a duplicate record, require three
+consecutive quadrature levels (`--report` grades the levels it is given) and
+every reference repeat, and list the commits the run's manifests recorded.
 
 ## Worlds, seeds and random numbers
 
@@ -868,13 +901,29 @@ gate.
      duplicate or unknown id and sorts the worlds by id before resampling); a
      world carries its updater ESS, its reference ESS and its reference bin
      masses for each alias quantity.
-   - *Updater precision (amendment A3).* The updater ESS of a world and alias
-     quantity is the effective multinomial size implied by the disagreement
-     of its two independent-key runs: with $\bar p$ the mean of their bin
-     masses and $s^2 = \tfrac12 \sum_b (U_{a,b} - U_{b,b})^2$, it is
-     $\sum_b \bar p_b (1 - \bar p_b) / s^2$, capped at the particle count
-     and floored at 1, so the simulated updater runs reproduce the measured
-     run-to-run variance. The kernel's own `ess` diagnostic is never used: the
+   - *Updater precision (amendment A3).* Each development world has eight
+     independent updater runs at the nominal budget (`updater_a`,
+     `updater_b` and the precision replicates `updater_rep_1` to
+     `updater_rep_6`, keys by purpose). The updater ESS of a world and alias
+     quantity is the multinomial size $n$ that reproduces their spread in the
+     quantity D2 depends on. D2's variance is quadratic in the per-run
+     covariance, so the estimate must be unbiased in $1/n^2$, not in $1/n$:
+     with $\bar p$ the mean bin masses of the eight runs,
+     $M = \mathrm{diag}(\bar p) - \bar p \bar p^\top$ (a multinomial of size
+     $n$ has covariance $M/n$) and $T$ the trace of the runs' sample
+     covariance on $\nu = 7$ degrees of freedom, a Gaussian approximation
+     gives $E[T^2] = ((\mathrm{tr} M)^2 + 2\,\mathrm{tr}(M^2)/\nu)/n^2$, so
+     $\hat n = \sqrt{(\mathrm{tr} M)^2 + 2\,\mathrm{tr}(M^2)/\nu}\,/\,T$,
+     capped at the particle count and floored at 1 (`replicate_ess`). The
+     earlier estimate from one pair, $\mathrm{tr} M / s^2$, is unbiased in
+     $1/n$ only and inflates $1/n^2$ by up to $1 + 2/\nu$ (three times for
+     two-bin worlds); with 38 two-bin worlds of true size 300 it widened the
+     largest $\mathrm{SE}_0$ by 156 percent, which would loosen $\delta_2$.
+     With eight replicates the largest and the mean $\mathrm{SE}_0$ are
+     within 7 and 2 percent of their values at the known size
+     (`test_estimated_precision_does_not_loosen_the_alias_tolerance`). The
+     replicates cost 4,560 update-equivalents per pair on the development
+     stage ("Compute"). The kernel's own `ess` diagnostic is never used: the
      adaptive ladder holds it at the conditional-ESS target times the particle
      count by construction, whatever the precision of the binned output. The
      reference ESS is the smaller Kish ESS of `reference_1` and
