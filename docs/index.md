@@ -114,6 +114,7 @@ how-to/migrate-sky-convention
 :hidden:
 
 updater-protocol
+updater-panel-grading
 ```
 
 ```{toctree}

@@ -12,7 +12,10 @@ Usage::
     python tools/updater_panel.py --freeze RUN_DIR [--exact EXACT.json]
     python tools/updater_panel.py --run development --out RUN_DIR [--shard i/n]
         [--parts updater,reference,certification] [--worlds 0-5]
-    python tools/updater_panel.py --status RUN_DIR
+    python tools/updater_panel.py --status RUN_DIR [--stage panel]
+    python tools/updater_panel.py --check-panel RUN_DIR
+    python tools/updater_panel.py --grade RUN_DIR [--mechanics pass|fail]
+        [--verdict-out docs/updater-verdict.csv] [--memory-mb MB]
 
 ``--dry-run`` prints the cells, the world and seed allocation, the model hashes,
 the reference arguments, the critical values and the compute tally. ``--sizing``
@@ -24,8 +27,10 @@ moment it finishes. A restart skips every unit already in the directory, and
 ``--shard i/n`` splits the units between processes or machines. ``--freeze``
 assembles the development records, computes the alias tolerance, certifies
 both references against it and reads the exact-check results; it reports
-``frozen`` or ``incomplete`` with every reason. Grading the panel into the
-verdict table is not implemented yet.
+``frozen`` or ``incomplete`` with every reason. ``--status`` counts the units
+of the stage given by ``--stage`` (development by default). ``--check-panel``
+audits a panel directory and ``--grade`` writes the verdict table from it; both
+are implemented in ``tools/updater_verdict.py``.
 """
 
 import argparse
@@ -2951,7 +2956,7 @@ def ess_floor_reasons(protocol, units):
 
 
 def progress(protocol, out_dir, stage="development"):
-    """Done and planned unit counts per part, for a run directory."""
+    """Done and planned unit counts per part of ``stage``, for a run directory."""
     units, duplicates = load_units(out_dir)
     lines = []
     for part in PARTS:
@@ -3014,6 +3019,48 @@ def main(argv=None):
     )
     parser.add_argument("--status", type=Path, default=None, help="print run progress")
     parser.add_argument(
+        "--stage",
+        choices=["development", "panel"],
+        default="development",
+        help="stage whose units --status counts",
+    )
+    parser.add_argument(
+        "--check-panel",
+        type=Path,
+        default=None,
+        help="panel run directory: audit completeness and consistency",
+    )
+    parser.add_argument(
+        "--grade",
+        type=Path,
+        default=None,
+        help="panel run directory: audit it and write the verdict table",
+    )
+    parser.add_argument(
+        "--verdict-out",
+        type=Path,
+        default=REPO / "docs" / "updater-verdict.csv",
+        help="verdict table written by --grade",
+    )
+    parser.add_argument(
+        "--mechanics",
+        choices=["pass", "fail"],
+        default=None,
+        help="result of the mechanics tests at the graded commit "
+        "(without it the mechanics verdict is incomplete)",
+    )
+    parser.add_argument(
+        "--memory-mb",
+        type=float,
+        default=None,
+        help="peak memory of the intended batch, recorded by --grade",
+    )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="grade a panel whose manifests flag a dirty code tree",
+    )
+    parser.add_argument(
         "--roles", default=None, help="comma list: run only these run roles"
     )
     parser.add_argument(
@@ -3033,7 +3080,10 @@ def main(argv=None):
     if args.sizing:
         sizing(protocol)
     if args.status is not None:
-        print("\n".join(progress(protocol, args.status)))
+        print("\n".join(progress(protocol, args.status, args.stage)))
+    status = 0
+    if args.check_panel is not None or args.grade is not None:
+        status = _panel_audit_or_grade(protocol, args)
     if args.ess is not None:
         print(json.dumps(ess_table(protocol, load_units(args.ess)[0]), indent=1))
     if args.run is not None:
@@ -3047,9 +3097,41 @@ def main(argv=None):
         or args.run
         or args.status
         or args.ess
+        or args.check_panel
+        or args.grade
     ):
         parser.error("nothing to do")
-    return 0
+    return status
+
+
+def _panel_audit_or_grade(protocol, args):
+    """Run ``--check-panel`` or ``--grade``; exit code 0 pass, 1 fail, 2 else."""
+    path = Path(__file__).with_name("updater_verdict.py")
+    spec = importlib.util.spec_from_file_location("updater_verdict", path)
+    verdict = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verdict)
+    tool = sys.modules.get(__name__)
+    if tool is None or not hasattr(tool, "atomic_write_text"):
+        tool = verdict.load_tool()
+    if args.check_panel is not None:
+        audit = verdict.audit_panel(
+            tool, protocol, args.check_panel, "panel", allow_dirty=args.allow_dirty
+        )
+        print(json.dumps(verdict.audit_summary(audit), indent=2, default=str))
+        return {"complete": 0}.get(audit["status"], 2)
+    result = verdict.grade_panel(
+        tool,
+        protocol,
+        args.grade,
+        allow_dirty=args.allow_dirty,
+        mechanics=args.mechanics,
+        memory_mb=args.memory_mb,
+    )
+    print(verdict.report_text(result))
+    if result["rows"] is not None:
+        verdict.write_verdict(tool, result, args.verdict_out)
+        print(f"wrote {args.verdict_out}")
+    return {"pass": 0, "fail": 1}.get(result["status"], 2)
 
 
 def run_stage(protocol, args):
