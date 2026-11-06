@@ -228,21 +228,29 @@ def test_no_recompile_across_values_and_counts(fitted, empty):
     ("ra", "expected"),
     [
         (0.3, UpdaterStatus.OK),
-        (4.0, UpdaterStatus.LOW_ESS),
+        (5.0, UpdaterStatus.INCOMPLETE_LADDER),
+        (14.0, UpdaterStatus.LOW_ESS),
         (np.inf, UpdaterStatus.NO_SUPPORT),
     ],
 )
 def test_status(ra, expected, empty):
-    """Statuses follow the reweighted ESS and support; nothing raises.
+    """Statuses follow the ladder, the reweighted ESS and support; nothing raises.
 
-    Fails if an unsupported record raises, changes the belief or reports OK,
-    or if a record far in the prior tail is not flagged LOW_ESS (ESS of order
-    1 of 256 at 8 prior sigma).
+    With 4 rungs, a record at 10 prior sigma leaves the ladder near
+    temperature 0.5 and its final correction keeps a conditional ESS of 84 to
+    128 of 256 over the lanes; at 28 prior sigma that correction collapses to
+    at most 7 particles. Fails if an unsupported record raises, changes the belief or
+    reports OK, if an unfinished ladder reports OK, or if a degenerate final
+    correction is not flagged LOW_ESS.
     """
     out, diag = vupdate(empty, _records(ra, 0.0, 1), _keys(11))
     assert bool(jnp.all(diag.status == expected))
     if expected == UpdaterStatus.NO_SUPPORT:
         _assert_bitwise_equal(out, empty)
+    else:
+        assert bool(jnp.all(diag.applied))
+        finished = expected == UpdaterStatus.OK
+        assert bool(jnp.all((diag.temperature == 1.0) == finished))
 
 
 def test_full_buffer_is_budget_exhausted(fitted):

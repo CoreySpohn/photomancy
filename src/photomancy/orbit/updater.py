@@ -33,10 +33,30 @@ Update contract:
 - Keys are typed threefry keys (``jax.random.key(seed, impl="threefry2x32")``)
   and the updater requires 64-bit mode.
 
-The kernel in this module is a placeholder: one importance reweighting by the
-new record's likelihood followed by systematic resampling. It does not use the
-rung or move budget and never reports ``INCOMPLETE_LADDER``; a tempered kernel
-with Metropolis moves replaces it behind the same interface.
+Kernel (fixed-particle tempered SMC with a fixed loop count):
+
+- The new record's log likelihood ``l`` is tempered in from ``beta = 0`` to 1
+  on top of the posterior given the buffered records, so rung ``r`` targets
+  ``prior x L_buffer x L_new^beta_r``.
+- Each rung picks its temperature increment by a fixed-count bisection so
+  that the conditional effective sample size of the incremental weights equals
+  ``target_cess_fraction`` of the particles, reweights, resamples
+  systematically and applies exactly ``n_moves`` random-walk Metropolis moves
+  that leave the rung's tempered target invariant.
+- The ladder is a ``fori_loop`` over ``n_rungs``: once ``beta`` reaches 1 the
+  remaining rungs are no-ops. If the budget ends below 1 the rest of the
+  likelihood is applied as one importance reweighting without resampling or
+  moves, so the returned belief is still a weighted approximation of the full
+  posterior, and the status says the ladder was incomplete.
+- Moves propose ``wrap(theta + scale L z)`` in the target's chart, with ``L``
+  the Cholesky factor of the weighted particle covariance (periodic coordinates
+  centered on their circular mean) and ``scale = proposal_scale / sqrt(d)``.
+  The proposal is symmetric on the chart (a Gaussian step, wrapped on the
+  circle for periodic coordinates), so the Hastings ratio is the ratio of the
+  tempered target densities; any chart Jacobian already sits in
+  :meth:`AbstractUpdateTarget.log_prior`.
+- The sum over rungs of the log mean incremental weight is the log marginal
+  likelihood of the record given the buffered records.
 """
 
 import enum
@@ -76,16 +96,39 @@ def _as_bool(x):
 class UpdaterStatus(enum.IntEnum):
     """Outcome of one update, stored as an integer in the diagnostics.
 
+    When more than one condition holds, the first in the order ``NO_SUPPORT``,
+    ``BUDGET_EXHAUSTED``, ``LOW_ESS``, ``INCOMPLETE_LADDER`` is reported; the
+    diagnostics (``ess``, ``temperature``, ``rungs_used``) always carry what
+    is needed to recover the others.
+
     Attributes:
-        OK: The record was assimilated (or was a no-op: padded or duplicate).
-        LOW_ESS: The record was assimilated, but the Kish effective sample size
-            of the reweighted particles fell below the updater's threshold.
+        OK: The record was assimilated with the ladder reaching temperature 1
+            inside the rung budget and every reweighting step keeping its
+            conditional ESS at or above the threshold, or the record was a
+            no-op (padded or duplicate).
+        LOW_ESS: The record was assimilated, but the returned belief is
+            effectively fewer than ``low_ess_fraction`` of the particles: the
+            smallest conditional effective sample size of any reweighting step
+            of the update (the ``ess`` diagnostic), or the number of distinct
+            weighted particles (``n_unique``), is below that fraction. With
+            the adaptive ladder every rung sits at ``target_cess_fraction`` by
+            construction, so the first test catches a degenerate final
+            correction of an incomplete ladder (or a rung whose bisection could
+            not reach the target), and the second catches moves that failed to
+            rejuvenate the duplicates resampling creates.
         NO_SUPPORT: No particle has a finite posterior weight under the record;
             the belief is returned unchanged.
-        BUDGET_EXHAUSTED: A fixed capacity ran out (the record buffer is full);
-            the belief is returned unchanged.
-        INCOMPLETE_LADDER: The rung budget ended before the record's likelihood
-            was fully tempered in. Reserved for a tempered kernel.
+        BUDGET_EXHAUSTED: A static capacity ran out: the accepted-record buffer
+            is full, so the record cannot be stored. The belief is returned
+            unchanged. A short rung budget is ``INCOMPLETE_LADDER``, not this.
+        INCOMPLETE_LADDER: The record was assimilated, but the ``n_rungs``
+            adaptive rungs ended with the temperature below 1. The remaining
+            fraction of the record's log likelihood was applied as one
+            importance reweighting without resampling or moves, so the belief
+            is a weighted approximation of the full posterior whose particles
+            were never moved under it; that correction kept its conditional
+            ESS at or above the threshold (otherwise the status is
+            ``LOW_ESS``).
     """
 
     OK = 0
@@ -145,14 +188,27 @@ class UpdaterDiagnostics(eqx.Module):
         status: A :class:`UpdaterStatus` value.
         applied: Whether the record changed the belief.
         duplicate: Whether the record's id was already in the buffer.
-        ess: Kish effective sample size of the reweighted particles (of the
-            current particles when nothing was applied; 0 when no particle has
-            weight).
+        ess: When the record was applied, the smallest conditional effective
+            sample size of any reweighting step of the update (each adaptive
+            rung and, for an incomplete ladder, the final correction), in
+            particles. The conditional ESS of incremental weights ``u`` on
+            normalized weights ``W`` is ``N (sum W u)^2 / sum W u^2``. When
+            nothing was applied, the Kish ESS of the current weights (0 when
+            no particle has weight).
         log_evidence_increment: Log of the record's marginal likelihood under
             the incoming belief (0 when nothing was applied).
-        rungs_used: Tempering rungs used.
-        acceptance_rate: Mean Metropolis acceptance rate over the moves (0 when
-            no moves ran).
+        rungs_used: Adaptive tempering rungs that ran.
+        acceptance_rate: Fraction of Metropolis proposals accepted over all
+            moves of the update (0 when no moves ran).
+        temperature: Temperature reached by the adaptive rungs: 1 when the
+            ladder completed, below 1 for an incomplete ladder, 0 when nothing
+            was applied.
+        n_unique: Number of distinct particles with positive weight in the
+            belief this call returns (0 when no particle has weight). Far
+            below the particle count after a completed ladder, it shows that
+            the moves did not rejuvenate the resampled duplicates. A particle
+            moved by any accepted step counts as distinct, so this bounds the
+            diversity from above.
     """
 
     status: jax.Array = eqx.field(converter=_as_int)
@@ -162,6 +218,8 @@ class UpdaterDiagnostics(eqx.Module):
     log_evidence_increment: jax.Array = eqx.field(converter=_as_float)
     rungs_used: jax.Array = eqx.field(converter=_as_int)
     acceptance_rate: jax.Array = eqx.field(converter=_as_float)
+    temperature: jax.Array = eqx.field(converter=_as_float)
+    n_unique: jax.Array = eqx.field(converter=_as_int)
 
 
 class AbstractUpdateTarget(eqx.Module):
@@ -215,6 +273,28 @@ class AbstractUpdateTarget(eqx.Module):
         """
         ra, dec = self.predict(theta, records.times)
         return loglike_relative_astrom(ra, dec, records)
+
+    def log_likelihood_split(self, theta, records, select):
+        """Log likelihood over two disjoint parts of a buffer, one prediction.
+
+        Args:
+            theta: Chart point. Shape ``(d,)``.
+            records: A ``RelativeAstromData``; invalid entries contribute zero.
+            select: Boolean mask of the entries in the second part. Shape
+                ``(K,)``.
+
+        Returns:
+            Tuple ``(rest, selected)`` of scalar log likelihoods over the valid
+            entries outside and inside ``select``; they sum to
+            :meth:`log_likelihood`.
+        """
+        ra, dec = self.predict(theta, records.times)
+
+        def part(mask):
+            masked = eqx.tree_at(lambda r: r.is_valid, records, records.is_valid & mask)
+            return loglike_relative_astrom(ra, dec, masked)
+
+        return part(~select), part(select)
 
     def wrap(self, theta):
         """Map the periodic coordinates of ``theta`` into ``[0, period)``."""
@@ -577,23 +657,166 @@ def _select(pred, on_true, on_false):
     return jax.tree.map(lambda a, b: jnp.where(pred, a, b), on_true, on_false)
 
 
+def _finite_or_neg_inf(x):
+    """Replace NaN (and +inf) by ``-inf``: an undefined density is zero."""
+    return jnp.where(jnp.isnan(x) | (x == jnp.inf), -jnp.inf, x)
+
+
+def _log_cess_fraction(log_weights, increment):
+    """Log of the conditional ESS fraction ``(sum W u)^2 / sum W u^2``.
+
+    Args:
+        log_weights: Normalized log weights ``log W``. Shape ``(n,)``.
+        increment: Incremental log weights ``log u``, shifted so that their
+            largest finite value is near 0 (``-inf`` for zero). Shape ``(n,)``.
+
+    Returns:
+        Scalar in ``(-inf, 0]``; NaN when no weight is finite.
+    """
+    return 2.0 * logsumexp(log_weights + increment) - logsumexp(
+        log_weights + 2.0 * increment
+    )
+
+
+def _weighted_cholesky(particles, log_weights, periods):
+    """Cholesky factor of the weighted particle covariance in the chart.
+
+    Periodic coordinates are centered on their weighted circular mean and their
+    deviations wrapped into ``[-period / 2, period / 2)``, so a cloud that
+    straddles the wrap point has its true (small) spread. A relative jitter of
+    ``1e-10`` times the mean variance, with an absolute floor, keeps the factor
+    finite for a degenerate cloud.
+
+    Args:
+        particles: Chart points. Shape ``(n, d)``.
+        log_weights: Normalized log weights. Shape ``(n,)``.
+        periods: Period of each coordinate (0 if non-periodic). Shape ``(d,)``.
+
+    Returns:
+        Lower-triangular factor. Shape ``(d, d)``.
+    """
+    w = jnp.exp(log_weights)
+    periodic = periods > 0.0
+    safe_period = jnp.where(periodic, periods, 1.0)
+    angle = two_pi * particles / safe_period
+    circular_mean = (
+        safe_period / two_pi * jnp.arctan2(w @ jnp.sin(angle), w @ jnp.cos(angle))
+    )
+    center = jnp.where(periodic, circular_mean, w @ particles)
+    dev = particles - center
+    wrapped = jnp.mod(dev + 0.5 * safe_period, safe_period) - 0.5 * safe_period
+    dev = jnp.where(periodic, wrapped, dev)
+    dev = jnp.where((w > 0.0)[:, None], dev, 0.0)
+    cov = (w[:, None] * dev).T @ dev
+    d = particles.shape[1]
+    jitter = 1e-10 * jnp.trace(cov) / d + jnp.finfo(float).tiny
+    chol = jnp.linalg.cholesky(cov + jitter * jnp.eye(d))
+    return jnp.where(jnp.isfinite(chol), chol, 0.0)
+
+
+def _metropolis_step(key, particles, aux, step_chol, wrap, evaluate, log_target):
+    """One random-walk Metropolis move of every particle.
+
+    Each particle proposes ``wrap(theta + step_chol @ z)`` with ``z`` standard
+    normal. The step is a fixed Gaussian, symmetric in the chart, and wrapping a
+    symmetric step onto a circle keeps it symmetric (the wrapped density is a
+    sum over images of a symmetric kernel), so the Hastings ratio reduces to
+    ``exp(log_target(proposal) - log_target(current))``. A density defined in
+    another parameterization must carry that chart's Jacobian.
+
+    Args:
+        key: Typed PRNG key.
+        particles: Chart points. Shape ``(n, d)``.
+        aux: Per-particle cached values ``evaluate(particles)`` (a pytree with
+            leading axis ``n``).
+        step_chol: Lower-triangular step factor, scale included. Shape
+            ``(d, d)``.
+        wrap: Map of a chart point onto the chart's fundamental domain.
+        evaluate: Chart point ``(d,)`` to its cached values.
+        log_target: Cached values of one point to its log target density; NaN
+            counts as ``-inf``.
+
+    Returns:
+        Tuple ``(particles, aux, accepted)``, ``accepted`` boolean ``(n,)``.
+    """
+    k_prop, k_acc = jax.random.split(key)
+    n, d = particles.shape
+    proposal = jax.vmap(wrap)(
+        particles + jax.random.normal(k_prop, (n, d)) @ step_chol.T
+    )
+    aux_prop = jax.vmap(evaluate)(proposal)
+    log_alpha = _finite_or_neg_inf(
+        jax.vmap(log_target)(aux_prop) - jax.vmap(log_target)(aux)
+    )
+    accepted = jnp.log(jax.random.uniform(k_acc, (n,))) < log_alpha
+
+    def pick(new, old):
+        mask = accepted.reshape((n,) + (1,) * (new.ndim - 1))
+        return jnp.where(mask, new, old)
+
+    return (
+        pick(proposal, particles),
+        jax.tree.map(pick, aux_prop, aux),
+        accepted,
+    )
+
+
+def _count_unique(particles, log_weights):
+    """Number of distinct particles with positive weight (0 if none)."""
+    positive = jnp.isfinite(log_weights)
+    top = particles[jnp.argmax(log_weights)]
+    rows = jnp.where(positive[:, None], particles, top)
+    ordered = rows[jnp.lexsort(rows.T[::-1])]
+    distinct = jnp.any(ordered[1:] != ordered[:-1], axis=1)
+    return jnp.where(jnp.any(positive), 1 + jnp.sum(distinct), 0)
+
+
+class _Ladder(eqx.Module):
+    """Carry of the tempering ladder (internal)."""
+
+    particles: jax.Array
+    log_weights: jax.Array
+    log_prior: jax.Array
+    ll_rest: jax.Array
+    ll_new: jax.Array
+    beta: jax.Array
+    log_z: jax.Array
+    rungs: jax.Array
+    accepted: jax.Array
+    proposed: jax.Array
+    min_cess: jax.Array
+
+
 class OrbitUpdater(eqx.Module):
     """Fixed-capacity sequential updater of a particle belief.
 
     Capacities and budget are static (they set array shapes and loop lengths);
-    the ESS threshold is a traced array, so changing it does not recompile.
-    Every method is ``jit``-compiled and composes with ``jax.vmap`` over
-    beliefs, records and keys.
+    the thresholds and the proposal scale are traced arrays, so changing them
+    does not recompile. Every method is ``jit``-compiled and composes with
+    ``jax.vmap`` over beliefs, records and keys. One update makes at most
+    ``n_particles x (1 + n_rungs x n_moves)`` likelihood evaluations, each over
+    the ``record_capacity`` buffer slots.
 
     Args:
         n_particles: Particles per belief.
-        n_rungs: Tempering rungs per update (budget; unused by the placeholder
-            kernel).
-        n_moves: Metropolis moves per rung (budget; unused by the placeholder
-            kernel).
+        n_rungs: Adaptive tempering rungs per update (the ladder's cap).
+        n_moves: Random-walk Metropolis moves per rung.
         record_capacity: Capacity of the accepted-record buffer.
-        low_ess_fraction: An applied update whose Kish ESS is below this
-            fraction of ``n_particles`` reports ``LOW_ESS``. Default 0.1.
+        low_ess_fraction: An applied update whose ``ess`` diagnostic (the
+            smallest conditional ESS of its reweighting steps) or ``n_unique``
+            is below this fraction of ``n_particles`` reports ``LOW_ESS``.
+            Default 0.1.
+        target_cess_fraction: Conditional ESS, as a fraction of
+            ``n_particles``, that each adaptive rung's temperature increment
+            is bisected to. Must exceed ``low_ess_fraction``. Default 0.5.
+        proposal_scale: Random-walk step in units of the particle covariance,
+            divided by ``sqrt(d)``. Default 0.3, well below the 2.38 that is
+            optimal for a Gaussian target: one or two astrometric epochs
+            confine the orbit posteriors to thin curved regions where larger
+            steps are almost always rejected.
+        n_bisect: Bisection iterations per rung (static). The smallest
+            temperature increment a rung can take is ``(1 - beta) / 2^n_bisect``.
+            Default 40.
 
     Raises:
         ValueError: If a capacity is not positive.
@@ -605,16 +828,36 @@ class OrbitUpdater(eqx.Module):
     n_moves: int = eqx.field(static=True)
     record_capacity: int = eqx.field(static=True)
     low_ess_fraction: jax.Array = eqx.field(converter=_as_float, default=0.1)
+    target_cess_fraction: jax.Array = eqx.field(converter=_as_float, default=0.5)
+    proposal_scale: jax.Array = eqx.field(converter=_as_float, default=0.3)
+    n_bisect: int = eqx.field(static=True, default=40)
 
     def __check_init__(self):
         """Validate capacities and the floating-point mode."""
-        for name in ("n_particles", "n_rungs", "n_moves", "record_capacity"):
+        for name in (
+            "n_particles",
+            "n_rungs",
+            "n_moves",
+            "record_capacity",
+            "n_bisect",
+        ):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"{name} must be at least 1.")
         if not jax.config.jax_enable_x64:
             raise RuntimeError("OrbitUpdater requires jax_enable_x64.")
 
-    def _diagnostics(self, status, applied, duplicate, ess, log_z=0.0, rungs=0):
+    def _diagnostics(
+        self,
+        status,
+        applied,
+        duplicate,
+        ess,
+        n_unique,
+        log_z=0.0,
+        rungs=0,
+        acceptance=0.0,
+        temperature=0.0,
+    ):
         return UpdaterDiagnostics(
             status=status,
             applied=applied,
@@ -622,7 +865,9 @@ class OrbitUpdater(eqx.Module):
             ess=ess,
             log_evidence_increment=log_z,
             rungs_used=rungs,
-            acceptance_rate=0.0,
+            acceptance_rate=acceptance,
+            temperature=temperature,
+            n_unique=n_unique,
         )
 
     @eqx.filter_jit
@@ -654,7 +899,9 @@ class OrbitUpdater(eqx.Module):
             record_ids=jnp.zeros(self.record_capacity, dtype=int),
             n_records=jnp.asarray(0, dtype=int),
             key=key,
-            diagnostics=self._diagnostics(status, False, False, _kish_ess(log_w)),
+            diagnostics=self._diagnostics(
+                status, False, False, _kish_ess(log_w), _count_unique(particles, log_w)
+            ),
         )
 
     @eqx.filter_jit
@@ -704,57 +951,220 @@ class OrbitUpdater(eqx.Module):
             status = jnp.where(
                 attempt & full, UpdaterStatus.BUDGET_EXHAUSTED, UpdaterStatus.OK
             )
-            ess = _kish_ess(belief.log_weights)
-            return belief, self._diagnostics(status, False, duplicate, ess)
+            return belief, self._unchanged_diagnostics(belief, status, duplicate)
 
         def apply(operands):
-            return self._placeholder_kernel(*operands)
+            return self._tempered_kernel(*operands)
 
         return jax.lax.cond(attempt & ~full, apply, skip, (belief, record, key))
 
-    def _placeholder_kernel(self, belief, record, key):
-        """Importance reweighting by the record, then systematic resampling.
-
-        Placeholder for the tempered kernel: it ignores the rung and move
-        budget and the buffered records (which a move kernel needs for its
-        target density).
-        """
-        target = belief.target
-        log_like = jax.vmap(target.log_likelihood, in_axes=(0, None))(
-            belief.particles, record.as_data()
-        )
-        log_w, log_total, no_support = _normalize(belief.log_weights + log_like)
-        ess = _kish_ess(log_w)
-        log_z = jnp.where(no_support, 0.0, log_total - logsumexp(belief.log_weights))
-
-        idx = _systematic_indices(key, log_w, self.n_particles)
-        i = belief.n_records
-        candidate = UpdaterBelief(
-            target=target,
-            particles=belief.particles[idx],
-            log_weights=jnp.full(self.n_particles, -jnp.log(self.n_particles)),
-            records=jax.tree.map(
-                lambda buf, new: buf.at[i].set(new[0]), belief.records, record.as_data()
-            ),
-            record_ids=belief.record_ids.at[i].set(record.record_id),
-            n_records=i + 1,
-            key=key,
-            diagnostics=belief.diagnostics,
-        )
-        low_ess = ess < self.low_ess_fraction * self.n_particles
-        status = jnp.where(
-            no_support,
-            UpdaterStatus.NO_SUPPORT,
-            jnp.where(low_ess, UpdaterStatus.LOW_ESS, UpdaterStatus.OK),
-        )
-        applied = ~no_support
-        diagnostics = self._diagnostics(
+    def _unchanged_diagnostics(self, belief, status, duplicate=False):
+        """Diagnostics of a call that returns ``belief`` unchanged."""
+        return self._diagnostics(
             status,
-            applied,
             False,
-            jnp.where(no_support, _kish_ess(belief.log_weights), ess),
-            log_z,
-            jnp.where(applied, 1, 0),
+            duplicate,
+            _kish_ess(belief.log_weights),
+            _count_unique(belief.particles, belief.log_weights),
         )
-        candidate = eqx.tree_at(lambda b: b.diagnostics, candidate, diagnostics)
-        return _select(applied, candidate, belief), diagnostics
+
+    def _move_log_density(self, aux, beta):
+        """Tempered log target ``log p + l_rest + beta l_new`` of one particle.
+
+        Args:
+            aux: Tuple ``(log_prior, ll_rest, ll_new)`` of scalars.
+            beta: Temperature in ``(0, 1]``.
+
+        Returns:
+            Scalar log density (``-inf`` off support).
+        """
+        log_prior, ll_rest, ll_new = aux
+        return log_prior + ll_rest + beta * ll_new
+
+    def _increment(self, log_weights, shifted, beta):
+        """Temperature increment of one rung by fixed-count bisection.
+
+        Returns the largest increment ``delta`` in ``(0, 1 - beta]`` whose
+        conditional ESS fraction is at least ``target_cess_fraction`` (to the
+        bisection's resolution), or the smallest bracketed increment when no
+        bisected value reaches the target, so every rung advances.
+
+        Args:
+            log_weights: Normalized log weights. Shape ``(n,)``.
+            shifted: New-record log likelihoods minus their largest finite
+                value. Shape ``(n,)``.
+            beta: Current temperature, below 1.
+
+        Returns:
+            Tuple ``(delta, reaches_one)``.
+        """
+        remaining = 1.0 - beta
+        log_target = jnp.log(self.target_cess_fraction)
+
+        def good(delta):
+            return _log_cess_fraction(log_weights, delta * shifted) >= log_target
+
+        def halve(_, bounds):
+            lo, hi = bounds
+            mid = 0.5 * (lo + hi)
+            ok = good(mid)
+            return jnp.where(ok, mid, lo), jnp.where(ok, hi, mid)
+
+        lo, hi = jax.lax.fori_loop(
+            0, self.n_bisect, halve, (jnp.zeros_like(beta), remaining)
+        )
+        reaches_one = good(remaining)
+        delta = jnp.where(reaches_one, remaining, jnp.where(lo > 0.0, lo, hi))
+        return delta, reaches_one
+
+    def _tempered_kernel(self, belief, record, key):
+        """Temper the record's likelihood in over at most ``n_rungs`` rungs."""
+        target = belief.target
+        n = self.n_particles
+        slot = belief.n_records
+        records = jax.tree.map(
+            lambda buf, new: buf.at[slot].set(new[0]), belief.records, record.as_data()
+        )
+        is_new = jnp.arange(self.record_capacity) == slot
+        periods = jnp.asarray(target.periods, dtype=float)
+        step_scale = self.proposal_scale / math.sqrt(len(target.periods))
+
+        def evaluate(theta):
+            ll_rest, ll_new = target.log_likelihood_split(theta, records, is_new)
+            return (
+                _finite_or_neg_inf(target.log_prior(theta)),
+                _finite_or_neg_inf(ll_rest),
+                _finite_or_neg_inf(ll_new),
+            )
+
+        log_prior, ll_rest, ll_new = jax.vmap(evaluate)(belief.particles)
+        _, _, no_support = _normalize(belief.log_weights + ll_new)
+
+        def shift(state):
+            """New-record log likelihoods minus their weighted-support maximum."""
+            live = jnp.isfinite(state.log_weights) & jnp.isfinite(state.ll_new)
+            peak = jnp.max(jnp.where(live, state.ll_new, -jnp.inf))
+            peak = jnp.where(jnp.isfinite(peak), peak, 0.0)
+            return peak, state.ll_new - peak
+
+        def reweight(state, delta, peak, shifted):
+            """Weights times ``u = exp(delta l)``; evidence and CESS updates."""
+            increment = jnp.where(jnp.isfinite(shifted), delta * shifted, -jnp.inf)
+            cess = n * jnp.exp(_log_cess_fraction(state.log_weights, increment))
+            log_w, log_total, _ = _normalize(state.log_weights + increment)
+            return eqx.tree_at(
+                lambda s: (s.log_weights, s.log_z, s.min_cess),
+                state,
+                (
+                    log_w,
+                    state.log_z + delta * peak + log_total,
+                    jnp.minimum(state.min_cess, cess),
+                ),
+            )
+
+        def rung(r, state):
+            def active(state):
+                k_resample, k_move = jax.random.split(jax.random.fold_in(key, r))
+                peak, shifted = shift(state)
+                delta, reaches_one = self._increment(
+                    state.log_weights, shifted, state.beta
+                )
+                state = reweight(state, delta, peak, shifted)
+                beta = jnp.where(reaches_one, 1.0, jnp.minimum(state.beta + delta, 1.0))
+                step_chol = step_scale * _weighted_cholesky(
+                    state.particles, state.log_weights, periods
+                )
+                idx = _systematic_indices(k_resample, state.log_weights, n)
+                particles = state.particles[idx]
+                aux = (state.log_prior[idx], state.ll_rest[idx], state.ll_new[idx])
+
+                def move(m, carry):
+                    particles, aux, accepted = carry
+                    particles, aux, acc = _metropolis_step(
+                        jax.random.fold_in(k_move, m),
+                        particles,
+                        aux,
+                        step_chol,
+                        target.wrap,
+                        evaluate,
+                        lambda a: self._move_log_density(a, beta),
+                    )
+                    return particles, aux, accepted + jnp.sum(acc)
+
+                particles, aux, accepted = jax.lax.fori_loop(
+                    0, self.n_moves, move, (particles, aux, jnp.asarray(0, dtype=int))
+                )
+                return _Ladder(
+                    particles=particles,
+                    log_weights=jnp.full(n, -jnp.log(n)),
+                    log_prior=aux[0],
+                    ll_rest=aux[1],
+                    ll_new=aux[2],
+                    beta=beta,
+                    log_z=state.log_z,
+                    rungs=state.rungs + 1,
+                    accepted=state.accepted + accepted,
+                    proposed=state.proposed + n * self.n_moves,
+                    min_cess=state.min_cess,
+                )
+
+            return jax.lax.cond(state.beta < 1.0, active, lambda s: s, state)
+
+        def run_ladder(_):
+            start = _Ladder(
+                particles=belief.particles,
+                log_weights=belief.log_weights,
+                log_prior=log_prior,
+                ll_rest=ll_rest,
+                ll_new=ll_new,
+                beta=jnp.asarray(0.0),
+                log_z=jnp.asarray(0.0),
+                rungs=jnp.asarray(0, dtype=int),
+                accepted=jnp.asarray(0, dtype=int),
+                proposed=jnp.asarray(0, dtype=int),
+                min_cess=jnp.asarray(float(n)),
+            )
+            state = jax.lax.fori_loop(0, self.n_rungs, rung, start)
+
+            def correct(state):
+                peak, shifted = shift(state)
+                return reweight(state, 1.0 - state.beta, peak, shifted)
+
+            final = jax.lax.cond(state.beta < 1.0, correct, lambda s: s, state)
+            n_unique = _count_unique(final.particles, final.log_weights)
+            floor = self.low_ess_fraction * n
+            low_ess = (final.min_cess < floor) | (n_unique < floor)
+            status = jnp.where(
+                low_ess,
+                UpdaterStatus.LOW_ESS,
+                jnp.where(
+                    state.beta < 1.0, UpdaterStatus.INCOMPLETE_LADDER, UpdaterStatus.OK
+                ),
+            )
+            diagnostics = self._diagnostics(
+                status,
+                True,
+                False,
+                final.min_cess,
+                n_unique,
+                final.log_z,
+                final.rungs,
+                final.accepted / jnp.maximum(final.proposed, 1),
+                state.beta,
+            )
+            updated = UpdaterBelief(
+                target=target,
+                particles=final.particles,
+                log_weights=final.log_weights,
+                records=records,
+                record_ids=belief.record_ids.at[slot].set(record.record_id),
+                n_records=slot + 1,
+                key=key,
+                diagnostics=diagnostics,
+            )
+            return updated, diagnostics
+
+        def refuse(_):
+            return belief, self._unchanged_diagnostics(belief, UpdaterStatus.NO_SUPPORT)
+
+        return jax.lax.cond(no_support, refuse, run_ladder, None)
