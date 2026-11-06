@@ -3055,7 +3055,7 @@ def main(argv=None):
         "--freeze-evidence",
         type=Path,
         default=None,
-        help="committed --freeze report (with its binding block); without it "
+        help="tracked --freeze report, unmodified relative to HEAD; without it "
         "no alias verdict can pass",
     )
     parser.add_argument(
@@ -3167,9 +3167,7 @@ def _panel_audit_or_grade(protocol, args):
         mechanics=load(args.mechanics_evidence, verdict.read_mechanics_attestation),
         memory_mb=args.memory_mb,
         latency_ms=args.latency_ms,
-        freeze_report=load(
-            args.freeze_evidence, lambda p: json.loads(Path(p).read_text())
-        ),
+        freeze_evidence_path=args.freeze_evidence,
     )
     print(verdict.report_text(result))
     out = args.verdict_out

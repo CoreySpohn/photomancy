@@ -13,8 +13,10 @@ import io
 import json
 import math
 import statistics
+import subprocess
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -108,6 +110,8 @@ def make_units(tool, protocol, edit=None, bins=None, post=None):
         w = unit["world"]
         half = [-1.0, 1.0] if w % 2 else [0.5, 0.9]
         summary = {
+            "particles": 1024,
+            "kish_ess": 900.0,
             "intervals": {q: {"90": [-1.0, 1.0], "50": list(half)} for q in quantities},
             "pit": {q: (w + 0.5) / N for q in quantities},
             "bins": bin_masses(unit, k),
@@ -132,7 +136,11 @@ def make_units(tool, protocol, edit=None, bins=None, post=None):
                 "kind": "reference",
                 "proposals": budgets[unit["mass_model"]]
                 * tool.reference_budget_factor(unit["mass_model"], unit["role"]),
-                "summary": {"kish_ess": 900.0, "bins": bin_masses(unit, k)},
+                "summary": {
+                    "particles": 1024,
+                    "kish_ess": 900.0,
+                    "bins": bin_masses(unit, k),
+                },
             }
         rec = dict(rec, id=unit["id"], run_hash=run_hash)
         if post is not None:
@@ -164,7 +172,11 @@ def freeze_report(tool, verdict, protocol, mass_models=None):
             m: {"status": "certified"}
             for m in (mass_models or protocol["panel"]["mass_models"])
         },
-        "exact_checks": {"verdicts": {"case_1": "pass", "case_2": "pass"}},
+        "exact_checks": {
+            "verdicts": dict.fromkeys(
+                ("ti_window", "physical_fixed", "ti_binding"), "pass"
+            )
+        },
     }
 
 
@@ -967,6 +979,116 @@ def test_alias_bound_above_its_cap_is_incomplete(tool, verdict, protocol, clean)
 # --- certification evidence ---
 
 
+def test_freeze_requires_canonical_exact_cases(tool, verdict, protocol):
+    """Probe: replace all exact verdicts with {invented: pass}, or omit one.
+
+    Fails if an invented or partial set of passing checks is accepted.
+    """
+    for cases in (
+        {"invented": "pass"},
+        {"ti_window": "pass", "physical_fixed": "pass"},
+    ):
+        report = freeze_report(tool, verdict, protocol)
+        report["exact_checks"]["verdicts"] = cases
+        assert not verdict.freeze_evidence(tool, protocol, report)["valid"]
+
+
+def test_freeze_rejects_invalid_or_ambiguous_group_power(tool, verdict, protocol):
+    """Probe: power 2.0, absent groups, or repeated good and bad group rows.
+
+    Fails if out-of-range bounds, missing groups, duplicates (even identical),
+    contradictory duplicates or unknown groups remain valid freeze evidence.
+    """
+    base = freeze_report(tool, verdict, protocol)
+    for value in (2.0, -0.1, math.nan, math.inf, None, True):
+        report = copy.deepcopy(base)
+        for row in report["alias"]["groups"]:
+            row["power_lower_95"] = value
+        assert not verdict.freeze_evidence(tool, protocol, report)["valid"]
+    for mutant in ("missing", "duplicate", "contradictory", "unknown"):
+        report = copy.deepcopy(base)
+        groups = report["alias"]["groups"]
+        key = tuple(
+            groups[0][k] for k in ("regime", "mass_model", "epoch_count", "quantity")
+        )
+        if mutant == "missing":
+            groups.pop(0)
+        elif mutant == "unknown":
+            groups[0]["regime"] = "invented"
+        else:
+            groups.append(
+                dict(
+                    groups[0], power_lower_95=0.0 if mutant == "contradictory" else 0.9
+                )
+            )
+        evid = verdict.freeze_evidence(tool, protocol, report)
+        assert not evid["valid"], mutant
+        assert key not in evid["power_ok"], mutant
+
+
+@pytest.mark.parametrize("diagnostic", [None, -1.0, math.nan, math.inf])
+def test_reference_diagnostics_cannot_be_missing_or_nonpositive(
+    tool, verdict, protocol, clean, evidence, diagnostic
+):
+    """Probe: normalized reference bins with absent/negative/NaN/infinite ESS.
+
+    Fails if invalid Kish ESS can contribute an alias pass (replaces the
+    zero-only empty-fit guard with coverage of populated fit diagnostics).
+    """
+    ident = "panel/ti_window/R1/w000/reference_1/k2"
+    units = dict(clean)
+    record = copy.deepcopy(units[ident])
+    if diagnostic is None:
+        del record["summary"]["kish_ess"]
+    else:
+        record["summary"]["kish_ess"] = diagnostic
+    assert verdict.record_problems(protocol, record)
+    units[ident] = record
+    row = by(
+        grade(tool, verdict, protocol, units, evidence),
+        regime="R1",
+        mass_model="ti_window",
+        epoch_count=2,
+        quantity="lnP",
+    )[0]
+    assert row["verdict_alias"] == "incomplete"
+
+
+@pytest.mark.parametrize("particles", [None, -1, 1.5, True])
+def test_reference_requires_a_positive_integer_retained_count(
+    verdict, protocol, clean, particles
+):
+    """Probe: valid ESS and bins with absent, negative or noninteger particles.
+
+    Fails if a reference with no valid retained-particle count can be scored.
+    """
+    record = copy.deepcopy(next(r for r in clean.values() if r["kind"] == "reference"))
+    if particles is None:
+        del record["summary"]["particles"]
+    else:
+        record["summary"]["particles"] = particles
+    assert verdict.record_problems(protocol, record)
+
+
+def test_grading_document_cites_operative_rules():
+    """Probe: the round-2 document cited precision/certification for D2 roles.
+
+    Fails if D2, failures or mechanics lack their operative citations, role
+    selection is presented as protocol text, or scoped certification is lost.
+    """
+    doc = (TOOLS.parent / "docs" / "updater-panel-grading.md").read_text()
+    for text in (
+        "931-940",
+        "966-992",
+        "1027-1031",
+        "1216-1220",
+        "implementation ruling fixed before results",
+        "affected mass model",
+    ):
+        assert text in doc
+    assert "every mass model certified" not in doc
+
+
 def test_alias_cannot_pass_without_freeze_evidence(
     tool, verdict, protocol, clean, evidence
 ):
@@ -1001,7 +1123,9 @@ def _binding_mutants(tool, verdict, protocol):
         "delta2": lambda r: r["alias"].update(delta2=7e-4),
         "binding_delta2": lambda r: r["binding"].update(alias_delta2=7e-4),
         "no_binding": lambda r: r.pop("binding"),
-        "exact_failed": lambda r: r["exact_checks"]["verdicts"].update(case_1="fail"),
+        "exact_failed": lambda r: r["exact_checks"]["verdicts"].update(
+            ti_window="fail"
+        ),
         "exact_missing": lambda r: r.pop("exact_checks"),
     }.items():
         report = copy.deepcopy(base)
@@ -1031,8 +1155,9 @@ def test_certification_and_power_are_per_mass_model_and_group(
 ):
     """An uncertified mass model blocks alias; an unpowered group blocks only itself.
 
-    Fails if certification is assumed for a mass model the report does not
-    certify, or the power floor is not checked per group and quantity.
+    Probe: mark only TI uncertified, including its numerically failing row.
+    Fails if physical aliases lose their passes, TI can fail the panel, or
+    the power floor is not scoped to its group and quantity.
     """
     report = freeze_report(tool, verdict, protocol)
     report["certification"]["ti_window"]["status"] = "not certified"
@@ -1042,7 +1167,21 @@ def test_certification_and_power_are_per_mass_model_and_group(
         by(rows, mass_model="ti_window", quantity="future_pa"), "alias"
     ) == {"incomplete"}
     assert not evid["valid"] and evid["certified"]["physical_fixed"]
-    assert verdicts(by(rows, quantity="future_pa"), "alias") == {"incomplete"}
+    assert verdicts(
+        by(rows, mass_model="physical_fixed", quantity="future_pa"), "alias"
+    ) == {"pass"}
+    report.update(status="incomplete", reasons=["ti_window reference not certified"])
+    scoped = verdict.freeze_evidence(tool, protocol, report)
+    damaged = make_units(tool, protocol, _bad_alias)
+    scoped_rows = grade(tool, verdict, protocol, damaged, scoped)
+    assert verdict.panel_verdict(scoped_rows) == "incomplete"
+    assert verdicts(by(scoped_rows, mass_model="ti_window"), "alias") == {
+        "incomplete",
+        "na",
+    }
+    assert verdicts(
+        by(scoped_rows, mass_model="physical_fixed", quantity="future_pa"), "alias"
+    ) == {"pass"}
     report = freeze_report(tool, verdict, protocol)
     for row in report["alias"]["groups"]:
         if (row["regime"], row["mass_model"], row["epoch_count"], row["quantity"]) == (
@@ -1062,6 +1201,32 @@ def test_certification_and_power_are_per_mass_model_and_group(
         rows, regime="R3", mass_model="physical_fixed", epoch_count=3, quantity="lnP"
     )[0]
     assert strong["verdict_alias"] == "pass"
+    report = freeze_report(tool, verdict, protocol)
+    for row in report["alias"]["groups"]:
+        if (row["regime"], row["mass_model"], row["epoch_count"], row["quantity"]) == (
+            "R4",
+            "ti_window",
+            2,
+            "lnP",
+        ):
+            row["power_lower_95"] = 0.5
+    weak_rows = grade(
+        tool,
+        verdict,
+        protocol,
+        damaged,
+        verdict.freeze_evidence(tool, protocol, report),
+    )
+    assert (
+        by(
+            weak_rows,
+            regime="R4",
+            mass_model="ti_window",
+            epoch_count=2,
+            quantity="lnP",
+        )[0]["verdict_alias"]
+        == "incomplete"
+    )
 
 
 def test_binding_from_the_tool_matches_the_protocol(tool, verdict, protocol):
@@ -1117,11 +1282,97 @@ def attestation(commit=CODE):
     return {"result": "pass", "code_commit": commit, "log_sha256": LOG_HASH}
 
 
+def committed_freeze(path, report):
+    """Create an isolated Git fixture; never commit in the working repository."""
+    path.mkdir(parents=True, exist_ok=True)
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(path), *args], stderr=subprocess.PIPE
+        )
+
+    git("init", "-q")
+    evidence = path / "freeze.json"
+    if evidence.exists() and evidence.read_text() == json.dumps(report):
+        return evidence
+    evidence.write_text(json.dumps(report))
+    git("add", "freeze.json")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.org",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "Synthetic freeze evidence",
+    )
+    return evidence
+
+
+def test_freeze_file_must_be_tracked_unchanged_and_unambiguous(
+    tool, verdict, protocol, tmp_path
+):
+    """Probe: use an untracked/outside file, edit it, stage it, or repeat a key.
+
+    Fails if Git membership, HEAD bytes, index changes or duplicate JSON exact
+    verdicts can be bypassed. No previous test covered file integrity.
+    """
+    repo = tmp_path / "repo"
+    path = committed_freeze(repo, freeze_report(tool, verdict, protocol))
+    original = path.read_text()
+    report, identity = verdict.read_freeze_evidence(path, repo)
+    assert identity["valid"] and report["status"] == "frozen"
+    for other in (
+        repo / "untracked.json",
+        tmp_path / "outside.json",
+        repo / "fre*.json",
+        repo / ":(glob)*.json",
+    ):
+        other.write_text(original)
+        assert not verdict.read_freeze_evidence(other, repo)[1]["valid"]
+    path.write_text(original + "\n")
+    assert not verdict.read_freeze_evidence(path, repo)[1]["valid"]
+    subprocess.run(["git", "-C", str(repo), "add", "freeze.json"], check=True)
+    path.write_text(original)
+    assert not verdict.read_freeze_evidence(path, repo)[1]["valid"]
+    subprocess.run(["git", "-C", str(repo), "add", "freeze.json"], check=True)
+    assert verdict.read_freeze_evidence(path, repo)[1]["valid"]
+    duplicate = original.replace(
+        '"ti_binding": "pass"', '"ti_binding": "fail", "ti_binding": "pass"'
+    )
+    path.write_text(duplicate)
+    subprocess.run(["git", "-C", str(repo), "add", "freeze.json"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "Synthetic ambiguous evidence",
+        ],
+        check=True,
+    )
+    assert not verdict.read_freeze_evidence(path, repo)[1]["valid"]
+
+
 def grade_dir(tool, verdict, protocol, path, evidence_report=True, **kw):
     """Grade a directory with valid mechanics and freeze evidence."""
     kw.setdefault("mechanics", attestation())
     if evidence_report:
         kw.setdefault("freeze_report", freeze_report(tool, verdict, protocol))
+        report = kw.pop("freeze_report")
+        repo = path / "evidence-repo"
+        kw.setdefault("freeze_evidence_path", committed_freeze(repo, report))
+        tool = SimpleNamespace(**dict(vars(tool), REPO=repo))
     return verdict.grade_panel(tool, protocol, path, **kw)
 
 
@@ -1374,7 +1625,9 @@ def test_dirty_override_is_exploratory_and_never_passes(
 ):
     """An accepted dirty tree grades at best incomplete, with no pass in the table.
 
-    Fails if the override yields a pass, a pass row, or an unmarked commit.
+    Probe: dirty manifests with --allow-dirty convert every pass to incomplete.
+    Fails if counts retain pre-conversion passes or disagree with the rows,
+    or the override yields a pass, a pass row, or an unmarked commit.
     """
     write_panel(
         tool,
@@ -1391,7 +1644,9 @@ def test_dirty_override_is_exploratory_and_never_passes(
         r[f"verdict_{c}"] != "pass" for r in result["rows"] for c in verdict.CRITERIA
     )
     assert {r["code_commit"] for r in result["rows"]} == {CODE + "-dirty"}
-    assert result["counts"]["coverage"]["pass"] > 0
+    assert result["counts"] == verdict.verdict_counts(result["rows"])
+    assert result["counts"]["coverage"]["pass"] == 0
+    assert result["counts"]["coverage"]["incomplete"] == 64
 
 
 def test_equivalent_architecture_spellings_agree(
@@ -1521,7 +1776,9 @@ def test_command_line_grades_and_exits_by_verdict(
 ):
     """``--check-panel`` and ``--grade`` run through ``main`` with exit codes.
 
-    Fails if the table is not written for a complete panel with its evidence,
+    Probe: append whitespace to a committed freeze JSON after a passing grade.
+    Fails if the edited evidence returns exit 0, Git identity is absent,
+    the table is not written for a complete panel with its evidence,
     a refused directory writes one, an exploratory grade overwrites the
     default table, or the exit code is not 0 for pass and 2 otherwise.
     """
@@ -1530,8 +1787,10 @@ def test_command_line_grades_and_exits_by_verdict(
     write_panel(tool, protocol, clean, run)
     mech = tmp_path / "mechanics.json"
     mech.write_text(json.dumps(attestation()))
-    freeze = tmp_path / "freeze.json"
-    freeze.write_text(json.dumps(freeze_report(tool, verdict, protocol)))
+    repo = tmp_path / "repo"
+    freeze = committed_freeze(repo, freeze_report(tool, verdict, protocol))
+    monkeypatch.setattr(tool, "REPO", repo)
+    monkeypatch.setattr(tool, "_self_module", lambda verdict: tool)
     out = tmp_path / "verdict.csv"
     assert tool.main(["--check-panel", str(run)]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
@@ -1544,6 +1803,25 @@ def test_command_line_grades_and_exits_by_verdict(
         str(freeze),
     ]
     assert tool.main([*args, "--verdict-out", str(out)]) == 0 and out.exists()
+    printed = capsys.readouterr().out
+    result = json.JSONDecoder().raw_decode(printed)[0]
+    original = freeze.read_text()
+    freeze.write_text(original + "\n")
+    assert tool.main([*args, "--verdict-out", str(out)]) == 2
+    assert "unmodified" in capsys.readouterr().out
+    freeze.write_text(original)
+    assert (
+        result["freeze_evidence"]["commit"]
+        == subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+    )
+    assert (
+        result["freeze_evidence"]["blob_hash"]
+        == subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD:freeze.json"], text=True
+        ).strip()
+    )
     out.unlink()
     assert tool.main(["--grade", str(run), "--verdict-out", str(out)]) == 2
     assert out.exists() and "incomplete" in out.read_text()
@@ -1560,10 +1838,9 @@ def test_command_line_grades_and_exits_by_verdict(
         dirty,
         edit_manifest=lambda i, e: e.update(code_dirty=True),
     )
-    monkeypatch.setattr(tool, "REPO", tmp_path / "repo")
     assert tool.main([*args[:1], str(dirty), *args[2:], "--allow-dirty"]) == 2
     assert "no table written" in capsys.readouterr().out
-    assert not (tmp_path / "repo").exists()
+    assert not (repo / "docs" / "updater-verdict.csv").exists()
 
 
 # --- smoke ---

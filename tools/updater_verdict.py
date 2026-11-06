@@ -31,6 +31,7 @@ import io
 import json
 import math
 import re
+import subprocess
 from pathlib import Path
 
 COLUMNS = (
@@ -443,10 +444,12 @@ def valid_intervals(ends):
 
 
 def _empty_fit(summary):
-    """Whether a summary reports a fit with no weighted draw."""
+    """Whether a fit lacks valid retained-particle and Kish ESS diagnostics."""
     if not isinstance(summary, dict):
         return True
-    return summary.get("particles") == 0 or _number(summary.get("kish_ess", 1.0)) == 0.0
+    particles = summary.get("particles")
+    ess = _number(summary.get("kish_ess"))
+    return type(particles) is not int or particles <= 0 or ess is None or ess <= 0.0
 
 
 def record_problems(protocol, record):
@@ -478,7 +481,7 @@ def record_problems(protocol, record):
     elif kind == "reference":
         summary = record.get("summary")
         if _empty_fit(summary):
-            problems.append("reference fit kept no weighted draw")
+            problems.append("reference fit has missing or invalid fit diagnostics")
         else:
             problems += _bin_problems(summary, alias["quantities"], nbins)
     else:
@@ -689,66 +692,195 @@ def freeze_binding(tool, protocol):
     }
 
 
+EXACT_CASES = {
+    "ti_window": "ti_window",
+    "physical_fixed": "physical_fixed",
+    "ti_binding": "ti_window",
+}
+
+
 def freeze_evidence(tool, protocol, report):
-    """Validate a freeze report against the protocol being graded.
+    """Validate report structure and resolve eligibility per mass model and group.
 
-    The report is the committed output of ``--freeze`` (with its binding
-    block). It is accepted only when it says ``frozen`` with no reasons, its
-    binding equals the current run hash, protocol budgets and frozen alias
-    tolerance, every mass model's reference is ``certified``, every exact-check
-    case passed, and every group and alias quantity has a power lower bound at
-    the protocol's floor.
-
-    Returns:
-        Dict with ``valid``, ``reasons``, ``certified`` (mass model to bool)
-        and ``power_ok`` (set of (regime, mass model, epoch count, quantity)
-        meeting the floor).
+    ``valid`` describes the whole freeze. ``usable`` requires a valid binding
+    and schema but allows scoped certification, exact-check and power failures.
+    Those failures make only their affected aliases incomplete, even when the
+    numerical alias bound fails. File integrity is checked by ``grade_panel``.
     """
     alias = protocol["criteria"]["alias_accuracy"]
     reasons = []
-    out = {"valid": False, "reasons": reasons, "certified": {}, "power_ok": set()}
+    out = {
+        "valid": False,
+        "usable": False,
+        "reasons": reasons,
+        "certified": {},
+        "exact_ok": {},
+        "power_ok": set(),
+    }
     if not isinstance(report, dict):
         reasons.append("freeze evidence is not a freeze report")
         return out
+    structural = []
+    if report.get("status") not in ("frozen", "incomplete"):
+        structural.append("freeze report has an invalid status")
+    if not isinstance(report.get("reasons"), list):
+        structural.append("freeze report's reasons are not a list")
     if report.get("status") != "frozen" or report.get("reasons"):
         reasons.append("freeze report is not frozen with no reasons")
-    binding = report.get("binding") or {}
+    binding = report.get("binding")
+    binding = binding if isinstance(binding, dict) else {}
     if binding.get("run_hash") != tool.run_hash(protocol):
-        reasons.append("freeze report is bound to another run hash")
+        structural.append("freeze report is bound to another run hash")
     if binding.get("budgets") != tool.protocol_budgets(protocol):
-        reasons.append("freeze report is bound to other budgets")
-    frozen = report.get("alias", {}).get("delta2")
-    graded = None if _number(frozen) is None else min(frozen, alias["delta2_max"])
-    same = (
-        graded is not None
-        and math.isclose(graded, alias["delta2"], rel_tol=1e-9)
+        structural.append("freeze report is bound to other budgets")
+    alias_report = report.get("alias")
+    alias_report = alias_report if isinstance(alias_report, dict) else {}
+    frozen = _number(alias_report.get("delta2"))
+    bound = _number(binding.get("alias_delta2"))
+    if not (
+        frozen is not None
+        and frozen > 0.0
+        and bound is not None
         and math.isclose(
-            binding.get("alias_delta2", math.nan), alias["delta2"], rel_tol=1e-9
+            min(frozen, alias["delta2_max"]), alias["delta2"], rel_tol=1e-9
         )
-    )
-    if not same:
-        reasons.append("freeze report's alias tolerance is not the protocol's")
+        and math.isclose(bound, alias["delta2"], rel_tol=1e-9)
+    ):
+        structural.append("freeze report's alias tolerance is not the protocol's")
+    certification = report.get("certification")
+    certification = certification if isinstance(certification, dict) else {}
     for mass_model in protocol["panel"]["mass_models"]:
-        cert = (report.get("certification") or {}).get(mass_model, {})
-        out["certified"][mass_model] = cert.get("status") == "certified"
+        cert = certification.get(mass_model)
+        out["certified"][mass_model] = (
+            isinstance(cert, dict) and cert.get("status") == "certified"
+        )
         if not out["certified"][mass_model]:
             reasons.append(f"{mass_model} reference is not certified in the report")
-    exact = (report.get("exact_checks") or {}).get("verdicts")
-    if not isinstance(exact, dict) or not exact or set(exact.values()) != {"pass"}:
-        reasons.append("exact checks are absent or not all passed")
-    for row in (report.get("alias") or {}).get("groups", []):
-        lower = _number(row.get("power_lower_95"))
-        if lower is not None and lower >= alias["min_power"]:
-            out["power_ok"].add(
-                (
-                    row.get("regime"),
-                    row.get("mass_model"),
-                    row.get("epoch_count"),
-                    row.get("quantity"),
-                )
-            )
+    exact_report = report.get("exact_checks")
+    exact = exact_report.get("verdicts") if isinstance(exact_report, dict) else None
+    if not isinstance(exact, dict) or set(exact) != set(EXACT_CASES):
+        structural.append("exact checks must contain the canonical cases exactly once")
+        exact = {}
+    elif any(v not in ("pass", "fail", "incomplete") for v in exact.values()):
+        structural.append("exact checks have invalid verdicts")
+    for mass_model in protocol["panel"]["mass_models"]:
+        out["exact_ok"][mass_model] = all(
+            exact.get(case) == "pass"
+            for case, model in EXACT_CASES.items()
+            if model == mass_model
+        )
+        if not out["exact_ok"][mass_model]:
+            reasons.append(f"{mass_model} exact checks are absent or not all passed")
+    expected = {
+        (r, m, k, q)
+        for r, m, k in tool.canonical_groups(protocol)
+        for q in alias["quantities"]
+    }
+    groups = alias_report.get("groups")
+    entries = {key: [] for key in expected}
+    if not isinstance(groups, list):
+        structural.append("freeze report's alias groups are not a list")
+        groups = []
+    for row in groups:
+        if not isinstance(row, dict):
+            structural.append("freeze report has a malformed alias group")
+            continue
+        key = tuple(
+            row.get(k) for k in ("regime", "mass_model", "epoch_count", "quantity")
+        )
+        if (
+            not all(isinstance(x, str) for x in (key[0], key[1], key[3]))
+            or type(key[2]) is not int
+            or key not in expected
+        ):
+            structural.append("freeze report has an unknown alias group")
+            continue
+        entries[key].append(row.get("power_lower_95"))
+    for key, values in sorted(entries.items()):
+        if len(values) != 1:
+            reasons.append(f"alias group {key} is missing or duplicated")
+        elif not valid_unit_interval(values[0]):
+            reasons.append(f"alias group {key} has an invalid power probability")
+        elif values[0] < alias["min_power"]:
+            reasons.append(f"alias group {key} is below the power floor")
+        else:
+            out["power_ok"].add(key)
+    reasons += structural
+    out["usable"] = not structural
     out["valid"] = not reasons
     return out
+
+
+def read_freeze_evidence(path, repo):
+    """Read only a tracked regular file whose bytes and index agree with HEAD.
+
+    Return the parsed report and Git identity, or no report and a reason. Git
+    supplies the commit and blob hashes; this is a review binding, not a claim
+    that the committed evidence was computed honestly.
+    """
+    identity = {"valid": False, "commit": None, "blob_hash": None, "path": None}
+    try:
+        if path is None:
+            raise ValueError("freeze evidence file is required")
+        repo = Path(repo).resolve()
+        path = Path(path).absolute()
+        relative = path.relative_to(repo).as_posix()
+        # Resolving as well prevents a symlink from escaping the repository.
+        path.resolve().relative_to(repo)
+        identity["path"] = relative
+
+        def git(*args):
+            return subprocess.check_output(
+                ["git", "--literal-pathspecs", "-C", str(repo), *args],
+                stderr=subprocess.PIPE,
+            )
+
+        if Path(git("rev-parse", "--show-toplevel").decode().strip()).resolve() != repo:
+            raise ValueError("freeze evidence must belong to the photomancy repository")
+        commit = git("rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+        identity["commit"] = commit
+        git("ls-files", "--error-unmatch", "--", relative)
+        tree = git("ls-tree", commit, "--", relative).decode().split("\t", 1)[0].split()
+        if len(tree) != 3 or tree[0] not in ("100644", "100755") or tree[1] != "blob":
+            raise ValueError("freeze evidence must be a committed regular file")
+        identity["blob_hash"] = tree[2]
+        git(
+            "diff",
+            "--cached",
+            "--quiet",
+            "--no-ext-diff",
+            "--no-textconv",
+            commit,
+            "--",
+            relative,
+        )
+        git("diff", "--quiet", "--no-ext-diff", "--no-textconv", commit, "--", relative)
+        if path.is_symlink():
+            raise ValueError("freeze evidence must be a regular file, not a symlink")
+        committed = git("cat-file", "blob", tree[2])
+        if path.read_bytes() != committed:
+            raise ValueError("freeze evidence bytes differ from HEAD")
+        report = json.loads(committed, object_pairs_hook=_unique_json_object)
+        if not isinstance(report, dict):
+            raise ValueError("freeze evidence is not a JSON object")
+    except (OSError, ValueError, subprocess.CalledProcessError) as err:
+        identity["reason"] = (
+            "freeze evidence must be tracked and unmodified relative to HEAD "
+            f"in the photomancy repository ({err})"
+        )
+        return None, identity
+    identity["valid"] = True
+    return report, identity
+
+
+def _unique_json_object(pairs):
+    """Reject repeated JSON keys rather than silently keeping the last value."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
 
 
 def mechanics_verdict(evidence, code_commit):
@@ -875,9 +1007,9 @@ def build_rows(
             failed-update rows when given.
         latency_ms: Measured warm batched amortized cost per active update for
             the intended batch, written on the failed-update rows when given.
-        freeze: ``freeze_evidence`` output. Without valid evidence, and for a
-            mass model or group it does not certify, an alias ``pass`` becomes
-            ``incomplete``; a ``fail`` stays a fail.
+        freeze: ``freeze_evidence`` output. Scoped certification, exact-check
+            or power deficiencies make affected aliases ``incomplete``, even
+            numerical failures. Unbound evidence cannot support a pass.
 
     Returns:
         List of row dicts in column order: the 64 cells, the position-angle
@@ -904,15 +1036,17 @@ def build_rows(
 
     def alias(group, row, k, q):
         verdict, stats = alias_statistics(group, k, q, protocol, crit)
-        if verdict == "pass":
-            key = (group.regime, group.mass_model, k, q)
-            backed = (
-                freeze is not None
-                and freeze.get("valid")
-                and freeze["certified"].get(group.mass_model)
+        key = (group.regime, group.mass_model, k, q)
+        if freeze is not None and freeze.get("usable"):
+            eligible = (
+                freeze["certified"].get(group.mass_model)
+                and freeze["exact_ok"].get(group.mass_model)
                 and key in freeze["power_ok"]
             )
-            verdict = "pass" if backed else "incomplete"
+            if not eligible:
+                verdict = "incomplete"
+        elif verdict == "pass":
+            verdict = "incomplete"
         row["verdict_alias"] = verdict
         return stats
 
@@ -1012,7 +1146,7 @@ def grade_panel(
     mechanics=None,
     memory_mb=None,
     latency_ms=None,
-    freeze_report=None,
+    freeze_evidence_path=None,
 ):
     """Audit a panel directory and grade it.
 
@@ -1025,7 +1159,7 @@ def grade_panel(
         mechanics: Attestation dict for ``mechanics_verdict``.
         memory_mb: Measured peak memory of the intended batch.
         latency_ms: Measured warm batched amortized ms per active update.
-        freeze_report: The committed ``--freeze`` report, as a dict.
+        freeze_evidence_path: Tracked ``--freeze`` JSON, unmodified from HEAD.
         allow_dirty: Grade a panel whose manifests flag a dirty tree. The
             result is exploratory: every ``pass`` is written as ``incomplete``
             so the table cannot satisfy a gate, and ``exploratory`` lists why.
@@ -1049,6 +1183,7 @@ def grade_panel(
     prov = audit["provenance"]
     commit = prov["code_commit"]
     mech, mech_reason = mechanics_verdict(mechanics, commit)
+    freeze_report, identity = read_freeze_evidence(freeze_evidence_path, tool.REPO)
     freeze = freeze_evidence(tool, protocol, freeze_report)
     rows = build_rows(
         tool,
@@ -1065,25 +1200,28 @@ def grade_panel(
         freeze,
     )
     reasons = []
+    if not identity["valid"]:
+        reasons.append(identity["reason"])
     if mech_reason:
         reasons.append(mech_reason)
     if not freeze["valid"]:
         reasons += freeze["reasons"]
     exploratory = list(prov["notes"])
-    counts = verdict_counts(rows)
     if exploratory:
         reasons += exploratory
         for row in rows:
             for c in CRITERIA:
                 if row[f"verdict_{c}"] == "pass":
                     row[f"verdict_{c}"] = "incomplete"
+    counts = verdict_counts(rows)
     verdict = panel_verdict(rows)
-    if audit["status"] == "incomplete" and verdict == "pass":
+    if (audit["status"] == "incomplete" or not freeze["valid"]) and verdict == "pass":
         verdict = "incomplete"
     return {
         "status": verdict,
         "reasons": reasons,
         "exploratory": bool(exploratory),
+        "freeze_evidence": identity,
         "audit": audit_summary(audit),
         "rows": rows,
         "counts": counts,
