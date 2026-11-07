@@ -6,6 +6,7 @@ plug-ins -- a forward model (``params -> predicted``), a likelihood
 nothing domain-specific; orbix / skyscapes supply the forward models.
 """
 
+from abc import abstractmethod
 from collections.abc import Callable
 from typing import Any
 
@@ -17,7 +18,31 @@ from jax.flatten_util import ravel_pytree
 from photomancy.priors import AbstractPrior
 
 
-class SceneLogDensity(eqx.Module):
+class AbstractLogDensity(eqx.Module):
+    """A log-density over a parameter position that may also return auxiliary output.
+
+    ``__call__(params)`` returns the scalar log-density. ``value_and_aux(params)``
+    returns ``(value, aux)`` where ``aux`` is any PyTree computed on the way (for
+    example the model predictions the value was scored on), so a backend that needs
+    both runs the forward model once. The default ``aux`` is ``None``; a subclass that
+    has something to share overrides ``value_and_aux`` and keeps ``__call__`` as its
+    first output.
+
+    A plain callable ``params -> scalar`` is accepted wherever a backend takes a
+    log-density; backends that read ``aux`` treat it as ``aux=None``.
+    """
+
+    @abstractmethod
+    def __call__(self, params):
+        """Return the scalar log-density at ``params``."""
+        raise NotImplementedError
+
+    def value_and_aux(self, params):
+        """Return ``(log_density, aux)`` at ``params``; ``aux`` defaults to ``None``."""
+        return self(params), None
+
+
+class SceneLogDensity(AbstractLogDensity):
     """A callable logdensity over a partitioned scene; array deps stay PyTree leaves.
 
     Holding ``forward_model`` / ``likelihood`` / ``prior`` / ``static`` as fields --

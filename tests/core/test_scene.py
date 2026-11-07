@@ -1,11 +1,14 @@
 """Tests for the scene-PyTree boundary: partition + ravel + logdensity."""
 
 import equinox as eqx
+import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from photomancy.core import build_scene_logdensity
+from photomancy.core.model import AbstractLogDensity, SceneLogDensity
 
 
 class _ToyScene(eqx.Module):
@@ -136,3 +139,25 @@ def test_scene_logdensity_accepts_abstract_prior_over_z():
     # the back-compat scene-callable prior path still works
     ld2, _, _ = build_scene_logdensity(scene, forward, likelihood, lambda s: -1.5)
     assert jnp.allclose(ld2(z), -1.5 + lik_term(z))
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_log_density_default_aux_is_none_and_value_is_the_call():
+    """``value_and_aux`` is ``(self(params), None)`` unless a subclass overrides it.
+
+    Truth source: the interface definition (the first output is ``__call__``).
+    Tolerance basis: exact-algebra (the same expression, compared exactly).
+    Fails if: the default returns something other than the plain value, or the
+    abstract base can be instantiated without a ``__call__``.
+    """
+    scene = _ToyScene(mu=jnp.asarray(0.0), label="toy")
+    logdensity, z0, _ = build_scene_logdensity(
+        scene, lambda s: s.mu, lambda p: -0.5 * (p - 1.0) ** 2, lambda s: 0.0
+    )
+    assert isinstance(logdensity, SceneLogDensity)
+    assert isinstance(logdensity, AbstractLogDensity)
+    value, aux = logdensity.value_and_aux(z0)
+    assert aux is None
+    assert value == logdensity(z0)
+    with pytest.raises(TypeError):
+        AbstractLogDensity()
