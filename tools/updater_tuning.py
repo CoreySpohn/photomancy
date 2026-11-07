@@ -145,6 +145,7 @@ def report(out_dir, ref_dir=None):
                     r["updates"][k - 1]["seconds"]
                     for r in (rec, other)
                     if not r["updates"][k - 1]["includes_compile"]
+                    and not r.get("cache_cold", False)
                 ]
                 for q in alias_q:
                     a = rec["summaries"][str(k)]["bins"][q]

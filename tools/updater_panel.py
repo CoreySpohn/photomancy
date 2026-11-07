@@ -1620,6 +1620,35 @@ def _resident_memory_mb():
     return resident_pages * os.sysconf("SC_PAGE_SIZE") / 2**20
 
 
+def _cgroup_memory_bytes(
+    proc_cgroup=Path("/proc/self/cgroup"), cgroup_root=Path("/sys/fs/cgroup")
+):
+    """Current and maximum bytes of this process's finite Linux cgroup v2.
+
+    Missing, unreadable, malformed or unlimited accounting leaves RSS as the
+    cleanup signal. Paths are injectable for tests without reading host files.
+    """
+    if sys.platform != "linux":
+        return None
+    try:
+        for line in Path(proc_cgroup).read_text().splitlines():
+            if not line.startswith("0::"):
+                continue
+            relative = Path(line[3:])
+            if not relative.is_absolute() or ".." in relative.parts:
+                return None
+            group = Path(cgroup_root) / str(relative).lstrip("/")
+            maximum = (group / "memory.max").read_text().strip()
+            if maximum == "max":
+                return None
+            current = int((group / "memory.current").read_text())
+            maximum = int(maximum)
+            return (current, maximum) if current >= 0 and maximum >= 0 else None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def run_units(
     units,
     out_dir,
@@ -1629,6 +1658,7 @@ def run_units(
     compatible=None,
     *,
     clear_caches_above_mb=4096,
+    clear_caches_above_fraction=0.6,
 ):
     """Run the units of one shard that no unit file in ``out_dir`` holds yet.
 
@@ -1642,8 +1672,11 @@ def run_units(
     After writing and logging a record, release it and clear Equinox/JAX
     caches and collect garbage when current RSS exceeds
     ``clear_caches_above_mb`` (MiB). Zero clears after every completed unit;
-    None disables cleanup. Checking between units preserves shared compiled
-    programs below the threshold; it is not a limit on a unit's peak memory.
+    None disables cleanup. On Linux, a finite cgroup v2 limit also triggers
+    cleanup above ``clear_caches_above_fraction`` of that limit. Checking
+    between units is not a limit on a unit's peak memory. After a clear, the
+    first updater record per configuration carries ``cache_cold: true`` so
+    timing consumers can exclude recompilation without changing the executor.
 
     Returns:
         Dict with the counts ``planned``, ``skipped`` and ``ran``.
@@ -1652,6 +1685,12 @@ def run_units(
         not math.isfinite(clear_caches_above_mb) or clear_caches_above_mb < 0
     ):
         raise ValueError("clear_caches_above_mb must be finite and nonnegative or None")
+    if not math.isfinite(clear_caches_above_fraction) or not (
+        0 < clear_caches_above_fraction < 1
+    ):
+        raise ValueError(
+            "clear_caches_above_fraction must be finite and between 0 and 1"
+        )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     mine = shard_units(units, shard)
@@ -1668,14 +1707,28 @@ def run_units(
     done = set(existing)
     todo = [u for u in mine if u["id"] not in done]
     path = out_dir / f"units-{shard[0]}of{shard[1]}.jsonl"
+    warm_since_clear = None
     for n, unit in enumerate(todo, 1):
         record = execute(unit)
+        if warm_since_clear is not None and "updates" in record:
+            compile_key = (unit["mass_model"], record["particles"])
+            if compile_key not in warm_since_clear:
+                record["cache_cold"] = True
+            warm_since_clear.add(compile_key)
         record["id"] = unit["id"]
         append_record(path, record)
         log(f"[{n}/{len(todo)}] {unit['id']} {record.get('seconds', 0.0):.1f} s")
         del record
-        if clear_caches_above_mb is not None and (
-            clear_caches_above_mb == 0 or _resident_memory_mb() > clear_caches_above_mb
+        if clear_caches_above_mb is None:
+            continue
+        memory = _cgroup_memory_bytes()
+        if (
+            clear_caches_above_mb == 0
+            or _resident_memory_mb() > clear_caches_above_mb
+            or (
+                memory is not None
+                and memory[0] > clear_caches_above_fraction * memory[1]
+            )
         ):
             import gc
 
@@ -1685,6 +1738,7 @@ def run_units(
             eqx.clear_caches()
             jax.clear_caches()
             gc.collect()
+            warm_since_clear = set()
     return {"planned": len(mine), "skipped": len(mine) - len(todo), "ran": len(todo)}
 
 
@@ -3026,6 +3080,13 @@ def _cache_arguments(parser):
         "MiB (default 4096; 0 clears every unit)",
     )
     parser.add_argument(
+        "--clear-caches-above-fraction",
+        type=float,
+        default=0.6,
+        help="clear after a unit above this fraction of a finite Linux cgroup v2 "
+        "memory.max (default 0.6; strictly between 0 and 1)",
+    )
+    parser.add_argument(
         "--no-clear-caches",
         dest="clear_caches_above_mb",
         action="store_const",
@@ -3290,6 +3351,9 @@ def run_stage(protocol, args):
             log=lambda m: print(m, flush=True),
             compatible=compatible,
             clear_caches_above_mb=getattr(args, "clear_caches_above_mb", 4096),
+            clear_caches_above_fraction=getattr(
+                args, "clear_caches_above_fraction", 0.6
+            ),
         )
     except IncompatibleRunError as err:
         raise SystemExit(f"refusing to resume: {err}") from None

@@ -902,6 +902,7 @@ def test_run_units_releases_records_and_clears_after_logging(
     events, refs = [], []
     rss = iter([128, 129, 120])
     monkeypatch.setattr(tool, "_resident_memory_mb", lambda: next(rss), raising=False)
+    monkeypatch.setattr(tool, "_cgroup_memory_bytes", lambda: None)
 
     class Record(dict):
         pass
@@ -963,13 +964,14 @@ def test_runner_cleanup_is_outside_panel_and_exact_fingerprints():
     assert exact.exact_run_hash(protocol) == exact_before
 
 
+@pytest.mark.medium
 def test_cleanup_preserves_written_unit_bytes(tmp_path):
-    """Fails if cache release changes deterministic unit output or JSON framing.
+    """Fails if clearing changes any physical reference/certification record bytes.
 
-    Use tiny numerical units with the same fresh-JIT-closure lifetime as a
-    physical reference. Exclude only top-level seconds: elapsed time varies
-    with compilation. Physical reference/certification identity is also
-    checked by the synthetic measurement harness at reduced proposal budgets.
+    Replaces the tiny square-closure probe with real UnitExecutor sampling,
+    summaries and certification variants. Medium tier: six physical fits
+    with forced recompilation exceed the five-second cold unit budget.
+    Only wall-clock seconds are excluded, using a byte substitution.
     """
     import subprocess
     import sys
@@ -992,28 +994,24 @@ def test_cleanup_preserves_written_unit_bytes(tmp_path):
 
 
 def _cache_identity_probe(tmp_path):
-    """Real numerical/cache operations in an otherwise empty process."""
-    import time
-
-    import equinox as eqx
-    import jax.numpy as jnp
-
+    """Physical sampling and real global cache clearing in a fresh process."""
     tool = _load_tool()
-    units = [{"id": str(i)} for i in range(3)]
-
-    def execute(unit):
-        start = time.perf_counter()
-        offset = int(unit["id"])
-
-        @eqx.filter_jit
-        def score(x):
-            return (x + offset) ** 2
-
-        return {
-            "seconds": time.perf_counter() - start,
-            "values": score(jnp.arange(8)).tolist(),
-        }
-
+    protocol = tool.load_protocol()
+    budgets = tool.protocol_budgets(protocol, physical_proposals=256)
+    roles = {"reference_1", "cert_doubled_1", "cert_proposal_1"}
+    units = [
+        u
+        for u in tool.plan_units(
+            protocol,
+            "development",
+            ["reference", "certification"],
+            mass_models=["physical_fixed"],
+            regimes=["R3"],
+            worlds=[0],
+        )
+        if u["role"] in roles and u["epoch_count"] == 2
+    ]
+    assert len(units) == 3
     written = []
     for policy, threshold in (("disabled", None), ("every", 0)):
         out = tmp_path / policy
@@ -1021,10 +1019,18 @@ def _cache_identity_probe(tmp_path):
             units,
             out,
             (0, 1),
-            execute,
+            tool.UnitExecutor(protocol, budgets, chunk=256),
             log=lambda m: None,
             clear_caches_above_mb=threshold,
         )
+        records = tool.read_records(out)
+        assert [r["proposals"] for r in records] == [256, 512, 256]
+        assert [r["method"] for r in records] == [
+            "scale_and_rotate_exact_highest_snr_anchor",
+            "scale_and_rotate_exact_highest_snr_anchor",
+            "scale_and_rotate_exact_lowest_snr_anchor",
+        ]
+        assert all(r["summary"]["kish_ess"] > 0 for r in records)
         lines = []
         for line in (out / "units-0of1.jsonl").read_bytes().splitlines(keepends=True):
             # Remove just the timing member from the written bytes. Preserve
@@ -1034,4 +1040,203 @@ def _cache_identity_probe(tmp_path):
             lines.append(re.sub(rb'"seconds": [^,}]+, ', b"", line))
         written.append(b"".join(lines))
     assert written[0] == written[1]
-    assert b'"values": [0, 1, 4, 9, 16, 25, 36, 49]' in written[0]
+
+
+def test_cleanup_marks_cold_configurations_and_tuning_excludes_them(
+    tmp_path, monkeypatch
+):
+    """Fails if post-clear recompiles enter warm medians or stay cold on reuse.
+
+    No existing tuning test covers the runner's cleanup-to-report boundary.
+    Fake numerical work keeps the test below the unit budget; persistence,
+    cleanup decisions and the tuning report are real.
+    """
+    import gc
+
+    import equinox as eqx
+    import jax
+
+    spec = importlib.util.spec_from_file_location(
+        "updater_tuning", TOOL.parent / "updater_tuning.py"
+    )
+    tuning = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tuning)
+    tool = tuning.panel
+    protocol = tool.load_protocol()
+    units = tool.plan_units(
+        protocol,
+        "development",
+        ["updater"],
+        mass_models=["ti_window"],
+        regimes=["R1"],
+        worlds=[0, 1],
+    )
+    units = [u for u in units if u["role"] != "updater_doubled"]
+    rss = iter([129, 0, 0, 0, 0, 0])
+    monkeypatch.setattr(tool, "_resident_memory_mb", lambda: next(rss))
+    for owner, name in ((eqx, "clear_caches"), (jax, "clear_caches"), (gc, "collect")):
+        monkeypatch.setattr(owner, name, lambda: None)
+    monkeypatch.setattr(tool, "_cgroup_memory_bytes", lambda: None, raising=False)
+    seen = set()
+
+    def execute(unit):
+        key = (unit["mass_model"], unit.get("particles", 16))
+        first = key not in seen
+        seen.add(key)
+        bins = {q: [0.25, 0.75] for q in ("lnP", "e", "future_pa")}
+        return {
+            "kind": "updater",
+            "particles": key[1],
+            "updates": [
+                {
+                    "includes_compile": first,
+                    "seconds": 100
+                    if unit["world"] == 0
+                    else (1 if unit["role"] == "updater_a" else 3),
+                    "status": "OK",
+                    "rungs_used": 1,
+                }
+                for _ in range(3)
+            ],
+            "summaries": {str(k): {"bins": bins} for k in (2, 3)},
+        }
+
+    # Distinct model and particle configurations must each be cold once.
+    extra = dict(
+        units[0],
+        role="updater_doubled",
+        particles=32,
+        id=units[0]["id"].replace("updater_a", "updater_doubled"),
+    )
+    physical = dict(
+        extra,
+        mass_model="physical_fixed",
+        particles=16,
+        id=extra["id"].replace("ti_window", "physical_fixed"),
+    )
+    tool.run_units(
+        [units[0], extra, physical, *units[1:]],
+        tmp_path / "config",
+        (0, 1),
+        execute,
+        log=lambda m: None,
+        clear_caches_above_mb=128,
+    )
+    records = tool.read_records(tmp_path / "config")
+    assert [r.get("cache_cold", False) for r in records] == [
+        False,
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
+    assert not records[3]["updates"][0]["includes_compile"]
+    report = tuning.report(tmp_path)["config"]
+    assert all(row["seconds_per_update_median"] == 2 for row in report.values())
+
+
+@pytest.fixture
+def cgroup_fs(tmp_path):
+    """A private proc membership file and cgroup tree, never the host's files."""
+    membership = tmp_path / "proc" / "self" / "cgroup"
+    membership.parent.mkdir(parents=True)
+    membership.write_text("4:cpu:/legacy\n0::/slice/shard\n")
+    root = tmp_path / "sys" / "fs" / "cgroup"
+    group = root / "slice" / "shard"
+    group.mkdir(parents=True)
+    (group / "memory.current").write_text("601\n")
+    (group / "memory.max").write_text("1000\n")
+    return membership, root, group
+
+
+def test_cgroup_memory_parsing_and_fallbacks(cgroup_fs, monkeypatch):
+    """Fails if path selection or absent limits break RSS fallback."""
+    tool = _load_tool()
+    membership, root, group = cgroup_fs
+    monkeypatch.setattr(tool.sys, "platform", "linux")
+    assert tool._cgroup_memory_bytes(membership, root) == (601, 1000)
+    (group / "memory.max").write_text("max\n")
+    assert tool._cgroup_memory_bytes(membership, root) is None
+    (group / "memory.max").write_text("invalid\n")
+    assert tool._cgroup_memory_bytes(membership, root) is None
+    (group / "memory.max").unlink()
+    assert tool._cgroup_memory_bytes(membership, root) is None
+    membership.write_text("0::/\n")
+    (root / "memory.current").write_text("600\n")
+    (root / "memory.max").write_text("1000\n")
+    assert tool._cgroup_memory_bytes(membership, root) == (600, 1000)
+    membership.write_text("4:memory:/legacy\n")
+    assert tool._cgroup_memory_bytes(membership, root) is None
+    membership.write_text("0::/../../outside\n")
+    assert tool._cgroup_memory_bytes(membership, root) is None
+    membership.unlink()
+    assert tool._cgroup_memory_bytes(membership, root) is None
+    membership.write_text("0::/\n")
+    monkeypatch.setattr(tool.sys, "platform", "darwin")
+    assert tool._cgroup_memory_bytes(membership, root) is None
+
+
+@pytest.mark.parametrize(
+    "argv,clears",
+    [
+        ([], 1),
+        (["--clear-caches-above-fraction", "0.7"], 0),
+        (["--no-clear-caches"], 0),
+    ],
+)
+def test_cgroup_pressure_clears_below_rss_threshold(
+    tmp_path, monkeypatch, cgroup_fs, argv, clears
+):
+    """Fails if cgroup pressure is ignored, uses >=, or overrides disabled cleanup."""
+    import gc
+
+    import equinox as eqx
+    import jax
+
+    tool = _load_tool()
+    membership, root, group = cgroup_fs
+    monkeypatch.setattr(tool.sys, "platform", "linux")
+    read_memory = tool._cgroup_memory_bytes
+    monkeypatch.setattr(
+        tool, "_cgroup_memory_bytes", lambda: read_memory(membership, root)
+    )
+    monkeypatch.setattr(tool, "_resident_memory_mb", lambda: 100)
+    events = []
+    monkeypatch.setattr(eqx, "clear_caches", lambda: events.append("eqx"))
+    monkeypatch.setattr(jax, "clear_caches", lambda: events.append("jax"))
+    monkeypatch.setattr(gc, "collect", lambda: events.append("gc"))
+
+    def execute(unit):
+        (group / "memory.current").write_text("600" if unit["id"] == "0" else "601")
+        return {"value": unit["id"]}
+
+    parser = tool.argparse.ArgumentParser()
+    tool._cache_arguments(parser)
+    policy = vars(parser.parse_args(argv))
+    tool.run_units(
+        [{"id": "0"}, {"id": "1"}],
+        tmp_path / "run",
+        (0, 1),
+        execute,
+        log=lambda m: None,
+        **policy,
+    )
+    assert events == ["eqx", "jax", "gc"] * clears
+    assert [r["value"] for r in tool.read_records(tmp_path / "run")] == ["0", "1"]
+
+
+@pytest.mark.parametrize("fraction", [0, 1, float("nan")])
+def test_invalid_cache_fraction_is_refused_before_writing(tmp_path, fraction):
+    """Fails if a missing headroom fraction permits work or writes output."""
+    tool = _load_tool()
+    out = tmp_path / "run"
+    with pytest.raises(ValueError, match="clear_caches_above_fraction"):
+        tool.run_units(
+            [],
+            out,
+            (0, 1),
+            lambda unit: {},
+            clear_caches_above_fraction=fraction,
+        )
+    assert not out.exists()

@@ -1440,6 +1440,7 @@ def main(argv=None):
                 log=lambda m: print(m, flush=True),
                 compatible=compatible,
                 clear_caches_above_mb=args.clear_caches_above_mb,
+                clear_caches_above_fraction=args.clear_caches_above_fraction,
             )
         except panel.IncompatibleRunError as err:
             raise SystemExit(f"refusing to resume: {err}") from None

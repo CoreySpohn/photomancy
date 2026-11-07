@@ -45,12 +45,33 @@ of every shard.
 
 Both `tools/updater_panel.py --run ...` and `tools/updater_exact_checks.py
 --out ...` accept `--clear-caches-above-mb MB` (default **4096 MiB**).
-After each completed unit is appended and logged, the runner releases its
-record and checks current process RSS. Above the threshold it calls
-`eqx.clear_caches()`, `jax.clear_caches()`, then `gc.collect()`, in that order.
-Use `--clear-caches-above-mb 0` to clear after every completed unit, or
-`--no-clear-caches` to disable cleanup. Resumed units that are skipped do not
-trigger cleanup. RSS is read natively on macOS and from `/proc` on Linux.
+Both also accept `--clear-caches-above-fraction FRACTION` (default **0.6**,
+strictly between 0 and 1). After each completed unit is appended and logged,
+the runner releases its record and checks current process RSS. On Linux it
+also reads `/proc/self/cgroup` to find the current cgroup v2 path and reads
+that group's `memory.current` and `memory.max` under `/sys/fs/cgroup`.
+With a finite limit, cleanup triggers when `memory.current` exceeds
+`FRACTION * memory.max`, or when RSS exceeds the MiB threshold. An absent,
+unreadable or unlimited cgroup limit leaves the RSS check in effect.
+macOS uses RSS only. The [kernel memory controller documentation](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#memory)
+describes this accounting, which includes descendants, page cache and kernel
+memory as well as the runner's process memory.
+
+Cleanup calls `eqx.clear_caches()`, `jax.clear_caches()`, then `gc.collect()`,
+in that order. Use `--clear-caches-above-mb 0` to clear after every completed
+unit, or `--no-clear-caches` to disable both pressure checks and cleanup.
+Resumed units that are skipped do not trigger cleanup. RSS is read natively
+on macOS and from `/proc` on Linux.
+
+The supported Linux layout is **one shard per cgroup**, with a separate
+`MemoryMax` for each shard. Size `MemoryMax` from the peak single-unit memory
+increment plus the settled cgroup baseline plus headroom for compilation,
+allocator retention and cgroup overhead. Measure these at the intended
+production budgets; the reduced-budget measurements below do not establish
+a safe `MemoryMax`. Checking after a unit cannot prevent an intra-unit OOM.
+The fraction provides room between cleanup checks and the cgroup limit;
+sharing a cgroup between shards requires accounting for simultaneous peaks
+and is outside the supported layout.
 
 Physical reference and certification units create a fresh JIT scoring
 closure for each fit. Retained compilation programs can otherwise grow with
@@ -71,15 +92,20 @@ it triggered for all 12 units. Direct cleanup averaged 0.075 and 0.089 seconds
 respectively; most of the time penalty was recompilation. These are short
 measurements of cache growth, not production-budget peak-memory estimates.
 
-The 4096 MiB default preserves compilation reuse below the threshold while
-bounding retained caches in long-running shards. It checks between units,
-so an individual unit can exceed the threshold. Native allocators can retain
+The 4096 MiB RSS default preserves compilation reuse below the threshold;
+the Linux cgroup fraction adds a separate pressure signal. These checks
+release retained caches between units, so an individual unit can exceed
+either threshold. Native allocators can retain
 freed memory; if RSS stays above the threshold, subsequent units clear too.
 No worker recycling was needed in the measurement. Per-record `seconds`
 excludes post-record cleanup but can include recompilation after earlier
-cleanup. The existing `includes_compile` field still marks the executor's
-first encounter with a configuration; it can underreport later recompiles.
-Use a separately measured warm run for latency reporting.
+cleanup. The executor's `includes_compile` field marks its first encounter
+with a configuration. After a clear, the runner additionally marks the first
+updater record for each mass-model/particle-count configuration with
+`cache_cold: true`; later reuse remains warm until the next clear.
+`updater_tuning.py` excludes both categories from warm latency medians.
+Older records lack the additional flag, so regenerate timing runs that used
+cleanup before this bookkeeping was added.
 
 ## What the audit refuses
 
