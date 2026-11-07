@@ -86,6 +86,49 @@ fitted geometry. The inference glue is a few lines, and because the forward mode
 injected, the same code path serves a surface-brightness render now and a coronagraph
 render later without modification.
 
+### Robust likelihoods
+
+{py:obj}`photomancy.likelihoods` builds the likelihood plug-in from data, a per-element
+`sigma` and an optional boolean `mask` (True uses the element): `gaussian_loglike`,
+`laplace_loglike`, `huber_loglike` (Gaussian core, Laplace tails beyond `delta` sigma) and
+`student_t_loglike` (heavy tails for unmodeled outliers such as cosmic rays and hot
+pixels). Each returns a normalized log density, so evidences compare across them. In all
+four `sigma` is the scale of the standardized residual, as in `scipy.stats`, which for
+Laplace and Student-t is not the standard deviation. Masked elements contribute exactly
+zero to the value and the gradient, even where the data or `sigma` are NaN there.
+
+{py:obj}`~photomancy.core.model.build_gaussian_fit` takes a builder through `likelihood=`
+and the mask through `mask=`; `functools.partial` sets a shape parameter. Without them it
+keeps its Gaussian.
+
+```python
+import functools
+
+import equinox as eqx
+import jax.numpy as jnp
+
+from photomancy.core import build_gaussian_fit
+from photomancy.likelihoods import huber_loglike
+
+
+class Scene(eqx.Module):
+    flux: jnp.ndarray
+
+
+data = jnp.array([1.0, 2.0, 3.0, 50.0])  # the last pixel is a hot pixel
+mask = jnp.array([True, True, True, False])
+logdensity, z0, unravel = build_gaussian_fit(
+    Scene(flux=jnp.zeros(4)),
+    data,
+    fit_leaves=lambda s: [s.flux],
+    noise_sigma=0.5,
+    forward=lambda s: s.flux,
+    likelihood=functools.partial(huber_loglike, delta=2.0),
+    mask=mask,
+)
+assert logdensity(data) > logdensity(jnp.zeros(4))
+```
+
 ## Backends and the unified posterior
 
 A backend is an Equinox configuration object with one pure method, `run(logdensity,

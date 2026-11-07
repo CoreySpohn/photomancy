@@ -103,6 +103,8 @@ def build_gaussian_fit(
     noise_sigma,
     forward: Callable,
     prior: Callable | AbstractPrior | None = None,
+    likelihood: Callable | None = None,
+    mask=None,
 ):
     """Fit selected scene leaves to ``data`` under iid Gaussian noise.
 
@@ -121,23 +123,36 @@ def build_gaussian_fit(
         prior: Optional prior forwarded to :func:`build_scene_logdensity` -- an
             ``AbstractPrior`` (scored in z-space) or a ``scene -> scalar`` callable.
             ``None`` is flat (improper).
+        likelihood: Optional likelihood builder ``(data, sigma, mask=None) ->
+            (predicted -> scalar)``, for example
+            :func:`photomancy.likelihoods.huber_loglike` (``functools.partial`` sets
+            its ``delta`` or ``nu``). It is called with
+            ``data``, ``noise_sigma`` and ``mask``. ``None`` keeps the unnormalized
+            Gaussian above, which is unchanged.
+        mask: Optional boolean array (True uses the element), forwarded to
+            ``likelihood``. Requires ``likelihood``.
 
     Returns:
         ``(logdensity, z0, unravel)`` from :func:`build_scene_logdensity`.
     """
     n_fit = len(fit_leaves(scene))
-    mask = jax.tree_util.tree_map(lambda _: False, scene)
-    mask = eqx.tree_at(fit_leaves, mask, [True] * n_fit)
+    fit_mask = jax.tree_util.tree_map(lambda _: False, scene)
+    fit_mask = eqx.tree_at(fit_leaves, fit_mask, [True] * n_fit)
 
-    data = jnp.asarray(data)
-    inv_var = 1.0 / jnp.asarray(noise_sigma) ** 2
+    if likelihood is not None:
+        log_like = likelihood(data, noise_sigma, mask=mask)
+    elif mask is not None:
+        raise ValueError("mask requires a likelihood builder, e.g. gaussian_loglike")
+    else:
+        data = jnp.asarray(data)
+        inv_var = 1.0 / jnp.asarray(noise_sigma) ** 2
 
-    def likelihood(predicted):
-        return -0.5 * jnp.sum((predicted - data) ** 2 * inv_var)
+        def log_like(predicted):
+            return -0.5 * jnp.sum((predicted - data) ** 2 * inv_var)
 
     if prior is None:
 
         def prior(_scene):
             return 0.0
 
-    return build_scene_logdensity(scene, forward, likelihood, prior, filter_spec=mask)
+    return build_scene_logdensity(scene, forward, log_like, prior, filter_spec=fit_mask)
