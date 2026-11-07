@@ -15,6 +15,9 @@ leaves only), so a group's state is exactly what ``optax.multi_transform`` would
 hold for it, and a stage that does not free a group can leave its state alone.
 """
 
+from collections.abc import Callable
+from typing import Any
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -23,9 +26,11 @@ import optax
 
 __all__ = [
     "UNLABELED",
+    "EarlyStopping",
     "FitStage",
     "MAPResult",
     "StageTrace",
+    "StepRecord",
     "group_labels",
     "map_fit",
     "rescaled_transform",
@@ -129,17 +134,60 @@ def rescaled_transform(transform, scale):
     return optax.GradientTransformationExtraArgs(init, update)
 
 
+class EarlyStopping(eqx.Module):
+    """End a stage when the objective stops improving.
+
+    The stage stops once ``patience`` consecutive steps fail to lower the best
+    objective seen in the stage by more than ``min_delta``. The check reads the loss
+    trace on the host every ``check_every`` steps, so the stage can run up to
+    ``check_every - 1`` steps past the step where the count was reached; use
+    ``check_every=1`` for the exact step at the cost of a host read per step.
+
+    Attributes:
+        patience: Consecutive non-improving steps that end the stage.
+        min_delta: Smallest decrease that counts as an improvement.
+        check_every: Steps between host checks.
+    """
+
+    patience: int
+    min_delta: float = 0.0
+    check_every: int = 10
+
+    def __check_init__(self):
+        """Validate the counts."""
+        if self.patience < 1 or self.check_every < 1:
+            raise ValueError("patience and check_every must be at least 1")
+
+
 class FitStage(eqx.Module):
     """One stage of a staged fit: run ``n_steps`` optimizer steps with some groups free.
 
     Attributes:
-        n_steps: Number of optimizer steps in the stage.
+        n_steps: Number of optimizer steps in the stage (the most, with early stopping).
         free: Names of the groups the stage optimizes, a tuple of strings.
-        name: Label carried into the trace (default ``""``).
+        logdensity: Log-density for this stage, replacing the one given to
+            :func:`map_fit` (for example a view over one exposure). ``None`` keeps it.
+        objective_scale: The stage minimizes ``-objective_scale * log_density``; the
+            loss trace records that scaled objective. It is an array at run time, so
+            changing it does not recompile.
+        closed_form: ``(params, aux) -> params`` applied after each optimizer update
+            with the ``aux`` of the log-density evaluation that produced the update's
+            gradient (the pre-step prediction). It updates parameters that are not
+            gradient leaves, for example a flux set by a ratio of windows.
+        transforms: ``None`` continues the run's optimizers, their states and their
+            schedule clock. A dict ``{group: transform}`` replaces the transform
+            table and starts fresh states for its groups at the current values.
+        early_stopping: An :class:`EarlyStopping`, or ``None`` to run all steps.
+        name: Label carried into the trace.
     """
 
     n_steps: int
     free: tuple[str, ...]
+    logdensity: Any = None
+    objective_scale: float = 1.0
+    closed_form: Callable | None = None
+    transforms: dict | None = None
+    early_stopping: EarlyStopping | None = None
     name: str = ""
 
     def __check_init__(self):
@@ -160,15 +208,43 @@ class StageTrace(eqx.Module):
     Attributes:
         name: The stage name.
         start: Global index of the stage's first step.
-        n_steps: Steps actually run.
+        n_steps: Steps actually run (fewer than planned after an early stop).
+        stopped_early: Whether early stopping ended the stage.
         loss: Per-step objective (``-objective_scale * log_density`` before the step),
             a host array of length ``n_steps``.
+        metrics: ``{name: host array of length n_steps}`` for each metric.
     """
 
     name: str = eqx.field(static=True)
     start: int = eqx.field(static=True)
     n_steps: int = eqx.field(static=True)
+    stopped_early: bool = eqx.field(static=True)
     loss: np.ndarray
+    metrics: dict
+
+
+class StepRecord(eqx.Module):
+    """What a callback receives: the state at one step, as host copies.
+
+    Everything is evaluated at the same point, the parameters before the step.
+
+    Attributes:
+        step: Global step index across all stages.
+        stage: The :class:`FitStage` being run.
+        stage_step: Step index within the stage.
+        params: The parameter PyTree before the step (NumPy arrays).
+        loss: The scaled objective at ``params``.
+        aux: The ``aux`` of the log-density at ``params`` (NumPy arrays).
+        metrics: ``{name: float}`` at ``params``.
+    """
+
+    step: int
+    stage: FitStage
+    stage_step: int
+    params: Any
+    loss: float
+    aux: Any
+    metrics: dict
 
 
 class MAPResult(eqx.Module):
@@ -196,17 +272,37 @@ def _value_and_aux(logdensity, params):
     return logdensity(params), None
 
 
-def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
+def _host_copy(tree):
+    """Copy every array leaf to host memory (a real copy, safe under donation)."""
+    return jax.tree.map(lambda x: np.array(x) if eqx.is_array(x) else x, tree)
+
+
+def map_fit(
+    logdensity,
+    init,
+    labels,
+    transforms,
+    stages,
+    *,
+    freeze="hold",
+    metrics=None,
+    callback=None,
+    callback_every=1,
+):
     """Run a staged MAP fit of ``logdensity`` over the PyTree ``init``.
 
     Each stage optimizes the groups it frees (``FitStage.free``) with the group's
-    transform for ``n_steps`` steps, minimizing ``-logdensity``. The optimizer state
-    of every group persists across stages. The parameters are never mutated: ``init``
-    stays valid and the result holds fresh buffers.
+    transform for ``n_steps`` steps, minimizing ``-objective_scale * logdensity``.
+    The optimizer state of every group persists across stages unless a stage brings
+    its own transforms. The parameters are never mutated: ``init`` stays valid and
+    the result holds fresh buffers. There is no randomness, and on CPU a repeated run
+    is bitwise identical.
 
     Compilation: one ``filter_jit`` step per distinct stage configuration (the set of
-    free groups), with the parameters, optimizer states and the trace buffer donated,
-    so stages that repeat a configuration or differ in length do not recompile.
+    free groups, the transform table and the closed form), with the parameters,
+    optimizer states and trace buffers donated. Stage length and objective scale are
+    runtime values, so stages that repeat a configuration do not recompile. A stage
+    whose ``logdensity`` has a different PyTree structure compiles its own program.
 
     Args:
         logdensity: A callable ``params -> scalar``, or an object with
@@ -216,7 +312,8 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
         labels: Group label PyTree from :func:`group_labels` (same structure as
             ``init``).
         transforms: ``{group: optax.GradientTransformation}``. A group with no
-            transform cannot be freed.
+            transform cannot be freed. The transform of a group sees only that
+            group's leaves, as a tuple.
         stages: Sequence of :class:`FitStage`.
         freeze: How a group that is not free in a stage is treated.
 
@@ -234,12 +331,21 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
             The last two reproduce the two freezing conventions of a single
             ``optax.multi_transform`` optimizer with one shared clock; use ``"hold"``
             for a new fit.
+        metrics: ``{name: fn(params, aux) -> scalar}`` evaluated inside every step
+            at the pre-step parameters and recorded in the trace.
+        callback: ``callback(record)`` called with a :class:`StepRecord` of host
+            copies every ``callback_every`` global steps; its return value is
+            ignored. It costs a host copy of the parameters on those steps.
+        callback_every: Steps between callbacks.
 
     Returns:
         A :class:`MAPResult`.
     """
     if freeze not in _POLICIES:
         raise ValueError(f"freeze must be one of {_POLICIES}, got {freeze!r}")
+    metrics = dict(metrics or {})
+    if "loss" in metrics:
+        raise ValueError("'loss' is reserved for the objective trace")
     stages = tuple(stages)
     leaves, treedef = jax.tree.flatten(init)
     lab = jax.tree.leaves(labels)
@@ -250,12 +356,20 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
     for k, name in enumerate(lab):
         if name != UNLABELED:
             members.setdefault(name, []).append(k)
-    for name in transforms:
-        if name not in members:
-            raise ValueError(f"transform for group {name!r}, which labels do not use")
+
+    def check_table(table, where):
+        for name in table:
+            if name not in members:
+                raise ValueError(f"{where}: transform for unused group {name!r}")
+
+    check_table(transforms, "transforms")
+    table = transforms
     for stage in stages:
+        if stage.transforms is not None:
+            check_table(stage.transforms, f"stage {stage.name!r}")
+            table = stage.transforms
         for name in stage.free:
-            if name not in transforms:
+            if name not in table:
                 raise ValueError(f"stage {stage.name!r} frees {name!r}: no transform")
 
     static_leaves = [
@@ -267,7 +381,8 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
     )
     total = sum(stage.n_steps for stage in stages)
     dtype = jnp.zeros(()).dtype
-    bufs = {"loss": jnp.full((total,), jnp.nan, dtype)}
+    bufs = {name: jnp.full((total,), jnp.nan, dtype) for name in ("loss", *metrics)}
+    want_aux = callback is not None
 
     def rebuild(arrays):
         full = [
@@ -279,12 +394,14 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
     def group_slices(arrays, groups):
         return {g: tuple(arrays[k] for k in members[g]) for g in groups}
 
-    steps = {}
+    steps, keep_alive = {}, []
 
-    def get_step(free):
-        if free in steps:
-            return steps[free]
-        active = free if freeze == "hold" else tuple(transforms)
+    def get_step(table, free, closed_form):
+        key = (id(table), free, id(closed_form))
+        if key in steps:
+            return steps[key]
+        keep_alive.append((table, closed_form))
+        active = free if freeze == "hold" else tuple(table)
 
         @eqx.filter_jit(donate="all-except-first")
         def step(static_args, arrays, states, bufs, count):
@@ -296,42 +413,116 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
                 for g in active:
                     for k, v in zip(members[g], fit[g], strict=True):
                         full[k] = v
-                value, _ = _value_and_aux(ld, rebuild(full))
-                return -scale * value
+                value, aux = _value_and_aux(ld, rebuild(full))
+                return -scale * value, aux
 
-            loss, grads = jax.value_and_grad(objective)(fit)
+            (loss, aux), grads = jax.value_and_grad(objective, has_aux=True)(fit)
             new_arrays, new_states = list(arrays), dict(states)
             for g in active:
                 grad = grads[g]
                 if freeze == "zero_gradient" and g not in free:
                     grad = jax.tree.map(jnp.zeros_like, grad)
-                update, new_states[g] = transforms[g].update(grad, states[g], fit[g])
+                update, new_states[g] = table[g].update(grad, states[g], fit[g])
                 if g not in free and freeze == "drop_update":
                     continue
                 for k, v in zip(
                     members[g], optax.apply_updates(fit[g], update), strict=True
                 ):
                     new_arrays[k] = v
-            bufs = {"loss": bufs["loss"].at[count].set(loss.astype(bufs["loss"].dtype))}
-            return tuple(new_arrays), new_states, bufs, count + 1
+            if closed_form is not None:
+                updated = closed_form(rebuild(new_arrays), aux)
+                flat = jax.tree.leaves(updated)
+                new_arrays = [
+                    jnp.asarray(flat[k], old.dtype) if arr else None
+                    for k, (arr, old) in enumerate(zip(is_arr, new_arrays, strict=True))
+                ]
+            record = {"loss": loss}
+            if metrics:
+                pre = rebuild(arrays)
+                record.update({name: fn(pre, aux) for name, fn in metrics.items()})
+            bufs = {
+                name: bufs[name].at[count].set(jnp.asarray(v, bufs[name].dtype))
+                for name, v in record.items()
+            }
+            return (
+                tuple(new_arrays),
+                new_states,
+                bufs,
+                count + 1,
+                aux if want_aux else None,
+            )
 
-        steps[free] = step
+        steps[key] = step
         return step
 
-    states = {g: transforms[g].init(group_slices(dyn, [g])[g]) for g in transforms}
+    def init_states(table, arrays):
+        return {g: table[g].init(group_slices(arrays, [g])[g]) for g in table}
+
+    table = transforms
+    states = init_states(table, dyn)
     offset, records = 0, []
     for stage in stages:
-        step = get_step(tuple(stage.free))
-        static_args = (logdensity, jnp.asarray(1.0, dtype))
+        if stage.transforms is not None:
+            table = stage.transforms
+            states = init_states(table, dyn)
+        step = get_step(table, tuple(stage.free), stage.closed_form)
+        static_args = (
+            logdensity if stage.logdensity is None else stage.logdensity,
+            jnp.asarray(stage.objective_scale, dtype),
+        )
         count = jnp.asarray(offset, jnp.int32)
-        for _ in range(stage.n_steps):
-            dyn, states, bufs, count = step(static_args, dyn, states, bufs, count)
-        records.append((stage.name, offset, stage.n_steps))
-        offset += stage.n_steps
+        stopping = stage.early_stopping
+        best, bad, checked, stopped = np.inf, 0, 0, False
+        n_run = 0
+        for j in range(stage.n_steps):
+            gi = offset + j
+            pre = (
+                _host_copy(rebuild(dyn))
+                if want_aux and gi % callback_every == 0
+                else None
+            )
+            dyn, states, bufs, count, aux = step(static_args, dyn, states, bufs, count)
+            n_run = j + 1
+            if pre is not None:
+                callback(
+                    StepRecord(
+                        step=gi,
+                        stage=stage,
+                        stage_step=j,
+                        params=pre,
+                        loss=float(bufs["loss"][gi]),
+                        aux=_host_copy(aux),
+                        metrics={name: float(bufs[name][gi]) for name in metrics},
+                    )
+                )
+            if stopping is not None and (
+                n_run % stopping.check_every == 0 or n_run == stage.n_steps
+            ):
+                fresh = np.asarray(bufs["loss"])[offset + checked : offset + n_run]
+                checked = n_run
+                for value in fresh:
+                    if value < best - stopping.min_delta:
+                        best, bad = value, 0
+                    else:
+                        bad += 1
+                    if bad >= stopping.patience:
+                        stopped = True
+                        break
+                if stopped:
+                    break
+        records.append((stage.name, offset, n_run, stopped))
+        offset += n_run
 
-    host_loss = np.asarray(bufs["loss"])
+    host = {name: np.asarray(buf) for name, buf in bufs.items()}
     traces = tuple(
-        StageTrace(name=name, start=start, n_steps=n, loss=host_loss[start : start + n])
-        for name, start, n in records
+        StageTrace(
+            name=name,
+            start=start,
+            n_steps=n,
+            stopped_early=stopped,
+            loss=host["loss"][start : start + n],
+            metrics={m: host[m][start : start + n] for m in metrics},
+        )
+        for name, start, n, stopped in records
     )
     return MAPResult(params=rebuild(dyn), stages=traces, opt_states=states)

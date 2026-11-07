@@ -10,6 +10,7 @@ import pytest
 
 from photomancy.backends.staged import (
     UNLABELED,
+    EarlyStopping,
     FitStage,
     group_labels,
     map_fit,
@@ -303,3 +304,213 @@ def test_freeze_policies_differ_where_they_should():
     assert not np.array_equal(
         first_moment(runs["drop_update"]), first_moment((None, runs["drop_update"][0]))
     )
+
+
+class _Q(eqx.Module):
+    x: jax.Array
+    y: jax.Array
+
+
+class _PreStepAux(eqx.Module):
+    """Quadratic around ``target``; ``aux`` is the ``x`` the value was scored at."""
+
+    target: jax.Array
+
+    def __call__(self, p):
+        return -0.5 * jnp.sum((p.x - self.target) ** 2)
+
+    def value_and_aux(self, p):
+        return self(p), p.x
+
+
+def _q_init():
+    return _Q(x=jnp.asarray([8.0, -4.0]), y=jnp.asarray([0.0, 0.0]))
+
+
+_Q_GROUPS = {"x": lambda t: t.x}
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_closed_form_sees_the_pre_step_aux_and_runs_after_the_update():
+    """``closed_form`` receives the aux scored before the step, on updated params.
+
+    Truth source: a run one step shorter. With ``aux = x`` and the closed form
+    ``y <- aux``, the final ``y`` equals ``x`` after ``n - 1`` steps, while the final
+    ``x`` is the ``n``-step value.
+    Tolerance basis: exact-algebra (bitwise; the same compiled step, one run longer).
+    Fails if: the closed form is handed the post-step prediction (the flux ratio of
+    a fit would then lag or lead by one iteration), or is applied before the update.
+    """
+    init, ld = _q_init(), _PreStepAux(jnp.asarray([1.0, 2.0]))
+    labels = group_labels(init, _Q_GROUPS)
+    tx = {"x": optax.sgd(0.25)}
+
+    def closed_form(params, aux):
+        return eqx.tree_at(lambda t: t.y, params, aux)
+
+    run = lambda n: map_fit(  # noqa: E731
+        ld, init, labels, tx, [FitStage(n, ("x",), closed_form=closed_form)]
+    )
+    short, full = run(4), run(5)
+    np.testing.assert_array_equal(full.params.y, short.params.x)
+    assert not np.array_equal(full.params.x, short.params.x)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_early_stopping_ends_a_stage_at_the_expected_step():
+    """Patience 3 on a one-step quadratic stops after step 5, or 6 with a 3-step check.
+
+    Truth source: ``sgd(1.0)`` on ``0.5 x^2`` reaches ``x = 0`` in one step, so the
+    losses are ``0.5 x0^2, 0, 0, 0, 0 ...``: the best value is at step 1, steps 2, 3
+    and 4 do not improve, and the third non-improving step is step 4 (5 steps run).
+    Checking every 3 steps reads steps 0-2, then 3-5, and stops at the check (6 run).
+    Tolerance basis: exact-algebra (integer step counts).
+    Fails if: patience counts from the wrong step, the check overshoots by more than
+    ``check_every - 1``, or the next stage does not start at the step the stage ended.
+    """
+    init, ld = _q_init(), _PreStepAux(jnp.zeros(2))
+    labels = group_labels(init, _Q_GROUPS)
+    tx = {"x": optax.sgd(1.0)}
+
+    def run(check_every):
+        stages = [
+            FitStage(
+                50,
+                ("x",),
+                early_stopping=EarlyStopping(3, check_every=check_every),
+                name="s1",
+            ),
+            FitStage(2, ("x",), name="s2"),
+        ]
+        return map_fit(ld, init, labels, tx, stages)
+
+    exact, coarse = run(1), run(3)
+    assert [t.n_steps for t in exact.stages] == [5, 2]
+    assert [t.n_steps for t in coarse.stages] == [6, 2]
+    assert exact.stages[0].stopped_early and not exact.stages[1].stopped_early
+    assert exact.stages[1].start == 5 and coarse.stages[1].start == 6
+    assert len(exact.stages[0].loss) == 5
+    np.testing.assert_array_equal(exact.stages[0].loss[1:], 0.0)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_callbacks_metrics_scale_and_stage_logdensity():
+    """Callbacks get pre-step host copies; metrics, scale and stage densities apply.
+
+    Truth source: ``sgd(lr)`` on ``scale * 0.5 (x - t)^2`` moves ``x`` by
+    ``-lr * scale * (x - t)``; with ``lr * scale = 1`` it lands on ``t``. The loss
+    traced at a step is ``scale * 0.5 (x - t)^2`` at the pre-step ``x``.
+    Tolerance basis: exact-algebra (powers of two, so every operation is exact).
+    Fails if: the callback sees post-step or donated (invalidated) buffers, the
+    metric is evaluated at a different point than the loss, ``objective_scale`` is
+    applied twice or not at all, or a stage keeps the run's density.
+    """
+    init = _q_init()
+    labels = group_labels(init, _Q_GROUPS)
+    seen = []
+    stages = [
+        FitStage(2, ("x",), objective_scale=0.5, name="first"),
+        FitStage(
+            2,
+            ("x",),
+            logdensity=_PreStepAux(jnp.asarray([4.0, 4.0])),
+            objective_scale=0.5,
+            name="second",
+        ),
+    ]
+    result = map_fit(
+        _PreStepAux(jnp.asarray([2.0, 2.0])),
+        init,
+        labels,
+        {"x": optax.sgd(2.0)},
+        stages,
+        metrics={"x0": lambda p, aux: aux[0]},
+        callback=seen.append,
+        callback_every=2,
+    )
+    np.testing.assert_array_equal(result.params.x, [4.0, 4.0])
+    first, second = result.stages
+    # First stage: x = (8, -4) lands on 2 in one step (lr * scale = 1), then stays.
+    np.testing.assert_array_equal(first.metrics["x0"], [8.0, 2.0])
+    np.testing.assert_array_equal(first.loss, [0.5 * 0.5 * (36 + 36), 0.0])
+    np.testing.assert_array_equal(second.metrics["x0"], [2.0, 4.0])
+    assert [r.step for r in seen] == [0, 2]
+    assert all(isinstance(r.params.x, np.ndarray) for r in seen)
+    np.testing.assert_array_equal(seen[0].params.x, [8.0, -4.0])
+    np.testing.assert_array_equal(seen[1].params.x, [2.0, 2.0])
+    np.testing.assert_array_equal(seen[1].aux, [2.0, 2.0])
+    assert seen[0].loss == first.loss[0] and seen[1].stage.name == "second"
+    np.testing.assert_array_equal(init.x, [8.0, -4.0])
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_first_step_group_rates_match_the_analytic_adam_step():
+    """The first Adam step of each group is ``-lr g / (|g| + eps)``, rescaled or not.
+
+    Truth source: the Adam definition at step one (bias-corrected moments equal
+    ``g`` and ``g^2``), with optax's default ``eps = 1e-8``. Gradients are exact
+    (``dL/dx = x - t`` for ``L = -log density``). A rescaled group runs Adam on
+    ``x / s``: ``dx = -s lr (s g) / (|s g| + eps)``.
+    Tolerance basis: floating-point (rtol 1e-12, float64).
+    Fails if: a group's learning rate is applied to the wrong group, epsilon acts in
+    leaf units instead of scaled units, or a schedule is read one step late.
+    """
+    init = _Q(x=jnp.asarray([8.0, -4.0]), y=jnp.asarray([3.0, 0.5]))
+    labels = group_labels(init, {"x": lambda t: t.x, "y": lambda t: t.y})
+    ld = lambda p: -0.5 * (jnp.sum((p.x - 1.0) ** 2) + jnp.sum((p.y + 1.0) ** 2))  # noqa: E731
+    lr_x, lr_y, scale, eps = 0.1, 0.03, 1e6, 1e-8
+    tx = {
+        "x": optax.adam(lr_x),
+        "y": rescaled_transform(optax.adam(lr_y), scale),
+    }
+    got = map_fit(ld, init, labels, tx, [FitStage(1, ("x", "y"))])
+    gx, gy = np.asarray(init.x) - 1.0, np.asarray(init.y) + 1.0
+    want_x = np.asarray(init.x) - lr_x * gx / (np.abs(gx) + eps)
+    want_y = np.asarray(init.y) - scale * lr_y * (scale * gy) / (
+        np.abs(scale * gy) + eps
+    )
+    np.testing.assert_allclose(got.params.x, want_x, rtol=1e-12)
+    np.testing.assert_allclose(got.params.y, want_y, rtol=1e-12)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_one_compile_per_stage_configuration_and_fresh_transforms():
+    """Four stages over three configurations trace thrice; fresh transforms restart.
+
+    Truth source: the number of times the log-density body runs, which is once per
+    trace (a Python side effect at trace time). Stages differ in length and scale
+    but two share their free set, transform table and closed form.
+    Tolerance basis: exact-algebra (integer counts).
+    Fails if: a stage length, scale or repeated configuration retraces the step
+    (six compiles per run would become one per stage), or a stage that supplies
+    transforms continues the old Adam moments instead of starting fresh.
+    """
+    traces = []
+
+    def ld(p):
+        traces.append(1)
+        return -0.5 * jnp.sum((p.x - 1.0) ** 2) - 0.5 * jnp.sum((p.y - 2.0) ** 2)
+
+    init = _q_init()
+    labels = group_labels(init, {"x": lambda t: t.x, "y": lambda t: t.y})
+    tx = {"x": optax.adam(0.1), "y": optax.adam(0.1)}
+    stages = [
+        FitStage(4, ("x",)),
+        FitStage(3, ("y",)),
+        FitStage(6, ("x",), objective_scale=0.5),
+        FitStage(2, ("x", "y")),
+    ]
+    map_fit(ld, init, labels, tx, stages)
+    assert len(traces) == 4 - 1  # (x), (y), (x, y): the third stage repeats the first
+
+    fresh = {"x": optax.adam(0.1), "y": optax.adam(0.1)}
+    cont = map_fit(ld, init, labels, tx, [FitStage(3, ("x",)), FitStage(1, ("x",))])
+    restarted = map_fit(
+        ld,
+        init,
+        labels,
+        tx,
+        [FitStage(3, ("x",)), FitStage(1, ("x",), transforms=fresh)],
+    )
+    count = lambda r: int(r.opt_states["x"][0].count)  # noqa: E731
+    assert count(cont) == 4 and count(restarted) == 1
