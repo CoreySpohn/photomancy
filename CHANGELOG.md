@@ -28,6 +28,43 @@
   refit rather than converted. Pass east offsets (Delta RA cos Dec), not
   Delta RA, as `RelativeAstromData.ra`.
 
+## [0.5.0](https://github.com/CoreySpohn/photomancy/compare/v0.4.0...v0.5.0) (2026-11-07)
+
+
+### Features
+
+* **orbit:** add a collapsed Metropolis-Hastings move for targets with a linear Gaussian block ([0bfc4b6](https://github.com/CoreySpohn/photomancy/commit/0bfc4b6907fdf1d4c0e1913912997c9498e7a734))
+* **orbit:** add a fixed-capacity orbit updater with its belief, statuses and targets ([7823e53](https://github.com/CoreySpohn/photomancy/commit/7823e532e81facd6ee9a0f46b07d95bb247aa656))
+* **orbit:** add per-target proposal scales and an exact collapsed period-alias move to the updater ([e843fa6](https://github.com/CoreySpohn/photomancy/commit/e843fa6bed85fd368a2b931382e4a40f325553a2))
+* **orbit:** add resumable, sharded development and certification runners to the updater panel ([4cfb86f](https://github.com/CoreySpohn/photomancy/commit/4cfb86f8fa84a9e9d8177bd2b892d8ac4e1e3a4d))
+* **orbit:** custom likelihood route with planet-scale sites in the model, inference and nested paths ([fc62ef7](https://github.com/CoreySpohn/photomancy/commit/fc62ef7031cb1a29883cd62b5db81a3ef8708f71))
+* **orbit:** replace the placeholder updater kernel with tempered SMC and random-walk moves ([b16dbdb](https://github.com/CoreySpohn/photomancy/commit/b16dbdb76cb2cbdb77a0dda24bc85a7399e2ec33))
+* **panel:** add the exact-check runner with quadrature refinement tables for both reference samplers ([c88b484](https://github.com/CoreySpohn/photomancy/commit/c88b48421225243ea85bd6d240c65317827e62d0))
+* **panel:** add the kernel tuning driver, per-model kernel values and the measured-cost tally ([229c421](https://github.com/CoreySpohn/photomancy/commit/229c42196b6748b85cbab8ef5f976aac146660d0))
+* **panel:** collapsed prior TI reference and an independent frequency-mixture sampler for check 3, with a bias-injection test ([bbe4bf4](https://github.com/CoreySpohn/photomancy/commit/bbe4bf468b0e6dbbca6c8648b6324172e2db2781))
+* **panel:** grade a panel directory into the verdict table, with a completeness audit and a stage flag for status ([9f11b3b](https://github.com/CoreySpohn/photomancy/commit/9f11b3b2001bffd412d08c091d3b81707b42efc8))
+* **panel:** stamp unit records with a run hash and flag stale records at the freeze ([1398e10](https://github.com/CoreySpohn/photomancy/commit/1398e104f52888f7c9699388c99f6677fb9acbb0))
+
+
+### Bug Fixes
+
+* **orbit:** count the OFTI reference epoch once in the rejection score ([92f7b4a](https://github.com/CoreySpohn/photomancy/commit/92f7b4a8b8c685b75903a42d118e01062d2da45a))
+* **orbit:** keep planet-scale sites on conversion, grade nested convergence by evidence, share model construction ([dc1d0de](https://github.com/CoreySpohn/photomancy/commit/dc1d0deaef830a2e2d91716f7ce29092a776bfd3))
+* **orbit:** normalize updater weights in max-shifted form, report zero ESS without support and reject non-finite physical charts ([95c2ed5](https://github.com/CoreySpohn/photomancy/commit/95c2ed5b932e1e2e97367c063ee475c9f0d7b73f))
+* **panel:** enforce the proposal cap on effective budgets and test the floor for every TI reference role ([ec21b30](https://github.com/CoreySpohn/photomancy/commit/ec21b303a7211abe1ecc2ff8a60b81d734b72a7c))
+* **panel:** enforce the TI ESS floor, independent exact checks with a binding window, TI budget 2^22 from a full preflight ([926a768](https://github.com/CoreySpohn/photomancy/commit/926a7684a06b6f0eb26e195b1e3f01a2c9e88031))
+* **panel:** score empty reference fits as incomplete, resolve per-model kernel values in exact checks, write the manifest at start ([b330ca2](https://github.com/CoreySpohn/photomancy/commit/b330ca2b6fb9d6b6fc9fc2658c76fa00ea7eea9d))
+* **panel:** unbiased replicate precision, source-fingerprinted run hashes, validated exact evidence, plan-complete freeze, refusing resume and atomic manifests ([d08e03b](https://github.com/CoreySpohn/photomancy/commit/d08e03b5d2c6bed2464c63b0bb31baac22a328a1))
+* **tools:** grade only bound evidence, mark missing or invalid evidence incomplete ([69f438b](https://github.com/CoreySpohn/photomancy/commit/69f438bef74302c6e4fa8e20681a42e72c2f8b13))
+* **tools:** mark recompiles after a cache clear cold, clear on cgroup memory pressure, identity test on real physical units ([55fd30d](https://github.com/CoreySpohn/photomancy/commit/55fd30d6a2f11ccd029fe4639ce90d3ef470034f))
+* **tools:** release JAX and Equinox compile caches between panel units above an RSS threshold ([545490d](https://github.com/CoreySpohn/photomancy/commit/545490df667e0ccca182b313085b3a47567f30b9))
+* **tools:** require canonical freeze evidence, valid fit diagnostics and tracked evidence files; scope incompleteness per model ([c0803b8](https://github.com/CoreySpohn/photomancy/commit/c0803b8bde5d26d6973eb7afab56914ddbc94448))
+
+
+### Performance Improvements
+
+* **orbit:** build the Thiele-Innes design matrix from one Kepler solve ([257ff63](https://github.com/CoreySpohn/photomancy/commit/257ff63cf775b8a7453b4945c0e2c8f51cd46933))
+
 ## [0.4.0](https://github.com/CoreySpohn/photomancy/compare/v0.3.0...v0.4.0) (2026-11-05)
 
 
