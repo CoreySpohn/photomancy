@@ -25,6 +25,7 @@ self-version constraint on shallow VCS checkouts.
 | hwostyle | >=1.7.0 | 1.7.1.dev6+g8f7acbaea | docs |
 | hwoutils | >=1.10.0 | 1.10.1.dev16+g683aa5221 | runtime |
 | hypothesis | >=6.79.1 | 6.79.1 | test |
+| ineedvalidation | >=1.0.0 | not run at the floor | test |
 | ipython | >=8.18 | 8.18.0 | docs |
 | ipywidgets | >=8.1.1 | 8.1.1 | docs |
 | jax | >=0.8.1 | 0.9.0 | runtime |
