@@ -384,6 +384,32 @@ def _write_units(
                 panel.append_record(path, rec)
 
 
+def test_refinement_convergence_rule_shrinks_or_is_at_the_mass_floor():
+    """A value converges when its change shrinks or the finest change is tiny.
+
+    Levels 0 to 2 of each value are set to a structurally zero bin (changes
+    of 2e-24, which cannot shrink), a bin whose change stalls at 1e-6, a bin
+    that shrinks, a growing change of 6e-15 (below the 1e-14 floor) and one of
+    2.5e-14 (above it). Fails if the structural zero bin is not accepted, if a
+    stalled change above 1e-14 is accepted, or if the 1e-14 edge moves.
+    """
+    names = ex.value_names()
+    cases = {
+        names[0]: (0.0, 2e-24, 4e-24),
+        names[1]: (0.1, 0.1 + 1e-6, 0.1 + 2e-6),
+        names[2]: (0.1, 0.1 + 1e-4, 0.1 + 1.5e-4),
+        names[3]: (0.0, 4e-15, 1e-14),
+        names[4]: (0.0, 5e-15, 3e-14),
+    }
+    levels = [{n: cases.get(n, (0.0, 0.0, 0.0))[k] for n in names} for k in range(3)]
+    out = ex.refinement(levels)
+    assert out[names[0]]["converged"]
+    assert not out[names[1]]["converged"]
+    assert out[names[2]]["converged"]
+    assert out[names[3]]["converged"]
+    assert not out[names[4]]["converged"]
+
+
 def test_report_flags_offsets_and_missing_units(tmp_path):
     """The verdicts pass a correct sampler and refuse incomplete evidence.
 

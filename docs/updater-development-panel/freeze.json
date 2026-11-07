@@ -1,0 +1,1096 @@
+{
+  "alias": {
+    "delta2": 0.01810111773388565,
+    "panels": 400,
+    "status": "incomplete",
+    "reasons": [
+      "delta2 0.0181 exceeds its bound 0.001",
+      "R1 ti_window 2 future_pa: power lower bound 0.413 below 0.8",
+      "R1 ti_window 3 future_pa: power lower bound 0.068 below 0.8",
+      "R1 physical_fixed 3 future_pa: power lower bound 0.712 below 0.8",
+      "R3 ti_window 2 e: power lower bound 0.756 below 0.8",
+      "R3 ti_window 2 future_pa: power lower bound 0.701 below 0.8",
+      "R3 ti_window 3 lnP: power lower bound 0.386 below 0.8",
+      "R3 ti_window 3 future_pa: power lower bound 0.344 below 0.8",
+      "R3 physical_fixed 3 future_pa: power lower bound 0.686 below 0.8"
+    ],
+    "groups": [
+      {
+        "regime": "R1",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "lnP",
+        "se0": 3.5952863376856473e-06,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "e",
+        "se0": 2.598546708230773e-06,
+        "power": 0.99,
+        "power_lower_95": 0.9772633064088687,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "future_pa",
+        "se0": 1.1562002966837913e-06,
+        "power": 0.455,
+        "power_lower_95": 0.4131454311464906,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "lnP",
+        "se0": 4.213356562041596e-06,
+        "power": 0.9975,
+        "power_lower_95": 0.9881956955460127,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "e",
+        "se0": 2.6946456028320397e-06,
+        "power": 0.9875,
+        "power_lower_95": 0.9738982009330861,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "future_pa",
+        "se0": 1.5061916237005027e-06,
+        "power": 0.09,
+        "power_lower_95": 0.06754077038495254,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "lnP",
+        "se0": 0.0009220352661354299,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 0.04,
+        "exact_pass_interval_95": [
+          0.023033395740548634,
+          0.06414601093905165
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "e",
+        "se0": 0.0003275331489579741,
+        "power": 0.9975,
+        "power_lower_95": 0.9881956955460127,
+        "exact_pass_rate": 0.5375,
+        "exact_pass_interval_95": [
+          0.4872656269408884,
+          0.5871755679108802
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "future_pa",
+        "se0": 0.0001138762787288694,
+        "power": 0.875,
+        "power_lower_95": 0.8444627626400555,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "lnP",
+        "se0": 0.001557871399669452,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 0.0025,
+        "exact_pass_interval_95": [
+          6.329251690484483e-05,
+          0.013849769962013515
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "e",
+        "se0": 0.0011187236801170211,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 0.02,
+        "exact_pass_interval_95": [
+          0.008673170369118188,
+          0.03902627671162052
+        ]
+      },
+      {
+        "regime": "R1",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "future_pa",
+        "se0": 6.65120967675304e-05,
+        "power": 0.75,
+        "power_lower_95": 0.7118211183534728,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "lnP",
+        "se0": 0.00028859731651444587,
+        "power": 0.995,
+        "power_lower_95": 0.9843448200635319,
+        "exact_pass_rate": 0.7025,
+        "exact_pass_interval_95": [
+          0.6550663333593891,
+          0.7469074521520889
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "e",
+        "se0": 0.00020042294873298398,
+        "power": 0.995,
+        "power_lower_95": 0.9843448200635319,
+        "exact_pass_rate": 0.91,
+        "exact_pass_interval_95": [
+          0.8775801131096769,
+          0.9361685268073177
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "future_pa",
+        "se0": 8.785993084999985e-05,
+        "power": 0.955,
+        "power_lower_95": 0.9339979457639271,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "lnP",
+        "se0": 0.0006562706771770332,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 0.095,
+        "exact_pass_interval_95": [
+          0.0681067155231001,
+          0.12806064599502126
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "e",
+        "se0": 0.0004461968413901278,
+        "power": 0.9975,
+        "power_lower_95": 0.9881956955460127,
+        "exact_pass_rate": 0.2425,
+        "exact_pass_interval_95": [
+          0.20128834688699015,
+          0.2875686118821854
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "future_pa",
+        "se0": 0.0003793367135514896,
+        "power": 0.9525,
+        "power_lower_95": 0.9310783725159708,
+        "exact_pass_rate": 0.3775,
+        "exact_pass_interval_95": [
+          0.3298053686716753,
+          0.42702171386057736
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "lnP",
+        "se0": 0.00015929206916799634,
+        "power": 0.9975,
+        "power_lower_95": 0.9881956955460127,
+        "exact_pass_rate": 0.9875,
+        "exact_pass_interval_95": [
+          0.9710716562147126,
+          0.9959291641554003
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "e",
+        "se0": 7.626067707386367e-05,
+        "power": 0.9925,
+        "power_lower_95": 0.9807307707169114,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "future_pa",
+        "se0": 5.329996187096026e-05,
+        "power": 0.98,
+        "power_lower_95": 0.9642033823863592,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "lnP",
+        "se0": 0.002940318357618002,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 0.0,
+        "exact_pass_interval_95": [
+          0.0,
+          0.009179804583665262
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "e",
+        "se0": 0.002899854398461069,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 0.0025,
+        "exact_pass_interval_95": [
+          6.329251690484483e-05,
+          0.013849769962013515
+        ]
+      },
+      {
+        "regime": "R2",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "future_pa",
+        "se0": 0.002877352893653455,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 0.0025,
+        "exact_pass_interval_95": [
+          6.329251690484483e-05,
+          0.013849769962013515
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "lnP",
+        "se0": 3.2148092280930467e-06,
+        "power": 0.995,
+        "power_lower_95": 0.9843448200635319,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "e",
+        "se0": 2.2535366987886144e-06,
+        "power": 0.7925,
+        "power_lower_95": 0.7563291796687037,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "future_pa",
+        "se0": 1.8262975974673488e-06,
+        "power": 0.74,
+        "power_lower_95": 0.7014175737821393,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "lnP",
+        "se0": 1.3265985727177563e-06,
+        "power": 0.4275,
+        "power_lower_95": 0.3860640254775035,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "e",
+        "se0": 2.44169384898094e-06,
+        "power": 0.865,
+        "power_lower_95": 0.8336234169869816,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "future_pa",
+        "se0": 1.1009059200769324e-06,
+        "power": 0.385,
+        "power_lower_95": 0.3444640958013939,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "lnP",
+        "se0": 0.0006690038500622456,
+        "power": 0.9975,
+        "power_lower_95": 0.9881956955460127,
+        "exact_pass_rate": 0.07,
+        "exact_pass_interval_95": [
+          0.047015328400178524,
+          0.09958251577006166
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "e",
+        "se0": 0.000824206922351133,
+        "power": 0.9975,
+        "power_lower_95": 0.9881956955460127,
+        "exact_pass_rate": 0.0525,
+        "exact_pass_interval_95": [
+          0.03278842457715325,
+          0.07913463048694475
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "future_pa",
+        "se0": 0.0004935642011800037,
+        "power": 0.9825,
+        "power_lower_95": 0.9673820235486689,
+        "exact_pass_rate": 0.26,
+        "exact_pass_interval_95": [
+          0.21767862820655404,
+          0.305913202215696
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "lnP",
+        "se0": 0.00054345483374048,
+        "power": 0.91,
+        "power_lower_95": 0.8828837153930815,
+        "exact_pass_rate": 0.3,
+        "exact_pass_interval_95": [
+          0.2554667280953088,
+          0.3475218790736515
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "e",
+        "se0": 0.002167403045144512,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 0.0075,
+        "exact_pass_interval_95": [
+          0.0015493589499054883,
+          0.021760668514417485
+        ]
+      },
+      {
+        "regime": "R3",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "future_pa",
+        "se0": 0.00013680124103064643,
+        "power": 0.725,
+        "power_lower_95": 0.6858571986237911,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "lnP",
+        "se0": 4.041415751193628e-06,
+        "power": 0.99,
+        "power_lower_95": 0.9772633064088687,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "e",
+        "se0": 2.6786718635253146e-06,
+        "power": 0.995,
+        "power_lower_95": 0.9843448200635319,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "ti_window",
+        "epoch_count": 2,
+        "quantity": "future_pa",
+        "se0": 3.0931322346461505e-06,
+        "power": 0.9425,
+        "power_lower_95": 0.9195181002593459,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "lnP",
+        "se0": 8.244360940188094e-05,
+        "power": 0.995,
+        "power_lower_95": 0.9843448200635319,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "e",
+        "se0": 4.809603693523196e-05,
+        "power": 0.99,
+        "power_lower_95": 0.9772633064088687,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "ti_window",
+        "epoch_count": 3,
+        "quantity": "future_pa",
+        "se0": 7.244128239752113e-05,
+        "power": 0.85,
+        "power_lower_95": 0.817457789640254,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "lnP",
+        "se0": 5.1824154485270514e-05,
+        "power": 0.9875,
+        "power_lower_95": 0.9738982009330861,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "e",
+        "se0": 2.8826592955383383e-05,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "physical_fixed",
+        "epoch_count": 2,
+        "quantity": "future_pa",
+        "se0": 2.5258161140486135e-05,
+        "power": 0.98,
+        "power_lower_95": 0.9642033823863592,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "lnP",
+        "se0": 0.000129525657564881,
+        "power": 0.99,
+        "power_lower_95": 0.9772633064088687,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "e",
+        "se0": 8.031381079761494e-05,
+        "power": 1.0,
+        "power_lower_95": 0.9925386444712004,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      },
+      {
+        "regime": "R4",
+        "mass_model": "physical_fixed",
+        "epoch_count": 3,
+        "quantity": "future_pa",
+        "se0": 5.1984863776902234e-05,
+        "power": 0.9875,
+        "power_lower_95": 0.9738982009330861,
+        "exact_pass_rate": 1.0,
+        "exact_pass_interval_95": [
+          0.9908201954163347,
+          1.0
+        ]
+      }
+    ]
+  },
+  "certification": {
+    "ti_window": {
+      "status": "certified",
+      "missing_units": 0,
+      "empty_units": 0,
+      "checks": [
+        {
+          "check": "repeat_noise",
+          "epoch_count": 2,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": 4.93034114175846e-08,
+          "d2_upper": 3.4479962417699463e-06,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 2,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": 9.616747458003225e-07,
+          "d2_upper": 6.164416486771096e-06,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 2,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": 8.22921533360779e-07,
+          "d2_upper": 3.839925081939228e-06,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 2,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": 1.4549044675835825e-07,
+          "d2_upper": 1.8910339792588e-06,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 2,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": 1.0735396377571569e-07,
+          "d2_upper": 2.030382005356499e-06,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 2,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": 1.227817181096804e-06,
+          "d2_upper": 3.4892049025008986e-06,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 2,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": -7.763764705484766e-07,
+          "d2_upper": 1.2758969727482307e-06,
+          "bound": 0.0005,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 2,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": -2.813507396394869e-06,
+          "d2_upper": 2.4354853288630804e-06,
+          "bound": 0.0005,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 2,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": 1.6897160180929095e-07,
+          "d2_upper": 1.6900401800291167e-06,
+          "bound": 0.0005,
+          "pass": true
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 3,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": -1.977210911596942e-05,
+          "d2_upper": 5.8500382463588956e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 3,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": 5.4862816198555505e-06,
+          "d2_upper": 5.440619439239922e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 3,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": -6.837706593515531e-06,
+          "d2_upper": 8.05469732765935e-06,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 3,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": -1.4191126702194879e-05,
+          "d2_upper": 8.532928330618494e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 3,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": -2.4196826135965215e-06,
+          "d2_upper": 5.444580028922727e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 3,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": -1.528854221255633e-05,
+          "d2_upper": 1.94674726676331e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 3,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": -2.0361191652972566e-05,
+          "d2_upper": 0.0001206391868713018,
+          "bound": 0.0005,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 3,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": -1.2852397391550718e-05,
+          "d2_upper": 4.406090014637131e-05,
+          "bound": 0.0005,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 3,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": -3.931251908726531e-05,
+          "d2_upper": 4.002891112216307e-05,
+          "bound": 0.0005,
+          "pass": true
+        }
+      ]
+    },
+    "physical_fixed": {
+      "status": "not certified",
+      "missing_units": 0,
+      "empty_units": 0,
+      "checks": [
+        {
+          "check": "repeat_noise",
+          "epoch_count": 2,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": -1.3179547556383654e-05,
+          "d2_upper": 1.9048874467962504e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 2,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": -2.220140305229182e-05,
+          "d2_upper": 8.160564957055977e-06,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 2,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": -3.254508692879285e-05,
+          "d2_upper": 1.0681709877719522e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 2,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": 8.110943279370487e-06,
+          "d2_upper": 2.5491266145828585e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 2,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": -3.57575140341997e-05,
+          "d2_upper": 3.3322449282956864e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 2,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": 4.156935938573738e-06,
+          "d2_upper": 5.112807157547104e-05,
+          "bound": 0.00025,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 2,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": 8.857659020937556e-06,
+          "d2_upper": 6.614501576731557e-05,
+          "bound": 0.0005,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 2,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": 3.3915686518109806e-05,
+          "d2_upper": 0.000119430037968745,
+          "bound": 0.0005,
+          "pass": true
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 2,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": -1.0194901257953122e-05,
+          "d2_upper": 6.425136096662762e-05,
+          "bound": 0.0005,
+          "pass": true
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 3,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": -9.025871001488596e-05,
+          "d2_upper": 0.000308533455940384,
+          "bound": 0.00025,
+          "pass": false
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 3,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": 2.7300580731104126e-06,
+          "d2_upper": 0.0014717018481110327,
+          "bound": 0.00025,
+          "pass": false
+        },
+        {
+          "check": "repeat_noise",
+          "epoch_count": 3,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": -0.0005702981030345804,
+          "d2_upper": 0.0006638622085582553,
+          "bound": 0.00025,
+          "pass": false
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 3,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": 6.436580317039793e-05,
+          "d2_upper": 0.00046555286908656545,
+          "bound": 0.00025,
+          "pass": false
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 3,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": 0.0008886041152980962,
+          "d2_upper": 0.003002131536237047,
+          "bound": 0.00025,
+          "pass": false
+        },
+        {
+          "check": "budget_agreement",
+          "epoch_count": 3,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": -2.1700025418242756e-05,
+          "d2_upper": 0.0005488347488066825,
+          "bound": 0.00025,
+          "pass": false
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 3,
+          "quantity": "lnP",
+          "worlds": 152,
+          "d2_mean": -0.0037986418558537214,
+          "d2_upper": 0.0036793615769962953,
+          "bound": 0.0005,
+          "pass": false
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 3,
+          "quantity": "e",
+          "worlds": 152,
+          "d2_mean": -0.0019304255454160653,
+          "d2_upper": 0.003399487971445611,
+          "bound": 0.0005,
+          "pass": false
+        },
+        {
+          "check": "proposal_agreement",
+          "epoch_count": 3,
+          "quantity": "future_pa",
+          "worlds": 152,
+          "d2_mean": -0.0035311758135408945,
+          "d2_upper": 0.003219336588110016,
+          "bound": 0.0005,
+          "pass": false
+        }
+      ]
+    }
+  },
+  "exact_checks": {
+    "verdicts": {
+      "ti_window": "pass",
+      "physical_fixed": "incomplete",
+      "ti_binding": "pass"
+    },
+    "reasons": {
+      "ti_window": [],
+      "physical_fixed": [
+        "refinement not converging for ['e_bin3', 'future_pa_bin2', 'future_pa_bin5']"
+      ],
+      "ti_binding": []
+    }
+  },
+  "status": "incomplete",
+  "reasons": [
+    "delta2 0.0181 exceeds its bound 0.001",
+    "R1 ti_window 2 future_pa: power lower bound 0.413 below 0.8",
+    "R1 ti_window 3 future_pa: power lower bound 0.068 below 0.8",
+    "R1 physical_fixed 3 future_pa: power lower bound 0.712 below 0.8",
+    "R3 ti_window 2 e: power lower bound 0.756 below 0.8",
+    "R3 ti_window 2 future_pa: power lower bound 0.701 below 0.8",
+    "R3 ti_window 3 lnP: power lower bound 0.386 below 0.8",
+    "R3 ti_window 3 future_pa: power lower bound 0.344 below 0.8",
+    "R3 physical_fixed 3 future_pa: power lower bound 0.686 below 0.8",
+    "physical_fixed reference not certified",
+    "physical_fixed exact checks (physical_fixed): incomplete"
+  ]
+}

@@ -60,6 +60,28 @@ posterior an unbounded sampler would return.
     algebra independently, grade the check-3 sampler, and add a
     binding-window case ("TI reference budget", "TI reference", "Exact
     checks").
+  - Physical reference re-sizing (recorded before the freeze). The first
+    development run, at the starting physical budget of $2^{22}$ proposals,
+    ended with freeze status `incomplete` (record in
+    `docs/updater-development-panel/`). At $2^{22}$ the physical reference
+    was not certified: all nine three-epoch certification bounds failed on
+    noise from the fits with low ESS, while the two-epoch bounds passed. By
+    the doubling rule of "Provisional values" (item 3) the physical budget
+    becomes $2^{24}$ = 16,777,216 proposals per fit. The cap rule makes
+    $2^{24}$ the largest legal primary budget, because the doubled role runs
+    at twice the primary budget and must stay within
+    `max_proposals_per_fit` ($2^{25}$). The parameter block carries the new
+    value; the protocol stays a draft until the freeze after the rerun. The
+    run hash excludes the budgets, so the development records keep their hash.
+  - A8: the definition of convergence for the exact checks ("Exact
+    checks"). A value has converged when its change shrinks between the last
+    two quadrature levels, or when the finest change is at most $10^{-14}$
+    times the total mass. Structurally zero bins cannot shrink (their changes
+    are 0 to $2 \times 10^{-24}$), and $10^{-14}$ is far below the bin-mass
+    floor $f$. The graded masses are normalized to a total of 1, so the code
+    tests the absolute change against $10^{-14}$; the same bound applies to
+    the four interval end points. The rule changes no verdict on the
+    development data.
 
 ## Parameter block
 
@@ -192,7 +214,7 @@ stated here under `stated`.
                   "independent": {"prior_fraction": 0.5, "inflation": 1.25,
                                   "budget_factor": 2},
                   "ess_floor": 200},
-    "physical_fixed": {"proposals_per_fit": 4194304, "max_proposals_per_fit": 33554432,
+    "physical_fixed": {"proposals_per_fit": 16777216, "max_proposals_per_fit": 33554432,
                        "anchor": "highest-SNR valid epoch"},
     "repeat_noise": {"runs": 4, "bound_fraction_of_delta2": 0.25},
     "convergence": {"bound_fraction_of_delta2": 0.25},
@@ -576,7 +598,9 @@ where $L_\mathrm{other}$ is the likelihood of every accepted epoch except the
 anchor (obtained by scoring with the anchor epoch masked invalid; the anchor
 values still drive the proposal). The anchor is the highest signal-to-noise
 valid epoch, the `ofti` default rule. The budget is *provisional*
-$N_\mathrm{prop} = 2^{22}$ = 4,194,304 proposals per fit, at most $2^{25}$.
+$N_\mathrm{prop} = 2^{24}$ = 16,777,216 proposals per fit, at most $2^{25}$
+(the doubled role runs at twice the budget, so $2^{24}$ is the largest
+primary budget the cap allows).
 
 ### Reference certification
 
@@ -721,7 +745,8 @@ central 90 percent intervals of the future east and north positions.
   doubling the nodes per dimension, and the table of every graded value at each
   level is committed. The quadrature error estimate $\epsilon_q$ of a value is
   twice the change between the two finest levels; the finest level must change
-  the value by less than the previous refinement did.
+  the value by less than the previous refinement did, or by at most
+  $10^{-14}$ times the total mass (*amendment A8*).
 - **Comparison.** The sampler (reference, and the updater for information) runs
   16 times with independent keys at its budget (*amendment A4*: the reference
   uses the `exact_run` key of the repeat, the updater that key folded with 1).

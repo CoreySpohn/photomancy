@@ -1198,7 +1198,9 @@ def refinement(levels_values):
     Returns:
         Dict name to ``{"levels", "eps_q", "converged"}``: ``eps_q`` is twice
         the change between the two finest levels; ``converged`` requires that
-        change to be smaller than the previous one (or below 1e-14).
+        change to be smaller than the previous one, or at most 1e-14 (the
+        masses are normalized to total 1, so this is 1e-14 of the total mass;
+        amendment A8).
     """
     out = {}
     for name in value_names():
