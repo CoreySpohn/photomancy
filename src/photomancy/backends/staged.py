@@ -185,7 +185,7 @@ class MAPResult(eqx.Module):
     opt_states: dict
 
 
-_POLICIES = ("hold",)
+_POLICIES = ("hold", "zero_gradient", "drop_update")
 
 
 def _value_and_aux(logdensity, params):
@@ -218,8 +218,22 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
         transforms: ``{group: optax.GradientTransformation}``. A group with no
             transform cannot be freed.
         stages: Sequence of :class:`FitStage`.
-        freeze: How a group that is not free in a stage is treated. ``"hold"``
-            leaves its leaves and its optimizer state untouched, bitwise.
+        freeze: How a group that is not free in a stage is treated.
+
+            - ``"hold"``: its leaves and its optimizer state are untouched, bitwise,
+              and its gradient is not computed. Its optimizer clock (the step count a
+              learning-rate schedule reads) advances only in stages that free it.
+            - ``"zero_gradient"``: every group in ``transforms`` takes an optimizer
+              step each iteration; a frozen group's gradient is replaced by zero, so
+              it keeps moving on its momentum and its moments decay.
+            - ``"drop_update"``: every group's gradient is computed and every
+              group's optimizer state advances, but a frozen group's update is
+              dropped, so it never moves while its moments keep accumulating its
+              gradients.
+
+            The last two reproduce the two freezing conventions of a single
+            ``optax.multi_transform`` optimizer with one shared clock; use ``"hold"``
+            for a new fit.
 
     Returns:
         A :class:`MAPResult`.
@@ -270,15 +284,16 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
     def get_step(free):
         if free in steps:
             return steps[free]
+        active = free if freeze == "hold" else tuple(transforms)
 
         @eqx.filter_jit(donate="all-except-first")
         def step(static_args, arrays, states, bufs, count):
             ld, scale = static_args
-            fit = group_slices(arrays, free)
+            fit = group_slices(arrays, active)
 
             def objective(fit):
                 full = list(arrays)
-                for g in free:
+                for g in active:
                     for k, v in zip(members[g], fit[g], strict=True):
                         full[k] = v
                 value, _ = _value_and_aux(ld, rebuild(full))
@@ -286,10 +301,13 @@ def map_fit(logdensity, init, labels, transforms, stages, *, freeze="hold"):
 
             loss, grads = jax.value_and_grad(objective)(fit)
             new_arrays, new_states = list(arrays), dict(states)
-            for g in free:
-                update, new_states[g] = transforms[g].update(
-                    grads[g], states[g], fit[g]
-                )
+            for g in active:
+                grad = grads[g]
+                if freeze == "zero_gradient" and g not in free:
+                    grad = jax.tree.map(jnp.zeros_like, grad)
+                update, new_states[g] = transforms[g].update(grad, states[g], fit[g])
+                if g not in free and freeze == "drop_update":
+                    continue
                 for k, v in zip(
                     members[g], optax.apply_updates(fit[g], update), strict=True
                 ):

@@ -186,3 +186,120 @@ def test_map_fit_does_not_consume_init_and_reaches_the_optimum():
     assert np.isfinite(np.asarray(init.a)).all()
     assert result.stages[0].loss.shape == (600,)
     assert result.stages[0].loss[-1] < result.stages[0].loss[0]
+
+
+_STAGES = [(12, ("a",)), (9, ("b",)), (7, ("a", "b"))]
+_T_MAX = sum(n for n, _ in _STAGES)
+
+
+def _cosine(base, floor):
+    """Cosine decay from ``base`` to ``floor`` over the whole run, one shared clock."""
+    return lambda t: floor + (base - floor) * 0.5 * (1.0 + jnp.cos(jnp.pi * t / _T_MAX))
+
+
+def _legacy_transforms():
+    return {"a": optax.adam(_cosine(0.05, 0.05)), "b": optax.adam(_cosine(0.02, 0.0))}
+
+
+def _hand_written_loop(init, policy):
+    """One ``optax.multi_transform`` loop with dynamic masks, freezing by ``policy``.
+
+    This is the structure of a staged fit written without the backend: one optimizer,
+    one state, one schedule clock, and a 0/1 mask per group chosen by the stage.
+    """
+    optimizer = optax.multi_transform(_legacy_transforms(), {"a": "a", "b": "b"})
+    params = {"a": init.a, "b": init.b}
+    state = optimizer.init(params)
+
+    @jax.jit
+    def step(params, state, mask):
+        def loss_fn(q):
+            return -_toy_logdensity(_Toy(q["a"], q["b"], init.fixed))
+
+        loss, grads = jax.value_and_grad(loss_fn)(params)
+        if policy == "zero_gradient":
+            grads = jax.tree.map(lambda g, m: g * m, grads, mask)
+            updates, state = optimizer.update(grads, state, params)
+        else:
+            updates, state = optimizer.update(grads, state, params)
+            updates = jax.tree.map(lambda u, m: u * m, updates, mask)
+        return optax.apply_updates(params, updates), state, loss
+
+    losses = []
+    for n, free in _STAGES:
+        mask = {g: jnp.asarray(1.0 if g in free else 0.0) for g in ("a", "b")}
+        for _ in range(n):
+            params, state, loss = step(params, state, mask)
+            losses.append(float(loss))
+    return params, np.asarray(losses)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.parametrize("policy", ["zero_gradient", "drop_update"])
+def test_legacy_freeze_policies_match_a_hand_written_optax_loop(policy):
+    """Three stages under each legacy policy equal the hand-written loop, and repeat.
+
+    Truth source: a separate implementation, one ``optax.multi_transform`` loop with
+    float masks, a cosine schedule on one clock across the stages and a loss traced
+    per step (independent code, so this is code verification, not validation).
+    Tolerance basis: floating-point (rtol 1e-12, float64; the same operations in the
+    same order, so the observed difference is far below it).
+    Fails if: a policy freezes with the wrong convention (``zero_gradient`` must keep
+    the frozen group drifting on momentum, ``drop_update`` must not), the clock
+    restarts at a stage boundary, or the loss trace is offset by a step.
+    """
+    init = _toy_init()
+    labels = group_labels(init, _TOY_GROUPS)
+    stages = [FitStage(n, free) for n, free in _STAGES]
+    got = map_fit(
+        _toy_logdensity, init, labels, _legacy_transforms(), stages, freeze=policy
+    )
+    want_params, want_loss = _hand_written_loop(init, policy)
+    np.testing.assert_allclose(got.params.a, want_params["a"], rtol=1e-12)
+    np.testing.assert_allclose(got.params.b, want_params["b"], rtol=1e-12)
+    np.testing.assert_allclose(
+        np.concatenate([t.loss for t in got.stages]), want_loss, rtol=1e-12
+    )
+    again = map_fit(
+        _toy_logdensity, init, labels, _legacy_transforms(), stages, freeze=policy
+    )
+    np.testing.assert_array_equal(again.params.a, got.params.a)
+    np.testing.assert_array_equal(again.params.b, got.params.b)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_freeze_policies_differ_where_they_should():
+    """A later stage that frees ``b`` moves ``a`` only under ``zero_gradient``.
+
+    Truth source: the three definitions in the ``map_fit`` docstring. ``hold`` and
+    ``drop_update`` keep ``a`` bitwise; ``drop_update`` still advances ``a``'s Adam
+    moments while ``hold`` does not; ``zero_gradient`` moves ``a`` on momentum.
+    Tolerance basis: exact-algebra (bitwise comparisons).
+    Fails if: the negative control is lost, so the equivalence test above could pass
+    with the policies swapped.
+    """
+    init = _toy_init()
+    labels = group_labels(init, _TOY_GROUPS)
+    one = [FitStage(10, ("a",))]
+    two = [*one, FitStage(5, ("b",))]
+    runs = {}
+    for policy in ("hold", "zero_gradient", "drop_update"):
+        args = (_toy_logdensity, init, labels, _toy_transforms())
+        runs[policy] = (
+            map_fit(*args, one, freeze=policy),
+            map_fit(*args, two, freeze=policy),
+        )
+    for policy in ("hold", "drop_update"):
+        np.testing.assert_array_equal(
+            runs[policy][1].params.a, runs[policy][0].params.a
+        )
+    assert not np.array_equal(
+        runs["zero_gradient"][1].params.a, runs["zero_gradient"][0].params.a
+    )
+    first_moment = lambda r: jax.tree.leaves(r[1].opt_states["a"])[0]  # noqa: E731
+    np.testing.assert_array_equal(
+        first_moment(runs["hold"]), first_moment((None, runs["hold"][0]))
+    )
+    assert not np.array_equal(
+        first_moment(runs["drop_update"]), first_moment((None, runs["drop_update"][0]))
+    )
