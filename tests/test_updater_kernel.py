@@ -376,6 +376,86 @@ def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
             np.testing.assert_allclose(cached, now, rtol=1e-10, atol=1e-9)
 
 
+def test_collapsed_move_keeps_design_and_caches_consistent():
+    """The TI design override and the carried caches of a collapsed move are exact.
+
+    The TI target's one-solve design matrix must equal the generic one built
+    from ``predict`` to 1e-14 at two parameter points. Then 512 draws of a
+    tempered TI posterior (collapsed importance resample, 2^13 prior draws,
+    errors 0.05 arcsec, new record at temperature 0.3) take two collapsed
+    moves with both accepted and rejected proposals (acceptance between 0.05
+    and 0.95); after every move the carried log Z, log prior and likelihoods
+    must equal a fresh evaluation at the returned particles and every
+    particle must lie inside the support. Fails if the design override
+    drifts from the forward model, or if an accepted move keeps the old
+    cached log Z or likelihoods. The million-draw invariance campaign of the
+    same move is slow-tier.
+    """
+    target = ThieleInnesTarget()
+    sigma, beta = 0.05, 0.3
+
+    @jax.jit
+    def design_gap(theta):
+        times = jnp.array([0.0, 200.0, 1234.5])
+        return jnp.max(
+            jnp.abs(
+                jnp.stack(target.linear_design(theta, times))
+                - jnp.stack(AbstractUpdateTarget.linear_design(target, theta, times))
+            )
+        )
+
+    for theta in (ORBIT_CASES["ti"][1], jnp.array([0.7, 7.5, 0.9, 0, 0, 0, 0.0])):
+        assert float(design_gap(theta)) < 1e-14
+    records = RelativeAstromData(
+        times=jnp.array([0.0, 200.0]),
+        ra=jnp.array([0.08, -0.05]),
+        dec=jnp.array([0.06, 0.1]),
+        ra_err=jnp.full(2, sigma),
+        dec_err=jnp.full(2, sigma),
+        corr=jnp.array([0.0, 0.3]),
+        planet_id=jnp.zeros(2, dtype=int),
+        is_valid=jnp.ones(2, dtype=bool),
+    )
+    select = jnp.array([False, True])
+    weights = jnp.array([1.0, beta])
+    ref = _exact_ti_draws(
+        target, records, select, beta, 512, pool=2**13, collapsed=True
+    )
+
+    @jax.jit
+    def fresh(x):
+        def evaluate(theta):
+            lr, ln = target.log_likelihood_split(theta, records, select)
+            return target.log_prior(theta), lr, ln
+
+        log_z = jax.vmap(lambda t: _linear_gaussian(target, t, records, weights)[2])(x)
+        return jax.vmap(evaluate)(x), log_z
+
+    step = eqx.filter_jit(_collapsed_step)
+    x = ref.start
+    aux, log_z = fresh(x)
+    chol = jnp.diag(jnp.asarray(ref.ref_sd[:3])) / math.sqrt(3.0)
+    for i in range(2):
+        x, aux, log_z, accepted = step(
+            jax.random.fold_in(_key(5), i),
+            x,
+            aux,
+            log_z,
+            chol,
+            target,
+            records,
+            weights,
+            select,
+            lambda t: _rest_log_prior(target, t),
+        )
+        assert 0.05 < float(jnp.mean(accepted)) < 0.95
+        assert np.all(np.isfinite(np.asarray(jax.vmap(target.log_prior)(x))))
+        aux_now, log_z_now = fresh(x)
+        np.testing.assert_allclose(log_z, log_z_now, rtol=1e-12, atol=1e-12)
+        for cached, now in zip(aux, aux_now, strict=True):
+            np.testing.assert_allclose(cached, now, rtol=1e-10, atol=1e-9)
+
+
 class _NoJacobianTI(ThieleInnesTarget):
     """Mutant whose alias map reports a zero log Jacobian."""
 
@@ -430,21 +510,17 @@ def _alias_step_without_marginal(
     )
 
 
-def _alias_case(offset):
-    """A TI posterior with separated period aliases and its exact draws.
+def _alias_problem(offset):
+    """The TI model, records, selection, weights and truth of the alias cases.
 
     The TI model is truncated to periods of 50 to 500 days (the
     multi-revolution regime) with ``t_ref`` = 150 days; records of an 80-day
     orbit at 0, 365 and 730 + ``offset`` days with 5 mas errors, the last at
-    temperature 0.5. Exact draws come from a collapsed importance sampler
-    (2^21 draws) resampled to N = 4000. Returns the model, records, weights,
-    selection, the exact draws and ``run(alias_target, step, rest)``, which
-    applies eight alias steps to the exact draws and returns the result and
-    the mean acceptance rate.
+    temperature 0.5.
     """
     model = TIBasisModel(lnP_hi=math.log(500.0), t_ref=150.0)
     target = ThieleInnesTarget(model)
-    sigma, beta, n = 0.005, 0.5, 4000
+    sigma, beta = 0.005, 0.5
     truth = jnp.array([0.2, math.log(80.0), 0.3, 0.3, -0.2, 0.1, 0.35])
     times = jnp.array([0.0, 365.0, 730.0 + offset])
     ra, dec = target.predict(truth, times)
@@ -461,6 +537,20 @@ def _alias_case(offset):
     )
     select = jnp.array([False, False, True])
     weights = jnp.array([1.0, 1.0, beta])
+    return model, target, records, select, weights, truth
+
+
+def _alias_case(offset):
+    """A TI posterior with separated period aliases and its exact draws.
+
+    :func:`_alias_problem` with exact draws from a collapsed importance
+    sampler (2^21 draws) resampled to N = 4000. Returns the model, target,
+    the exact draws, ``run(alias_target, step, rest)``, which applies eight
+    alias steps to the exact draws and returns the result and the mean
+    acceptance rate, and ``z_lnp(x)``, the standardized ln P mean shift.
+    """
+    model, target, records, select, weights, _ = _alias_problem(offset)
+    beta, n = 0.5, 4000
     ref = _exact_ti_draws(target, records, select, beta, n, pool=2**21, collapsed=True)
 
     def run(alias_target, step=_alias_step, rest=None):
@@ -586,6 +676,114 @@ def test_alias_jump_reweights_by_the_marginal_off_the_lattice():
     assert np.mean(np.abs(jumped[:, 1] - np.asarray(ref.start)[:, 1]) > 1e-9) > 0.1
     assert ref.max_z(jumped) < 4.0
     assert abs(z_lnp(run(target, step=_alias_step_without_marginal)[0])) > 6.0
+
+
+def test_alias_map_is_an_involution_with_the_exact_jacobian():
+    """The alias map inverts under k -> -k, has Jacobian f / f' and copies the lattice.
+
+    At a TI point on a lattice (spacing 365 days, anchor 37 days, different
+    from ``t_ref`` = 150 days): jumping by k and then -k returns the point to
+    1e-12 with opposite log Jacobians (k = 1, 2, 5, so a one-sided jump
+    fails); the reported log Jacobian equals the log absolute determinant of
+    the automatic derivative of the (ln P, tau) map to 1e-10; predictions at
+    every lattice epoch are unchanged to 1e-12; a jump to a negative
+    frequency is non-finite. Fails if the Jacobian is dropped or inverted,
+    the jump is asymmetric, or the phase shift leaves out ``t_ref``.
+    """
+    model = TIBasisModel(lnP_hi=math.log(500.0), t_ref=150.0)
+    target = ThieleInnesTarget(model)
+    theta = ORBIT_CASES["ti"][1]
+    lattice = 37.0 + 365.0 * jnp.arange(3.0)
+    bad = target.alias_jump(theta, -1.0, 365.0, 37.0)[0]
+    assert not bool(jnp.all(jnp.isfinite(bad)))
+    for k in (1.0, 2.0, 5.0):
+        new, log_jac = target.alias_jump(theta, k, 365.0, 37.0)
+        back, back_jac = target.alias_jump(new, -k, 365.0, 37.0)
+        np.testing.assert_allclose(back, theta, rtol=0, atol=1e-12)
+        assert abs(float(log_jac + back_jac)) < 1e-12
+        np.testing.assert_allclose(
+            target.predict(new, lattice), target.predict(theta, lattice), atol=1e-12
+        )
+
+        def chart(v, k=k):
+            return target.alias_jump(theta.at[1:3].set(v), k, 365.0, 37.0)[0][1:3]
+
+        jac = jax.jacfwd(chart)(theta[1:3])
+        assert abs(math.log(abs(float(jnp.linalg.det(jac)))) - float(log_jac)) < 1e-10
+
+
+@eqx.filter_jit
+def _alias_rate_pair(target, records, select, weights, truth, ks, z, key):
+    """Measured and enumerated acceptance of an alias step started at ``truth``."""
+    spacing, anchor = _epoch_lattice(records)
+
+    def rest(theta):
+        return _rest_log_prior(target, theta)
+
+    def one_k(k):
+        new, _ = target.alias_jump(truth, k, spacing, anchor)
+        mean, chol, log_z, _, _ = _linear_gaussian(target, new, records, weights)
+        c = mean + jax.vmap(
+            lambda zz: jax.scipy.linalg.solve_triangular(chol.T, zz, lower=False)
+        )(z)
+        moved = jax.vmap(lambda cc: new.at[3:].set(cc))(c)
+        _, _, log_z_now, _, _ = _linear_gaussian(target, truth, records, weights)
+        log_alpha = jax.vmap(rest)(moved) + log_z - rest(truth) - log_z_now
+        log_alpha += new[1] - truth[1]
+        log_alpha = jnp.where(jnp.isnan(log_alpha), -jnp.inf, log_alpha)
+        return jnp.mean(jnp.minimum(1.0, jnp.exp(log_alpha)))
+
+    expected = jnp.mean(jax.vmap(one_k)(ks))
+    x = jnp.tile(truth, (1000, 1))
+    aux = jax.vmap(
+        lambda t: (
+            target.log_prior(t),
+            *target.log_likelihood_split(t, records, select),
+        )
+    )(x)
+    log_z = jax.vmap(lambda t: _linear_gaussian(target, t, records, weights)[2])(x)
+    accepted = _alias_step(key, x, aux, log_z, target, records, weights, select, rest)[
+        3
+    ]
+    return jnp.mean(accepted), expected
+
+
+def _alias_rates(offset):
+    """Measured and independent expected acceptance of an alias step at the truth.
+
+    Every one of 1000 particles starts at the truth of :func:`_alias_problem`.
+    The expected rate enumerates every ``k`` and 16 conditional draws of the
+    TI constants and averages ``min(1, exp(log ratio))`` with the ratio
+    ``p_rest(u', c') Z(u') f / (p_rest(u, c) Z(u) f')`` written out directly.
+    """
+    _, target, records, select, weights, truth = _alias_problem(offset)
+    spacing, _ = _epoch_lattice(records)
+    k_max = int(target.alias_k_max(spacing))
+    ks = jnp.asarray([k for k in range(-k_max, k_max + 1) if k], float)
+    z = jax.random.normal(jax.random.key(3), (16, 4))
+    measured, expected = _alias_rate_pair(
+        target, records, select, weights, truth, ks, z, _key(7)
+    )
+    return float(measured), float(expected)
+
+
+def test_alias_step_acceptance_matches_the_hastings_ratio():
+    """The alias step accepts at the rate its Hastings ratio implies.
+
+    With every particle at the truth of :func:`_alias_problem`, the measured
+    acceptance of one alias step (1000 draws, standard error about 0.012)
+    must lie within 0.04 of the rate enumerated independently from the ratio
+    ``p_rest(u', c') Z(u') f / (p_rest(u, c) Z(u) f')``. On the 365-day
+    lattice the rate is about 0.21; with the last epoch 20 days off it the
+    marginal likelihood changes and the rate falls to about 0.04. Fails if
+    the step drops the marginal correction (0.23 off the lattice), the
+    implied-mass window (0.31 on the lattice) or the Jacobian, or breaks the
+    lattice copy. The million-draw invariance campaigns are slow-tier.
+    """
+    for offset in (0.0, 20.0):
+        measured, expected = _alias_rates(offset)
+        assert 0.02 < expected < 0.4
+        assert abs(measured - expected) < 0.04, (offset, measured, expected)
 
 
 class _PriorMovesUpdater(OrbitUpdater):

@@ -739,6 +739,68 @@ def test_units_write_complete_summaries_and_exact_physical_weights():
         assert abs(sd / world["sigma"] - 1.0) < 0.06
 
 
+def test_ti_production_reference_keeps_the_mass_window():
+    """The production TI reference matches the independent one only with its window.
+
+    One R3 development world at two epochs (the implied-mass window binds
+    there), 2^14 proposals each: the production collapsed reference and the
+    frequency-mixture reference must agree on every ln P bin mass within 0.03
+    (measured 0.008), and the production reference run on a target whose
+    prior lacks the implied-mass window must miss by more than 0.1 (measured
+    0.15). Fails if the production reference drops the mass window. The
+    six-world certification statistic is slow-tier.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+
+    from photomancy.orbit.updater import ThieleInnesTarget
+
+    tool = _load_tool()
+    protocol = tool.load_protocol()
+    n = 2**14
+    budgets = tool.protocol_budgets(protocol, particles=64, ti_proposals=n)
+    roles = {"reference_1", "cert_proposal_1"}
+    units = {
+        u["role"]: u
+        for u in tool.plan_units(
+            protocol,
+            "development",
+            ["reference", "certification"],
+            mass_models=["ti_window"],
+            regimes=["R3"],
+            worlds=[0],
+        )
+        if u["role"] in roles and u["epoch_count"] == 2
+    }
+
+    class NoWindowTI(ThieleInnesTarget):
+        def log_prior(self, theta):
+            m = self.model
+            box = (theta[0] > 0) & (theta[0] < m.e_max)
+            box &= (theta[1] > m.lnP_lo) & (theta[1] < m.lnP_hi)
+            return jnp.where(box, m.log_prior_ti(theta), -jnp.inf)
+
+    collapsed = tool.ti_collapsed_reference
+
+    def no_window(target, data, key, n_prop, chunk):
+        return collapsed(
+            NoWindowTI(target.model, target.dist_pc), data, key, n_prop, chunk
+        )
+
+    def lnp_bins(role, patch=None):
+        if patch is not None:
+            tool.ti_collapsed_reference = patch
+        try:
+            executor = tool.UnitExecutor(protocol, budgets, chunk=n)
+            return np.asarray(executor(units[role])["summary"]["bins"]["lnP"])
+        finally:
+            tool.ti_collapsed_reference = collapsed
+
+    other = lnp_bins("cert_proposal_1")
+    assert np.max(np.abs(lnp_bins("reference_1") - other)) < 0.03
+    assert np.max(np.abs(lnp_bins("reference_1", no_window) - other)) > 0.1
+
+
 # Slow: six-world, four-role certification retains full precision and both mutants.
 @pytest.mark.slow
 def test_ti_independent_reference_catches_an_injected_bias():

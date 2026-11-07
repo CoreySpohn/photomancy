@@ -124,6 +124,67 @@ def _collapsed_reference(setup, key, n):
     return ex.summary_values(summary)
 
 
+def test_ti_quadrature_assembly_matches_a_small_collapsed_sampler():
+    """Level-0 TI quadrature agrees coarsely with a 2^15-draw collapsed sampler.
+
+    The quadrature's bin masses, end points and the position-angle wedge
+    masses weighted over the nodes are compared with one collapsed
+    importance run (exact weights, independent of the quadrature's dense
+    normal equations). Level 0 is coarse, so the tolerances catch assembly
+    errors, not accuracy: bin masses within 0.02 (measured 0.008) and end
+    points within 0.01 (measured 0.004), and the masses of each quantity sum
+    to 1. Fails if the quadrature drops the marginal-likelihood weight,
+    misweights nodes, uses the wrong future-position covariance, or mislabels
+    a bin or end point. The multi-run certification is slow-tier.
+    """
+    protocol = ex.panel.load_protocol()
+    setup = ex.case_setup(protocol, "ti_window")
+    values = ex.ti_quadrature(setup, ex.level_counts(ex.TI_BASE, 0))["values"]
+    for quantity in ("lnP", "e", "future_pa"):
+        assert abs(sum(values[f"{quantity}_bin{b}"] for b in range(8)) - 1.0) < 1e-12
+    sampled = _collapsed_reference(setup, jax.random.key(0), 2**15)
+    for name in ex.value_names():
+        tol = 0.02 if "_bin" in name else 0.01
+        assert abs(sampled[name] - values[name]) < tol, (
+            name,
+            sampled[name],
+            values[name],
+        )
+
+
+def test_physical_quadrature_assembly_matches_a_small_reference_sampler():
+    """Level-0 physical quadrature agrees coarsely with a 2^14-proposal reference.
+
+    The reference (scale-and-rotate proposal, weight rho^-2 on the support)
+    runs once. Level 0 is coarse (one Gauss node per e bin, eight per angle),
+    so the tolerances catch convention errors: every bin mass within 0.06
+    (measured 0.025) and end points within 0.003 (measured 5e-4), and the
+    masses of each quantity sum to 1. Fails if the rotation sign, the
+    position-angle offset of the future epoch, the east and north arcs, or
+    the e-coordinate transform is wrong. The 2^18-proposal comparison is
+    slow-tier.
+    """
+    protocol = ex.panel.load_protocol()
+    setup = ex.case_setup(protocol, "physical_fixed")
+    quad = ex.physical_quadrature(setup, ex.level_counts(ex.PHYSICAL_BASE, 0))
+    values = quad["values"]
+    for quantity in ("lnP", "e", "future_pa"):
+        assert abs(sum(values[f"{quantity}_bin{b}"] for b in range(8)) - 1.0) < 1e-10
+    key = ex.panel.draw_key(protocol, "exact", "physical_fixed", 0, 0, "exact_run", 0)
+    q, lw = ex.reference_sample(protocol, setup, key, 2**14)
+    summary = ex.panel.summarize_posterior(
+        q, lw, setup["edges"], ex.panel.visibility_mas(protocol)
+    )
+    sampled = ex.summary_values(summary)
+    for name in ex.value_names():
+        tol = 0.06 if "_bin" in name else 0.003
+        assert abs(sampled[name] - values[name]) < tol, (
+            name,
+            sampled[name],
+            values[name],
+        )
+
+
 # Slow: independent quadrature certification needs a large Monte Carlo reference.
 @pytest.mark.slow
 def test_ti_quadrature_matches_an_independent_exact_sampler():
