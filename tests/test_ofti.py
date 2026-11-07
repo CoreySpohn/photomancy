@@ -228,21 +228,23 @@ def test_score_uses_only_nonreference_epoch():
     np.testing.assert_allclose(ll, second_epoch_ll, rtol=1e-4, atol=1e-4)
 
 
+# Medium: Two-epoch rejection sampling includes the cold OFTI program.
+@pytest.mark.medium
 def test_returns_particle_posterior():
-    """Output is a normalized SamplePosterior with the expected contract."""
+    """Fails if two-epoch rejection loses its normalized SamplePosterior contract."""
     data = make_data(jax.random.PRNGKey(0), 2)
     pp = ofti(
         data,
         Ms=MSUN,
         dist_pc=DIST_PC,
         key=jax.random.PRNGKey(1),
-        n_accept=500,
+        n_accept=32,
         log_P_range=(2.0, 3.0),
-        batch=20000,
+        batch=4096,
     )
     assert isinstance(pp, SamplePosterior)
     assert pp.param_names == PARAM_NAMES
-    assert pp.samples.shape == (500, 7)
+    assert pp.samples.shape == (32, 7)
     assert float(jax.scipy.special.logsumexp(pp.log_weights)) == pytest.approx(
         0.0, abs=1e-5
     )

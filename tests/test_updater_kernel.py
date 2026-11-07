@@ -229,7 +229,8 @@ def _exact_ti_draws(target, records, select, beta, n, pool=2**22, collapsed=Fals
     return _ExactDraws(start, max_z, ref_m, ref_var, factor, ref_sd, ess)
 
 
-@pytest.mark.medium
+# Slow: million-draw references resolve the invariant moments and mutant biases.
+@pytest.mark.slow
 def test_collapsed_move_leaves_tempered_ti_posterior_invariant():
     """Collapsed moves keep exact TI posterior draws exact; window and weight matter.
 
@@ -503,7 +504,8 @@ def _alias_case(offset):
     return model, target, ref, run, z_lnp
 
 
-@pytest.mark.medium
+# Slow: million-draw references resolve the invariant moments and mutant biases.
+@pytest.mark.slow
 def test_alias_jump_leaves_tempered_ti_posterior_invariant_on_a_lattice():
     """Alias jumps keep exact draws exact; Jacobian, symmetry, window, phase.
 
@@ -564,7 +566,8 @@ def test_alias_jump_leaves_tempered_ti_posterior_invariant_on_a_lattice():
     assert shift.max() > 1e-3
 
 
-@pytest.mark.medium
+# Slow: million-draw references resolve the invariant moments and mutant biases.
+@pytest.mark.slow
 def test_alias_jump_reweights_by_the_marginal_off_the_lattice():
     """Off the lattice the alias ratio must carry Z(u') / Z(u).
 
@@ -621,6 +624,8 @@ def _gauss_log_marginal(y, mean, var):
     return float(np.sum(-0.5 * (y - mean) ** 2 / var - 0.5 * np.log(2.0 * np.pi * var)))
 
 
+# Medium: The full updater and wrong-target control each need a cold kernel compile.
+@pytest.mark.medium
 def test_conjugate_posterior_evidence_and_wrong_target_mutant():
     """Two tempered updates reproduce the conjugate posterior and evidence.
 

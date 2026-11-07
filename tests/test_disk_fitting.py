@@ -8,8 +8,6 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from orbix.kepler.shortcuts.grid import get_grid_solver  # noqa: E402
-from skyscapes.disk import GraterDisk  # noqa: E402
-from skyscapes.scene import FlatStar, System  # noqa: E402
 
 from photomancy.backends import LaplaceBackend  # noqa: E402
 from photomancy.disk import (  # noqa: E402
@@ -33,40 +31,50 @@ def _FIT(s):
     ]
 
 
-def _make_system(sma=50.0, alpha_in=5.0, alpha_out=-5.0, ksi0=1.0, incl=55.0, pa=30.0):
-    """Star + GraterDisk System; orientation held as arrays so it is fittable."""
-    disk = GraterDisk(
-        sma_AU=jnp.array(sma),
-        alpha_in=jnp.array(alpha_in),
-        alpha_out=jnp.array(alpha_out),
-        ksi0_AU=jnp.array(ksi0),
-        gamma=jnp.array(2.0),
-        beta=jnp.array(1.0),
-        rmin_AU=jnp.array(5.0),
-        rmax_AU=jnp.array(200.0),
-        wavelengths_nm=jnp.array([400.0, 1000.0]),
-        g_HG_grid=jnp.array([0.3, 0.3]),
-        Ag_grid=jnp.array([0.5, 0.5]),
-        nx=51,
-        ny=51,
-        pixel_scale_arcsec=0.2,
-        dist_pc=10.0,
-        n_slices_los=31,
-    )
-    star = FlatStar(Ms_kg=1.989e30, dist_pc=10.0, flux_phot_per_nm_m2=1e9)
-    return System(
-        star=star,
-        planets=(),
-        disk=disk,
-        trig_solver=SOLVER,
-        midplane_inc_deg=jnp.array(incl),
-        midplane_pa_deg=jnp.array(pa),
-    )
+@pytest.fixture(scope="module")
+def make_system():
+    """Import the scene stack only on the worker that executes these disk tests."""
+    from skyscapes.disk import GraterDisk
+    from skyscapes.scene import FlatStar, System
+
+    def build(sma=50.0, alpha_in=5.0, alpha_out=-5.0, ksi0=1.0, incl=55.0, pa=30.0):
+        """Star + GraterDisk System; orientation held as arrays so it is fittable."""
+        disk = GraterDisk(
+            sma_AU=jnp.array(sma),
+            alpha_in=jnp.array(alpha_in),
+            alpha_out=jnp.array(alpha_out),
+            ksi0_AU=jnp.array(ksi0),
+            gamma=jnp.array(2.0),
+            beta=jnp.array(1.0),
+            rmin_AU=jnp.array(5.0),
+            rmax_AU=jnp.array(200.0),
+            wavelengths_nm=jnp.array([400.0, 1000.0]),
+            g_HG_grid=jnp.array([0.3, 0.3]),
+            Ag_grid=jnp.array([0.5, 0.5]),
+            nx=51,
+            ny=51,
+            pixel_scale_arcsec=0.2,
+            dist_pc=10.0,
+            n_slices_los=31,
+        )
+        star = FlatStar(Ms_kg=1.989e30, dist_pc=10.0, flux_phot_per_nm_m2=1e9)
+        return System(
+            star=star,
+            planets=(),
+            disk=disk,
+            trig_solver=SOLVER,
+            midplane_inc_deg=jnp.array(incl),
+            midplane_pa_deg=jnp.array(pa),
+        )
+
+    return build
 
 
-def test_build_disk_logdensity_is_finite_and_differentiable():
+# Medium: The disk image and its six-parameter gradient exceed the unit compile budget.
+@pytest.mark.medium
+def test_build_disk_logdensity_is_finite_and_differentiable(make_system):
     """The disk logdensity builds over the fitted leaves and is grad-safe at z0."""
-    system = _make_system()
+    system = make_system()
     forward = surface_brightness_forward(WL, TIME)
     image = forward(system)
     sigma = 0.02 * float(jnp.max(jnp.abs(image)))
@@ -81,16 +89,16 @@ def test_build_disk_logdensity_is_finite_and_differentiable():
 
 
 @pytest.mark.slow
-def test_laplace_recovers_disk_shape_and_orientation():
+def test_laplace_recovers_disk_shape_and_orientation(make_system):
     """Laplace MAP recovers the truth disk shape + orientation from a noisy image."""
-    truth = _make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
+    truth = make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
     forward = surface_brightness_forward(WL, TIME)
     clean = forward(truth)
     sigma = 0.02 * float(jnp.max(jnp.abs(clean)))
     rng = np.random.default_rng(0)
     data = jnp.asarray(np.asarray(clean) + rng.normal(0.0, sigma, clean.shape))
 
-    init = _make_system(
+    init = make_system(
         sma=56.0, alpha_in=4.0, alpha_out=-6.0, ksi0=1.3, incl=48.0, pa=22.0
     )
     logdensity, z0, unravel = build_disk_logdensity(
@@ -105,9 +113,11 @@ def test_laplace_recovers_disk_shape_and_orientation():
     assert abs(float(fit.midplane_pa_deg) - 30.0) < 6.0
 
 
-def test_forward_is_swappable():
+# Medium: this consumer can pay for the deferred scene-stack import.
+@pytest.mark.medium
+def test_forward_is_swappable(make_system):
     """A swapped forward (stand-in for a coronagraph stage) fits end to end."""
-    system = _make_system()
+    system = make_system()
     base = surface_brightness_forward(WL, TIME)
 
     def alt_forward(s):  # stand-in for a coronagraph/PSF stage
@@ -122,12 +132,14 @@ def test_forward_is_swappable():
     assert jnp.all(jnp.isfinite(jax.grad(logdensity)(z0)))
 
 
-def test_default_disk_prior_aligns_and_centers_on_system():
+# Medium: this consumer can pay for the deferred scene-stack import.
+@pytest.mark.medium
+def test_default_disk_prior_aligns_and_centers_on_system(make_system):
     """default_disk_prior pairs with disk_fit_leaves: aligned z, centered on system."""
     from photomancy.disk import default_disk_prior, disk_fit_leaves
     from photomancy.priors import IndependentPrior
 
-    system = _make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
+    system = make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
     forward = surface_brightness_forward(WL, TIME)
     prior = default_disk_prior(system)
     assert isinstance(prior, IndependentPrior)

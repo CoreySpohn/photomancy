@@ -124,7 +124,8 @@ def _collapsed_reference(setup, key, n):
     return ex.summary_values(summary)
 
 
-@pytest.mark.medium
+# Slow: independent quadrature certification needs a large Monte Carlo reference.
+@pytest.mark.slow
 def test_ti_quadrature_matches_an_independent_exact_sampler():
     """Level-0 TI quadrature agrees with collapsed importance sampling.
 
@@ -159,7 +160,8 @@ def test_ti_quadrature_matches_an_independent_exact_sampler():
         assert abs(x.mean() - q1[name]) < tol, (name, x.mean(), q1[name], tol)
 
 
-@pytest.mark.medium
+# Slow: independent quadrature certification needs a large Monte Carlo reference.
+@pytest.mark.slow
 def test_physical_quadrature_matches_the_reference_sampler_coarsely():
     """Level-0 physical quadrature agrees with the exact-weight reference.
 
@@ -193,7 +195,8 @@ def test_physical_quadrature_matches_the_reference_sampler_coarsely():
         )
 
 
-@pytest.mark.medium
+# Slow: independent quadrature certification needs a large Monte Carlo reference.
+@pytest.mark.slow
 def test_binding_window_case_grades_a_shared_window_error():
     """In the binding-window case both TI samplers pass and a lost window fails.
 

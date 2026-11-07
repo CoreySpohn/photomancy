@@ -14,7 +14,7 @@ from photomancy.backends import LaplaceMixtureBackend  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
-from photomancy.orbit.init import find_init, find_init_top_k  # noqa: E402
+from photomancy.orbit.init import find_init_top_k  # noqa: E402
 from photomancy.posterior import MixturePosterior  # noqa: E402
 
 MSUN_KG = 1.989e30
@@ -62,14 +62,40 @@ def _make_astrom(n_obs, seed=42):
     )
 
 
-def test_build_orbit_logdensity_maps_between_z_and_physical():
-    """The bridge yields a finite flat logdensity and round-trips the period."""
-    astrom = _make_astrom(6)
-    init_dict = find_init(astrom, MSUN_KG, DIST_PC, log_T_range=LOG_P_RANGE)
+@pytest.fixture(scope="module")
+def orbit_problem_and_inits():
+    """Share one orbit model and a small blind grid across bridge consumers.
 
+    Initializer ranking has dedicated regressions; these consumers check the
+    bridge and backend. Keep two starts and the original period recovery bound.
+    """
+    astrom = _make_astrom(5)
     problem = build_orbit_logdensity(
         MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
+    # Endpoint seeds have infinite inverse support transforms. Keep the blind
+    # grid inside the model's unchanged prior for the finite round-trip checks.
+    lo, hi = LOG_P_RANGE
+    init_range = (lo + 0.1 * (hi - lo), hi - 0.1 * (hi - lo))
+    inits = find_init_top_k(
+        astrom,
+        MSUN_KG,
+        DIST_PC,
+        k=2,
+        log_T_range=init_range,
+        n_log_T=32,
+        e_grid=jnp.array([0.0, 0.15, 0.4]),
+        n_tp=12,
+    )
+    return problem, inits
+
+
+# Medium: Building and evaluating the orbit bridge includes the first model trace.
+@pytest.mark.medium
+def test_build_orbit_logdensity_maps_between_z_and_physical(orbit_problem_and_inits):
+    """The bridge yields a finite flat logdensity and round-trips the period."""
+    problem, init_dicts = orbit_problem_and_inits
+    init_dict = init_dicts[0]
     z_init = problem.init_to_z(init_dict)
 
     assert jnp.isfinite(problem.logdensity(z_init))
@@ -82,21 +108,19 @@ def test_build_orbit_logdensity_maps_between_z_and_physical():
     assert len(problem.param_names) > 0
 
 
-def test_orbit_fit_through_generic_backend_recovers_period():
+# Medium: Blind initialization and a multi-start orbit fit exceed the unit budget.
+@pytest.mark.medium
+def test_orbit_fit_through_generic_backend_recovers_period(orbit_problem_and_inits):
     """Orbit fitting run through the generic LaplaceMixtureBackend recovers T.
 
     Proves the orbit NumPyro model fits through the domain-agnostic engine: the
     bridge logdensity + TI-seeded multi-start Laplace mixture recover the true
     period within 10% on sparse (n=5) astrometry, matching the orbit-specific path.
     """
-    astrom = _make_astrom(5)
-    problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
-    )
-    init_dicts = find_init_top_k(astrom, MSUN_KG, DIST_PC, k=5, log_T_range=LOG_P_RANGE)
+    problem, init_dicts = orbit_problem_and_inits
     inits = jnp.stack([problem.init_to_z(d) for d in init_dicts])
 
-    post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=300).run(
+    post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=100).run(
         problem.logdensity, inits
     )
 
@@ -106,13 +130,12 @@ def test_orbit_fit_through_generic_backend_recovers_period():
     assert abs(t_fit - TRUE_T) / TRUE_T < 0.10, f"t_fit={t_fit:.1f} vs {TRUE_T}"
 
 
-def test_orbit_problem_exposes_unflatten_and_trace():
+# Medium: this consumer can pay for the shared model trace and blind grid.
+@pytest.mark.medium
+def test_orbit_problem_exposes_unflatten_and_trace(orbit_problem_and_inits):
     """The problem exposes the model unflatten + trace for the EIG forward."""
-    astrom = _make_astrom(6)
-    problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
-    )
-    init_dict = find_init(astrom, MSUN_KG, DIST_PC, log_T_range=LOG_P_RANGE)
+    problem, init_dicts = orbit_problem_and_inits
+    init_dict = init_dicts[0]
     z = problem.init_to_z(init_dict)
 
     assert callable(problem.unflatten)
@@ -122,7 +145,9 @@ def test_orbit_problem_exposes_unflatten_and_trace():
     assert -1.0 < float(phys["cos_i"]) < 1.0  # constrained into Uniform(-1, 1)
 
 
-def test_to_unconstrained_round_trips_known_orbit():
+# Medium: this consumer can pay for the shared model trace and blind grid.
+@pytest.mark.medium
+def test_to_unconstrained_round_trips_known_orbit(orbit_problem_and_inits):
     """Physical orbit rows -> z -> physical recovers the orbit (OFTI bridge)."""
     from photomancy.orbit.inference import to_unconstrained
     from photomancy.posterior import SamplePosterior
@@ -137,9 +162,7 @@ def test_to_unconstrained_round_trips_known_orbit():
         evidence=jnp.asarray(jnp.nan),
         param_names=("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp"),
     )
-    problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, relative_astrom_data=_make_astrom(6), log_P_range=LOG_P_RANGE
-    )
+    problem, _ = orbit_problem_and_inits
     zpost = to_unconstrained(phys_post, problem, MSUN_KG)
     assert zpost.samples.shape == (1, len(problem.param_names))
 

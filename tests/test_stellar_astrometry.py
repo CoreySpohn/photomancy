@@ -11,6 +11,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -97,6 +98,8 @@ class _Orbit(eqx.Module):
     log_Mp: jnp.ndarray
 
 
+# Medium: The seven-parameter reflex fit includes a cold optimizer and Hessian.
+@pytest.mark.medium
 def test_mass_is_identifiable_from_reflex():
     """A reflex-astrometry fit recovers the planet mass (period -> a -> amplitude)."""
     P_days = 4331.0  # a = 5.2 AU around 1 Msun
@@ -174,6 +177,8 @@ def test_mass_is_identifiable_from_reflex():
     assert float(sigma[-1]) < 0.1  # log_Mp is well constrained, not degenerate
 
 
+# Medium: Wiring the stellar channel includes the first NumPyro model trace.
+@pytest.mark.medium
 def test_numpyro_model_wires_stellar_channel():
     """build_orbit_logdensity wires the stellar channel and fits the mass."""
     times = jnp.linspace(0.0, 4000.0, 10)

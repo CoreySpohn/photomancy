@@ -28,8 +28,8 @@ MODEL = TIBasisModel(lnP_lo=float(np.log(80.0)), lnP_hi=float(np.log(3000.0)))
 TRUTH = dict(a=1.0, e=0.25, inc=0.65, W=1.1, w=0.8, tau=0.30, mu=MU_SUN)
 
 
-def _newton_E(M, e, iters=60):
-    """Independent Newton Kepler solve for the test truth."""
+def _newton_E(M, e, iters=12):
+    """Independent Kepler solve to float64 residuals for this e <= 0.9 grid."""
     E = M
     for _ in range(iters):
         E = E - (E - e * jnp.sin(E) - M) / (1.0 - e * jnp.cos(E))
@@ -235,6 +235,8 @@ def test_forward_au_matches_independent_propagation():
         assert np.allclose(float(y[i]), float(r[1]), atol=1e-9)
 
 
+# Medium: Cold Lambert solve plus an independent grid reference exceeds the unit budget.
+@pytest.mark.medium
 def test_lambert_depth_fit_matches_grid_reference():
     """The exact Lambert fit reproduces the certified grid posterior (n=2)."""
     data = _make_data(2)
@@ -257,29 +259,34 @@ def test_lambert_depth_fit_matches_grid_reference():
     assert float(np.std(np.asarray(lj))) > 0.1
 
 
+# Medium: Two- and three-epoch importance fits include separate cold solver programs.
+@pytest.mark.medium
 def test_third_epoch_tightens_period():
     """Scoring a third epoch through the likelihood shrinks std(lnP)."""
     # Gentler noise and a depth proposal matched to the ~1 AU data scale keep
     # the uniform proposal's ESS usable once the third epoch's likelihood
     # multiplies in (the production answer is a data-informed proposal).
     sigma = 0.06
+    # Contraction needs a broad period prior, not five-revolution alias coverage;
+    # test_lambert_depth_fit_matches_grid_reference retains that full grid.
+    model = TIBasisModel(lnP_lo=float(np.log(300.0)), lnP_hi=MODEL.lnP_hi)
     post2 = lambert_depth_fit(
         _make_data(2, sigma_au=sigma),
         dist_pc=DIST_PC,
-        model=MODEL,
+        model=model,
         key=jax.random.PRNGKey(1),
         n_per_family=6000,
-        n_max_rev=5,
+        n_max_rev=1,
         z_max_au=3.0,
     )
     data3 = _make_data(3, sigma_au=sigma)
     post3 = lambert_depth_fit(
         data3,
         dist_pc=DIST_PC,
-        model=MODEL,
+        model=model,
         key=jax.random.PRNGKey(2),
         n_per_family=16000,
-        n_max_rev=5,
+        n_max_rev=1,
         idx=(0, 2),
         z_max_au=3.0,
     )

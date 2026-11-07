@@ -86,7 +86,10 @@ jobs:
 
       - name: Quick tier
         run: |
-          pytest tests/ -m "not slow" -ra --tb=short \
+          # skyscapes creates a config file in the home directory on its first import.
+          python -c "import skyscapes"
+          # Keep each file's compiled fixtures on one of two bounded workers.
+          pytest tests/ -m "not slow" -n 2 --dist loadfile -ra --tb=short \
             --timeout=300 --fail-slow=30s \
             --durations=15 --durations-min=1.0 \
             --junitxml=junit-quick.xml

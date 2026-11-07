@@ -13,6 +13,7 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 from orbix.equations import period_to_sma  # noqa: E402
 
 from photomancy.backends import LaplaceBackend  # noqa: E402
@@ -65,6 +66,8 @@ def _make_two_planet_astrom(seed=11):
     )
 
 
+# Medium: Tracing the two-planet model exceeds the unit cold-compile budget.
+@pytest.mark.medium
 def test_build_orbit_logdensity_two_planets_builds_and_evaluates():
     """The API exposes n_planets and a 2-planet astrometry model evaluates finitely."""
     astrom = _make_two_planet_astrom()
@@ -80,6 +83,8 @@ def test_build_orbit_logdensity_two_planets_builds_and_evaluates():
     assert z0.shape[0] > 6  # per-planet (plate-shaped) position, larger than 1-planet
 
 
+# Medium: The two-planet optimizer and Hessian exceed the unit cold-compile budget.
+@pytest.mark.medium
 def test_two_planet_fit_recovers_both_periods_from_seed():
     """A 2-planet fit seeded near truth recovers both periods.
 

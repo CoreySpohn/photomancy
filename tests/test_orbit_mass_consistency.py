@@ -94,6 +94,8 @@ def test_to_unconstrained_round_trips_total_mass_period(massive_orbit):
     assert zpost.evidence == post.evidence
 
 
+# Medium: The real nested-sampler mass-column regression needs a cold sampler compile.
+@pytest.mark.medium
 def test_nested_posterior_carries_true_mass_for_period_inversion():
     """Nested rows keep the mass needed to invert their derived semimajor axis."""
     log_mass = float(jnp.log10(0.1 * Msun2kg / Mearth2kg))

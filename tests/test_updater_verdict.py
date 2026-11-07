@@ -1291,7 +1291,14 @@ def committed_freeze(path, report):
             ["git", "-C", str(path), *args], stderr=subprocess.PIPE
         )
 
-    git("init", "-q")
+    # Keep temporary metadata outside .git, which some test sandboxes protect.
+    git(
+        "init",
+        "-q",
+        "--template=",
+        "--separate-git-dir",
+        str(path.with_name(path.name + "-git")),
+    )
     evidence = path / "freeze.json"
     if evidence.exists() and evidence.read_text() == json.dumps(report):
         return evidence

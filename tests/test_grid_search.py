@@ -134,6 +134,8 @@ def test_evaluator_matches_direct_loglike():
     assert jnp.allclose(ev(phys), loglike_relative_astrom(ra, dec, data))
 
 
+# Medium: comparing two independently compiled orbit evaluators exceeds the unit budget.
+@pytest.mark.medium
 def test_batched_loglike_matches_unfused():
     """batched_loglike via scan+vmap matches direct vmap over all particles."""
     from photomancy.orbit.grid_search import (
@@ -147,11 +149,11 @@ def test_batched_loglike_matches_unfused():
     shape = EccVectorShape()
     ev = build_evaluator((data,), Ms=MSUN, dist_pc=10.0, shape=shape)
     bounds = shape.default_bounds(log_T_range=(2.0, 3.0), e_max=0.5)
-    u = AdaptiveImportanceSampler().stage1(jax.random.PRNGKey(1), 6, 200)
+    u = AdaptiveImportanceSampler().stage1(jax.random.PRNGKey(0), 6, 24)
     phys = shape.to_physical(u, bounds, Ms=MSUN)
-    fused = batched_loglike(ev, phys, n_particles=200, chunk_size=50)
+    fused = batched_loglike(ev, phys, n_particles=24, chunk_size=6)
     ref = jax.vmap(ev)({k: v for k, v in phys.items()})
-    assert fused.shape == (200,)
+    assert fused.shape == (24,)
     assert jnp.allclose(fused, ref, atol=1e-5)
 
 

@@ -739,7 +739,8 @@ def test_units_write_complete_summaries_and_exact_physical_weights():
         assert abs(sd / world["sigma"] - 1.0) < 0.06
 
 
-@pytest.mark.medium
+# Slow: six-world, four-role certification retains full precision and both mutants.
+@pytest.mark.slow
 def test_ti_independent_reference_catches_an_injected_bias():
     """Certification check 3 for TI passes two exact references, fails a biased one.
 

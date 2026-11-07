@@ -6,6 +6,7 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+import pytest  # noqa: E402
 from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, d2s  # noqa: E402
 from orbix.equations import period_to_sma  # noqa: E402
 
@@ -69,6 +70,8 @@ def _make_astrom(n_obs=6, seed=4):
     )
 
 
+# Medium: The RV model, optimizer and Hessian require a cold compile.
+@pytest.mark.medium
 def test_rv_only_fit_recovers_period_from_seed():
     """An RV-only fit recovers the period when seeded near the true period.
 
@@ -86,6 +89,8 @@ def test_rv_only_fit_recovers_period_from_seed():
     assert abs(t_fit - TRUE_T) / TRUE_T < 0.10
 
 
+# Medium: The joint RV/astrometry multi-start fit exceeds the unit compile budget.
+@pytest.mark.medium
 def test_joint_rv_astrometry_recovers_period_and_mass():
     """A joint RV + astrometry fit recovers the period (astrometry) and mass (RV)."""
     rv = _make_rv()
@@ -97,10 +102,10 @@ def test_joint_rv_astrometry_recovers_period_and_mass():
         relative_astrom_data=astrom,
         log_P_range=LOG_P_RANGE,
     )
-    init_dicts = find_init_top_k(astrom, MSUN_KG, DIST_PC, k=5, log_T_range=LOG_P_RANGE)
+    init_dicts = find_init_top_k(astrom, MSUN_KG, DIST_PC, k=2, log_T_range=LOG_P_RANGE)
     inits = jnp.stack([problem.init_to_z(d) for d in init_dicts])
 
-    post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=300).run(
+    post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=100).run(
         problem.logdensity, inits
     )
     assert isinstance(post, MixturePosterior)

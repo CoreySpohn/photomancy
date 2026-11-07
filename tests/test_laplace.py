@@ -3,6 +3,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -74,26 +75,9 @@ def _make_astrom(n_obs, seed=42):
 # ---------------------------------------------------------------------------
 
 
-def test_map_laplace_fit_smoke():
-    """map_laplace_fit returns a GaussianPosterior with consistent shapes."""
-    astrom = _make_astrom(5)
-    init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-    result = map_laplace_fit(
-        Msun2kg,
-        DIST_PC,
-        relative_astrom_data=astrom,
-        log_P_range=LOG_P_RANGE,
-        init_vals=init_vals,
-        n_steps=200,
-    )
-    assert isinstance(result, GaussianPosterior)
-    d = result.mean.shape[0]
-    assert result.cov.shape == (d, d)
-    assert jnp.isfinite(result.evidence)
-
-
-def test_map_converges():
-    """MAP on n=5 data recovers T within 10% of truth."""
+@pytest.fixture(scope="module")
+def fitted():
+    """Fit the five-epoch scenario once for all posterior contract checks."""
     astrom = _make_astrom(5)
     init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
     result = map_laplace_fit(
@@ -106,6 +90,25 @@ def test_map_converges():
     problem = build_orbit_logdensity(
         Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
+    return result, problem
+
+
+# Medium: this consumer can pay for the shared fit and blind initializer.
+@pytest.mark.medium
+def test_map_laplace_fit_smoke(fitted):
+    """Fails if an orbit fit loses its Gaussian covariance or finite evidence."""
+    result, _ = fitted
+    assert isinstance(result, GaussianPosterior)
+    d = result.mean.shape[0]
+    assert result.cov.shape == (d, d)
+    assert jnp.isfinite(result.evidence)
+
+
+# Medium: this consumer can pay for the shared fit and blind initializer.
+@pytest.mark.medium
+def test_map_converges(fitted):
+    """Fails if the five-epoch MAP period misses truth by more than 10%."""
+    result, problem = fitted
     samples = sample_physical(result, problem, jax.random.PRNGKey(0), 500)
     T_median = float(jnp.median(samples["T"]))
     assert abs(T_median - TRUE_T) / TRUE_T < 0.10, (
@@ -113,6 +116,8 @@ def test_map_converges():
     )
 
 
+# Medium: Three sparse-epoch fits include distinct initializer shapes.
+@pytest.mark.medium
 def test_covariance_positive_definite():
     """Regularised covariance is positive-definite for n=1,2,3."""
     for n_obs in [1, 2, 3]:
@@ -130,34 +135,20 @@ def test_covariance_positive_definite():
         assert jnp.all(eigvals > 0), f"n={n_obs}: eigenvalues={eigvals}"
 
 
-def test_samples_shape():
-    """The fitted GaussianPosterior samples flat z-space with the right shape."""
-    astrom = _make_astrom(5)
-    init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-    result = map_laplace_fit(
-        Msun2kg,
-        DIST_PC,
-        relative_astrom_data=astrom,
-        log_P_range=LOG_P_RANGE,
-        init_vals=init_vals,
-        n_steps=100,
-    )
-    samples = result.sample(jax.random.PRNGKey(1), 100)
+# Medium: this consumer can pay for the shared fit and blind initializer.
+@pytest.mark.medium
+def test_samples_shape(fitted):
+    """Fails if the fitted posterior no longer samples flat z-space."""
+    result, _ = fitted
+    samples = result.sample(jax.random.PRNGKey(0), 100)
     assert samples.shape == (100, result.mean.shape[0])
 
 
-def test_log_prob_finite():
-    """log_prob() returns finite values at the MAP point."""
-    astrom = _make_astrom(5)
-    init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-    result = map_laplace_fit(
-        Msun2kg,
-        DIST_PC,
-        relative_astrom_data=astrom,
-        log_P_range=LOG_P_RANGE,
-        init_vals=init_vals,
-        n_steps=100,
-    )
+# Medium: this consumer can pay for the shared fit and blind initializer.
+@pytest.mark.medium
+def test_log_prob_finite(fitted):
+    """Fails if the MAP density differs from the Gaussian normalizer."""
+    result, _ = fitted
     lp = result.log_prob(result.mean)
     assert jnp.isfinite(lp), f"log_prob at MAP = {lp}"
     # log_prob at the mean is the maximum (zero Mahalanobis distance),

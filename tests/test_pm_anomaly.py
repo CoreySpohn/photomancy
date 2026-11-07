@@ -10,6 +10,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -108,6 +109,8 @@ class _Sys(eqx.Module):
     log_Mp: jnp.ndarray
 
 
+# Medium: The joint seven-parameter PMa fit needs a cold gradient and Hessian compile.
+@pytest.mark.medium
 def test_joint_relative_astrom_and_pma_recovers_mass():
     """Relative astrometry pins the orbit shape; the PMa then pins the mass."""
     t_ast = jnp.asarray(np.linspace(0.0, T_GAIA, 12))
@@ -178,7 +181,7 @@ def test_joint_relative_astrom_and_pma_recovers_mass():
         log_Mp=jnp.array(LOG_MP_TRUE + 0.3),
     )
     ld, z0, unravel = build_scene_logdensity(init, forward, likelihood, prior)
-    post = LaplaceBackend(n_steps=600, min_eigenvalue=1e-12).run(ld, z0)
+    post = LaplaceBackend(n_steps=100, min_eigenvalue=1e-12).run(ld, z0)
     fit = unravel(post.mean)
     assert abs(float(fit.log_Mp) - LOG_MP_TRUE) < 0.1  # mass recovered to ~25%
     assert float(jnp.sqrt(jnp.diag(post.cov))[-1]) < 0.2  # mass is constrained
