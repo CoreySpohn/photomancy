@@ -8,14 +8,17 @@ import numpy as np
 import optax
 import pytest
 
+from photomancy.backends.base import AbstractBackend
 from photomancy.backends.staged import (
     UNLABELED,
     EarlyStopping,
     FitStage,
+    MAPBackend,
     group_labels,
     map_fit,
     rescaled_transform,
 )
+from photomancy.posterior import PointPosterior
 
 
 class _Tree(eqx.Module):
@@ -514,3 +517,32 @@ def test_one_compile_per_stage_configuration_and_fresh_transforms():
     )
     count = lambda r: int(r.opt_states["x"][0].count)  # noqa: E731
     assert count(cont) == 4 and count(restarted) == 1
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_map_backend_returns_a_point_posterior_through_the_backend_protocol():
+    """``MAPBackend.run`` equals ``map_fit`` and returns a density-free point estimate.
+
+    Truth source: ``sgd(1.0)`` on ``0.5 (x - t)^2`` lands on ``t`` in one step, where
+    the log-density is exactly 0.
+    Tolerance basis: exact-algebra (bitwise).
+    Fails if: ``run`` fits a different problem than ``fit``, the log density is
+    evaluated before instead of after the fit, or the point posterior claims an
+    evidence or a sample it cannot have.
+    """
+    init, ld = _q_init(), _PreStepAux(jnp.asarray([1.0, 2.0]))
+    backend = MAPBackend(
+        labels=group_labels(init, _Q_GROUPS),
+        transforms={"x": optax.sgd(1.0)},
+        stages=(FitStage(2, ("x",)),),
+    )
+    assert isinstance(backend, AbstractBackend)
+    post = backend.run(ld, init)
+    assert isinstance(post, PointPosterior)
+    np.testing.assert_array_equal(post.params.x, [1.0, 2.0])
+    assert post.log_density == 0.0
+    assert np.isnan(post.evidence)
+    with pytest.raises(NotImplementedError):
+        post.sample(jax.random.PRNGKey(0), 3)
+    with pytest.raises(NotImplementedError):
+        post.log_prob(jnp.zeros(2))

@@ -92,6 +92,39 @@ class GaussianPosterior(AbstractPosterior):
         return JointPrior(mean=self.mean, cholesky=jnp.linalg.cholesky(self.cov))
 
 
+class PointPosterior(AbstractPosterior):
+    """A point estimate: the parameter PyTree a MAP fit ended at.
+
+    Produced by :class:`~photomancy.backends.staged.MAPBackend`. It carries no
+    uncertainty, so it has no density and no evidence: ``evidence`` is NaN, and
+    ``sample`` and ``log_prob`` raise. The parameters keep the structure of the
+    fitted PyTree (they are not flattened).
+
+    Args:
+        params: The fitted parameter PyTree.
+        log_density: The log-density at ``params``, a scalar.
+    """
+
+    params: object
+    log_density: jnp.ndarray
+
+    @property
+    def evidence(self):
+        """NaN: a point estimate has no marginal likelihood."""
+        return jnp.asarray(jnp.nan)
+
+    def sample(self, key, n):
+        """Unsupported: a point estimate has no distribution to draw from."""
+        raise NotImplementedError(
+            "PointPosterior is a point estimate; use a Laplace or sampling backend "
+            "for uncertainty."
+        )
+
+    def log_prob(self, z):
+        """Unsupported: a point estimate has no density."""
+        raise NotImplementedError("PointPosterior has no density.")
+
+
 class MixturePosterior(AbstractPosterior):
     """An evidence-weighted Gaussian mixture posterior (the Laplace mixture).
 

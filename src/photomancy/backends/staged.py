@@ -8,7 +8,8 @@ optimizer state. This module holds the pieces a staged fit is described with:
 - :func:`group_labels` names the groups of a parameter PyTree from explicit selectors,
 - :func:`rescaled_transform` runs a transform on ``params / scale`` so a leaf keeps
   its physical units while the steps match a fit in other units,
-- :class:`FitStage` describes one stage and :func:`map_fit` runs the stages.
+- :class:`FitStage` describes one stage and :func:`map_fit` runs the stages,
+- :class:`MAPBackend` packages a staged fit behind the backend protocol.
 
 Every group has its own optimizer state (the transform applied to that group's
 leaves only), so a group's state is exactly what ``optax.multi_transform`` would
@@ -24,10 +25,14 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from photomancy.backends.base import AbstractBackend
+from photomancy.posterior import PointPosterior
+
 __all__ = [
     "UNLABELED",
     "EarlyStopping",
     "FitStage",
+    "MAPBackend",
     "MAPResult",
     "StageTrace",
     "StepRecord",
@@ -526,3 +531,62 @@ def map_fit(
         for name, start, n, stopped in records
     )
     return MAPResult(params=rebuild(dyn), stages=traces, opt_states=states)
+
+
+@eqx.filter_jit
+def _log_density_at(logdensity, params):
+    return _value_and_aux(logdensity, params)[0]
+
+
+class MAPBackend(AbstractBackend):
+    """Staged MAP fit over a PyTree, returning a ``PointPosterior``.
+
+    The backend holds the fit's description; ``run(logdensity, init)`` is
+    :func:`map_fit` followed by one evaluation of ``logdensity`` at the result. Unlike
+    the other backends, ``init`` is the parameter PyTree, not a flat array, and there
+    is no randomness (``key`` is unused). Use :meth:`fit` for the per-stage traces.
+
+    Args:
+        labels: Group label PyTree from :func:`group_labels`.
+        transforms: ``{group: optax.GradientTransformation}``.
+        stages: Tuple of :class:`FitStage`.
+        freeze: ``"hold"``, ``"zero_gradient"`` or ``"drop_update"``; see
+            :func:`map_fit`.
+        metrics: ``{name: fn(params, aux) -> scalar}`` recorded every step.
+        callback: ``callback(StepRecord)`` called every ``callback_every`` steps.
+        callback_every: Steps between callbacks.
+    """
+
+    labels: Any
+    transforms: dict
+    stages: tuple[FitStage, ...]
+    freeze: str = eqx.field(static=True, default="hold")
+    metrics: dict | None = None
+    callback: Callable | None = None
+    callback_every: int = eqx.field(static=True, default=1)
+
+    def fit(self, logdensity, init):
+        """Run the staged fit and return the :class:`MAPResult` with its traces."""
+        return map_fit(
+            logdensity,
+            init,
+            self.labels,
+            self.transforms,
+            self.stages,
+            freeze=self.freeze,
+            metrics=self.metrics,
+            callback=self.callback,
+            callback_every=self.callback_every,
+        )
+
+    def run(self, logdensity, init, key=None):
+        """Fit from the parameter PyTree ``init``; return a ``PointPosterior``.
+
+        ``PointPosterior.log_density`` is the run-level ``logdensity`` at the result,
+        even when the last stage fitted a restricted view of it.
+        """
+        result = self.fit(logdensity, init)
+        return PointPosterior(
+            params=result.params,
+            log_density=_log_density_at(logdensity, result.params),
+        )
