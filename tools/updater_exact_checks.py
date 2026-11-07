@@ -1372,6 +1372,7 @@ def report(protocol, out_dir, cases=CASES, levels=(0, 1, 2)):
 def main(argv=None):
     """Command-line entry point."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    panel._cache_arguments(parser)
     parser.add_argument("--protocol", type=Path, default=panel.PROTOCOL)
     parser.add_argument("--out", type=Path, default=None, help="run directory")
     parser.add_argument("--levels", default="0,1,2")
@@ -1438,6 +1439,7 @@ def main(argv=None):
                 panel._ManifestFirst(executor, args.out, shard, entry),
                 log=lambda m: print(m, flush=True),
                 compatible=compatible,
+                clear_caches_above_mb=args.clear_caches_above_mb,
             )
         except panel.IncompatibleRunError as err:
             raise SystemExit(f"refusing to resume: {err}") from None

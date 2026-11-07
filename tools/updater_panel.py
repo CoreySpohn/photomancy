@@ -1603,7 +1603,33 @@ class IncompatibleRunError(RuntimeError):
     """A run directory holds records that the current run cannot reuse."""
 
 
-def run_units(units, out_dir, shard, execute, log=print, compatible=None):
+def _resident_memory_mb():
+    """Current process RSS in MiB on Linux or macOS, rather than peak RSS."""
+    import os
+
+    if sys.platform == "darwin":
+        import ctypes
+
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        usage = (ctypes.c_uint64 * 32)()
+        # RUSAGE_INFO_V2: UUID (16 bytes), then six uint64s before resident size.
+        if libproc.proc_pid_rusage(os.getpid(), 2, ctypes.byref(usage)):
+            raise OSError(ctypes.get_errno(), "proc_pid_rusage failed")
+        return usage[8] / 2**20
+    resident_pages = int(Path("/proc/self/statm").read_text().split()[1])
+    return resident_pages * os.sysconf("SC_PAGE_SIZE") / 2**20
+
+
+def run_units(
+    units,
+    out_dir,
+    shard,
+    execute,
+    log=print,
+    compatible=None,
+    *,
+    clear_caches_above_mb=4096,
+):
     """Run the units of one shard that no unit file in ``out_dir`` holds yet.
 
     Each finished unit is appended to ``units-{i}of{n}.jsonl`` at once, so a
@@ -1613,9 +1639,19 @@ def run_units(units, out_dir, shard, execute, log=print, compatible=None):
     anything runs (``IncompatibleRunError``), so an earlier test override, a
     budget change or a code change cannot be skipped over silently.
 
+    After writing and logging a record, release it and clear Equinox/JAX
+    caches and collect garbage when current RSS exceeds
+    ``clear_caches_above_mb`` (MiB). Zero clears after every completed unit;
+    None disables cleanup. Checking between units preserves shared compiled
+    programs below the threshold; it is not a limit on a unit's peak memory.
+
     Returns:
         Dict with the counts ``planned``, ``skipped`` and ``ran``.
     """
+    if clear_caches_above_mb is not None and (
+        not math.isfinite(clear_caches_above_mb) or clear_caches_above_mb < 0
+    ):
+        raise ValueError("clear_caches_above_mb must be finite and nonnegative or None")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     mine = shard_units(units, shard)
@@ -1637,6 +1673,18 @@ def run_units(units, out_dir, shard, execute, log=print, compatible=None):
         record["id"] = unit["id"]
         append_record(path, record)
         log(f"[{n}/{len(todo)}] {unit['id']} {record.get('seconds', 0.0):.1f} s")
+        del record
+        if clear_caches_above_mb is not None and (
+            clear_caches_above_mb == 0 or _resident_memory_mb() > clear_caches_above_mb
+        ):
+            import gc
+
+            import equinox as eqx
+            import jax
+
+            eqx.clear_caches()
+            jax.clear_caches()
+            gc.collect()
     return {"planned": len(mine), "skipped": len(mine) - len(todo), "ran": len(todo)}
 
 
@@ -2968,9 +3016,28 @@ def progress(protocol, out_dir, stage="development"):
     return lines
 
 
+def _cache_arguments(parser):
+    """Shared runner-only cache policy options for the panel and exact checks."""
+    parser.add_argument(
+        "--clear-caches-above-mb",
+        type=float,
+        default=4096,
+        help="clear compilation caches after a unit if RSS exceeds this many "
+        "MiB (default 4096; 0 clears every unit)",
+    )
+    parser.add_argument(
+        "--no-clear-caches",
+        dest="clear_caches_above_mb",
+        action="store_const",
+        const=None,
+        help="disable completed-unit cache cleanup",
+    )
+
+
 def main(argv=None):
     """Command-line entry point."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    _cache_arguments(parser)
     parser.add_argument("--dry-run", action="store_true", help="print the allocation")
     parser.add_argument("--sizing", action="store_true", help="print criterion power")
     parser.add_argument("--protocol", type=Path, default=PROTOCOL)
@@ -3222,6 +3289,7 @@ def run_stage(protocol, args):
             _ManifestFirst(executor, args.out, shard, entry),
             log=lambda m: print(m, flush=True),
             compatible=compatible,
+            clear_caches_above_mb=getattr(args, "clear_caches_above_mb", 4096),
         )
     except IncompatibleRunError as err:
         raise SystemExit(f"refusing to resume: {err}") from None

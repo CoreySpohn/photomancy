@@ -879,3 +879,159 @@ def test_check3_proposal_densities_match_their_draws():
             assert abs(float(log_q) - exact) < 1e-10
             if kappa != 1.0:
                 assert abs(float(log_q) + 4.0 * math.log(kappa) - exact) > 0.5
+
+
+@pytest.mark.parametrize("threshold,cleared", [(None, []), (0, [0, 1, 2]), (128, [1])])
+def test_run_units_releases_records_and_clears_after_logging(
+    tmp_path, monkeypatch, threshold, cleared
+):
+    """Fails if cleanup precedes persistence/release, ignores RSS, or runs on resume.
+
+    No existing test covers the completed-unit cache lifetime. Replace RSS
+    and global cleanup operations here; the isolated identity probe below
+    exercises real cache clearing without collecting other tests' programs.
+    """
+    import gc
+    import weakref
+
+    import equinox as eqx
+    import jax
+
+    tool = _load_tool()
+    units = [{"id": str(i)} for i in range(3)]
+    events, refs = [], []
+    rss = iter([128, 129, 120])
+    monkeypatch.setattr(tool, "_resident_memory_mb", lambda: next(rss), raising=False)
+
+    class Record(dict):
+        pass
+
+    def execute(unit):
+        assert all(ref() is None for ref in refs)
+        record = Record(seconds=0.0, value=int(unit["id"]))
+        refs.append(weakref.ref(record))
+        return record
+
+    def log(message):
+        assert len(tool.read_records(tmp_path)) == len(refs)
+        events.append((len(refs) - 1, "log"))
+
+    for owner, name, label in (
+        (eqx, "clear_caches", "eqx"),
+        (jax, "clear_caches", "jax"),
+        (gc, "collect", "gc"),
+    ):
+
+        def observe(*args, _label=label, **kwargs):
+            assert all(ref() is None for ref in refs)
+            events.append((len(refs) - 1, _label))
+
+        monkeypatch.setattr(owner, name, observe)
+    counts = tool.run_units(
+        units, tmp_path, (0, 1), execute, log=log, clear_caches_above_mb=threshold
+    )
+    assert counts == {"planned": 3, "skipped": 0, "ran": 3}
+    assert events == [
+        (i, event)
+        for i in range(3)
+        for event in (["log", "eqx", "jax", "gc"] if i in cleared else ["log"])
+    ]
+    assert all(ref() is None for ref in refs)
+    before = list(events)
+    assert tool.run_units(
+        units, tmp_path, (0, 1), execute, log=log, clear_caches_above_mb=threshold
+    ) == {"planned": 3, "skipped": 3, "ran": 0}
+    assert events == before
+
+
+def test_runner_cleanup_is_outside_panel_and_exact_fingerprints():
+    """Fails if runner orchestration enters either record fingerprint."""
+    tool = _load_tool()
+    spec = importlib.util.spec_from_file_location(
+        "updater_exact_checks", TOOL.parent / "updater_exact_checks.py"
+    )
+    exact = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(exact)
+    for definitions in (tool._record_definitions(), exact._exact_definitions()):
+        assert all(getattr(obj, "__name__", None) != "run_units" for obj in definitions)
+    protocol = tool.load_protocol()
+    before = tool.run_hash(protocol)
+    exact_before = exact.exact_run_hash(protocol)
+    tool.run_units = lambda *a, **kw: None
+    exact.panel.run_units = tool.run_units
+    assert tool.run_hash(protocol) == before
+    assert exact.exact_run_hash(protocol) == exact_before
+
+
+def test_cleanup_preserves_written_unit_bytes(tmp_path):
+    """Fails if cache release changes deterministic unit output or JSON framing.
+
+    Use tiny numerical units with the same fresh-JIT-closure lifetime as a
+    physical reference. Exclude only top-level seconds: elapsed time varies
+    with compilation. Physical reference/certification identity is also
+    checked by the synthetic measurement harness at reduced proposal budgets.
+    """
+    import subprocess
+    import sys
+
+    # A fresh process prevents this test's real global cache clearing from
+    # paying for compiled programs retained by unrelated earlier tests.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; "
+            "sys.path.insert(0, sys.argv[1]); "
+            "from test_updater_panel import _cache_identity_probe; "
+            "_cache_identity_probe(Path(sys.argv[2]))",
+            str(Path(__file__).parent),
+            str(tmp_path),
+        ],
+        check=True,
+    )
+
+
+def _cache_identity_probe(tmp_path):
+    """Real numerical/cache operations in an otherwise empty process."""
+    import time
+
+    import equinox as eqx
+    import jax.numpy as jnp
+
+    tool = _load_tool()
+    units = [{"id": str(i)} for i in range(3)]
+
+    def execute(unit):
+        start = time.perf_counter()
+        offset = int(unit["id"])
+
+        @eqx.filter_jit
+        def score(x):
+            return (x + offset) ** 2
+
+        return {
+            "seconds": time.perf_counter() - start,
+            "values": score(jnp.arange(8)).tolist(),
+        }
+
+    written = []
+    for policy, threshold in (("disabled", None), ("every", 0)):
+        out = tmp_path / policy
+        tool.run_units(
+            units,
+            out,
+            (0, 1),
+            execute,
+            log=lambda m: None,
+            clear_caches_above_mb=threshold,
+        )
+        lines = []
+        for line in (out / "units-0of1.jsonl").read_bytes().splitlines(keepends=True):
+            # Remove just the timing member from the written bytes. Preserve
+            # every other byte, including the newline and JSON separators.
+            import re
+
+            lines.append(re.sub(rb'"seconds": [^,}]+, ', b"", line))
+        written.append(b"".join(lines))
+    assert written[0] == written[1]
+    assert b'"values": [0, 1, 4, 9, 16, 25, 36, 49]' in written[0]

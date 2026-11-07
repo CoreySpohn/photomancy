@@ -41,6 +41,46 @@ There is no signature or independent attestation of the freeze computation.
 `RUN_DIR` holds the `units-{i}of{n}.jsonl` and `manifest-{i}of{n}.json` files
 of every shard.
 
+## Runner memory and compilation caches
+
+Both `tools/updater_panel.py --run ...` and `tools/updater_exact_checks.py
+--out ...` accept `--clear-caches-above-mb MB` (default **4096 MiB**).
+After each completed unit is appended and logged, the runner releases its
+record and checks current process RSS. Above the threshold it calls
+`eqx.clear_caches()`, `jax.clear_caches()`, then `gc.collect()`, in that order.
+Use `--clear-caches-above-mb 0` to clear after every completed unit, or
+`--no-clear-caches` to disable cleanup. Resumed units that are skipped do not
+trigger cleanup. RSS is read natively on macOS and from `/proc` on Linux.
+
+Physical reference and certification units create a fresh JIT scoring
+closure for each fit. Retained compilation programs can otherwise grow with
+the number of completed units. Exact checks have the same closure pattern
+in their physical reference and TI anchor samplers; their shared `run_units`
+path receives the same cleanup. The policy is runner orchestration outside
+the panel and exact-check fingerprints: budgets, keys, numerical algorithms,
+numerical record contents and run hashes are unchanged.
+
+A short synthetic macOS measurement used 12 physical reference/certification
+units per policy, three worlds, 256 proposals (512 for doubled roles) and a
+256-proposal chunk, in one process. After excluding the first two units of
+each policy, disabled cleanup grew by **26.49 MiB/unit** at **1.63 s/unit**.
+Clearing every unit gave **-1.70 MiB/unit** at **5.21 s/unit**; a low RSS
+threshold chosen to force cleanup gave **0.40 MiB/unit** at **4.59 s/unit**,
+settling near 473 MiB. The threshold was the phase's initial RSS plus 16 MiB;
+it triggered for all 12 units. Direct cleanup averaged 0.075 and 0.089 seconds
+respectively; most of the time penalty was recompilation. These are short
+measurements of cache growth, not production-budget peak-memory estimates.
+
+The 4096 MiB default preserves compilation reuse below the threshold while
+bounding retained caches in long-running shards. It checks between units,
+so an individual unit can exceed the threshold. Native allocators can retain
+freed memory; if RSS stays above the threshold, subsequent units clear too.
+No worker recycling was needed in the measurement. Per-record `seconds`
+excludes post-record cleanup but can include recompilation after earlier
+cleanup. The existing `includes_compile` field still marks the executor's
+first encounter with a configuration; it can underreport later recompiles.
+Use a separately measured warm run for latency reporting.
+
 ## What the audit refuses
 
 The audit refuses to grade, and writes no table, when any of these holds:
