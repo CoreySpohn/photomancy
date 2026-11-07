@@ -152,6 +152,7 @@ def test_ti_quadrature_assembly_matches_a_small_collapsed_sampler():
         )
 
 
+@pytest.mark.medium
 def test_physical_quadrature_assembly_matches_a_small_reference_sampler():
     """Level-0 physical quadrature agrees coarsely with a 2^14-proposal reference.
 
