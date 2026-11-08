@@ -94,20 +94,20 @@ class ExposureLogDensity(AbstractLogDensity):
         if len(self.terms) == 0:
             raise ValueError("an ExposureLogDensity needs at least one term")
 
-    def value_and_aux(self, model):
+    def value_and_aux(self, params):
         """Return ``(log_density, predictions)`` with one prediction per term."""
-        results = [term(model) for term in self.terms]
+        results = [term(params) for term in self.terms]
         total = results[0][0]
         for value, _ in results[1:]:
             total = total + value
         images = [image for _, image in results]
         if self.prior is not None:
-            total = total + self.prior(model)
+            total = total + self.prior(params)
         return total, tuple(images)
 
-    def __call__(self, model):
-        """Return the scalar log-density at ``model``."""
-        return self.value_and_aux(model)[0]
+    def __call__(self, params):
+        """Return the scalar log-density at ``params`` (an ``ExposureModel``)."""
+        return self.value_and_aux(params)[0]
 
     def restrict(self, indices):
         """A view over the terms at ``indices``, with the same prior.

@@ -42,7 +42,7 @@ The log-density is any callable from the PyTree to a scalar. A stage names the g
 frees, and every group has an `optax` transform. A group that a stage does not free keeps
 its values and its optimizer state exactly (`freeze="hold"`).
 
-```python
+```python continuation
 def logdensity(m):
     return (
         -0.5 * jnp.sum((m.shape + m.offset * m.fixed - jnp.array([4.0, 6.0])) ** 2)
