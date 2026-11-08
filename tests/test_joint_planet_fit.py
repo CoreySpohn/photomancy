@@ -241,9 +241,11 @@ def test_planet_freed_after_the_map_recovers_flux_and_offset():
     H0 control: residual rms 0.59 sigma and exit-seam error 5.0e-2. The offset error
     is platform dependent because the fit stops before round-off (7e-4 pixel on macOS,
     2.9e-3 on the Linux runner); its tolerance, 1e-2 pixel, is still 36 times below
-    the 0.36 pixel error of the map-peak start. The other tolerances are about 3 times
-    the H1 values (flux 2e-3, residual rms 0.03, seam 3e-2) and the control must stay
-    above 0.3 and 3e-2.
+    the 0.36 pixel error of the map-peak start. The flux error also varies between
+    runs (5.6e-4 on macOS, 2.1e-3 on the Linux runner); its tolerance, 1e-2, sits
+    below the 2.5e-2 at which the fit stalls when the stage that frees the planet
+    keeps the star flux fixed. The other tolerances are about 3 times the H1 values
+    (residual rms 0.03, seam 3e-2) and the control must stay above 0.3 and 3e-2.
     Fails if: the map's amplitude or position is not a usable start, a stage that frees
     the planet leaves the star position or flux fixed so the planet cannot explain its
     own light, or the frozen-companion control absorbs the planet.
@@ -257,6 +259,6 @@ def test_planet_freed_after_the_map_recovers_flux_and_offset():
     assert _residual_rms(out, h0) > 0.3
     assert _seam_error(out, h0) > 3e-2
     assert float(jnp.linalg.norm(h1.scene.offset - out["true_offset"])) < 1e-2
-    assert abs(float(h1.scene.flux) / out["true_flux"] - 1.0) < 2e-3
+    assert abs(float(h1.scene.flux) / out["true_flux"] - 1.0) < 1e-2
     assert _residual_rms(out, h1) < 3e-2
     assert _seam_error(out, h1) < 3e-2
