@@ -133,7 +133,7 @@ assert logdensity(data) > logdensity(jnp.zeros(4))
 
 A backend is an Equinox configuration object with one pure method, `run(logdensity,
 init, key) -> Posterior`. The backend sees only the flat logdensity, never the scene or
-the forward model, which keeps a new sampler useful to every domain at once. Eight
+the forward model, which keeps a new sampler useful to every domain at once. Nine
 backends exist today:
 
 - {py:obj}`~photomancy.backends.laplace.LaplaceBackend`: a MAP optimization followed by the eigenvalue-clamped inverse
@@ -158,11 +158,17 @@ backends exist today:
 - {py:obj}`~photomancy.backends.nested.JaxnsBackend`: nested sampling, which returns a posterior and the evidence for model
   comparison and detection significance, the Bayes factor that answers a question such as
   whether a given molecule is present.
+- {py:obj}`~photomancy.backends.staged.MAPBackend`: a staged gradient fit over a parameter
+  PyTree, the exception to the flat-logdensity rule. Each stage frees named groups of
+  parameters, optimizer states carry across stages, and the result is a point estimate with
+  no covariance or evidence. {py:obj}`~photomancy.exposure.ExposureLogDensity` is the
+  logdensity it was built for, a sum of exposure terms over one shared instrument.
 
-Every backend returns one of three `Posterior` types,
+Every backend returns one of four `Posterior` types,
 {py:obj}`~photomancy.posterior.GaussianPosterior`,
-{py:obj}`~photomancy.posterior.MixturePosterior`, or
-{py:obj}`~photomancy.posterior.SamplePosterior`, behind a uniform interface: `sample` draws
+{py:obj}`~photomancy.posterior.MixturePosterior`,
+{py:obj}`~photomancy.posterior.SamplePosterior`, or
+{py:obj}`~photomancy.posterior.PointPosterior` (which has no density or evidence), behind a uniform interface: `sample` draws
 positions, `log_prob` scores a position where a closed form exists, and `evidence`
 reports the log marginal likelihood. Consumers such as the value-of-information layer read
 this interface and stay agnostic to which backend produced the result. A posterior also

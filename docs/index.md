@@ -106,6 +106,7 @@ explanation/glossary
 :hidden:
 
 how-to/migrate-sky-convention
+how-to/staged-map-fit
 ```
 
 ```{toctree}

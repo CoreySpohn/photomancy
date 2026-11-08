@@ -89,6 +89,11 @@ to every domain at once.
 | `MCLMCBackend` | microcanonical Langevin Monte Carlo | equally weighted samples |
 | `SMCBackend` | adaptive-tempered sequential Monte Carlo | samples and the evidence |
 | `JaxnsBackend` | nested sampling | samples and the evidence for model comparison |
+| `MAPBackend` | staged gradient fit over a parameter PyTree, with named groups freed stage by stage | a point estimate (`PointPosterior`) |
+
+`MAPBackend` is the exception to the flat-logdensity rule: it takes the parameter PyTree itself
+and runs the stages of a fit such as a multi-exposure coronagraph model. See the
+[staged fit guide](https://github.com/CoreySpohn/photomancy/blob/main/docs/how-to/staged-map-fit.md).
 
 ## Documentation
 
