@@ -277,6 +277,11 @@ def _value_and_aux(logdensity, params):
     return logdensity(params), None
 
 
+def _strong_copy(x):
+    """A fresh buffer with the dtype of ``x`` and no weak type (so no retrace later)."""
+    return jax.lax.convert_element_type(jnp.array(x, copy=True), jnp.asarray(x).dtype)
+
+
 def _host_copy(tree):
     """Copy every array leaf to host memory (a real copy, safe under donation)."""
     return jax.tree.map(lambda x: np.array(x) if eqx.is_array(x) else x, tree)
@@ -381,7 +386,7 @@ def map_fit(
         None if arr else leaf for arr, leaf in zip(is_arr, leaves, strict=True)
     ]
     dyn = tuple(
-        jnp.array(leaf, copy=True) if arr else None
+        _strong_copy(leaf) if arr else None
         for arr, leaf in zip(is_arr, leaves, strict=True)
     )
     total = sum(stage.n_steps for stage in stages)

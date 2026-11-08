@@ -13,8 +13,8 @@ repos:
       - id: trailing-whitespace
       - id: name-tests-test
         args: [--pytest-test-first]
-        # Reference implementations are helpers, not collected tests.
-        exclude: ^tests/(nmc_reference|sky_reference)\.py$
+        # Reference implementations and toy renders are helpers, not collected tests.
+        exclude: ^tests/(nmc_reference|sky_reference|toy_coronagraph)\.py$
       - id: end-of-file-fixer
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.3
