@@ -141,3 +141,16 @@ def test_log_prob_of_a_colored_field_is_the_white_density():
     got = float(field.log_prob(field.color(w)))
     want = float(field.log_prob_white(w))
     assert abs(got / want - 1.0) < 1e-4
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_whiten_inverts_color_on_a_full_support():
+    """Whiten and color invert each other on a full support, to f32 round-off."""
+    field = _field()
+    w = jax.random.normal(jax.random.PRNGKey(6), (N, N))
+    np.testing.assert_allclose(field.whiten(field.color(w)), w, rtol=0, atol=1e-4)
+    x = field.sample(jax.random.PRNGKey(7))
+    scale = float(jnp.max(jnp.abs(x)))
+    np.testing.assert_allclose(
+        field.color(field.whiten(x)), x, rtol=0, atol=1e-5 * scale
+    )

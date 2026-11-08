@@ -88,6 +88,16 @@ class StationaryGaussianField(eqx.Module):
         x = jnp.real(jnp.fft.ifft2(self.amplitude * jnp.fft.fft2(white)))
         return jnp.where(self.support, x, 0.0).astype(white.dtype)
 
+    def whiten(self, x: Array) -> Array:
+        """White coordinates of a field: the inverse of ``color`` on a full support.
+
+        ``Re(IFFT2(FFT2(x) / A))``; needs ``A > 0`` everywhere. On a partial support it
+        returns the white field of the zero-filled map, which ``color`` maps back to
+        ``x`` only up to the masking.
+        """
+        w = jnp.real(jnp.fft.ifft2(jnp.fft.fft2(x) / self.amplitude))
+        return w.astype(x.dtype)
+
     def log_prob(self, x: Array) -> Array:
         """Gaussian log density of a field ``x``, up to a constant.
 
