@@ -88,6 +88,18 @@ class StationaryGaussianField(eqx.Module):
         x = jnp.real(jnp.fft.ifft2(self.amplitude * jnp.fft.fft2(white)))
         return jnp.where(self.support, x, 0.0).astype(white.dtype)
 
+    def log_prob(self, x: Array) -> Array:
+        """Gaussian log density of a field ``x``, up to a constant.
+
+        ``-0.5 * sum(|FFT2(x)|^2 / A^2) / n^2``, which equals ``log_prob_white(w)`` for
+        ``x = color(w)`` on a full support. Needs ``A > 0`` everywhere; on a partial
+        support it is the density of the zero-filled map, so a prior on a masked leaf
+        (a pupil-plane map) can be used directly without whitening the leaf.
+        """
+        power = jnp.abs(jnp.fft.fft2(jnp.where(self.support, x, 0.0))) ** 2
+        n_cells = self.amplitude.shape[0] * self.amplitude.shape[1]
+        return -0.5 * jnp.sum(power / self.amplitude**2) / n_cells
+
     def log_prob_white(self, white: Array) -> Array:
         """Standard-normal log density of the white coordinates, up to a constant."""
         return -0.5 * jnp.sum(white**2)

@@ -131,3 +131,13 @@ def test_invalid_inputs_raise():
         StationaryGaussianField.from_radial_psd(
             lambda k: -k, np.ones((4, 4), bool), 4.0
         )
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_log_prob_of_a_colored_field_is_the_white_density():
+    """On a full support log_prob(color(w)) = -0.5 |w|^2 (Parseval) to f32 round-off."""
+    field = _field()
+    w = jax.random.normal(jax.random.PRNGKey(5), (N, N))
+    got = float(field.log_prob(field.color(w)))
+    want = float(field.log_prob_white(w))
+    assert abs(got / want - 1.0) < 1e-4
