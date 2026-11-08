@@ -107,6 +107,7 @@ explanation/glossary
 
 how-to/migrate-sky-convention
 how-to/staged-map-fit
+how-to/likelihood-ratio-map
 ```
 
 ```{toctree}
