@@ -344,15 +344,28 @@ def map_fit(
         metrics: ``{name: fn(params, aux) -> scalar}`` evaluated inside every step
             at the pre-step parameters and recorded in the trace.
         callback: ``callback(record)`` called with a :class:`StepRecord` of host
-            copies every ``callback_every`` global steps; its return value is
+            copies on the global steps ``callback_every`` selects; its return value is
             ignored. It costs a host copy of the parameters on those steps.
-        callback_every: Steps between callbacks.
+        callback_every: Steps between callbacks (an int), or a predicate
+            ``step -> bool`` on the global step index (for example a set's
+            ``__contains__``), so a fit can report at stage boundaries without a
+            host copy of the parameters every step.
 
     Returns:
         A :class:`MAPResult`.
     """
     if freeze not in _POLICIES:
         raise ValueError(f"freeze must be one of {_POLICIES}, got {freeze!r}")
+    if callable(callback_every):
+        due = callback_every
+    elif int(callback_every) >= 1:
+        every = int(callback_every)
+
+        def due(step):
+            return step % every == 0
+
+    else:
+        raise ValueError(f"callback_every must be >= 1, got {callback_every!r}")
     metrics = dict(metrics or {})
     if "loss" in metrics:
         raise ValueError("'loss' is reserved for the objective trace")
@@ -486,11 +499,7 @@ def map_fit(
         n_run = 0
         for j in range(stage.n_steps):
             gi = offset + j
-            pre = (
-                _host_copy(rebuild(dyn))
-                if want_aux and gi % callback_every == 0
-                else None
-            )
+            pre = _host_copy(rebuild(dyn)) if want_aux and due(gi) else None
             dyn, states, bufs, count, aux = step(static_args, dyn, states, bufs, count)
             n_run = j + 1
             if pre is not None:
@@ -559,7 +568,8 @@ class MAPBackend(AbstractBackend):
             :func:`map_fit`.
         metrics: ``{name: fn(params, aux) -> scalar}`` recorded every step.
         callback: ``callback(StepRecord)`` called every ``callback_every`` steps.
-        callback_every: Steps between callbacks.
+        callback_every: Steps between callbacks, or a predicate on the global
+            step; see :func:`map_fit`.
     """
 
     labels: Any
@@ -568,7 +578,7 @@ class MAPBackend(AbstractBackend):
     freeze: str = eqx.field(static=True, default="hold")
     metrics: dict | None = None
     callback: Callable | None = None
-    callback_every: int = eqx.field(static=True, default=1)
+    callback_every: int | Callable = eqx.field(static=True, default=1)
 
     def fit(self, logdensity, init):
         """Run the staged fit and return the :class:`MAPResult` with its traces."""

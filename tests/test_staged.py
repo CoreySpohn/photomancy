@@ -444,6 +444,17 @@ def test_callbacks_metrics_scale_and_stage_logdensity():
     np.testing.assert_array_equal(seen[1].aux, [2.0, 2.0])
     assert seen[0].loss == first.loss[0] and seen[1].stage.name == "second"
     np.testing.assert_array_equal(init.x, [8.0, -4.0])
+    predicate = []
+    map_fit(
+        _PreStepAux(jnp.asarray([2.0, 2.0])),
+        init,
+        labels,
+        {"x": optax.sgd(2.0)},
+        stages,
+        callback=predicate.append,
+        callback_every={1, 3}.__contains__,
+    )
+    assert [r.step for r in predicate] == [1, 3]
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
