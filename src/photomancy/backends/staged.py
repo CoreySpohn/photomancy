@@ -116,9 +116,12 @@ def rescaled_transform(transform, scale):
             group's parameters.
 
     Returns:
-        An ``optax.GradientTransformation``. It passes ``params / scale`` to
+        An ``optax.GradientTransformationExtraArgs``. It passes ``params / scale`` to
         ``transform.update``, so a transform that reads ``params`` (weight decay)
-        sees the scaled variable.
+        sees the scaled variable. The extra arguments of a line-search solver are
+        mapped the same way: ``grad`` is multiplied by ``scale`` and ``value_fn``
+        takes the scaled variable (``value`` is unchanged), so a solver stage with
+        ``rescaled_transform(optax.lbfgs(), scale)`` runs L-BFGS in ``q``.
     """
 
     def init(params):
@@ -128,11 +131,19 @@ def rescaled_transform(transform, scale):
         scaled_params = (
             None if params is None else _scaled(params, scale, lambda x, s: x / s)
         )
+        extra = dict(extra_args)
+        if extra.get("grad") is not None:
+            extra["grad"] = _scaled(extra["grad"], scale, lambda x, s: x * s)
+        if extra.get("value_fn") is not None:
+            value_fn = extra["value_fn"]
+            extra["value_fn"] = lambda q: value_fn(
+                _scaled(q, scale, lambda x, s: x * s)
+            )
         out, state = transform.update(
             _scaled(updates, scale, lambda x, s: x * s),
             state,
             scaled_params,
-            **extra_args,
+            **extra,
         )
         return _scaled(out, scale, lambda x, s: x * s), state
 

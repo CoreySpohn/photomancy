@@ -707,3 +707,48 @@ def test_solver_stage_rejects_a_closed_form_transforms_or_an_unknown_group():
             _toy_transforms(),
             [FitStage(1, ("z",), solver=optax.lbfgs())],
         )
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_rescaled_solver_is_lbfgs_on_the_scaled_variable():
+    """``rescaled_transform(lbfgs, s)`` on ``p`` is L-BFGS on ``q = p / s``.
+
+    Truth source: the same solver run directly on the scaled problem
+    ``g(q) = f(q * s)``, a quadratic whose scales differ by 1e8 in ``p`` and are
+    equal in ``q``.
+    Tolerance basis: floating-point (rtol 1e-9 on ``p / s`` after 8 steps; the two
+    runs do the same arithmetic up to the multiplications by ``s``).
+    Fails if: the solver's line search is handed the gradient or the objective in
+    the unscaled variable, which mixes units inside the zoom line search.
+    """
+    s = jnp.asarray([1e-7, 1.0, 10.0])
+    target = jnp.asarray([0.3, -1.0, 2.0])
+
+    def f(p):
+        return jnp.sum((p / s - target) ** 2 * jnp.asarray([1.0, 3.0, 9.0]))
+
+    def g(q):
+        return f(q * s)
+
+    def run(solver, objective, x):
+        # a fresh gradient each step, as map_fit computes it (a cached one from the
+        # solver state would be in the solver's scaled variable)
+        value_and_grad = jax.value_and_grad(objective)
+
+        @jax.jit
+        def step(x, state):
+            value, grad = value_and_grad(x)
+            update, state = solver.update(
+                grad, state, x, value=value, grad=grad, value_fn=objective
+            )
+            return optax.apply_updates(x, update), state
+
+        state = solver.init(x)
+        for _ in range(8):
+            x, state = step(x, state)
+        return np.asarray(x)
+
+    q0 = jnp.asarray([1.0, 1.0, 1.0])
+    direct = run(optax.lbfgs(), g, q0)
+    scaled = run(rescaled_transform(optax.lbfgs(), s), f, q0 * s)
+    np.testing.assert_allclose(scaled / np.asarray(s), direct, rtol=1e-9, atol=0)
