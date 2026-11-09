@@ -336,7 +336,9 @@ def map_fit(
     is bitwise identical.
 
     Compilation: one ``filter_jit`` step per distinct stage configuration (the set of
-    free groups, the transform table and the closed form), with the parameters,
+    free groups, the transform table and the closed form, or the solver object of a
+    solver stage, compared by identity: reuse one solver object across stages that
+    should share a program), with the parameters,
     optimizer states and trace buffers donated. Stage length and objective scale are
     runtime values, so stages that repeat a configuration do not recompile. A stage
     whose ``logdensity`` has a different PyTree structure compiles its own program.
