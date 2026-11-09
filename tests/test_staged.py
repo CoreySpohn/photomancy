@@ -557,3 +557,153 @@ def test_map_backend_returns_a_point_posterior_through_the_backend_protocol():
         post.sample(jax.random.PRNGKey(0), 3)
     with pytest.raises(NotImplementedError):
         post.log_prob(jnp.zeros(2))
+
+
+_ROT = np.linalg.qr(np.random.default_rng(7).standard_normal((5, 5)))[0]
+_CURV = _ROT @ np.diag([1.0, 10.0, 100.0, 1e3, 1e4]) @ _ROT.T
+_MODE = np.asarray([1.0, 2.0, 3.0, 0.5, -0.5])
+
+
+def _coupled_quadratic(p):
+    """Log density ``-0.5 d^T H d`` with H rotated (it couples a and b), cond 1e4."""
+    d = jnp.concatenate([p.a, p.b]) - _MODE
+    return -0.5 * d @ jnp.asarray(_CURV) @ d
+
+
+def _optax_lbfgs_loop(x, n_steps):
+    """The same fit written directly with optax: one vector, the solver's own loop."""
+
+    def f(v):
+        return -_coupled_quadratic(_Toy(v[:3], v[3:], jnp.ones(2)))
+
+    solver = optax.lbfgs()
+    value_and_grad = optax.value_and_grad_from_state(f)
+
+    @jax.jit
+    def step(x, state):
+        value, grad = value_and_grad(x, state=state)
+        update, state = solver.update(
+            grad, state, x, value=value, grad=grad, value_fn=f
+        )
+        return optax.apply_updates(x, update), state
+
+    state = solver.init(x)
+    for _ in range(n_steps):
+        x, state = step(x, state)
+    return np.asarray(x)
+
+
+@vv.case("scene-fits", "code-verification", basis="mutation")
+def test_solver_stage_reaches_the_mode_of_an_ill_conditioned_coupled_quadratic():
+    """An L-BFGS stage over two groups reaches the mode; per-group Adam does not.
+
+    Truth source: the mode of the quadratic, a = (1, 2, 3), b = (0.5, -0.5), with a
+    rotated Hessian of condition number 1e4 that couples the two groups, and the same
+    fit written as a plain optax L-BFGS loop on one vector.
+    Tolerance basis: mutation and floating-point. The stage equals the plain loop after
+    30 steps to 1e-10 (the same arithmetic in a different PyTree layout) and reaches
+    the mode to 1e-8 after 60 steps, as the plain loop does; per-group Adam at lr 0.05
+    in 60 steps stays more than 0.1 away, so the test fails if the solver stage falls
+    back to the group transforms.
+    Fails if: the solver is not given the stage objective (the line search needs it),
+    the joint update is not written back to both groups, or the sign is wrong.
+    """
+    init = _toy_init()
+    labels = group_labels(init, _TOY_GROUPS)
+    x0 = jnp.concatenate([init.a, init.b])
+
+    def solve(n):
+        return map_fit(
+            _coupled_quadratic,
+            init,
+            labels,
+            _toy_transforms(),
+            [FitStage(n, ("a", "b"), solver=optax.lbfgs())],
+        )
+
+    mid = solve(30)
+    np.testing.assert_allclose(
+        np.concatenate([mid.params.a, mid.params.b]),
+        _optax_lbfgs_loop(x0, 30),
+        rtol=0,
+        atol=1e-10,
+    )
+    solved = solve(60)
+    got = np.concatenate([solved.params.a, solved.params.b])
+    np.testing.assert_allclose(got, _MODE, rtol=0, atol=1e-8)
+    np.testing.assert_array_equal(solved.params.fixed, init.fixed)
+    adam = map_fit(
+        _coupled_quadratic,
+        init,
+        labels,
+        _toy_transforms(),
+        [FitStage(60, ("a", "b"))],
+    )
+    assert np.max(np.abs(np.concatenate([adam.params.a, adam.params.b]) - _MODE)) > 0.1
+    assert solved.stages[0].loss.shape == (60,)
+    assert solved.stages[0].loss[-1] < solved.stages[0].loss[0]
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_solver_stage_leaves_other_groups_and_their_transform_states_untouched():
+    """A solver stage moves only its free groups; the group transforms resume after it.
+
+    Truth source: the definition of a solver stage (fresh solver state; groups it does
+    not free, and every group transform state, are not touched).
+    Tolerance basis: exact-algebra (bitwise equality).
+    Fails if: the solver stage advances a group transform's clock or moments, moves a
+    group it does not free, or leaks its state into the next stage.
+    """
+    init = _toy_init()
+    labels = group_labels(init, _TOY_GROUPS)
+    kwargs = dict(labels=labels, transforms=_toy_transforms(), freeze="drop_update")
+    before = map_fit(_toy_logdensity, init, stages=[FitStage(10, ("a",))], **kwargs)
+    after = map_fit(
+        _toy_logdensity,
+        init,
+        stages=[
+            FitStage(10, ("a",)),
+            FitStage(8, ("b",), solver=optax.lbfgs()),
+        ],
+        **kwargs,
+    )
+    np.testing.assert_array_equal(after.params.a, before.params.a)
+    assert not np.array_equal(after.params.b, before.params.b)
+    for group in ("a", "b"):
+        for got, want in zip(
+            jax.tree.leaves(after.opt_states[group]),
+            jax.tree.leaves(before.opt_states[group]),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(got, want)
+    resumed = map_fit(
+        _toy_logdensity,
+        init,
+        stages=[
+            FitStage(10, ("a",)),
+            FitStage(8, ("b",), solver=optax.lbfgs()),
+            FitStage(5, ("a",)),
+        ],
+        **kwargs,
+    )
+    assert [t.n_steps for t in resumed.stages] == [10, 8, 5]
+    assert int(resumed.opt_states["a"][0].count) == 15
+
+
+def test_solver_stage_rejects_a_closed_form_transforms_or_an_unknown_group():
+    """A solver stage refuses a closed form, its own transforms, and unknown groups."""
+    with pytest.raises(ValueError, match="no closed_form"):
+        FitStage(1, ("a",), closed_form=lambda p, aux: p, solver=optax.lbfgs())
+    with pytest.raises(ValueError, match="no closed_form"):
+        FitStage(1, ("a",), transforms=_toy_transforms(), solver=optax.lbfgs())
+    with pytest.raises(ValueError, match="at least one group"):
+        FitStage(1, (), solver=optax.lbfgs())
+    init = _toy_init()
+    with pytest.raises(ValueError, match="unknown"):
+        map_fit(
+            _toy_logdensity,
+            init,
+            group_labels(init, _TOY_GROUPS),
+            _toy_transforms(),
+            [FitStage(1, ("z",), solver=optax.lbfgs())],
+        )

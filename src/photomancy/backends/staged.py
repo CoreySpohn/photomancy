@@ -183,6 +183,15 @@ class FitStage(eqx.Module):
             schedule clock. A dict ``{group: transform}`` replaces the transform
             table and starts fresh states for its groups at the current values.
         early_stopping: An :class:`EarlyStopping`, or ``None`` to run all steps.
+        solver: ``None`` steps each free group with its own transform. An
+            ``optax.GradientTransformationExtraArgs`` (for example ``optax.lbfgs()``)
+            instead optimizes the union of the free groups jointly, as one PyTree
+            ``{group: leaves}``, and receives ``value``, ``grad`` and ``value_fn`` (the
+            stage objective of that PyTree) for a line search. Its state starts fresh
+            at the stage and ends with it; the groups the stage does not free stay
+            untouched, whatever ``freeze`` says, and their transform states do not
+            advance. It excludes ``closed_form`` (an update outside the solver would
+            invalidate its curvature pairs) and ``transforms``.
         name: Label carried into the trace.
     """
 
@@ -193,6 +202,7 @@ class FitStage(eqx.Module):
     closed_form: Callable | None = None
     transforms: dict | None = None
     early_stopping: EarlyStopping | None = None
+    solver: Any = None
     name: str = ""
 
     def __check_init__(self):
@@ -205,6 +215,12 @@ class FitStage(eqx.Module):
             isinstance(g, str) for g in self.free
         ):
             raise ValueError(f"free must be a tuple of group names, got {self.free!r}")
+        if self.solver is not None and (
+            self.closed_form is not None or self.transforms is not None
+        ):
+            raise ValueError("a solver stage takes no closed_form and no transforms")
+        if self.solver is not None and not self.free:
+            raise ValueError("a solver stage must free at least one group")
 
 
 class StageTrace(eqx.Module):
@@ -392,7 +408,10 @@ def map_fit(
             check_table(stage.transforms, f"stage {stage.name!r}")
             table = stage.transforms
         for name in stage.free:
-            if name not in table:
+            if stage.solver is not None:
+                if name not in members:
+                    raise ValueError(f"stage {stage.name!r} frees unknown {name!r}")
+            elif name not in table:
                 raise ValueError(f"stage {stage.name!r} frees {name!r}: no transform")
 
     static_leaves = [
@@ -478,6 +497,58 @@ def map_fit(
         steps[key] = step
         return step
 
+    def get_solver_step(solver, free):
+        key = ("solver", id(solver), free)
+        if key in steps:
+            return steps[key]
+        keep_alive.append(solver)
+
+        @eqx.filter_jit(donate="all-except-first")
+        def step(static_args, arrays, state, bufs, count):
+            ld, scale = static_args
+
+            def objective(fit):
+                full = list(arrays)
+                for g in free:
+                    for k, v in zip(members[g], fit[g], strict=True):
+                        full[k] = v
+                value, aux = _value_and_aux(ld, rebuild(full))
+                return -scale * value, aux
+
+            fit = group_slices(arrays, free)
+            (loss, aux), grads = jax.value_and_grad(objective, has_aux=True)(fit)
+            update, state = solver.update(
+                grads,
+                state,
+                fit,
+                value=loss,
+                grad=grads,
+                value_fn=lambda f: objective(f)[0],
+            )
+            moved = optax.apply_updates(fit, update)
+            new_arrays = list(arrays)
+            for g in free:
+                for k, v in zip(members[g], moved[g], strict=True):
+                    new_arrays[k] = v
+            record = {"loss": loss}
+            if metrics:
+                pre = rebuild(arrays)
+                record.update({name: fn(pre, aux) for name, fn in metrics.items()})
+            bufs = {
+                name: bufs[name].at[count].set(jnp.asarray(v, bufs[name].dtype))
+                for name, v in record.items()
+            }
+            return (
+                tuple(new_arrays),
+                state,
+                bufs,
+                count + 1,
+                aux if want_aux else None,
+            )
+
+        steps[key] = step
+        return step
+
     def init_states(table, arrays):
         return {g: table[g].init(group_slices(arrays, [g])[g]) for g in table}
 
@@ -488,7 +559,18 @@ def map_fit(
         if stage.transforms is not None:
             table = stage.transforms
             states = init_states(table, dyn)
-        step = get_step(table, tuple(stage.free), stage.closed_form)
+        solver_state = None
+        if stage.solver is not None:
+            free = tuple(stage.free)
+            step = get_solver_step(stage.solver, free)
+            # fresh buffers: a solver state may hold one array in two places, and
+            # the step donates its inputs
+            solver_state = jax.tree.map(
+                lambda x: jnp.array(x, copy=True),
+                stage.solver.init(group_slices(dyn, free)),
+            )
+        else:
+            step = get_step(table, tuple(stage.free), stage.closed_form)
         static_args = (
             logdensity if stage.logdensity is None else stage.logdensity,
             jnp.asarray(stage.objective_scale, dtype),
@@ -500,7 +582,14 @@ def map_fit(
         for j in range(stage.n_steps):
             gi = offset + j
             pre = _host_copy(rebuild(dyn)) if want_aux and due(gi) else None
-            dyn, states, bufs, count, aux = step(static_args, dyn, states, bufs, count)
+            if solver_state is None:
+                dyn, states, bufs, count, aux = step(
+                    static_args, dyn, states, bufs, count
+                )
+            else:
+                dyn, solver_state, bufs, count, aux = step(
+                    static_args, dyn, solver_state, bufs, count
+                )
             n_run = j + 1
             if pre is not None:
                 callback(
