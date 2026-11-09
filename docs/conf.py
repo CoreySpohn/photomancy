@@ -35,7 +35,15 @@ intersphinx_mapping = {
 
 # jupyter_execute holds myst-nb's executed intermediates. Sphinx otherwise
 # picks them up as documents of their own and warns that each is in no toctree.
-exclude_patterns = ["_build", ".build", "jupyter_execute", "Thumbs.db", ".DS_Store"]
+exclude_patterns = [
+    "_build",
+    ".build",
+    "jupyter_execute",
+    "Thumbs.db",
+    ".DS_Store",
+    # The updater panel folder holds data files and a README read in the repository.
+    "updater-development-panel",
+]
 
 autoapi_dirs = ["../src"]
 autoapi_ignore = ["**/_version.py"]
