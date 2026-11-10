@@ -477,15 +477,16 @@ def _scale_marginal(target, limit, log_g, data):
         )
         return jnp.where(has & on_region & (inside > 0.0), val, -jnp.inf)
 
-    def quadrature():
-        ll = jax.vmap(
-            lambda t: _report_sum(_counts_at(log_g, limit, t, data), limit, data)
-        )(half * _GL_X)
-        return logsumexp(jnp.log(_GL_W) + ll) - jnp.log(2.0)
+    def node(i, acc):
+        ll = _report_sum(_counts_at(log_g, limit, half * _GL_X[i], data), limit, data)
+        return jnp.logaddexp(acc, jnp.log(_GL_W[i]) + ll)
 
-    # The predicate depends on the report alone, so under vmap over orbits the cond
-    # stays a cond and only the branch that applies is run.
-    return jax.lax.cond(_has_detection(data), closed, quadrature)
+    # The nodes run in a loop whose trip count is zero with a detection, so a lane
+    # batch (which turns a cond on the report into a select that runs both
+    # branches) still skips them; a cond would pay for all of them on every draw.
+    n_nodes = jnp.where(_has_detection(data), 0, _GL_X.shape[0])
+    total = jax.lax.fori_loop(0, n_nodes, node, jnp.asarray(-jnp.inf))
+    return jnp.where(_has_detection(data), closed(), total - jnp.log(2.0))
 
 
 def _scale_draw(key, target, limit, log_g, data):
@@ -505,6 +506,23 @@ def _scale_draw(key, target, limit, log_g, data):
     half = target.ln_lam_half
     k_cell, k_in, k_norm = jax.random.split(key, 3)
 
+    width = 2.0 * half / _N_CELLS
+    mid = -half + width * (jnp.arange(_N_CELLS) + 0.5)
+    noise = jax.random.gumbel(k_cell, (_N_CELLS,))
+
+    def best(i, carry):
+        top, pick, top_flat, pick_flat = carry
+        ll = _report_sum(_counts_at(log_g, limit, mid[i], data), limit, data)
+        score = ll + noise[i]
+        take = score > top
+        take_flat = noise[i] > top_flat
+        return (
+            jnp.where(take, score, top),
+            jnp.where(take, i, pick),
+            jnp.where(take_flat, noise[i], top_flat),
+            jnp.where(take_flat, i, pick_flat),
+        )
+
     def gaussian():
         _, t_hat, sd, _, _, _, _ = _scale_fit(limit, log_g, data)
         z = jax.random.truncated_normal(
@@ -512,17 +530,15 @@ def _scale_draw(key, target, limit, log_g, data):
         )
         return jnp.clip(t_hat + sd * z, -half, half)
 
-    def cells():
-        width = 2.0 * half / _N_CELLS
-        mid = -half + width * (jnp.arange(_N_CELLS) + 0.5)
-        ll = jax.vmap(
-            lambda t: _report_sum(_counts_at(log_g, limit, t, data), limit, data)
-        )(mid)
-        safe = jnp.where(jnp.isfinite(jnp.max(ll)), ll, 0.0)
-        cell = jnp.argmax(safe + jax.random.gumbel(k_cell, ll.shape))
-        return mid[cell] + width * (jax.random.uniform(k_in) - 0.5)
-
-    t = jax.lax.cond(_has_detection(data), gaussian, cells)
+    # Without a detection the cells are scanned in a loop (zero trips with one),
+    # so a lane batch that turns the cond into a select does not pay for them.
+    n_cells = jnp.where(_has_detection(data), 0, _N_CELLS)
+    init = (jnp.asarray(-jnp.inf), jnp.asarray(0)) * 2
+    top, pick, _, pick_flat = jax.lax.fori_loop(0, n_cells, best, init)
+    # No cell with a finite likelihood: the cells are equally likely.
+    cell = jnp.where(jnp.isfinite(top), pick, pick_flat)
+    cells = mid[cell] + width * (jax.random.uniform(k_in) - 0.5)
+    t = jnp.where(_has_detection(data), gaussian(), cells)
     return target.ln_lam_ref + jnp.where(jnp.isfinite(t), t, 0.0)
 
 
