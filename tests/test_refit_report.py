@@ -86,6 +86,7 @@ def test_report_likelihood_tends_to_the_null_form_as_the_limit_grows():
 
     The two differ by the planet's shot noise, which the null form leaves out, so
     they agree to 1e-6 only once ``limit`` is huge against the expected counts.
+    Fails if the report law is not the null law in that limit.
     """
     sep, dmag0, lim = _curves(3, limit=1e9)
     rep = ReportData(
@@ -143,7 +144,11 @@ def test_report_likelihood_carries_the_planet_shot_noise():
 
 
 def test_report_detection_below_the_threshold_has_no_density_and_padding_is_free():
-    """A detection under ``snr_thresh * limit`` is impossible; padded rows add zero."""
+    """A detection under ``snr_thresh * limit`` is impossible; padded rows add zero.
+
+    Fails if a sub-threshold detection keeps a finite density, or a padded row
+    changes the sum.
+    """
     rep = _report([0.0, 1.0], [True, False], [100.0, 0.0])
     alpha, d_mag = jnp.array([0.1, 0.1]), jnp.array([24.0, 24.0])
     assert float(loglike_report(alpha, d_mag, rep)) == -np.inf
@@ -154,41 +159,26 @@ def test_report_detection_below_the_threshold_has_no_density_and_padding_is_free
     )
 
 
-@pytest.mark.medium
-def test_chart_report_equals_the_element_report_for_both_mirror_orbits():
-    """The chart route and the element route give one report for each mirror orbit.
+@pytest.mark.medium(
+    reason="24 chart-to-element comparisons through the forward model, 10 s cold"
+)
+def test_chart_mirror_rows_follow_the_element_branches_for_any_constants():
+    """Row ``b`` of the chart report is the orbit of ``ti_to_elements(theta, b)``.
 
     The chart route shares one Kepler solve across draws and takes the
     line-of-sight offset from the Thiele-Innes constants; the element route goes
-    through the forward model. Row ``b`` of the chart terms is the orbit of
-    ``ti_to_elements(theta, b)``, and the two mirror orbits give different
-    reports (they differ in phase angle), so the sign cannot be absorbed.
+    through the forward model. Twelve random constants, with both signs of
+    ``sin((sigma - phi) / 2)`` present (the branch the line-of-sight offset
+    depends on), agree row by row to 1e-9 relative, and the two rows of each set
+    differ (the mirror orbits have different phase angles), so the sign cannot be
+    absorbed. Fails if a row follows the wrong element branch on either sign.
     """
     target = _target()
     rep = _report(
         [0.0, 200.0, 360.0, 410.0], [True, True, False, False], [900.0, 700.0, 0.0, 0.0]
     )
-    for theta in (
-        CHART,
-        jnp.array([0.4, np.log(300.0), 0.7, -0.8, 0.3, 0.6, 0.9]),
-    ):
-        chart = _ti_report_terms(target, theta, _report_xy(target, theta, rep), rep)
-        for b in (0, 1):
-            el = ti_to_elements(theta, b)
-            np.testing.assert_allclose(
-                chart[b], _element_terms(target, el, rep), rtol=1e-9, atol=1e-9
-            )
-        assert float(jnp.max(jnp.abs(chart[0] - chart[1]))) > 1.0
-
-
-@pytest.mark.medium
-def test_chart_mirror_rows_follow_the_element_branches_for_any_constants():
-    """Row ``b`` is the orbit of ``ti_to_elements(theta, b)`` for any constants."""
-    target = _target(SCALE_RANGE)
-    rep = _report(
-        [0.0, 200.0, 360.0, 410.0], [True, True, False, False], [900.0, 700.0, 0.0, 0.0]
-    )
     rng = np.random.default_rng(0)
+    signs = []
     for _ in range(12):
         theta = jnp.asarray(
             [
@@ -198,12 +188,17 @@ def test_chart_mirror_rows_follow_the_element_branches_for_any_constants():
                 *rng.normal(0, 0.5, 4),
             ]
         )
+        sigma = np.arctan2(theta[3] - theta[6], theta[5] + theta[4])
+        phi = np.arctan2(theta[3] + theta[6], theta[5] - theta[4])
+        signs.append(np.sin((sigma - phi) / 2.0))
         chart = _ti_report_terms(target, theta, _report_xy(target, theta, rep), rep)
         for b in (0, 1):
             el = ti_to_elements(theta, b)
             np.testing.assert_allclose(
                 chart[b], _element_terms(target, el, rep), rtol=1e-9, atol=1e-6
             )
+        assert float(jnp.max(jnp.abs(chart[0] - chart[1]))) > 1e-3
+    assert min(signs) < 0.0 < max(signs)
 
 
 def _counts_at_scale(el, ln_lam, epoch):
@@ -243,7 +238,7 @@ def _grid_marginal(target, el, rep, n=4001):
     return ln_lam, ll
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="two 4001-scale forward-model integrals, 4 s cold")
 def test_element_report_weights_match_an_independent_scale_integral():
     """`report_log_weights` is the log of the report law averaged over the scale.
 
@@ -251,7 +246,8 @@ def test_element_report_weights_match_an_independent_scale_integral():
     the logarithm; their log mean is the reference. A detection plus nulls (the
     closed form, which fixes the detection variance at the measured counts and
     takes the nulls at the peak) agrees within 0.05; a report with no detection
-    (quadrature) agrees to 1e-3.
+    (quadrature) agrees to 1e-3. Fails if the weights drop the shot noise, mis-set
+    the range share of the scale, or the quadrature is not the integral.
     """
     target = _target()
     el = ti_to_elements(CHART, 1)
@@ -291,9 +287,12 @@ def test_prior_cloud_follows_the_declared_prior():
     assert stats.kstest(el[:, 7], stats.uniform(-3.0, 2.0).cdf).pvalue > 0.01
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="compiles the first tier on a 2048-point cloud, 4 s cold")
 def test_first_tier_of_an_empty_report_is_the_prior():
-    """No valid row leaves every weight equal: the cloud is the prior, full size."""
+    """No valid row leaves every weight equal: the cloud is the prior, full size.
+
+    Fails if an empty report changes a weight or the evidence.
+    """
     target = _target()
     cloud = prior_cloud(target, jax.random.key(0), 2048)
     empty = ReportData.zeros(4, 16, THRESH)
@@ -304,14 +303,14 @@ def test_first_tier_of_an_empty_report_is_the_prior():
 
 
 @pytest.mark.parametrize("off", [0.0, 0.43])
-def test_scale_draw_recovers_a_planet_off_the_old_nodes(off):
-    """A detection at the true counts puts the drawn scale on the truth, on or off 0.25.
+def test_scale_draw_recovers_a_planet_at_any_offset_from_the_range_middle(off):
+    """A detection at the true counts puts the drawn scale on the truth.
 
-    The planet's scale is ``off`` away from the middle of the range, where a
-    9-node grid 0.25 apart has a node when ``off`` is zero and none when it is
-    0.43. The counts are the noiseless expectation, so the Gaussian peak is the
-    truth and the 6000 draws have mean within four standard errors of it, with
-    the spread of ``1 / SNR``. Fails if the scale is snapped to a grid.
+    The planet's scale is ``off`` away from the middle of the range, at the middle
+    itself and between the points of a grid 0.25 apart. The counts are the
+    noiseless expectation, so the Gaussian peak is the truth and the 6000 draws
+    have mean within four standard errors of it, with the spread of ``1 / SNR``.
+    Fails if the scale is snapped to a grid.
     """
     target = _target()
     truth = LN_LAM + off
@@ -326,7 +325,7 @@ def test_scale_draw_recovers_a_planet_off_the_old_nodes(off):
     assert len(np.unique(np.round(drawn, 6))) > 1000
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="two 4001-scale integrals and 6000 draws each, 1 s warm")
 def test_scale_draw_follows_the_scale_posterior():
     """Drawn scales match the posterior on a fine grid, with and without a detection.
 
@@ -378,7 +377,9 @@ def _null_probability(target, elements, rep):
     return jax.lax.map(one, elements, batch_size=2**12)
 
 
-@pytest.mark.medium
+@pytest.mark.medium(
+    reason="1500 worlds scored at four epochs and a 16384-point first tier, 9 s"
+)
 def test_first_tier_predicts_the_realized_detection_rate():
     """Mean predicted detection probability matches the realized fraction.
 
@@ -407,6 +408,33 @@ def test_first_tier_predicts_the_realized_detection_rate():
     realized = detected[kept, 3].mean()
     se = np.sqrt(predicted * (1.0 - predicted) / kept.sum())
     assert abs(predicted - realized) < 3.0 * se
+
+
+def test_the_report_ladder_refuses_arguments_it_cannot_honor():
+    """Fewer than two rounds or more kernels than support points is an error.
+
+    The ladder needs a scoring round and a last round, and the kernel centers are
+    drawn without replacement from 4096 support points. Fails if either call
+    runs and returns a cloud that silently uses fewer rounds or fewer centers.
+    """
+    target = _target()
+    records = RelativeAstromData.zeros(3)
+    rep = _report([0.0], [False], [0.0])
+    key = jax.random.key(0)
+    with pytest.raises(ValueError, match="max_rounds"):
+        collapsed_refit(
+            target, records, key, n_particles=8, n_round=2**8, report=rep, max_rounds=1
+        )
+    with pytest.raises(ValueError, match="n_centers"):
+        collapsed_refit(
+            target,
+            records,
+            key,
+            n_particles=8,
+            n_round=2**8,
+            report=rep,
+            n_centers=5000,
+        )
 
 
 # -- refits with the report term -----------------------------------------------------
@@ -449,14 +477,14 @@ def _fixture(k):
     return golden, records, report, target
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="the refit must run to see the scale move, 5 s cold")
 @pytest.mark.parametrize("off", [0.0, 0.43])
-def test_a_detection_pins_the_photometric_scale_on_or_off_the_old_nodes(off):
-    """Detections at the true scale put the refit's scale near it, on or off a node.
+def test_a_detection_pins_the_photometric_scale_at_any_offset(off):
+    """Detections at the true scale put the refit's scale near it, at either offset.
 
     The stored counts are those of a planet at the middle of the scale range;
     multiplying them by ``exp(off)`` moves the planet ``off`` away (0.43 sits
-    between the 0.25-spaced nodes of the earlier scheme). The mean scale of the
+    between the points of a grid 0.25 apart). The mean scale of the
     refit cloud is within 0.3 of the truth and moves with it. Fails if the report
     term is not weighted into the cloud, or the scale is snapped to a grid.
     """
@@ -478,7 +506,7 @@ def test_a_detection_pins_the_photometric_scale_on_or_off_the_old_nodes(off):
     assert len(np.unique(np.round(ln_lam, 6))) > 500
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="the whole ladder must compile under vmap, 2 s")
 def test_the_refit_with_a_report_runs_under_vmap():
     """``importance_refit`` with a report vmaps over keys and returns finite clouds.
 
@@ -510,7 +538,7 @@ def test_the_refit_with_a_report_runs_under_vmap():
 
 KEYS = 8
 N_CLOUD = 4096
-PDET_TOL = 0.05
+PDET_SLACK = 0.015
 FUSED = {
     1: dict(n_round=2**17),
     2: dict(n_round=2**16, n_last=2**18),
@@ -567,24 +595,30 @@ def _graded(k):
     return ref, sd, {key: np.asarray(v) for key, v in out.items()}
 
 
-@pytest.mark.slow
+@pytest.mark.slow(
+    reason="eight refits of up to 2**18 proposals per record count, 8 to 70 s"
+)
 @pytest.mark.parametrize("k", [1, 2, 3])
 def test_refit_with_the_report_matches_the_golden_reference(k):
-    """Eight keys with the report on agree with the exact reference.
+    """Eight keys with the report on agree with the golden references.
 
-    The detection probability at a future epoch is within 0.05 of the golden value
-    plus three of its standard errors; the mean predicted position is within a
-    quarter of a predictive standard deviation, with the golden's own sampling
-    error added, and its spread within 0.8 to 1.25; the mean evidence ratio is
-    within three standard errors of one, counting the golden's relative error
-    (about one over the root of its Kish size). Fails if the report term is
-    omitted, loses the planet shot noise, or the scale is not redrawn.
+    The mean detection probability at a future epoch is within 0.015 plus three
+    combined standard errors of the independent reference (astrometry-only
+    clouds weighted by the forward-model report likelihood), the combined error
+    taking the reference's spread over its keys and the refit's over its own;
+    the gate at three records is about 0.02, so an offset of 0.04 fails. The mean
+    predicted position is within a quarter of a predictive standard deviation,
+    with the exact golden's own sampling error added, and its spread within 0.8
+    to 1.25; the mean evidence ratio is within three standard errors of one,
+    counting the exact golden's relative error (about one over the root of its
+    Kish size). Fails if the report term is omitted, loses the planet shot
+    noise, or the scale is not redrawn.
     """
     ref, sd, g = _graded(k)
+    ind = json.loads(GOLDEN.read_text())["independent"][str(k)]
     rel = 1.0 / np.sqrt(ref["kish"])
-    assert (
-        np.abs(g["pdet"] - ref["p_detect"]).max() <= PDET_TOL + 3.0 * ref["p_detect_se"]
-    )
+    se = np.hypot(ind["p_detect_se"], g["pdet"].std(ddof=1) / np.sqrt(KEYS))
+    assert abs(g["pdet"].mean() - ind["p_detect"]) <= PDET_SLACK + 3.0 * se
     shift = np.abs(g["mean"] - ref["position_mean"]) / sd
     assert shift.max() <= 0.25 + 3.0 * rel
     ratio = g["spread"] / sd
@@ -594,7 +628,9 @@ def test_refit_with_the_report_matches_the_golden_reference(k):
     assert abs(ev.mean() - 1.0) <= 3.0 * se
 
 
-@pytest.mark.slow
+@pytest.mark.slow(
+    reason="reads the eight refits per record count of the golden test, 1 s extra"
+)
 @pytest.mark.parametrize("k", [1, 2, 3])
 def test_keys_with_the_report_reach_a_usable_size(k):
     """At most two of eight keys report a size under 400 or a failed status.

@@ -18,12 +18,19 @@ Usage::
 
     uv run python tools/refit_golden.py [MIN_KISH]
     uv run python tools/refit_golden.py report [MIN_KISH] [MAX_CHUNKS]
+    uv run python tools/refit_golden.py independent [KEYS]
 
 The ``report`` form adds the photometric report: the same fixture with the first
 ``k`` detections reported with their counts, a null at 410 days, a photometric
 scale uniform in its logarithm over a range of 2.25, and the report likelihood in
 the exact weights with the scale integrated on a fine grid. It writes
-``tests/data/refit_report_golden.json``.
+``tests/data/refit_report_golden.json``. The ``independent`` form adds to that file
+a second reference built without the exact-weight chunks: astrometry-only clouds of
+the refit, each orbit weighted by the report likelihood from the forward model with
+the scale integrated on a grid, repeated over several keys so that the spread of
+the keys gives the standard error. It is the reference the acceptance test grades
+the detection probability against, since the exact reference keeps few effective
+draws at three records.
 """
 
 import itertools
@@ -46,6 +53,8 @@ from photomancy.orbit.refit import (
     _counts_at,
     _element_geometry,
     _report_sum,
+    importance_refit,
+    loglike_report,
     physical_prior_target,
     scale_rotate_draw,
 )
@@ -512,6 +521,122 @@ def report_main(min_kish=20_000.0, max_chunks=REPORT_MAX_CHUNKS):
     print("wrote", REPORT_PATH)
 
 
+# -- independent report reference ----------------------------------------------------
+
+IND_KEYS = 8
+IND_PARTICLES = 2**15
+IND_SEED = 100
+# proposals of the astrometry-only refit that make its cloud large enough
+IND_FUSED = {
+    1: dict(n_round=2**17),
+    2: dict(n_round=2**16, n_last=2**18),
+    3: dict(n_round=2**16, n_last=2**18),
+}
+
+
+def _unit_photometry(tg, el, epochs):
+    """Separation (arcsec) and delta magnitude at unit scale of ``el`` at ``epochs``."""
+    period = jnp.exp(el[0])
+    mass = jnp.exp(el[6]) * Msun2kg
+    a = (G * mass / (two_pi / period) ** 2) ** (1.0 / 3.0)
+    return predict_photometry(
+        epochs,
+        a,
+        el[1],
+        el[2],
+        el[3],
+        jnp.cos(el[4]),
+        jnp.sin(el[4]),
+        tg.model.t_ref + el[5] * period,
+        mass,
+        1.0,
+        tg.dist_pc,
+    )
+
+
+def _log_like_at(tg, el, rep, ln_lam):
+    """Report log likelihood of one orbit at each log scale, via the forward model."""
+    alpha, d_mag = _unit_photometry(tg, el, rep.epochs)
+    return jax.vmap(
+        lambda s: loglike_report(alpha, d_mag - 2.5 * s / np.log(10.0), rep)
+    )(ln_lam)
+
+
+def _forward_scale_terms(tg, el, rep, row):
+    """Log report marginal and detection probability of one orbit, forward model route.
+
+    The scale runs over ``N_SCALE_GRID`` cell midpoints of its log range. Unlike
+    :func:`fine_scale_terms`, no geometry or scale helper of the refit module is
+    used: every row goes through ``predict_photometry`` and ``loglike_report``.
+    """
+    width = tg.ln_lam_hi - tg.ln_lam_lo
+    grid = tg.ln_lam_lo + width * (jnp.arange(N_SCALE_GRID) + 0.5) / N_SCALE_GRID
+    ll = _log_like_at(tg, el, rep, grid)
+    ll = jnp.where(jnp.isfinite(ll), ll, -jnp.inf)
+    p_det = 1.0 - jnp.exp(_log_like_at(tg, el, row, grid))
+    post = jax.nn.softmax(ll)
+    marginal = jax.scipy.special.logsumexp(ll) - jnp.log(N_SCALE_GRID)
+    return marginal, jnp.sum(jnp.where(post > 0.0, post * p_det, 0.0))
+
+
+def _weighted_mean(log_w, x):
+    """Self-normalized mean of ``x`` under host log weights."""
+    w = np.exp(log_w - np.max(log_w))
+    return float(w @ x / w.sum())
+
+
+def independent_reference(k, keys=IND_KEYS):
+    """Detection probability at the future epoch from astrometry-only clouds.
+
+    Each of ``keys`` astrometry-only refits (no report) is scored with the report
+    likelihood of every orbit, the scale integrated on a grid, and the clouds
+    are pooled. The standard error is the spread of the per-key values over the
+    root of their number. No scale code of the refit enters.
+    """
+    keys = int(keys)
+    tg, buf, rep, row = report_target(), fixture(k), report_fixture(k), future_row()
+    score = jax.jit(
+        lambda els: jax.lax.map(
+            lambda el: _forward_scale_terms(tg, el, rep, row), els, batch_size=2**9
+        )
+    )
+    pooled, per_key = [], []
+    for i in range(keys):
+        cloud = importance_refit(
+            tg,
+            buf,
+            None,
+            jax.random.key(IND_SEED + i),
+            n_particles=IND_PARTICLES,
+            **IND_FUSED[k],
+        )
+        marginal, p_det = (np.asarray(v) for v in score(cloud.elements))
+        pooled.append((marginal, p_det))
+        per_key.append(_weighted_mean(marginal, p_det))
+        print(k, i, per_key[-1], flush=True)
+    marginal, p_det = (np.concatenate(v) for v in zip(*pooled, strict=True))
+    weight = np.exp(marginal - marginal.max())
+    return {
+        "k": k,
+        "keys": keys,
+        "p_detect": _weighted_mean(marginal, p_det),
+        "p_detect_se": float(np.std(per_key, ddof=1) / np.sqrt(keys)),
+        "kish": float(weight.sum() ** 2 / np.sum(weight**2)),
+        "per_key": per_key,
+    }
+
+
+def independent_main(keys=IND_KEYS):
+    """Add the independent reference to the stored report golden file."""
+    out = json.loads(REPORT_PATH.read_text())
+    out["independent"] = {}
+    for k in (1, 2, 3):
+        out["independent"][str(k)] = independent_reference(k, keys)
+        print(k, out["independent"][str(k)], flush=True)
+    REPORT_PATH.write_text(json.dumps(out, indent=1))
+    print("wrote", REPORT_PATH)
+
+
 def main(min_kish=40_000.0):
     """Write the golden file for k = 1, 2, 3."""
     out = {
@@ -539,5 +664,7 @@ def main(min_kish=40_000.0):
 if __name__ == "__main__":
     if sys.argv[1:2] == ["report"]:
         report_main(*(float(x) for x in sys.argv[2:]))
+    elif sys.argv[1:2] == ["independent"]:
+        independent_main(*sys.argv[2:])
     else:
         main(*(float(x) for x in sys.argv[1:]))
