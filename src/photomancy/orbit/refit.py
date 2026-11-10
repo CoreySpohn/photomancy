@@ -449,6 +449,12 @@ def _scale_marginal(target, limit, log_g, data):
     times the share of its mass inside the range, the nulls taken at its peak
     (they change slowly over the peak's width, about ``1 / SNR``). Without a
     detection there is no peak: Gauss-Legendre quadrature over the range.
+
+    This closed form and the Gaussian draw of :func:`_scale_draw` are two halves
+    of one approximation, the joint of the scale and the nulls with the nulls
+    frozen at the peak, so their errors cancel to second order. Never make one
+    half exact alone: an exact draw on these weights cost 16 percent of the
+    detection probability at three records at a signal to noise of 5 to 6.
     """
     half = target.ln_lam_half
 
@@ -488,6 +494,13 @@ def _scale_draw(key, target, limit, log_g, data):
     With a detection: the Gaussian of :func:`_scale_fit` truncated to the range.
     Without: a draw from a fine grid of the null likelihood over the range
     (uniform within the chosen cell).
+
+    The Gaussian draw and the closed-form weights of :func:`_scale_marginal` are
+    two halves of one approximation, the joint of the scale and the nulls with
+    the nulls frozen at the peak, so their errors cancel to second order. Never
+    make one half exact alone: an exact draw on the present weights cost 16
+    percent of the detection probability at three records at a signal to noise
+    of 5 to 6.
     """
     half = target.ln_lam_half
     k_cell, k_in, k_norm = jax.random.split(key, 3)
@@ -1067,7 +1080,9 @@ def _ladder_rounds(
     second round at power one, or round ``max_rounds - 1``. Its weights are the
     plain importance weights, so the ladder changes the proposal only. A last
     round under ``ess_floor`` is repeated, with the proposal fit to it, up to
-    ``_RETRIES`` times and the final round is returned.
+    ``_RETRIES`` times and the final round is returned. The returned round is
+    selected on its own Kish size, so the evidence of a repeated refit carries
+    that selection.
 
     Returns:
         ``(u, log_q, terms, k_score, log_w, n_rounds)`` of the returned round.
@@ -1173,7 +1188,8 @@ def collapsed_refit(
             only.
         n_last: Proposals of the last round (static); default ``n_round``. The
             Kish size is linear in it for a fixed proposal.
-        n_centers: Kernels of the adaptive proposal (static).
+        n_centers: Kernels of the adaptive proposal (static); with a report at
+            most 4096, the support points they are drawn from.
         defensive: Fraction of an adaptive round drawn from the prior box.
         n_constants: Sets of constants drawn at each proposal (static). More
             than one integrates part of the mass window and of the physical
@@ -1186,7 +1202,7 @@ def collapsed_refit(
             elements carry a mirror orbit and a photometric scale drawn from
             their conditional, and the evidence includes it.
         max_rounds: Most rounds of the report ladder (static); the last is one
-            of them.
+            of them. At least 2.
 
     Returns:
         A :class:`RefitCloud`.
@@ -1198,6 +1214,13 @@ def collapsed_refit(
                 f"proposals per round ({n}) must be a multiple of {_DENSITY_BATCH}"
             )
     if report is not None:
+        if max_rounds < 2:
+            raise ValueError(f"max_rounds ({max_rounds}) must be at least 2")
+        if n_centers > _N_SUPPORT:
+            raise ValueError(
+                f"n_centers ({n_centers}) cannot exceed the {_N_SUPPORT} support "
+                "points they are drawn from"
+            )
         return _collapsed_refit_report(
             target,
             records,
