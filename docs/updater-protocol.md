@@ -15,11 +15,12 @@ posterior an unbounded sampler would return.
 
 ## Status and amendments
 
-- **Status: draft.** Values marked *provisional* below may be re-sized on the
+- **Status: frozen.** Values marked *provisional* below were re-sized on the
   development panel by the rules in "Provisional values", only inside the
   bounds stated there.
-  After re-sizing, the parameter block's `status` becomes `frozen` in a
-  dedicated commit, and that commit is the frozen protocol.
+  After re-sizing, the parameter block's `status` became `frozen` in a
+  dedicated commit, and that commit is the frozen protocol. The freeze report
+  is `incomplete`; see "Recorded limit at the freeze" below.
 - The protocol commit recorded in every verdict row is the latest commit that
   changed this file. `python tools/updater_panel.py --dry-run` prints it.
 - After the freeze, the panel may be rerun only after an amendment to this file,
@@ -82,6 +83,35 @@ posterior an unbounded sampler would return.
     tests the absolute change against $10^{-14}$; the same bound applies to
     the four interval end points. The rule changes no verdict on the
     development data.
+- **Recorded limit at the freeze.** The rerun at the physical budget of
+  $2^{24}$ proposals, four times the starting $2^{22}$, ended with freeze
+  status `incomplete` (record in `docs/updater-development-panel/budget-2p24/`,
+  unmodified). The maintainer accepted starting the panel with this limit on
+  2026-11-09. The estimators and the budgets did not change, and the alias
+  criterion of `physical_fixed` stays `incomplete` under the rules of this
+  document. Every panel result that depends on the physical alias carries
+  this limit in its report.
+  - The physical reference is not certified at $2^{24}$, the largest legal
+    primary budget ($2^{25}$ cap on the doubled role). Fifteen of 18
+    certification checks pass. The three that fail are the three-epoch
+    proposal agreement bounds for lnP, e and future_pa, with upper limits
+    5.22e-04, 1.29e-03 and 1.24e-03 against 5.00e-04. Passing
+    would need about $2^{26}$ proposals.
+  - The failure comes from low ESS in a few three-epoch worlds of R2 and R3.
+    Six of the 152 worlds have a minimum ESS below 40 over their reference runs
+    (5.7 to 39.6, for example 5.7 against 318 in R2 world 8), and 18 are
+    below 200. Worlds with both samplers at high ESS agree to about $10^{-5}$.
+    The physical pair has no ESS floor; 16 of its 64 role, regime and epoch
+    cells have a worst fit below 200.
+  - The candidate alias tolerance is $\delta_2 = 0.0146$, above
+    its maximum of $10^{-3}$, and 8 power bounds are below 0.8. Because no
+    $\delta_2$ could be frozen, certification ran at $\delta_2 = 10^{-3}$; the
+    value in the parameter block is unchanged.
+  - The physical exact checks are `incomplete` on three flagged values.
+    `e_bin3` is an artefact of the convergence criterion: the quadrature
+    settles at 0.10846 and the reference sampler gives 0.108452.
+    `future_pa_bin2` (mass about $10^{-13}$) and `future_pa_bin5` (mass about
+    $1.5 \times 10^{-6}$) remain flagged.
 
 ## Parameter block
 
@@ -96,7 +126,7 @@ stated here under `stated`.
 {
   "protocol": "orbit-updater-acceptance",
   "version": 1,
-  "status": "draft",
+  "status": "frozen",
   "distance_pc": 10.0,
   "updater_budget": {
     "particles": 8192,

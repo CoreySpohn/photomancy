@@ -1,0 +1,338 @@
+{
+ "physical_fixed R1 k=2 doubled": {
+  "fits": 76,
+  "worst": 26673.5,
+  "median": 950442.6,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R1 k=2 independent": {
+  "fits": 76,
+  "worst": 1006.7,
+  "median": 366155.9,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R1 k=2 primary": {
+  "fits": 152,
+  "worst": 13393.8,
+  "median": 475438.4,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R1 k=3 doubled": {
+  "fits": 76,
+  "worst": 2271.3,
+  "median": 113307.1,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R1 k=3 independent": {
+  "fits": 76,
+  "worst": 74.0,
+  "median": 15085.0,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R1 k=3 primary": {
+  "fits": 152,
+  "worst": 1115.6,
+  "median": 56547.4,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R2 k=2 doubled": {
+  "fits": 76,
+  "worst": 5870.3,
+  "median": 368810.4,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R2 k=2 independent": {
+  "fits": 76,
+  "worst": 990.7,
+  "median": 134174.0,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R2 k=2 primary": {
+  "fits": 152,
+  "worst": 2872.8,
+  "median": 184489.7,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R2 k=3 doubled": {
+  "fits": 76,
+  "worst": 40.0,
+  "median": 19994.7,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R2 k=3 independent": {
+  "fits": 76,
+  "worst": 5.7,
+  "median": 1740.2,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R2 k=3 primary": {
+  "fits": 152,
+  "worst": 26.3,
+  "median": 10003.8,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R3 k=2 doubled": {
+  "fits": 76,
+  "worst": 4088.6,
+  "median": 32581.2,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R3 k=2 independent": {
+  "fits": 76,
+  "worst": 501.6,
+  "median": 9757.3,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R3 k=2 primary": {
+  "fits": 152,
+  "worst": 2003.5,
+  "median": 16305.4,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R3 k=3 doubled": {
+  "fits": 76,
+  "worst": 326.8,
+  "median": 1812.4,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R3 k=3 independent": {
+  "fits": 76,
+  "worst": 14.1,
+  "median": 447.5,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R3 k=3 primary": {
+  "fits": 152,
+  "worst": 128.6,
+  "median": 898.8,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R4 k=2 doubled": {
+  "fits": 76,
+  "worst": 278264.0,
+  "median": 1253388.7,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R4 k=2 independent": {
+  "fits": 76,
+  "worst": 30586.4,
+  "median": 429158.7,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R4 k=2 primary": {
+  "fits": 152,
+  "worst": 121226.0,
+  "median": 621343.7,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R4 k=3 doubled": {
+  "fits": 76,
+  "worst": 2982.7,
+  "median": 194842.6,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R4 k=3 independent": {
+  "fits": 76,
+  "worst": 1041.6,
+  "median": 47325.7,
+  "floor": null,
+  "below_floor": []
+ },
+ "physical_fixed R4 k=3 primary": {
+  "fits": 152,
+  "worst": 1440.5,
+  "median": 104664.5,
+  "floor": null,
+  "below_floor": []
+ },
+ "ti_window R1 k=2 doubled": {
+  "fits": 76,
+  "worst": 33353.3,
+  "median": 1464569.0,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R1 k=2 independent": {
+  "fits": 76,
+  "worst": 14208.4,
+  "median": 638855.4,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R1 k=2 primary": {
+  "fits": 152,
+  "worst": 16492.2,
+  "median": 732468.5,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R1 k=3 doubled": {
+  "fits": 76,
+  "worst": 50014.2,
+  "median": 1181233.2,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R1 k=3 independent": {
+  "fits": 76,
+  "worst": 23780.4,
+  "median": 507499.9,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R1 k=3 primary": {
+  "fits": 152,
+  "worst": 24741.5,
+  "median": 590887.5,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R2 k=2 doubled": {
+  "fits": 76,
+  "worst": 16334.6,
+  "median": 204671.3,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R2 k=2 independent": {
+  "fits": 76,
+  "worst": 7948.8,
+  "median": 108872.6,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R2 k=2 primary": {
+  "fits": 152,
+  "worst": 7784.3,
+  "median": 101519.0,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R2 k=3 doubled": {
+  "fits": 76,
+  "worst": 764.3,
+  "median": 41572.7,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R2 k=3 independent": {
+  "fits": 76,
+  "worst": 414.2,
+  "median": 18793.3,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R2 k=3 primary": {
+  "fits": 152,
+  "worst": 378.7,
+  "median": 20772.9,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R3 k=2 doubled": {
+  "fits": 76,
+  "worst": 1209549.4,
+  "median": 1985118.9,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R3 k=2 independent": {
+  "fits": 76,
+  "worst": 488233.4,
+  "median": 839346.6,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R3 k=2 primary": {
+  "fits": 152,
+  "worst": 604279.1,
+  "median": 991929.1,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R3 k=3 doubled": {
+  "fits": 76,
+  "worst": 27708.3,
+  "median": 387356.6,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R3 k=3 independent": {
+  "fits": 76,
+  "worst": 14309.0,
+  "median": 158364.7,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R3 k=3 primary": {
+  "fits": 152,
+  "worst": 13834.7,
+  "median": 193718.4,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R4 k=2 doubled": {
+  "fits": 76,
+  "worst": 41891.5,
+  "median": 1223831.2,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R4 k=2 independent": {
+  "fits": 76,
+  "worst": 16721.1,
+  "median": 542731.5,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R4 k=2 primary": {
+  "fits": 152,
+  "worst": 20967.0,
+  "median": 610766.7,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R4 k=3 doubled": {
+  "fits": 76,
+  "worst": 1482.6,
+  "median": 533889.8,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R4 k=3 independent": {
+  "fits": 76,
+  "worst": 629.7,
+  "median": 220245.1,
+  "floor": 200,
+  "below_floor": []
+ },
+ "ti_window R4 k=3 primary": {
+  "fits": 152,
+  "worst": 732.1,
+  "median": 267369.8,
+  "floor": 200,
+  "below_floor": []
+ }
+}
