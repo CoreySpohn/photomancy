@@ -16,7 +16,14 @@ This is a slow campaign, never part of the unit tier.
 
 Usage::
 
-    uv run python libraries/photomancy/tools/refit_golden.py [MIN_KISH]
+    uv run python tools/refit_golden.py [MIN_KISH]
+    uv run python tools/refit_golden.py report [MIN_KISH] [MAX_CHUNKS]
+
+The ``report`` form adds the photometric report: the same fixture with the first
+``k`` detections reported with their counts, a null at 410 days, a photometric
+scale uniform in its logarithm over a range of 2.25, and the report likelihood in
+the exact weights with the scale integrated on a fine grid. It writes
+``tests/data/refit_report_golden.json``.
 """
 
 import itertools
@@ -27,14 +34,18 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import G, Msun2kg, mas2arcsec, two_pi
+from hwoutils.constants import G, Msun2kg, Rearth2AU, mas2arcsec, two_pi
 
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import MU_SUN
-from photomancy.orbit.forward import predict_relative_astrometry
+from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
 from photomancy.orbit.refit import (
     ECC_ALPHA,
     ECC_BETA,
+    ReportData,
+    _counts_at,
+    _element_geometry,
+    _report_sum,
     physical_prior_target,
     scale_rotate_draw,
 )
@@ -244,6 +255,263 @@ def records_json(k):
     }
 
 
+# -- report fixture ----------------------------------------------------------------
+
+THRESHOLD = 5.0
+LIMIT_COUNTS = 100.0
+CONTRAST_FLOOR = 5e-11
+LAM_TRUE = 0.3 * Rearth2AU**2
+SCALE_HALF = 1.125
+N_SCALE_GRID = 512
+T_NULL = 410.0
+N_GRID = 128
+KEEP_BELOW_MAX = 20.0
+# Three records with the photometric report keep about 2 effective draws per 1e6
+# proposals, so the chunk cap, not the Kish target, ends that reference.
+REPORT_MAX_CHUNKS = 600
+REPORT_PATH = Path(__file__).parents[1] / "tests" / "data" / "refit_report_golden.json"
+
+
+def lam_range():
+    """The log scale range ``ln(Ag Rp^2)``: the truth plus or minus 1.125."""
+    return (np.log(LAM_TRUE) - SCALE_HALF, np.log(LAM_TRUE) + SCALE_HALF)
+
+
+def report_target():
+    """The windowed physical-prior target of the fixture with its scale range."""
+    return physical_prior_target(1.0, DIST_PC, 0.10, lam_range())
+
+
+def fine_scale_terms(tg, el, rep, row):
+    """Log report marginal and detection probability of one orbit, scale on a grid.
+
+    The scale offset ``t`` runs over ``N_SCALE_GRID`` cell midpoints of the range
+    (uniform prior); the marginal is the mean of the report likelihood over them
+    and the detection probability at ``row`` is its posterior average.
+    """
+    half = tg.ln_lam_half
+    t = -half + (2.0 * half / N_SCALE_GRID) * (jnp.arange(N_SCALE_GRID) + 0.5)
+    limit, log_g = _element_geometry(tg, el, rep)
+    ll = jax.vmap(
+        lambda ti: _report_sum(_counts_at(log_g, limit, ti, rep), limit, rep)
+    )(t)
+    limit_f, log_g_f = _element_geometry(tg, el, row)
+    pd = jax.vmap(
+        lambda ti: (
+            1.0
+            - jnp.exp(_report_sum(_counts_at(log_g_f, limit_f, ti, row), limit_f, row))
+        )
+    )(t)
+    marginal = jax.scipy.special.logsumexp(ll) - jnp.log(N_SCALE_GRID)
+    post = jax.nn.softmax(jnp.where(jnp.isfinite(ll), ll, -jnp.inf))
+    return marginal, jnp.sum(jnp.where(post > 0.0, post * pd, 0.0))
+
+
+def sensitivity(n_rows):
+    """Separation, limiting delta magnitude and noise grids of ``n_rows`` epochs.
+
+    The planet-free noise is ``LIMIT_COUNTS`` at every separation and the
+    contrast limit is ``CONTRAST_FLOOR (1 + (0.05 / alpha)^6)``, so the expected
+    counts are ``THRESHOLD LIMIT_COUNTS contrast / limit(alpha)``.
+    """
+    sep = np.geomspace(0.005, 2.0, N_GRID)
+    dmag0 = -2.5 * np.log10(CONTRAST_FLOOR * (1.0 + (IWA_ARCSEC / sep) ** 6))
+    tile = lambda x: jnp.asarray(np.tile(x, (n_rows, 1)))  # noqa: E731
+    return tile(sep), tile(dmag0), tile(np.full(N_GRID, LIMIT_COUNTS))
+
+
+def truth_counts(times):
+    """Expected planet counts of the fixture's truth orbit at ``times`` (days)."""
+    a, e, cos_i, node, omega, m_ref = TRUTH
+    period = two_pi / jnp.sqrt(G * Msun2kg / a**3)
+    tp = -m_ref / two_pi * period
+    alpha, d_mag = predict_photometry(
+        jnp.asarray(times),
+        a,
+        e,
+        cos_i,
+        node,
+        jnp.cos(omega),
+        jnp.sin(omega),
+        tp,
+        Msun2kg,
+        LAM_TRUE,
+        DIST_PC,
+    )
+    limit = CONTRAST_FLOOR * (1.0 + (IWA_ARCSEC / alpha) ** 6)
+    return THRESHOLD * LIMIT_COUNTS * 10.0 ** (-0.4 * d_mag) / limit
+
+
+def report_fixture(k):
+    """Reports of the fixture: the first ``k`` detections and a null at ``T_NULL``.
+
+    Detections carry counts drawn from the reporting law at the truth orbit
+    (``Normal(N, LIMIT_COUNTS^2 + N)``, every draw above the threshold).
+    """
+    times = np.array([*EPOCHS_D[:k], T_NULL])
+    n = CAPACITY
+    expected = np.asarray(truth_counts(times))
+    noise = np.asarray(jax.random.normal(jax.random.key(12, impl="threefry2x32"), (k,)))
+    counts = expected[:k] + np.sqrt(LIMIT_COUNTS**2 + expected[:k]) * noise
+    assert np.all(counts >= THRESHOLD * LIMIT_COUNTS)
+    sep, dmag0, limit = sensitivity(n)
+    detected = np.zeros(n, bool)
+    detected[:k] = True
+    row_counts = np.zeros(n)
+    row_counts[:k] = counts
+    epochs = np.zeros(n)
+    epochs[: k + 1] = times
+    valid = np.zeros(n, bool)
+    valid[: k + 1] = True
+    return ReportData(
+        epochs=jnp.asarray(epochs),
+        sep_grid=sep,
+        dmag0_grid=dmag0,
+        limit_grid=limit,
+        is_detected=jnp.asarray(detected),
+        counts=jnp.asarray(row_counts),
+        is_valid=jnp.asarray(valid),
+        snr_thresh=THRESHOLD,
+    )
+
+
+def future_row():
+    """A one-row report at ``FUTURE_D`` whose null probability is ``1 - P(detect)``."""
+    sep, dmag0, limit = sensitivity(1)
+    return ReportData(
+        epochs=jnp.asarray([FUTURE_D]),
+        sep_grid=sep,
+        dmag0_grid=dmag0,
+        limit_grid=limit,
+        is_detected=jnp.zeros(1, bool),
+        counts=jnp.zeros(1),
+        is_valid=jnp.ones(1, bool),
+        snr_thresh=THRESHOLD,
+    )
+
+
+def report_reference(k, min_kish, max_chunks=REPORT_MAX_CHUNKS, seed=0):
+    """Accumulate the weighted statistics for ``k`` records and the report rows.
+
+    Scale-and-rotate draws are exact for the astrometric physical prior; each is
+    weighted by the report likelihood with the photometric scale integrated on a
+    fine grid, and the scale posterior of each orbit carries the detection
+    probability.
+    """
+    tg, buf, rep, row = report_target(), fixture(k), report_fixture(k), future_row()
+    edges = np.linspace(float(tg.model.lnP_lo), float(tg.model.lnP_hi), N_BINS + 1)
+    future = jnp.asarray([FUTURE_D])
+    shift = None
+    total = np.zeros(1 + 5 + 2 + N_BINS)
+    sq = 0.0
+    n_done = 0
+    for chunk in range(max_chunks):
+        key = jax.random.fold_in(jax.random.key(seed), chunk)
+        elements, log_w, offset = scale_rotate_draw(tg, buf, key, n_proposals=CHUNK)
+        # The report weight is at most one per row, so astrometric weights far under
+        # the chunk's largest cannot matter: score the report on the rest only.
+        astro = np.asarray(log_w)
+        keep = np.flatnonzero(astro > np.max(astro) - KEEP_BELOW_MAX)
+        size = max(2**12, 2 ** int(np.ceil(np.log2(max(keep.size, 1)))))
+        padded = np.concatenate([keep, np.full(size - keep.size, keep[0])])
+        elements = elements[jnp.asarray(padded)]
+        marginal, pdet = jax.lax.map(
+            lambda el: fine_scale_terms(tg, el, rep, row), elements, batch_size=2**9
+        )
+        marginal, pdet = np.asarray(marginal), np.asarray(pdet)
+        lw = astro[padded] + marginal
+        lw = np.where(np.isfinite(lw), lw, -np.inf)
+        lw[keep.size :] = -np.inf
+        if shift is None:
+            shift = float(lw.max()) if np.isfinite(lw.max()) else 0.0
+        w = np.exp(lw - shift)
+        xy = np.asarray(positions(elements, future))[:, :, 0]
+        ra, dec = xy[:, 0], xy[:, 1]
+        ln_p = np.asarray(elements[:, 0])
+        vis = (np.hypot(ra, dec) > IWA_ARCSEC).astype(float)
+        bins = np.stack(
+            [(ln_p >= lo) & (ln_p < hi) for lo, hi in itertools.pairwise(edges)], 1
+        )
+        parts = np.concatenate(
+            [
+                [w.sum()],
+                [w @ ra, w @ dec, w @ ra**2, w @ dec**2, w @ (ra * dec), w @ vis],
+                [w @ pdet],
+                w @ bins,
+            ]
+        )
+        total += parts
+        sq += float(w @ w)
+        n_done += CHUNK
+        kish = total[0] ** 2 / sq
+        if kish >= min_kish and chunk >= 3:
+            break
+    s0 = total[0]
+    mean = np.array([total[1], total[2]]) / s0
+    cov = np.array(
+        [
+            [total[3] / s0 - mean[0] ** 2, total[5] / s0 - mean[0] * mean[1]],
+            [total[5] / s0 - mean[0] * mean[1], total[4] / s0 - mean[1] ** 2],
+        ]
+    )
+    p_det = total[7] / s0
+    return {
+        "k": k,
+        "proposals": n_done,
+        "kish": float(kish),
+        "p_visible": float(total[6] / s0),
+        "p_detect": float(p_det),
+        "p_detect_se": float(np.sqrt(p_det * (1 - p_det) / kish)),
+        "position_mean": mean.tolist(),
+        "position_cov": cov.tolist(),
+        "bin_edges": edges.tolist(),
+        "bin_masses": (total[8:] / s0).tolist(),
+        "log_evidence": float(np.log(s0) + shift - np.log(n_done) - float(offset)),
+    }
+
+
+def report_json(k):
+    """The report fixture as plain lists."""
+    rep = report_fixture(k)
+    return {
+        name: np.asarray(getattr(rep, name)).tolist()
+        for name in (
+            "epochs",
+            "sep_grid",
+            "dmag0_grid",
+            "limit_grid",
+            "is_detected",
+            "counts",
+            "is_valid",
+        )
+    }
+
+
+def report_main(min_kish=20_000.0, max_chunks=REPORT_MAX_CHUNKS):
+    """Write the report golden file for k = 1, 2, 3."""
+    out = {
+        "fixture": {
+            "mass_msun": 1.0,
+            "mass_half_width": 0.10,
+            "dist_pc": DIST_PC,
+            "epochs_d": list(EPOCHS_D),
+            "null_d": T_NULL,
+            "future_d": FUTURE_D,
+            "iwa_arcsec": IWA_ARCSEC,
+            "snr_thresh": THRESHOLD,
+            "ln_lam_range": list(lam_range()),
+        },
+        "records": {str(k): records_json(k) for k in (1, 2, 3)},
+        "report": {str(k): report_json(k) for k in (1, 2, 3)},
+        "reference": {},
+    }
+    for k in (1, 2, 3):
+        out["reference"][str(k)] = report_reference(k, min_kish, int(max_chunks))
+        print(k, out["reference"][str(k)], flush=True)
+    REPORT_PATH.write_text(json.dumps(out, indent=1))
+    print("wrote", REPORT_PATH)
+
+
 def main(min_kish=40_000.0):
     """Write the golden file for k = 1, 2, 3."""
     out = {
@@ -269,4 +537,7 @@ def main(min_kish=40_000.0):
 
 
 if __name__ == "__main__":
-    main(*(float(x) for x in sys.argv[1:]))
+    if sys.argv[1:2] == ["report"]:
+        report_main(*(float(x) for x in sys.argv[2:]))
+    else:
+        main(*(float(x) for x in sys.argv[1:]))
