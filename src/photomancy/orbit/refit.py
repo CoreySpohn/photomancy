@@ -351,27 +351,42 @@ def _propose(key, centers, chol, lo, hi, n, defensive):
     return u, log_q
 
 
-def _collapsed_weights(target, records, u, z):
+def _collapsed_weights(target, records, u, key, n_constants):
     """Constants from their conditional Gaussian and the log weight before proposal.
 
+    Each point of ``u`` draws ``n_constants`` sets of constants. Its weight holds
+    the mean over the draws of ``p_rest`` (the physical density over the
+    reference Gaussian, zero outside the mass window) and one draw is kept with
+    probability proportional to its ``p_rest``. For any function ``h`` the
+    expectation of ``mean(p_rest) h(kept)`` is that of ``p_rest h`` under the
+    conditional Gaussian, so the kept point is properly weighted for the joint
+    target at any ``n_constants`` and the mean weight is still the evidence. The
+    draws cost no further Kepler solve.
+
     Returns ``(theta, log_w)`` with ``log_w`` the log marginal likelihood of the
-    constants plus ``log p_rest`` (the physical density over the reference
-    Gaussian); the caller subtracts the log proposal density of ``u``.
+    constants plus the log mean ``p_rest``; the caller subtracts the log
+    proposal density of ``u``.
     """
     weights = records.is_valid.astype(float)
 
     def one(args):
-        ui, zi = args
+        ui, ki = args
+        k_draw, k_keep = jax.random.split(ki)
         theta = jnp.concatenate([ui, jnp.zeros(4)])
         mean, chol, log_marginal, _, _ = _linear_gaussian(
             target, theta, records, weights
         )
-        c = mean + jax.scipy.linalg.solve_triangular(chol.T, zi, lower=False)
-        theta = theta.at[3:].set(c)
-        lw = log_marginal + _rest_log_prior(target, theta)
-        return theta, jnp.where(jnp.isfinite(lw), lw, -jnp.inf)
+        z = jax.random.normal(k_draw, (n_constants, 4))
+        c = mean + jax.scipy.linalg.solve_triangular(chol.T, z.T, lower=False).T
+        thetas = jnp.concatenate([jnp.broadcast_to(ui, (n_constants, 3)), c], axis=1)
+        rest = jax.vmap(lambda th: _rest_log_prior(target, th))(thetas)
+        rest = jnp.where(jnp.isfinite(rest), rest, -jnp.inf)
+        keep = jnp.argmax(rest + jax.random.gumbel(k_keep, (n_constants,)))
+        lw = log_marginal + logsumexp(rest) - jnp.log(n_constants)
+        return thetas[keep], jnp.where(jnp.isfinite(lw), lw, -jnp.inf)
 
-    return jax.lax.map(one, (u, z), batch_size=min(_MAP_BATCH, u.shape[0]))
+    keys = jax.random.split(key, u.shape[0])
+    return jax.lax.map(one, (u, keys), batch_size=min(_MAP_BATCH, u.shape[0]))
 
 
 def _evidence_constant(target, records):
@@ -401,6 +416,7 @@ def collapsed_refit(
     n_last=None,
     n_centers=256,
     defensive=0.1,
+    n_constants=8,
     ess_floor=400.0,
 ):
     """Collapsed importance refit with adaptive rounds (any number of records).
@@ -423,6 +439,10 @@ def collapsed_refit(
             Kish size is linear in it for a fixed proposal.
         n_centers: Kernels of the adaptive proposal (static).
         defensive: Fraction of an adaptive round drawn from the prior box.
+        n_constants: Sets of constants drawn at each proposal (static). More
+            than one integrates part of the mass window and of the physical
+            density over the constants, the main loss of size where the
+            records span more than about one period.
         ess_floor: Kish size under which the status is ``LOW_ESS``.
 
     Returns:
@@ -446,8 +466,9 @@ def collapsed_refit(
             u, log_q = _propose(
                 keys[3 * r + 1], centers, chol, lo, hi, sizes[r], defensive
             )
-        z = jax.random.normal(keys[3 * r + 2], (sizes[r], 4))
-        theta, log_marginal = _collapsed_weights(target, records, u, z)
+        theta, log_marginal = _collapsed_weights(
+            target, records, u, keys[3 * r + 2], n_constants
+        )
         log_w = jnp.where(jnp.isfinite(log_marginal), log_marginal - log_q, -jnp.inf)
     ess = _kish(log_w)
     log_evidence = (
@@ -618,6 +639,7 @@ def importance_refit(
     n_last=None,
     n_centers=256,
     defensive=0.1,
+    n_constants=8,
     ess_floor=400.0,
 ):
     """Stateless importance refit of an orbit from its record buffer.
@@ -638,6 +660,7 @@ def importance_refit(
         n_last: Proposals of the last collapsed round; default ``n_round``.
         n_centers: Kernels of the adaptive proposal.
         defensive: Prior fraction of an adaptive round.
+        n_constants: Sets of constants drawn at each collapsed proposal.
         ess_floor: Kish size under which the status is ``LOW_ESS``.
 
     Returns:
@@ -669,6 +692,7 @@ def importance_refit(
             n_last=n_last,
             n_centers=n_centers,
             defensive=defensive,
+            n_constants=n_constants,
             ess_floor=ess_floor,
         )
 
