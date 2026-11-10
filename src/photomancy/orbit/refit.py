@@ -429,6 +429,11 @@ def collapsed_refit(
         A :class:`RefitCloud`.
     """
     n_last = n_round if n_last is None else n_last
+    for n in (n_round, n_last):
+        if n > _DENSITY_BATCH and n % _DENSITY_BATCH:
+            raise ValueError(
+                f"proposals per round ({n}) must be a multiple of {_DENSITY_BATCH}"
+            )
     sizes = [n_round] * (n_rounds - 1) + [n_last]
     lo, hi = _prior_box(target)
     keys = jax.random.split(key, 3 * n_rounds + 1)
@@ -636,7 +641,8 @@ def importance_refit(
         ess_floor: Kish size under which the status is ``LOW_ESS``.
 
     Returns:
-        A :class:`RefitCloud`; status ``NO_SUPPORT`` when no record is valid.
+        A :class:`RefitCloud`; with no valid record the status is ``NO_SUPPORT``
+        and the elements are NaN.
     """
     if report is not None:
         raise NotImplementedError("the report term is not implemented")
@@ -670,10 +676,14 @@ def importance_refit(
         cloud = jax.lax.cond(n_valid >= 2, many, one, 0)
     else:
         cloud = many(0) if int(n_valid) >= 2 else one(0)
+    supported = n_valid > 0
+    cloud = eqx.tree_at(
+        lambda c: c.elements, cloud, jnp.where(supported, cloud.elements, jnp.nan)
+    )
     return eqx.tree_at(
         lambda c: c.status,
         cloud,
-        jnp.where(n_valid > 0, cloud.status, int(UpdaterStatus.NO_SUPPORT)).astype(
+        jnp.where(supported, cloud.status, int(UpdaterStatus.NO_SUPPORT)).astype(
             jnp.int32
         ),
     )

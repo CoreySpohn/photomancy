@@ -30,8 +30,14 @@ import numpy as np
 from hwoutils.constants import G, Msun2kg, mas2arcsec, two_pi
 
 from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.few_epoch import MU_SUN
 from photomancy.orbit.forward import predict_relative_astrometry
-from photomancy.orbit.refit import physical_prior_target, scale_rotate_draw
+from photomancy.orbit.refit import (
+    ECC_ALPHA,
+    ECC_BETA,
+    physical_prior_target,
+    scale_rotate_draw,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -45,6 +51,7 @@ TRUTH = (1.0, 0.1, 0.35, 1.0, 2.0, 1.0)
 CAPACITY = 5
 N_BINS = 8
 CHUNK = 2**20
+BRUTE_CHUNK = 2**17
 MAX_CHUNKS = 200
 PATH = Path(__file__).parents[1] / "tests" / "data" / "refit_golden.json"
 
@@ -165,6 +172,69 @@ def reference(k, min_kish, seed=0):
     }
 
 
+def brute_force_reference(k, n_chunks=64, seed=1):
+    """Independent check of the reference: plain importance sampling from the prior.
+
+    Orbits are drawn in physical coordinates from the declared prior (``e`` Beta
+    truncated, ``ln P`` and the periastron phase uniform, the mass log-uniform
+    in its window, ``cos i``, ``omega`` and the node uniform) and weighted by
+    the record likelihood alone, through the forward model and none of the
+    scale-and-rotate machinery. It needs about 1e3 draws per effective sample, so
+    it serves one record only.
+    """
+    tg, buf = target(), fixture(k)
+    m = tg.model
+    edges = np.linspace(float(m.lnP_lo), float(m.lnP_hi), N_BINS + 1)
+    future = jnp.asarray([FUTURE_D])
+    times = buf.times[:k]
+    data = jnp.stack([buf.ra[:k], buf.dec[:k]])
+    sig = jnp.stack([buf.ra_err[:k], buf.dec_err[:k]])
+    vis = np.zeros(1)
+    bins = np.zeros(N_BINS)
+    s0 = s1 = 0.0
+    n_done = 0
+    for chunk in range(n_chunks):
+        ks = jax.random.split(jax.random.fold_in(jax.random.key(seed), chunk), 7)
+        n = BRUTE_CHUNK
+        e = jax.random.beta(ks[0], ECC_ALPHA, ECC_BETA, (n,))
+        ln_p = jax.random.uniform(ks[1], (n,), minval=m.lnP_lo, maxval=m.lnP_hi)
+        tau = jax.random.uniform(ks[2], (n,))
+        cos_i = jax.random.uniform(ks[3], (n,), minval=-1.0, maxval=1.0)
+        omega = jax.random.uniform(ks[4], (n,), maxval=two_pi)
+        node = jax.random.uniform(ks[5], (n,), maxval=two_pi)
+        ln_mu = jax.random.uniform(
+            ks[6], (n,), minval=jnp.log(m.mu_lo), maxval=jnp.log(m.mu_hi)
+        )
+        elements = jnp.stack(
+            [ln_p, e, cos_i, node, omega, tau, ln_mu - jnp.log(MU_SUN), 0 * e], axis=1
+        )
+        xy = positions(elements, times)
+        resid = (xy - data[None]) / sig[None]
+        log_w = -0.5 * jnp.sum(resid**2, axis=(1, 2))
+        log_w = jnp.where(e < m.e_max, log_w, -jnp.inf)
+        w = np.exp(np.asarray(log_w))
+        xy_f = np.asarray(positions(elements, future))[:, :, 0]
+        ln_p_np = np.asarray(ln_p)
+        vis += np.array([w @ (np.hypot(xy_f[:, 0], xy_f[:, 1]) > IWA_ARCSEC)])
+        bins += w @ np.stack(
+            [(ln_p_np >= lo) & (ln_p_np < hi) for lo, hi in itertools.pairwise(edges)],
+            1,
+        )
+        s0 += w.sum()
+        s1 += float(w @ w)
+        n_done += n
+    kish = s0**2 / s1
+    p_vis = float(vis[0] / s0)
+    return {
+        "k": k,
+        "proposals": n_done,
+        "kish": float(kish),
+        "p_visible": p_vis,
+        "p_visible_se": float(np.sqrt(p_vis * (1 - p_vis) / kish)),
+        "bin_masses": (bins / s0).tolist(),
+    }
+
+
 def records_json(k):
     """The fixture buffer as plain lists."""
     buf = fixture(k)
@@ -191,6 +261,8 @@ def main(min_kish=40_000.0):
     for k in (1, 2, 3):
         out["reference"][str(k)] = reference(k, min_kish)
         print(k, out["reference"][str(k)], flush=True)
+    out["independent"] = {"1": brute_force_reference(1)}
+    print("independent", out["independent"], flush=True)
     PATH.parent.mkdir(exist_ok=True)
     PATH.write_text(json.dumps(out, indent=1))
     print("wrote", PATH)
