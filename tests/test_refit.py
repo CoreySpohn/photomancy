@@ -26,6 +26,7 @@ from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.refit import (  # noqa: E402
     ECC_ALPHA,
     ECC_BETA,
+    ReportData,
     _systematic_indices,
     collapsed_refit,
     importance_refit,
@@ -100,7 +101,7 @@ def test_the_mass_window_is_a_declared_width():
 
 
 def test_a_refit_without_records_has_no_support():
-    """No valid record is `NO_SUPPORT`; a report term is refused until it exists."""
+    """No valid record is `NO_SUPPORT`; a report does not change that."""
     target = physical_prior_target(1.0, DIST_PC)
     records = RelativeAstromData.zeros(3)
     cloud = importance_refit(
@@ -108,10 +109,15 @@ def test_a_refit_without_records_has_no_support():
     )
     assert int(cloud.status) == int(UpdaterStatus.NO_SUPPORT)
     assert bool(jnp.all(jnp.isnan(cloud.elements)))
-    with pytest.raises(NotImplementedError):
-        importance_refit(
-            target, records, object(), jax.random.key(0), n_particles=8, n_round=2**8
-        )
+    with_report = importance_refit(
+        target,
+        records,
+        ReportData.zeros(3, 4),
+        jax.random.key(0),
+        n_particles=8,
+        n_round=2**8,
+    )
+    assert int(with_report.status) == int(UpdaterStatus.NO_SUPPORT)
 
 
 def test_proposals_above_the_density_block_must_divide_into_blocks():
