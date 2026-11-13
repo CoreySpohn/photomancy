@@ -117,7 +117,7 @@ def test_k16_fit_recovers_orientation(k16):
     orbit = orbits_from_samples(samples, k16["Ms"])
     positions = orbit.position_arcsec(
         trig_solver=markley_solve_trig,
-        t_jd=jnp.asarray(times),
+        time_jd=jnp.asarray(times),
         Ms_kg=k16["Ms"],
         dist_pc=k16["dist_pc"],
     )
@@ -144,7 +144,7 @@ def test_relative_astrometry_east_north(k16, oracle):
         expected = np.asarray(
             orbit.position_arcsec(
                 trig_solver=markley_solve_trig,
-                t_jd=times,
+                time_jd=times,
                 Ms_kg=k16["Ms"],
                 dist_pc=k16["dist_pc"],
             )
@@ -172,7 +172,7 @@ def test_raw_rows_and_forward_match_classical_ti(k16, cos_i):
         Ms_kg=p["Ms"],
     )
     rows, beta, radius = orbit.propagate(
-        trig_solver=markley_solve_trig, t_jd=times, Ms_kg=p["Ms"]
+        trig_solver=markley_solve_trig, time_jd=times, Ms_kg=p["Ms"]
     )
     np.testing.assert_allclose(rows[0], expected, atol=1e-9, rtol=0)
     np.testing.assert_allclose(
