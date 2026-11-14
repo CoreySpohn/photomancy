@@ -182,7 +182,9 @@ class FitStage(eqx.Module):
         n_steps: Number of optimizer steps in the stage (the most, with early stopping).
         free: Names of the groups the stage optimizes, a tuple of strings.
         logdensity: Log-density for this stage, replacing the one given to
-            :func:`map_fit` (for example a view over one exposure). ``None`` keeps it.
+            :func:`map_fit` (for example a view over one exposure). Before the first
+            ``prepare``, this override applies only to this stage. After it, the
+            replacement persists in later stages. ``None`` keeps the current density.
         objective_scale: The stage minimizes ``-objective_scale * log_density``; the
             loss trace records that scaled objective. It is an array at run time, so
             changing it does not recompile.
@@ -204,6 +206,11 @@ class FitStage(eqx.Module):
             advance. It excludes ``closed_form`` (an update outside the solver would
             invalidate its curvature pairs) and ``transforms``.
         name: Label carried into the trace.
+        prepare: ``params -> logdensity`` called once on the host when the stage
+            starts, even with zero steps. It receives independent host copies of
+            the current parameters, with the structure of ``init``. The returned
+            density is used for this and later stages until another stage supplies
+            ``prepare`` or ``logdensity``. Excludes ``logdensity`` on the same stage.
     """
 
     n_steps: int
@@ -215,6 +222,7 @@ class FitStage(eqx.Module):
     early_stopping: EarlyStopping | None = None
     solver: Any = None
     name: str = ""
+    prepare: Callable | None = None
 
     def __check_init__(self):
         """Validate the step count and the free-group names."""
@@ -232,6 +240,8 @@ class FitStage(eqx.Module):
             raise ValueError("a solver stage takes no closed_form and no transforms")
         if self.solver is not None and not self.free:
             raise ValueError("a solver stage must free at least one group")
+        if self.prepare is not None and self.logdensity is not None:
+            raise ValueError("a stage takes either prepare or logdensity, not both")
 
 
 class StageTrace(eqx.Module):
@@ -335,6 +345,12 @@ def map_fit(
     the result holds fresh buffers. There is no randomness, and on CPU a repeated run
     is bitwise identical.
 
+    A stage's ``prepare`` hook runs on the host with independent copies of the
+    current parameters before any step in that stage. Its returned log density
+    persists until another stage supplies ``prepare`` or ``logdensity``. Before the
+    first hook, explicit stage densities remain local to their stage, preserving
+    fits without hooks. Hooks do not reset optimizer states.
+
     Compilation: one ``filter_jit`` step per distinct stage configuration (the set of
     free groups, the transform table and the closed form, or the solver object of a
     solver stage, compared by identity: reuse one solver object across stages that
@@ -342,6 +358,9 @@ def map_fit(
     optimizer states and trace buffers donated. Stage length and objective scale are
     runtime values, so stages that repeat a configuration do not recompile. A stage
     whose ``logdensity`` has a different PyTree structure compiles its own program.
+    Densities returned by ``prepare`` reuse the same step when their static values,
+    PyTree structure, array shapes and dtypes match; changing array values does not
+    recompile.
 
     Args:
         logdensity: A callable ``params -> scalar``, or an object with
@@ -568,7 +587,16 @@ def map_fit(
     table = transforms
     states = init_states(table, dyn)
     offset, records = 0, []
+    prepared = False
+    density = logdensity
     for stage in stages:
+        if stage.prepare is not None:
+            density = stage.prepare(_host_copy(rebuild(dyn)))
+            prepared = True
+        elif stage.logdensity is not None:
+            density = stage.logdensity
+        elif not prepared:
+            density = logdensity
         if stage.transforms is not None:
             table = stage.transforms
             states = init_states(table, dyn)
@@ -585,7 +613,7 @@ def map_fit(
         else:
             step = get_step(table, tuple(stage.free), stage.closed_form)
         static_args = (
-            logdensity if stage.logdensity is None else stage.logdensity,
+            density,
             jnp.asarray(stage.objective_scale, dtype),
         )
         count = jnp.asarray(offset, jnp.int32)

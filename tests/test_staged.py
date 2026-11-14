@@ -420,6 +420,7 @@ def test_callbacks_metrics_scale_and_stage_logdensity():
             objective_scale=0.5,
             name="second",
         ),
+        FitStage(1, ("x",), objective_scale=0.5, name="third"),
     ]
     result = map_fit(
         _PreStepAux(jnp.asarray([2.0, 2.0])),
@@ -431,13 +432,14 @@ def test_callbacks_metrics_scale_and_stage_logdensity():
         callback=seen.append,
         callback_every=2,
     )
-    np.testing.assert_array_equal(result.params.x, [4.0, 4.0])
-    first, second = result.stages
+    np.testing.assert_array_equal(result.params.x, [2.0, 2.0])
+    first, second, third = result.stages
     # First stage: x = (8, -4) lands on 2 in one step (lr * scale = 1), then stays.
     np.testing.assert_array_equal(first.metrics["x0"], [8.0, 2.0])
     np.testing.assert_array_equal(first.loss, [0.5 * 0.5 * (36 + 36), 0.0])
     np.testing.assert_array_equal(second.metrics["x0"], [2.0, 4.0])
-    assert [r.step for r in seen] == [0, 2]
+    np.testing.assert_array_equal(third.loss, [2.0])
+    assert [r.step for r in seen] == [0, 2, 4]
     assert all(isinstance(r.params.x, np.ndarray) for r in seen)
     np.testing.assert_array_equal(seen[0].params.x, [8.0, -4.0])
     np.testing.assert_array_equal(seen[1].params.x, [2.0, 2.0])
@@ -455,6 +457,67 @@ def test_callbacks_metrics_scale_and_stage_logdensity():
         callback_every={1, 3}.__contains__,
     )
     assert [r.step for r in predicate] == [1, 3]
+
+
+@pytest.mark.parametrize("solver_stage", [False, True])
+def test_prepare_uses_current_host_parameters_and_reuses_the_step(
+    monkeypatch, solver_stage
+):
+    """Fails if preparation sees stale/donated values, loses its density, or retraces.
+
+    Each SGD step halves the distance to the target. Two preparations move that
+    target by two from the current x; an explicit density then replaces it.
+    Both group and joint solver stages must preserve these exact binary values.
+    """
+    init = _q_init()
+    seen, traces, callbacks = [], [], []
+    original = _PreStepAux.__call__
+
+    def counted(self, params):
+        traces.append(1)
+        return original(self, params)
+
+    monkeypatch.setattr(_PreStepAux, "__call__", counted)
+
+    def prepare(params):
+        assert jax.tree.structure(params) == jax.tree.structure(init)
+        assert all(isinstance(x, np.ndarray) for x in jax.tree.leaves(params))
+        seen.append(params)
+        # Host edits must not change the live parameters, including frozen leaves.
+        params.y[:] = 123.0
+        return _PreStepAux(params.x + 2.0)
+
+    tx = {"x": optax.sgd(0.5)}
+    solver = optax.with_extra_args_support(tx["x"]) if solver_stage else None
+    zero = _PreStepAux(jnp.zeros(2))
+    stages = [
+        FitStage(1, ("x",), solver=solver),
+        FitStage(1, ("x",), solver=solver, prepare=prepare),
+        FitStage(1, ("x",), solver=solver),
+        FitStage(1, ("x",), solver=solver, prepare=prepare),
+        FitStage(1, ("x",), solver=solver, logdensity=zero),
+        FitStage(1, ("x",), solver=solver),
+    ]
+    result = map_fit(
+        zero,
+        init,
+        group_labels(init, _Q_GROUPS),
+        tx,
+        stages,
+        callback=callbacks.append,
+        metrics={"x0": lambda p, aux: aux[0]},
+    )
+    assert len(traces) == 1
+    np.testing.assert_array_equal(seen[0].x, [4.0, -2.0])
+    np.testing.assert_array_equal(seen[1].x, [5.5, -0.5])
+    np.testing.assert_array_equal(result.params.x, [1.625, 0.125])
+    np.testing.assert_array_equal(result.params.y, init.y)
+    np.testing.assert_array_equal(
+        [record.params.x[0] for record in callbacks], [8, 4, 5, 5.5, 6.5, 3.25]
+    )
+    np.testing.assert_array_equal(
+        [stage.loss[0] for stage in result.stages], [40, 4, 1, 4, 21.25, 5.3125]
+    )
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
@@ -691,7 +754,11 @@ def test_solver_stage_leaves_other_groups_and_their_transform_states_untouched()
 
 
 def test_solver_stage_rejects_a_closed_form_transforms_or_an_unknown_group():
-    """A solver stage refuses a closed form, its own transforms, and unknown groups."""
+    """Fails if incompatible stage options or unknown groups are silently accepted."""
+    with pytest.raises(ValueError, match="either prepare or logdensity"):
+        FitStage(
+            1, ("a",), logdensity=_toy_logdensity, prepare=lambda p: _toy_logdensity
+        )
     with pytest.raises(ValueError, match="no closed_form"):
         FitStage(1, ("a",), closed_form=lambda p, aux: p, solver=optax.lbfgs())
     with pytest.raises(ValueError, match="no closed_form"):
