@@ -13,9 +13,12 @@ from scipy import integrate, stats
 
 from photomancy.core import build_gaussian_fit
 from photomancy.likelihoods import (
+    LowRankGaussianLogLikelihood,
     gaussian_loglike,
     huber_loglike,
     laplace_loglike,
+    low_rank_gaussian_loglike,
+    residual_basis,
     student_t_loglike,
 )
 
@@ -136,7 +139,7 @@ def test_huber_density_integrates_to_one(delta):
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-@pytest.mark.parametrize("name", list(BUILDERS))
+@pytest.mark.parametrize("name", [*BUILDERS, "low_rank"])
 def test_masked_elements_are_inert_even_when_nan(name):
     """NaN data, sigma and predicted at masked elements leave value and gradient finite.
 
@@ -147,13 +150,22 @@ def test_masked_elements_are_inert_even_when_nan(name):
     normalization counts masked elements.
     """
     data, sigma, predicted, mask = _problem()
-    build = BUILDERS[name]
-    clean = build(data[mask], sigma[mask])(predicted[mask])
-
     bad_data = np.where(mask, data, np.nan)
     bad_sigma = np.where(mask, sigma, np.nan)
     bad_pred = jnp.asarray(np.where(mask, predicted, np.nan))
-    like = build(bad_data, bad_sigma, mask)
+    if name == "low_rank":
+        basis = np.random.default_rng(0).normal(size=(data.size, 2))
+        clean = low_rank_gaussian_loglike(data[mask], sigma[mask], basis[mask.ravel()])(
+            predicted[mask]
+        )
+        basis[~mask.ravel()] = np.nan
+        like = low_rank_gaussian_loglike(bad_data, bad_sigma, basis, mask)
+        np.testing.assert_array_equal(like.solve(bad_pred)[~mask], 0)
+        np.testing.assert_array_equal(like.posterior_term(bad_pred)[~mask], 0)
+    else:
+        build = BUILDERS[name]
+        clean = build(data[mask], sigma[mask])(predicted[mask])
+        like = build(bad_data, bad_sigma, mask)
     value, grad = jax.value_and_grad(like)(bad_pred)
     np.testing.assert_allclose(value, clean, rtol=1e-14, atol=0.0)
     assert np.all(np.isfinite(np.asarray(grad)))
@@ -164,7 +176,7 @@ def test_masked_elements_are_inert_even_when_nan(name):
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
-@pytest.mark.parametrize("name", list(BUILDERS))
+@pytest.mark.parametrize("name", [*BUILDERS, "low_rank"])
 def test_jit_equals_eager(name):
     """filter_jit of the Module likelihood equals the eager value.
 
@@ -173,14 +185,28 @@ def test_jit_equals_eager(name):
     data or normalization).
     """
     data, sigma, predicted, mask = _problem()
-    like = BUILDERS[name](data, sigma, mask)
+    if name == "low_rank":
+        basis = np.random.default_rng(0).normal(size=(data.size, 2))
+        like = low_rank_gaussian_loglike(data, sigma, basis, mask)
+    else:
+        like = BUILDERS[name](data, sigma, mask)
     eager = like(predicted)
-    jitted = eqx.filter_jit(lambda lk, p: lk(p))(like, jnp.asarray(predicted))
+    evaluate = eqx.filter_jit(lambda lk, p: lk(p))
+    jitted = evaluate(like, jnp.asarray(predicted))
     np.testing.assert_array_max_ulp(np.asarray(eager), np.asarray(jitted), maxulp=4)
+    if name == "low_rank":
+        changed = low_rank_gaussian_loglike(data + 1, sigma * 2, basis * 3, ~mask)
+        np.testing.assert_array_max_ulp(
+            np.asarray(changed(predicted)),
+            np.asarray(evaluate(changed, jnp.asarray(predicted))),
+            maxulp=4,
+        )
+        assert all(eqx.is_array(leaf) for leaf in jax.tree.leaves(like))
+        assert not jax.make_jaxpr(lambda lk, p: lk(p))(like, predicted).consts
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
-@pytest.mark.parametrize("name", list(BUILDERS))
+@pytest.mark.parametrize("name", [*BUILDERS, "low_rank"])
 def test_gradients_match_finite_differences(name):
     """Forward and reverse derivatives to order 2 agree with finite differences.
 
@@ -192,7 +218,29 @@ def test_gradients_match_finite_differences(name):
     data = np.array([0.0, 0.0, 0.0, 0.0])
     sigma = np.array([1.0, 1.0, 1.5, 0.8])
     predicted = jnp.asarray([0.4, -0.7, 3.0, -4.0])
-    like = BUILDERS[name](data, sigma)
+    if name == "low_rank":
+        basis = np.random.default_rng(0).normal(size=(data.size, 2))
+        like = low_rank_gaussian_loglike(data, sigma, basis)
+        check_grads(
+            like.solve,
+            (predicted,),
+            order=2,
+            modes=("fwd", "rev"),
+            eps=1e-4,
+            atol=1e-4,
+            rtol=1e-4,
+        )
+        check_grads(
+            like.posterior_term,
+            (predicted,),
+            order=2,
+            modes=("fwd", "rev"),
+            eps=1e-4,
+            atol=1e-4,
+            rtol=1e-4,
+        )
+    else:
+        like = BUILDERS[name](data, sigma)
     with jax.enable_x64():
         check_grads(
             like,
@@ -214,6 +262,132 @@ def test_shape_parameters_must_be_positive(name):
     key = "delta" if name == "huber" else "nu"
     with pytest.raises(ValueError, match=key):
         BUILDERS[name](np.zeros(2), 1.0, **{key: 0.0})
+
+
+def test_low_rank_dense_density_and_conditional_mean():
+    """Fails if the determinant, inverse covariance, or conditional mean is wrong."""
+    data, sigma, predicted, mask = (v[:2] for v in _problem())
+    basis = np.random.default_rng(0).normal(size=(data.size, 3))
+    like = LowRankGaussianLogLikelihood(data, sigma, basis, mask)
+    used_basis = basis[mask.ravel()]
+    cov = np.diag(sigma[mask] ** 2) + used_basis @ used_basis.T
+    expected = stats.multivariate_normal.logpdf(
+        data[mask], mean=predicted[mask], cov=cov
+    )
+    np.testing.assert_allclose(like(predicted), expected, rtol=1e-10)
+    solved = np.linalg.solve(cov, data[mask] - predicted[mask])
+    np.testing.assert_allclose(like.solve(data - predicted)[mask], solved, rtol=1e-10)
+    np.testing.assert_allclose(
+        like.posterior_term(predicted)[mask],
+        used_basis @ used_basis.T @ solved,
+        rtol=1e-10,
+    )
+
+
+def test_low_rank_zero_is_diagonal_gaussian():
+    """Fails if rank zero changes the Gaussian density, precision, or residual mean."""
+    data, sigma, predicted, mask = (v[:2] for v in _problem())
+    data, sigma, predicted = (
+        np.where(mask, v, np.nan) for v in (data, sigma, predicted)
+    )
+    like = low_rank_gaussian_loglike(data, sigma, np.zeros((data.size, 0)), mask)
+    assert like(predicted) == gaussian_loglike(data, sigma, mask)(predicted)
+    np.testing.assert_array_equal(like.posterior_term(predicted), np.zeros(data.shape))
+    np.testing.assert_allclose(
+        like.solve(predicted), np.where(mask, predicted / sigma**2, 0), rtol=1e-14
+    )
+
+
+@pytest.mark.parametrize(
+    ("data", "basis"),
+    [([2e4, 0], [[1e4], [0]]), ([0, 0], [[1e4, 1e4], [0, 0]])],
+)
+def test_low_rank_float32_large_aligned_residual(data, basis):
+    """Fails if float32 factorization loses the prior or the quadratic cancels.
+
+    The two identical large modes make the float32 Gram matrix singular without
+    host double precision. An aligned residual makes subtractive Woodbury lose
+    the order-one quadratic. The covariance here is diagonal, giving an oracle.
+    """
+    data = np.array(data, dtype=np.float32)
+    basis = np.array(basis, dtype=np.float32)
+    sigma = np.ones(2, dtype=np.float32)
+    with jax.enable_x64(False):
+        like = low_rank_gaussian_loglike(data, sigma, basis)
+        value = like(np.zeros_like(data))
+    variance = 1 + np.sum(basis.astype(float) ** 2, axis=1)
+    expected = stats.norm.logpdf(data, scale=np.sqrt(variance)).sum()
+    np.testing.assert_allclose(value, expected, rtol=1e-6)
+
+
+def test_low_rank_amplitude_statistics():
+    """Fails if nuisance covariance cannot remove a confounded amplitude bias.
+
+    Two images have different noise and templates but share one amplitude. This
+    is a fixed injection, not a Monte Carlo coverage test.
+    """
+    rng = np.random.default_rng(0)
+    q, _ = np.linalg.qr(rng.normal(size=(40, 3)))
+    basis = 100 * q[:, :2]
+    templates = (q[:, 0] + q[:, 2], q[:, 0] + 0.8 * q[:, 2])
+    truth = 3.0
+    sigmas = (0.05, 0.08)
+    residuals = tuple(
+        truth * p + 4 * q[:, 0] - 2 * q[:, 1] + rng.normal(size=40) * sigma
+        for p, sigma in zip(templates, sigmas, strict=True)
+    )
+    for rank in (2, 0):
+        numerator, precision = 0.0, 0.0
+        for template, residual, sigma in zip(templates, residuals, sigmas, strict=True):
+            like = low_rank_gaussian_loglike(residual, sigma, basis[:, :rank])
+            numerator += template @ like.solve(residual)
+            precision += template @ like.solve(template)
+        amplitude, error = numerator / precision, 1 / jnp.sqrt(precision)
+        if rank:
+            assert abs(amplitude - truth) < error
+        else:
+            assert abs(amplitude - truth) > 10 * error
+
+
+def test_residual_basis_uncentered_scaling_and_mask():
+    """Fails if SVD is centered, scaled by the wrong count, truncated, or unmasked."""
+    residuals = np.array([[[1.0, 2.0], [4.0, np.nan]], [[3.0, 4.0], [7.0, np.nan]]])
+    mask = np.array([[True, True], [True, False]])
+    matrix = residuals[:, mask].T
+    left, singular, _ = np.linalg.svd(matrix, full_matrices=False)
+    for rank in (0, 1, 2):
+        basis, values = residual_basis(residuals, rank, mask)
+        np.testing.assert_allclose(values, singular, rtol=1e-12)
+        expected = left[:, :rank] * singular[:rank] / np.sqrt(2)
+        # Column signs are arbitrary; each retained mode must keep its own scale.
+        np.testing.assert_allclose(abs(basis[mask.ravel()]), abs(expected), rtol=1e-12)
+        np.testing.assert_array_equal(basis[~mask.ravel()], np.zeros((1, rank)))
+        if rank == 2:
+            np.testing.assert_allclose(
+                basis[mask.ravel()] @ basis[mask.ravel()].T,
+                matrix @ matrix.T / 2,
+                rtol=1e-12,
+            )
+    unmasked, values = residual_basis(residuals[:, mask], 2)
+    np.testing.assert_allclose(unmasked @ unmasked.T, matrix @ matrix.T / 2, rtol=1e-12)
+    np.testing.assert_allclose(values, singular, rtol=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("residuals", "rank", "mask", "message"),
+    [
+        (np.ones((2, 3)), -1, None, "between zero and n"),
+        (np.ones((2, 3)), 3, None, "between zero and n"),
+        (np.ones((2, 3)), 2, [True, False, False], "used pixels"),
+        (np.array([[1.0, np.nan]]), 0, None, "finite on the mask"),
+        (np.array([[1.0, np.inf]]), 1, None, "finite on the mask"),
+        (np.empty((0, 3)), 0, None, "at least one"),
+    ],
+)
+def test_residual_basis_rejects_invalid_inputs(residuals, rank, mask, message):
+    """Fails if invalid ranks or non-finite used residuals produce a silent basis."""
+    with pytest.raises(ValueError, match=message):
+        residual_basis(residuals, rank, mask)
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")

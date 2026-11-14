@@ -97,6 +97,15 @@ four `sigma` is the scale of the standardized residual, as in `scipy.stats`, whi
 Laplace and Student-t is not the standard deviation. Masked elements contribute exactly
 zero to the value and the gradient, even where the data or `sigma` are NaN there.
 
+For correlated residuals, {py:func}`~photomancy.likelihoods.low_rank_gaussian_loglike`
+builds a {py:class}`~photomancy.likelihoods.LowRankGaussianLogLikelihood` with covariance
+`diag(sigma**2) + basis @ basis.T`. The basis is shared between images; unit Gaussian
+coefficients are marginalized independently for each image. Its `solve` method applies
+the masked inverse covariance, and `posterior_term` returns the conditional mean of
+the low-rank residual. {py:func}`~photomancy.likelihoods.residual_basis` constructs an
+uncentered basis from a stack of already-normalized residual images. Both preparation
+steps run outside JAX tracing; the resulting likelihood supports JIT and derivatives.
+
 {py:obj}`~photomancy.core.model.build_gaussian_fit` takes a builder through `likelihood=`
 and the mask through `mask=`; `functools.partial` sets a shape parameter. Without them it
 keeps its Gaussian.
