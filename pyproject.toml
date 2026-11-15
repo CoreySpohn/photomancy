@@ -35,7 +35,7 @@ dependencies = [
     # pathfinder needs (0.2.4 fails with "cond branches must have equal output types").
     "optax>=0.2.5",
     # >=3.0.0: raw positions and velocities use (east, north, away).
-    "orbix>=3.0.0",
+    "orbix>=4.0.0",
     # >=2.1.0: scene states and the disk chart use the same (east, north) sky
     # chart as orbix 3, so an older skyscapes must not install beside photomancy.
     "skyscapes>=2.1.0",
