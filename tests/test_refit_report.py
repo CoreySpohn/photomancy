@@ -20,6 +20,7 @@ import pytest  # noqa: E402
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi  # noqa: E402
 from scipy import stats  # noqa: E402
 
+from photomancy.orbit import refit  # noqa: E402
 from photomancy.orbit.data import NullData, RelativeAstromData  # noqa: E402
 from photomancy.orbit.forward import (  # noqa: E402
     predict_photometry,
@@ -435,6 +436,62 @@ def test_the_report_ladder_refuses_arguments_it_cannot_honor():
             report=rep,
             n_centers=5000,
         )
+
+
+@pytest.mark.parametrize("case, evaluations", [("full", 2), ("low", 2), ("bisect", 26)])
+def test_beta_selection_skips_bisection_when_endpoints_decide(
+    monkeypatch, case, evaluations
+):
+    """Fails if endpoint decisions still score 24 unused bisection powers.
+
+    All three paths must retain the previous selector's exact returned bytes.
+    The runtime callback counts real Kish evaluations, including loop trips.
+    """
+    marginal = jnp.zeros(256)
+    if case == "low":
+        marginal = marginal.at[1:].set(-jnp.inf)
+    lr = jnp.broadcast_to(jnp.linspace(-20.0, 0.0, 256)[:, None], (256, 2))
+    if case == "full":
+        lr = jnp.zeros_like(lr)
+    terms = (marginal, jnp.zeros((256, 2)), lr)
+    log_q, beta_min = jnp.zeros(256), jnp.asarray(0.0)
+    kish = refit._kish
+
+    @eqx.filter_jit
+    def reference(terms, log_q, beta_min):
+        full = kish(refit._tempered(terms, log_q, 1.0))
+        here = kish(refit._tempered(terms, log_q, beta_min))
+        floor = jnp.clip(
+            refit._LADDER_SHRINK * here, refit._LADDER_FLOOR_MIN, refit._LADDER_FLOOR
+        )
+
+        def step(_, bounds):
+            lo, hi = bounds
+            mid = 0.5 * (lo + hi)
+            ok = kish(refit._tempered(terms, log_q, mid)) >= floor
+            return jnp.where(ok, mid, lo), jnp.where(ok, hi, mid)
+
+        lo, _ = jax.lax.fori_loop(0, 24, step, (beta_min, 1.0))
+        return jnp.where(full >= floor, 1.0, jnp.where(here <= floor, beta_min, lo))
+
+    expected = np.asarray(reference(terms, log_q, beta_min))
+    calls = []
+
+    def counted(weights):
+        value = kish(weights)
+        jax.debug.callback(lambda x: calls.append(float(x)), value, ordered=True)
+        return value
+
+    monkeypatch.setattr(refit, "_kish", counted)
+
+    @eqx.filter_jit
+    def select(terms, log_q, beta_min):
+        return refit._pick_beta(terms, log_q, beta_min)
+
+    actual = np.asarray(select(terms, log_q, beta_min))
+    jax.effects_barrier()
+    assert actual.tobytes() == expected.tobytes()
+    assert len(calls) == evaluations
 
 
 # -- refits with the report term -----------------------------------------------------

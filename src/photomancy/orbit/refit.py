@@ -980,8 +980,17 @@ def _pick_beta(terms, log_q, beta_min):
         ok = _kish(_tempered(terms, log_q, mid)) >= floor
         return jnp.where(ok, mid, lo), jnp.where(ok, hi, mid)
 
-    lo, _ = jax.lax.fori_loop(0, _BISECT_STEPS, bisect, (beta_min, 1.0))
-    return jnp.where(full >= floor, 1.0, jnp.where(here <= floor, beta_min, lo))
+    def search():
+        lo, _ = jax.lax.fori_loop(0, _BISECT_STEPS, bisect, (beta_min, 1.0))
+        return lo
+
+    # Endpoint decisions do not need any of the intermediate powers. Keep the
+    # bisection and its arithmetic unchanged for rounds that need a search.
+    return jax.lax.cond(
+        full >= floor,
+        lambda: jnp.asarray(1.0),
+        lambda: jax.lax.cond(here <= floor, lambda: beta_min, search),
+    )
 
 
 def _local_fit(key, u, log_w, lo, hi, n_centers):
