@@ -28,6 +28,19 @@
   refit rather than converted. Pass east offsets (Delta RA cos Dec), not
   Delta RA, as `RelativeAstromData.ra`.
 
+## [0.6.0](https://github.com/CoreySpohn/photomancy/compare/v0.5.0...v0.6.0) (2026-11-15)
+
+
+### Features
+
+* **likelihoods:** Gaussian likelihood with a marginalized low-rank term and its residual basis ([6eb12a1](https://github.com/CoreySpohn/photomancy/commit/6eb12a1c0cfa00391744a09241ced71b53e58d32))
+* **staged:** a stage can rebuild its log density from the current parameters ([683476c](https://github.com/CoreySpohn/photomancy/commit/683476c0917f8632ad250cdab589ebf63a782a91))
+
+
+### Performance Improvements
+
+* **photomancy:** skip unnecessary report-power bisection ([1a779e0](https://github.com/CoreySpohn/photomancy/commit/1a779e08e4cf0028d4b4aed568b2152f961e85c3))
+
 ## [0.5.0](https://github.com/CoreySpohn/photomancy/compare/v0.4.0...v0.5.0) (2026-11-10)
 
 
