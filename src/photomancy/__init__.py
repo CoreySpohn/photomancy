@@ -32,6 +32,8 @@ from photomancy.posterior import (
     SamplePosterior,
 )
 from photomancy.posterior_utils import project_samples, sample_capped
+from photomancy.system_terms import RelativeAstrometryTerm
+from photomancy.terms import AbstractTerm, TermLogDensity
 
 try:
     from photomancy._version import __version__
@@ -42,6 +44,7 @@ __all__ = [
     "AbstractBackend",
     "AbstractLogDensity",
     "AbstractPosterior",
+    "AbstractTerm",
     "GaussianPosterior",
     "LaplaceBackend",
     "LaplaceMixtureBackend",
@@ -52,8 +55,10 @@ __all__ = [
     "PathfinderBackend",
     "PathfinderMixtureBackend",
     "PointPosterior",
+    "RelativeAstrometryTerm",
     "SMCBackend",
     "SamplePosterior",
+    "TermLogDensity",
     "__version__",
     "build_scene_logdensity",
     "project_samples",

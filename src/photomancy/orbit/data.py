@@ -129,6 +129,42 @@ class RelativeAstromData(eqx.Module):
     is_valid: jnp.ndarray
 
     @classmethod
+    def from_sep_pa(
+        cls, *, times, sep, sep_err, pa_deg, pa_err_deg, planet_id=None, max_n=None
+    ):
+        """Convert separation and position angle to east/north astrometry.
+
+        Separation and its error are in arcsec. Position angle and its error
+        are in degrees, east of north. Independent separation and angle errors
+        are propagated to a first-order Cartesian covariance. Inputs have one
+        entry per epoch; ``planet_id`` defaults to zero for every row.
+        ``max_n=None`` keeps all rows valid; otherwise pad to ``max_n``.
+        """
+        times = jnp.asarray(times)
+        sep, sep_err = jnp.asarray(sep), jnp.asarray(sep_err)
+        pa = jnp.deg2rad(jnp.asarray(pa_deg))
+        pa_err = jnp.deg2rad(jnp.asarray(pa_err_deg))
+        sin_pa, cos_pa = jnp.sin(pa), jnp.cos(pa)
+        sep_var, tangential_var = sep_err**2, (sep * pa_err) ** 2
+        ra_err = jnp.sqrt(sin_pa**2 * sep_var + cos_pa**2 * tangential_var)
+        dec_err = jnp.sqrt(cos_pa**2 * sep_var + sin_pa**2 * tangential_var)
+        cov = sin_pa * cos_pa * (sep_var - tangential_var)
+        if planet_id is None:
+            planet_id = jnp.zeros(times.shape, dtype=int)
+        values = dict(
+            times=times,
+            ra=sep * sin_pa,
+            dec=sep * cos_pa,
+            ra_err=ra_err,
+            dec_err=dec_err,
+            corr=cov / (ra_err * dec_err),
+            planet_id=jnp.asarray(planet_id, dtype=int),
+        )
+        if max_n is not None:
+            return cls.pad(**values, max_n=max_n)
+        return cls(**values, is_valid=jnp.ones(times.shape, dtype=bool))
+
+    @classmethod
     def pad(
         cls, *, times, ra, dec, ra_err, dec_err, corr, planet_id, max_n=MAX_REL_ASTROM
     ):
