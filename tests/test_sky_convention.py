@@ -25,6 +25,175 @@ from photomancy.orbit.thiele_innes import thiele_innes_fit
 
 jax.config.update("jax_enable_x64", True)
 
+_FORWARD_TIMES = np.array([-120.0, 0.0, 137.0, 690.0])
+_ECCENTRIC_ELEMENTS = (2.7, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)
+
+
+@pytest.mark.parametrize(
+    "elements, mass_ratio, relative, stellar, anomaly",
+    [
+        pytest.param(
+            (1.3, 0.0, 1.0, 0.3, 1.0, 0.0, 17.0),
+            0.001,
+            [
+                [
+                    -0.099948653732590889,
+                    0.010652383819374982,
+                    0.10321978551077628,
+                    0.10049197648748968,
+                ],
+                [
+                    0.028744853748847676,
+                    0.10345301696405339,
+                    -0.012715183015172887,
+                    -0.026783626745417014,
+                ],
+            ],
+            [
+                [
+                    9.9848804927663229e-05,
+                    -1.0641742077297684e-05,
+                    -0.00010311666884193434,
+                    -0.00010039158490258709,
+                ],
+                [
+                    -2.8716137611236439e-05,
+                    -0.00010334966729675663,
+                    1.2702480534638249e-05,
+                    2.6756869875541474e-05,
+                ],
+            ],
+            [-6.8076138122183554e-08, 5.9287394533732639e-08],
+            id="circular-face-on",
+        ),
+        pytest.param(
+            _ECCENTRIC_ELEMENTS,
+            0.003,
+            [
+                [
+                    0.091789842799087640,
+                    0.0062827931267316825,
+                    -0.14472636179985801,
+                    -0.25165442563755791,
+                ],
+                [
+                    0.061613483320555405,
+                    -0.039842104664956760,
+                    -0.094401615838050415,
+                    -0.013869845333618919,
+                ],
+            ],
+            [
+                [
+                    -0.00027454589072508761,
+                    -1.8792003370084792e-05,
+                    0.00043288044406737187,
+                    0.00075270516142838856,
+                ],
+                [
+                    -0.00018428758720006602,
+                    0.00011916880757215381,
+                    0.00028235777419157647,
+                    4.1485080758581009e-05,
+                ],
+            ],
+            [-1.0836480091115674e-06, -5.4599438127197698e-07],
+            id="eccentric-inclined",
+        ),
+        pytest.param(
+            (4.1, 0.25, 1e-6, 2.2, -0.8, 0.6, 29.0),
+            0.1,
+            [
+                [
+                    -0.076159654905933419,
+                    -0.14543872744042433,
+                    -0.19610128333880375,
+                    -0.075873012087053063,
+                ],
+                [
+                    0.055436000177148295,
+                    0.10586402730342588,
+                    0.14274122119320648,
+                    0.055228045776032686,
+                ],
+            ],
+            [
+                [
+                    0.0069236049914484926,
+                    0.013221702494584030,
+                    0.017827389394436705,
+                    0.0068975465533684605,
+                ],
+                [
+                    -0.0050396363797407546,
+                    -0.0096240024821296257,
+                    -0.012976474653927862,
+                    -0.0050207314341847902,
+                ],
+            ],
+            [-5.9921181833747623e-06, 4.3615644482251724e-06],
+            id="near-edge-on-finite-mass",
+        ),
+    ],
+)
+def test_forward_predictors_keep_their_values(
+    elements, mass_ratio, relative, stellar, anomaly
+):
+    """Pin pre-change outputs generated in x64, stored with 17 significant digits.
+
+    Fails if the relative, stellar or PM-anomaly predictor changes mass, sign,
+    units, epochs or shape. Absolute floors are 1e-14 arcsec (relative),
+    1e-16 arcsec (stellar) and 1e-19 arcsec/day (anomaly); rtol is 1e-11.
+    """
+    params = dict(
+        zip(("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp"), elements, strict=True)
+    )
+    params.update(Ms=Msun2kg, Mp=mass_ratio * Msun2kg, dist_pc=12.5)
+    times = jnp.asarray(_FORWARD_TIMES)
+    actual_relative = predict_relative_astrometry(times, **params)
+    actual_stellar = predict_stellar_astrometry(times, **params)
+    actual_anomaly = predict_pm_anomaly(0.0, 9000.0, 1023.0, 25, **params)
+    for actual, expected, atol in (
+        (actual_relative, relative, 1e-14),
+        (actual_stellar, stellar, 1e-16),
+        (actual_anomaly, anomaly, 1e-19),
+    ):
+        assert np.shape(actual) == np.shape(expected)
+        np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=atol)
+
+
+@pytest.mark.parametrize("cos_i", [0.4, 1.0, -1.0])
+def test_relative_astrometry_element_gradients(cos_i):
+    """Compare independent element derivatives to x64 central differences.
+
+    Fails if any of a, e, cos_i, W, cos_w, sin_w or tp loses its derivative.
+    At exactly face-on inclinations the existing reverse-mode cos_i gradient is NaN;
+    the other six finite derivatives must still match. Steps of 1e-5 times
+    max(1, abs(element)) balance truncation and roundoff (rtol 2e-6, atol 1e-9).
+    """
+    elements = jnp.asarray(_ECCENTRIC_ELEMENTS).at[2].set(cos_i)
+
+    def score(x):
+        ra, dec = predict_relative_astrometry(
+            jnp.asarray(_FORWARD_TIMES),
+            *x,
+            Msun2kg,
+            12.5,
+            Mp=0.003 * Msun2kg,
+        )
+        return jnp.sum(ra + 0.37 * dec)
+
+    indices = np.array([0, 1, 3, 4, 5, 6] if abs(cos_i) == 1 else range(7))
+    steps = 1e-5 * np.maximum(1.0, np.abs(elements))
+    central = []
+    for i in indices:
+        offset = jnp.zeros_like(elements).at[i].set(steps[i])
+        central.append(
+            (score(elements + offset) - score(elements - offset)) / (2 * steps[i])
+        )
+    actual = jax.grad(score)(elements)
+    np.testing.assert_allclose(actual[indices], central, rtol=2e-6, atol=1e-9)
+
 
 @pytest.fixture
 def k16():

@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, d2s
 from numpyro import handlers
@@ -250,6 +251,39 @@ def test_predict_rv_known_mass_matches_exact_two_body_K():
     )[0]
     measured_K = -velocity / (1.0 + eccentricity)
     assert float(measured_K) == pytest.approx(float(expected_K), rel=1e-12, abs=0)
+
+
+def test_predict_rv_matches_orbit_radial_velocity():
+    """Compare minimum-mass RV to the orbit's stellar velocity in m/s.
+
+    Fails if true mass, inclination, sign or units differ between the paths.
+    The x64 tolerance (rtol 1e-12, atol 1e-10 m/s) allows solver and conversion
+    rounding for a finite-mass, eccentric, inclined orbit.
+    """
+    from orbix import KeplerianOrbit
+    from orbix.kepler import markley_solve_trig
+
+    period, e, cos_i, node, cos_w, sin_w, tp = (430.0, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)
+    mass = 0.1 * Msun2kg
+    times = jnp.array([-120.0, 0.0, 137.0, 690.0])
+    orbit = KeplerianOrbit.from_period(
+        period, e, cos_i, node, cos_w, sin_w, tp, Ms_kg=Msun2kg, Mp_kg=mass
+    )
+    expected = orbit.radial_velocity_m_s(
+        trig_solver=markley_solve_trig, time_jd=times, Ms_kg=Msun2kg, Mp_kg=mass
+    )[0]
+    actual = predict_rv(
+        times,
+        period,
+        Msun2kg,
+        mass * jnp.sqrt(1 - cos_i**2),
+        e,
+        cos_w,
+        sin_w,
+        tp,
+        Mp=mass,
+    ) * (AU2m / d2s)
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-10)
 
 
 @pytest.mark.parametrize("n_planets", [1, 2])
