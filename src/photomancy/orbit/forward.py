@@ -1,9 +1,9 @@
 """Forward models for orbit fitting -- pure JAX, no sampler dependency.
 
 Each function takes scalar orbital parameters + a time array and returns
-predicted observable quantities. They call ``orbix.equations`` building blocks
-directly, using the Normal->Disk parameterization ``(cos_w, sin_w)`` to avoid
-all trig calls.
+predicted observable quantities. Orbital kinematics come from
+``orbix.system.FrameOrbit``, using the Normal->Disk parameterization
+``(cos_w, sin_w)``.
 
 All computations use natural units:
 - Distances: AU
@@ -14,12 +14,9 @@ All computations use natural units:
 
 import jax.numpy as jnp
 from hwoutils.constants import G, two_pi
-from orbix.equations.orbit import AB_matrices_reduced, mean_anomaly_tp, mean_motion
 from orbix.equations.phase import lambert_phase_exact
-from orbix.equations.propagation import single_r
-from orbix.kepler.core import diff_solve_trig
 
-two_pi_G = two_pi * G
+from photomancy.orbit._frame import frame_from_tp, plane_from_motion
 
 
 def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp, *, Mp=0.0):
@@ -32,6 +29,10 @@ def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp, *, Mp=0.0):
     available (an RV-only minimum-mass fit), omitting ``Mp`` uses the
     ``Mp << Ms`` approximation. Its fractional overestimate in K is
     ``(2/3)(Mp/Ms) + O((Mp/Ms)^2)``.
+
+    With dimensionless perifocal rates (Xdot, Ydot), the velocity is
+    ``-a * Mp_sini / (Ms + Mp) * (sin_w * Xdot + cos_w * Ydot)``.
+    This minimum-mass expression needs no inclination.
 
     Args:
         times: Observation epochs (days). Shape ``(N,)``.
@@ -49,21 +50,11 @@ def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp, *, Mp=0.0):
         rv_model: Predicted RV (AU/day). Shape ``(N,)``.
             Convert to m/s by multiplying by ``hwoutils.constants.AU2m / d2s``.
     """
-    # Mean motion and mean anomaly
-    n = two_pi / T
-    M = mean_anomaly_tp(times, n, tp)
-
-    # Solve Kepler's equation (differentiable)
-    sinE, cosE = diff_solve_trig(M, e)
-
-    # e-independent base velocity scale: K0 = K * sqrt(1-e^2)
-    # K0 = K * sqrt(1-e^2), with total two-body mass when available.
-    K0 = (two_pi_G / T) ** (1.0 / 3.0) * Mp_sini / (Ms + Mp) ** (2.0 / 3.0)
-
-    # Singularity-free RV: cancellation of sqrt(1-e^2) factors
-    sqrt_1me2 = jnp.sqrt(1.0 - e**2)
-    denom = 1.0 - e * cosE
-    rv_model = -(K0 / denom) * (sqrt_1me2 * cosE * cos_w - sinE * sin_w)
+    mu = G * (Ms + Mp)
+    a = (mu * (T / two_pi) ** 2) ** (1.0 / 3.0)
+    orbit = plane_from_motion(e, tp, two_pi / T)
+    _, rate = orbit.perifocal_coordinates(times)
+    rv_model = -a * Mp_sini / (Ms + Mp) * (sin_w * rate[..., 0] + cos_w * rate[..., 1])
 
     return rv_model
 
@@ -95,28 +86,14 @@ def predict_relative_astrometry(
     Returns:
         Tuple of ``(ra_pred, dec_pred)``, each shape ``(N,)`` in arcsec.
     """
-    # Derived quantities
-    mu = G * (Ms + Mp)
-    n = mean_motion(a, mu)
-    M = mean_anomaly_tp(times, n, tp)
-    sinE, cosE = diff_solve_trig(M, e)
-
-    # Trig values for AB matrices
-    sin_i = jnp.sqrt(1.0 - cos_i**2)
-    sqrt_1me2 = jnp.sqrt(1.0 - e**2)
-    sinW, cosW = jnp.sin(W), jnp.cos(W)
-
-    # AB matrices in AU
-    A, B = AB_matrices_reduced(a, sqrt_1me2, sin_i, cos_i, sinW, cosW, sin_w, cos_w)
-
-    # Position vector: r = A*(cosE - e) + B*sinE, shape (3, N)
-    r = single_r(A, B, e, sinE, cosE)
+    orbit = frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, G * (Ms + Mp))
+    r, _ = orbit.at(times)
 
     # Raw rows are (east, north, away); return (east, north) in arcsec.
     # At distance d_pc: angle_arcsec = separation_AU / d_pc
     # (since 1 AU at 1 pc = 1 arcsec by definition)
-    ra_pred = r[0] / dist_pc  # arcsec
-    dec_pred = r[1] / dist_pc  # arcsec
+    ra_pred = r[..., 0] / dist_pc  # arcsec
+    dec_pred = r[..., 1] / dist_pc  # arcsec
 
     return ra_pred, dec_pred
 
@@ -268,31 +245,18 @@ def predict_photometry(
             - ``alpha_arcsec``: Angular separation in arcsec.
             - ``dMag``: Delta-magnitude (larger = fainter).
     """
-    # Orbital propagation
-    mu = G * (Ms + Mp)
-    n = mean_motion(a, mu)
-    M = mean_anomaly_tp(times, n, tp)
-    sinE, cosE = diff_solve_trig(M, e)
-
-    # Trig values
-    sin_i = jnp.sqrt(1.0 - cos_i**2)
-    sqrt_1me2 = jnp.sqrt(1.0 - e**2)
-    sinW, cosW = jnp.sin(W), jnp.cos(W)
-
-    A, B = AB_matrices_reduced(a, sqrt_1me2, sin_i, cos_i, sinW, cosW, sin_w, cos_w)
-
-    # Position vector in AU, shape (3, N)
-    r = single_r(A, B, e, sinE, cosE)
+    orbit = frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, G * (Ms + Mp))
+    r, _ = orbit.at(times)
 
     # Angular separation on the sky
     # Sky-plane distance: sqrt(x^2 + y^2), observer along z-axis
-    sky_sep_AU = jnp.sqrt(r[0] ** 2 + r[1] ** 2)
+    sky_sep_AU = jnp.sqrt(r[..., 0] ** 2 + r[..., 1] ** 2)
     alpha_arcsec = sky_sep_AU / dist_pc
 
     # Standard star-planet-observer phase: cos(beta) = z/|r|, z away.
-    r_mag = jnp.sqrt(r[0] ** 2 + r[1] ** 2 + r[2] ** 2)
+    r_mag = jnp.sqrt(r[..., 0] ** 2 + r[..., 1] ** 2 + r[..., 2] ** 2)
     r_mag_safe = jnp.maximum(r_mag, 1e-30)
-    cos_beta = r[2] / r_mag_safe
+    cos_beta = r[..., 2] / r_mag_safe
     sin_beta = jnp.sqrt(jnp.maximum(1.0 - cos_beta**2, 0.0))
 
     # Lambert phase function

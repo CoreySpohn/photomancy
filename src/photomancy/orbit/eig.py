@@ -12,14 +12,6 @@ from collections.abc import Callable
 import jax
 import jax.numpy as jnp
 from hwoutils.constants import G, Mearth2kg
-from orbix.equations.orbit import (
-    AB_matrices_reduced,
-    mean_anomaly_tp,
-    mean_motion,
-)
-from orbix.equations.phase import lambert_phase_exact
-from orbix.equations.propagation import single_r
-from orbix.kepler.core import diff_solve_trig
 
 from photomancy.eig import (
     alias_breaking_eig,
@@ -28,6 +20,7 @@ from photomancy.eig import (
     geometric_eig,
 )
 from photomancy.eig import evaluate_candidates as _eval_candidates
+from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
 from photomancy.posterior import MixturePosterior
 
 __all__ = [
@@ -77,22 +70,10 @@ def _predict_astrom_pure(
     cos_w = jnp.cos(w)
     sin_w = jnp.sin(w)
 
-    n = mean_motion(a, mu)
-    # Use atleast_1d to create a proper 1-element time array
-    M = mean_anomaly_tp(jnp.atleast_1d(t), n, tp)
-    sinE, cosE = diff_solve_trig(M, e)
-
-    sin_i = jnp.sqrt(1.0 - cos_i**2)
-    sqrt_1me2 = jnp.sqrt(1.0 - e**2)
-    sinW, cosW = jnp.sin(W), jnp.cos(W)
-
-    A, B = AB_matrices_reduced(a, sqrt_1me2, sin_i, cos_i, sinW, cosW, sin_w, cos_w)
-    r = single_r(A, B, e, sinE, cosE)
-
-    # Raw rows are (east, north, away).
-    ra = r[0, 0] / dist_pc
-    dec = r[1, 0] / dist_pc
-    return jnp.array([ra, dec])
+    ra, dec = predict_relative_astrometry(
+        jnp.atleast_1d(t), a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc, Mp=Mp
+    )
+    return jnp.array([ra[0], dec[0]])
 
 
 def _predict_sep_dmag_pure(
@@ -128,33 +109,21 @@ def _predict_sep_dmag_pure(
     cos_w = jnp.cos(w)
     sin_w = jnp.sin(w)
 
-    n = mean_motion(a, mu)
-    M = mean_anomaly_tp(jnp.atleast_1d(t), n, tp)
-    sinE, cosE = diff_solve_trig(M, e)
-
-    sin_i = jnp.sqrt(1.0 - cos_i**2)
-    sqrt_1me2 = jnp.sqrt(1.0 - e**2)
-    sinW, cosW = jnp.sin(W), jnp.cos(W)
-
-    A, B = AB_matrices_reduced(a, sqrt_1me2, sin_i, cos_i, sinW, cosW, sin_w, cos_w)
-    r = single_r(A, B, e, sinE, cosE)
-
-    # Angular separation on sky
-    sky_sep_AU = jnp.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2)
-    sep_arcsec = sky_sep_AU / dist_pc
-
-    # Standard star-planet-observer phase: cos(beta) = z/|r|, z away.
-    r_mag = jnp.sqrt(r[0, 0] ** 2 + r[1, 0] ** 2 + r[2, 0] ** 2)
-    r_mag_safe = jnp.maximum(r_mag, 1e-30)
-    cos_beta = r[2, 0] / r_mag_safe
-    sin_beta = jnp.sqrt(jnp.maximum(1.0 - cos_beta**2, 0.0))
-    phase = lambert_phase_exact(cos_beta, sin_beta)
-
-    # Contrast and dMag
-    contrast = Lambda * phase / jnp.maximum(r_mag**2, 1e-60)
-    dMag = -2.5 * jnp.log10(jnp.maximum(contrast, 1e-300))
-
-    return jnp.array([sep_arcsec, dMag])
+    sep, dmag = predict_photometry(
+        jnp.atleast_1d(t),
+        a,
+        e,
+        cos_i,
+        W,
+        cos_w,
+        sin_w,
+        tp,
+        Ms,
+        Lambda,
+        dist_pc,
+        Mp=Mp,
+    )
+    return jnp.array([sep[0], dmag[0]])
 
 
 # ---------------------------------------------------------------------------

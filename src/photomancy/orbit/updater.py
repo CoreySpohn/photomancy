@@ -105,8 +105,8 @@ from jax.scipy.special import betainc, logsumexp
 from jax.scipy.stats import beta as beta_dist
 from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_motion
-from orbix.kepler.core import diff_solve_trig
 
+from photomancy.orbit._frame import plane_from_phase
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
 from photomancy.orbit.forward import predict_relative_astrometry
@@ -543,10 +543,9 @@ class ThieleInnesTarget(AbstractUpdateTarget):
             Tuple ``(H_ra, H_dec)``, each shape ``(K, 4)``.
         """
         e, ln_period, tau = theta[0], theta[1], theta[2]
-        mean_anomaly = two_pi * ((times - self.model.t_ref) / jnp.exp(ln_period) - tau)
-        sin_e, cos_e = diff_solve_trig(jnp.mod(mean_anomaly, two_pi), e)
-        x = (cos_e - e) / self.dist_pc
-        y = jnp.sqrt(1.0 - e**2) * sin_e / self.dist_pc
+        orbit = plane_from_phase(e, ln_period, tau, self.model.t_ref)
+        xy, _ = orbit.perifocal_coordinates(times)
+        x, y = xy[..., 0] / self.dist_pc, xy[..., 1] / self.dist_pc
         zero = jnp.zeros_like(x)
         return (
             jnp.stack([x, y, zero, zero], axis=1),

@@ -49,8 +49,10 @@ from jax.scipy.stats import beta as beta_dist
 from jax.scipy.stats import norm
 from orbix.equations.orbit import mean_motion
 from orbix.equations.phase import lambert_phase_exact
-from orbix.kepler.core import diff_solve_trig
+from orbix.system import FrameOrbit
+from orbix.system.rotation import from_basis
 
+from photomancy.orbit._frame import plane_from_phase
 from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel, ti_semimajor_axis
 from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.ofti import _scale_rotate_score
@@ -546,9 +548,10 @@ def _report_xy(target, theta, data):
     """Orbit-plane ``(cos E - e, sqrt(1 - e^2) sin E)`` at the report epochs."""
     e, ln_period, tau = theta[0], theta[1], theta[2]
     m = target.model
-    mean_anomaly = two_pi * ((data.epochs - m.t_ref) / jnp.exp(ln_period) - tau)
-    sin_e, cos_e = diff_solve_trig(jnp.mod(mean_anomaly, two_pi), e)
-    return cos_e - e, jnp.sqrt(1.0 - e**2) * sin_e
+    xy, _ = plane_from_phase(e, ln_period, tau, m.t_ref).perifocal_coordinates(
+        data.epochs
+    )
+    return xy[..., 0], xy[..., 1]
 
 
 def _ti_geometry(target, theta, xy, data):
@@ -565,9 +568,20 @@ def _ti_geometry(target, theta, xy, data):
     z_a = jnp.sqrt(jnp.maximum(a2 - east_x**2 - north_x**2, 0.0))
     z_b = jnp.sqrt(jnp.maximum(a2 - east_y**2 - north_y**2, 0.0))
     z_b = jnp.where(east_x * east_y + north_x * north_y > 0.0, -z_b, z_b)
-    east = east_x * x + east_y * y
-    north = north_x * x + north_y * y
-    z0 = z_a * x + z_b * y
+    a = jnp.sqrt(a2)
+    p = jnp.stack([east_x, north_x, z_a]) / a
+    q = jnp.stack([east_y, north_y, z_b]) / a
+    plane = plane_from_phase(theta[0], theta[1], theta[2], target.model.t_ref)
+    orbit = FrameOrbit(
+        a,
+        plane.n_rad_per_d,
+        plane.ex,
+        plane.ey,
+        from_basis(p, q, jnp.cross(p, q)),
+        plane.epoch_d,
+    )
+    r_xyz = orbit.plane_basis() @ jnp.stack([x, y])
+    east, north, z0 = r_xyz[0], r_xyz[1], r_xyz[2]
     alpha = jnp.hypot(east, north) / target.dist_pc
     r2 = east**2 + north**2 + z0**2
     r = jnp.sqrt(r2)

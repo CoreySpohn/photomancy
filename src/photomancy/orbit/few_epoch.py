@@ -47,8 +47,9 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import G, Msun2kg, two_pi
 from orbix.equations import lambert_solve
-from orbix.kepler.core import diff_solve_trig
+from orbix.system import FrameOrbit
 
+from photomancy.orbit._frame import plane_from_phase
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.posterior import SamplePosterior
 
@@ -105,11 +106,8 @@ class TIBasisModel(eqx.Module):
         with X = cos(E) - e and Y = sqrt(1-e^2) sin(E).
         """
         e, lnP, tau = theta[0], theta[1], theta[2]
-        P = jnp.exp(lnP)
-        M = two_pi * ((times - self.t_ref) / P - tau)
-        sinE, cosE = diff_solve_trig(jnp.mod(M, two_pi), e)
-        X = cosE - e
-        Y = jnp.sqrt(1.0 - e**2) * sinE
+        xy, _ = plane_from_phase(e, lnP, tau, self.t_ref).perifocal_coordinates(times)
+        X, Y = xy[..., 0], xy[..., 1]
         east_X, east_Y, north_X, north_Y = theta[3:]
         east = east_X * X + east_Y * Y
         north = north_X * X + north_Y * Y
@@ -177,16 +175,15 @@ def state_to_theta(r, v, mu, t, t_ref):
     Returns:
         theta = (e, lnP, tau, east_X, east_Y, north_X, north_Y), shape (7,).
     """
-    rn = jnp.linalg.norm(r)
-    a = 1.0 / (2.0 / rn - jnp.dot(v, v) / mu)
-    P = two_pi * jnp.sqrt(a**3 / mu)
-    e_vec = ((jnp.dot(v, v) - mu / rn) * r - jnp.dot(r, v) * v) / mu
-    e = jnp.linalg.norm(e_vec)
-    p_hat = e_vec / e
-    h = jnp.cross(r, v)
-    q_hat = jnp.cross(h / jnp.linalg.norm(h), p_hat)
-    cosE = (1.0 - rn / a) / e
-    sinE = jnp.dot(r, v) / (e * jnp.sqrt(mu * a))
+    orbit = FrameOrbit.from_cartesian(r, v, mu_AU3_per_d2=mu, epoch_d=t)
+    e, P = orbit.e, orbit.period_d
+    basis = orbit.plane_basis()
+    c, s = orbit.ex / e, orbit.ey / e
+    p = basis[:, 0] * c + basis[:, 1] * s
+    q = -basis[:, 0] * s + basis[:, 1] * c
+    xy, _ = orbit.perifocal_coordinates(t)
+    cosE = xy[0] + e
+    sinE = xy[1] / jnp.sqrt(1.0 - e**2)
     E = jnp.arctan2(sinE, cosE)
     M = E - e * sinE
     tau = jnp.mod((t - t_ref) / P - M / two_pi, 1.0)
@@ -195,10 +192,10 @@ def state_to_theta(r, v, mu, t, t_ref):
             e,
             jnp.log(P),
             tau,
-            a * p_hat[0],
-            a * q_hat[0],
-            a * p_hat[1],
-            a * q_hat[1],
+            p[0],
+            q[0],
+            p[1],
+            q[1],
         ]
     )
 

@@ -20,16 +20,15 @@ argument of periapsis) and the semi-major axis:
     G = a\\sqrt{1-e^2} (-\\sin\\Omega\\sin\\omega + \\cos\\Omega\\cos\\omega\\cos i)
 
 These keep the classical letters: (A, F) multiply north and (B, G) east.
-The position matrices from :func:`orbix.equations.orbit.AB_matrices_reduced`
-instead store rows in the right-handed (east, north, away) frame, with
-positive dz/dt receding. Thus their sky rows are (B, A) and (G, F).
+``FrameOrbit`` stores positions in the right-handed (east, north, away)
+frame, with positive dz/dt receding. Its sky rows use (B, A) and (G, F).
 """
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from orbix.equations.orbit import mean_anomaly_tp
-from orbix.kepler.core import diff_solve_trig
+
+from photomancy.orbit._frame import plane_from_motion
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -374,14 +373,11 @@ def thiele_innes_fit(relative_astrom_data, T, e, tp, Ms, dist_pc):
         A :class:`TIFitResult` with the best-fit TI constants, recovered
         orbital elements, and goodness-of-fit statistics.
     """
-    # Compute basis functions X(t) = cosE(t) - e, Y(t) = sinE(t)
-    # n = 2pi/T directly -- no need to go through Kepler III
-    n = 2.0 * jnp.pi / T
-    M = mean_anomaly_tp(relative_astrom_data.times, n, tp)
-    sinE, cosE = diff_solve_trig(M, e)
-
-    X = cosE - e  # shape (N,)
-    Y = sinE  # shape (N,)
+    orbit = plane_from_motion(e, tp, 2.0 * jnp.pi / T)
+    xy, _ = orbit.perifocal_coordinates(relative_astrom_data.times)
+    X = xy[..., 0]
+    # F and G include sqrt(1-e^2), so retain the public unscaled Y basis.
+    Y = xy[..., 1] / jnp.sqrt(1.0 - e**2)
 
     # Solve for (A', F', B', G') = (A/dist_pc, F/dist_pc, B/dist_pc, G/dist_pc)
     A_s, F_s, B_s, G_s = _solve_abfg(

@@ -424,3 +424,35 @@ def test_predict_rv_is_receding_positive_stellar_velocity(known_mass):
     assert bool(jnp.any(velocity > 0))
     assert bool(jnp.any(velocity < 0))
     assert jnp.allclose(prediction, velocity, rtol=tolerance, atol=0.0)
+
+
+def test_minimum_mass_rv_matches_inclined_true_mass():
+    """Fails if minimum-mass RV needs inclination or loses its mass scaling.
+
+    The expected fractional excess is (2/3) Mp/Ms to leading order;
+    concavity makes the exact excess smaller. A small planet isolates this
+    approximation from the independently propagated true stellar velocity.
+    """
+    from hwoutils.constants import G, two_pi
+    from orbix.system import FrameOrbit
+
+    mass = 1e-5 * Msun2kg
+    period, inc, peri = 370.0, 0.73, 1.1
+    times = jnp.linspace(-130.0, 620.0, 19)
+    mu = G * (Msun2kg + mass)
+    a = (mu * (period / two_pi) ** 2) ** (1.0 / 3.0)
+    orbit = FrameOrbit.from_classical(
+        a, 0.4, inc, 0.3, peri, 0.0, mu_AU3_per_d2=mu, epoch_d=17.0
+    )
+    true_rv = -mass / (Msun2kg + mass) * orbit.at(times)[1][..., 2]
+    minimum = predict_rv(
+        times,
+        period,
+        Msun2kg,
+        mass * jnp.sin(inc),
+        0.4,
+        jnp.cos(peri),
+        jnp.sin(peri),
+        17.0,
+    )
+    np.testing.assert_allclose(minimum, true_rv, rtol=(2.0 / 3.0) * mass / Msun2kg)

@@ -9,7 +9,6 @@ Built on orbix geometry (``orbix.equations``, ``orbix.kepler``).
 """
 
 from orbix.equations import period_to_sma
-from orbix.kepler.core import diff_solve_trig
 
 from photomancy.orbit.data import (
     ImagingData,
@@ -136,7 +135,6 @@ __all__ = [
     "astrometric_loss",
     "build_orbit_logdensity",
     # Orbital-mechanics primitives (re-exported from orbix)
-    "diff_solve_trig",
     "ecc_distribution",
     # Priors
     "eccentricity_disk_transform",
