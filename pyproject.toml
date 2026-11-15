@@ -38,7 +38,7 @@ dependencies = [
     "orbix>=4.0.0",
     # >=2.1.0: scene states and the disk chart use the same (east, north) sky
     # chart as orbix 3, so an older skyscapes must not install beside photomancy.
-    "skyscapes>=2.1.0",
+    "skyscapes>=3.0.0",
 ]
 
 [project.optional-dependencies]
