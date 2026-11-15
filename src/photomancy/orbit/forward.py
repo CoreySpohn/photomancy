@@ -170,6 +170,11 @@ def _reflex_proper_motion(
     ra, dec = predict_stellar_astrometry(
         ts, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
     )
+    return _path_proper_motion(ts, ra, dec)
+
+
+def _path_proper_motion(ts, ra, dec):
+    """Least-squares east/north slopes of an angular path at day epochs."""
     dt = ts - jnp.mean(ts)
     denom = jnp.sum(dt**2)
     pm_ra = jnp.sum(dt * (ra - jnp.mean(ra))) / denom

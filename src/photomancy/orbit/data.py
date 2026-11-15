@@ -671,3 +671,83 @@ class OrbitData(eqx.Module):
             null=null,
             imaging=imaging,
         )
+
+
+class PhotometryData(eqx.Module):
+    """Linear planet/star contrast measurements and upper limits.
+
+    All fields have shape ``(N,)``. ``times`` uses the system's day frame;
+    ``contrast`` and ``contrast_err`` are dimensionless linear flux ratios.
+    ``band_id`` and ``planet_id`` index the term's bandpasses and system planets.
+    ``is_upper_limit`` selects a Gaussian cumulative probability below the
+    reported contrast; ``is_valid`` excludes padded rows.
+    """
+
+    times: jnp.ndarray
+    contrast: jnp.ndarray
+    contrast_err: jnp.ndarray
+    band_id: jnp.ndarray
+    planet_id: jnp.ndarray
+    is_upper_limit: jnp.ndarray
+    is_valid: jnp.ndarray
+
+    @classmethod
+    def pad(
+        cls,
+        *,
+        times,
+        contrast,
+        contrast_err,
+        band_id,
+        planet_id,
+        is_upper_limit,
+        max_n=MAX_IMG,
+    ):
+        """Pad contrast observations, using unit errors on invalid rows."""
+        n = jnp.asarray(times).shape[0]
+        return cls(
+            times=_pad_1d(times, max_n),
+            contrast=_pad_1d(contrast, max_n),
+            contrast_err=_pad_1d(contrast_err, max_n, fill=1.0),
+            band_id=_pad_1d(band_id, max_n).astype(int),
+            planet_id=_pad_1d(planet_id, max_n).astype(int),
+            is_upper_limit=_pad_1d(is_upper_limit, max_n).astype(bool),
+            is_valid=_valid_mask(n, max_n),
+        )
+
+    @classmethod
+    def from_dmag(
+        cls,
+        *,
+        times,
+        dmag,
+        dmag_err,
+        band_id,
+        planet_id=None,
+        is_upper_limit=None,
+        max_n=None,
+    ):
+        """Convert magnitude differences with first-order Gaussian errors.
+
+        ``contrast = 10**(-0.4*dmag)`` and its standard deviation is
+        ``0.4*ln(10)*contrast*dmag_err``. Upper-limit rows use that same
+        conversion for the limit and its noise scale. Planet indices default
+        to zero, limit flags to False, and ``max_n=None`` keeps all rows valid.
+        """
+        times = jnp.asarray(times)
+        contrast = 10.0 ** (-0.4 * jnp.asarray(dmag))
+        if planet_id is None:
+            planet_id = jnp.zeros(times.shape, dtype=int)
+        if is_upper_limit is None:
+            is_upper_limit = jnp.zeros(times.shape, dtype=bool)
+        values = dict(
+            times=times,
+            contrast=contrast,
+            contrast_err=0.4 * jnp.log(10.0) * contrast * jnp.asarray(dmag_err),
+            band_id=jnp.asarray(band_id, dtype=int),
+            planet_id=jnp.asarray(planet_id, dtype=int),
+            is_upper_limit=jnp.asarray(is_upper_limit, dtype=bool),
+        )
+        if max_n is not None:
+            return cls.pad(**values, max_n=max_n)
+        return cls(**values, is_valid=jnp.ones(times.shape, dtype=bool))

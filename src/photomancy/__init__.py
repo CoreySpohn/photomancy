@@ -32,7 +32,14 @@ from photomancy.posterior import (
     SamplePosterior,
 )
 from photomancy.posterior_utils import project_samples, sample_capped
-from photomancy.system_terms import RelativeAstrometryTerm
+from photomancy.system_terms import (
+    PhotometryTerm,
+    ProperMotionAnomalyTerm,
+    RadialVelocityTerm,
+    RelativeAstrometryTerm,
+    StellarAstrometryTerm,
+)
+from photomancy.targets import TargetData, load_target
 from photomancy.terms import AbstractTerm, TermLogDensity
 
 try:
@@ -54,13 +61,19 @@ __all__ = [
     "NUTSBackend",
     "PathfinderBackend",
     "PathfinderMixtureBackend",
+    "PhotometryTerm",
     "PointPosterior",
+    "ProperMotionAnomalyTerm",
+    "RadialVelocityTerm",
     "RelativeAstrometryTerm",
     "SMCBackend",
     "SamplePosterior",
+    "StellarAstrometryTerm",
+    "TargetData",
     "TermLogDensity",
     "__version__",
     "build_scene_logdensity",
+    "load_target",
     "project_samples",
     "sample_capped",
     "sigma_from_log_bayes_factor",

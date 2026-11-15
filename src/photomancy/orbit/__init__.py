@@ -15,6 +15,7 @@ from photomancy.orbit.data import (
     ImagingData,
     NullData,
     OrbitData,
+    PhotometryData,
     PMAnomalyData,
     RelativeAstromData,
     RVData,
@@ -113,6 +114,7 @@ __all__ = [
     "OrbitUpdater",
     "PMAnomalyData",
     "ParamBounds",
+    "PhotometryData",
     # Data containers
     "RVData",
     "RelativeAstromData",

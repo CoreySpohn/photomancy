@@ -6,33 +6,62 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import G, Msun2kg
+from hwoutils.constants import G, Mearth2kg, Msun2kg
 from orbix import KeplerianOrbit
 from orbix.kepler import markley_solve_trig
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
 from skyscapes.scene.system import System
+from skyscapes.spectral import Bandpass
 
-from photomancy import AbstractTerm, RelativeAstrometryTerm, TermLogDensity
+from photomancy import (
+    AbstractTerm,
+    PhotometryTerm,
+    ProperMotionAnomalyTerm,
+    RadialVelocityTerm,
+    RelativeAstrometryTerm,
+    StellarAstrometryTerm,
+    TermLogDensity,
+)
 from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
 from photomancy.likelihoods import gaussian_loglike
-from photomancy.orbit.data import RelativeAstromData
-from photomancy.orbit.forward import predict_relative_astrometry
-from photomancy.orbit.likelihoods import loglike_relative_astrom
+from photomancy.orbit.data import (
+    PhotometryData,
+    PMAnomalyData,
+    RelativeAstromData,
+    RVData,
+    StellarAstromData,
+)
+from photomancy.orbit.forward import (
+    predict_pm_anomaly,
+    predict_relative_astrometry,
+    predict_rv,
+    predict_stellar_astrometry,
+)
+from photomancy.orbit.likelihoods import (
+    loglike_pm_anomaly,
+    loglike_relative_astrom,
+    loglike_rv_marginalized,
+    loglike_stellar_astrom,
+)
+from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
 
 # a [AU], e, node [rad], inclination [rad], periapsis [rad], M0 [rad], t0 [day].
 _ELEMENTS = np.array([1.7, 0.31, 1.1, 0.8, 0.6, 0.4, 24.0])
 _TIMES = np.array([31.0, 120.0, 290.0, 470.0])
 
 
-def _system(elements=_ELEMENTS):
-    """Build a massless planet with explicit orbital elements and stellar context."""
+_MASS = 317.8
+
+
+def _system(elements=_ELEMENTS, mass=_MASS):
+    """Build a finite-mass planet with explicit orbital elements and stellar context."""
     a, e, node, inc, peri, mean, epoch = elements
     orbit = KeplerianOrbit(a, e, node, inc, peri, mean, epoch)
     planet = Planet(
         Rp_Rearth=jnp.ones(1),
-        Mp_Mearth=jnp.zeros(1),
+        Mp_Mearth=jnp.atleast_1d(mass),
         orbit=orbit,
         physical_model=LambertianPhysicalModel(Ag=jnp.array([0.3])),
     )
@@ -120,7 +149,7 @@ def test_system_element_parity():
     """
     data = _data()
     a, e, node, inc, peri, mean, epoch = _ELEMENTS
-    motion = np.sqrt(G * Msun2kg / a**3)
+    motion = np.sqrt(G * (Msun2kg + _MASS * Mearth2kg) / a**3)
     expected_positions = predict_relative_astrometry(
         data.times,
         a=a,
@@ -132,7 +161,7 @@ def test_system_element_parity():
         tp=epoch - mean / motion,
         Ms=Msun2kg,
         dist_pc=10.0,
-        Mp=0.0,
+        Mp=_MASS * Mearth2kg,
     )
     expected = loglike_relative_astrom(*expected_positions, data)
     actual, prediction = RelativeAstrometryTerm(data)(_system())
@@ -275,3 +304,322 @@ def test_mixed_sum_and_restriction(with_prior):
     for indices in ((-1,), (2,)):
         with pytest.raises(IndexError):
             ld.restrict(indices)
+
+
+@vv.case("scene-fits", "code-verification", basis="equivalence")
+@vv.seam("skyscapes", "photomancy")
+@pytest.mark.parametrize("kind", ["stellar", "rv", "pma"])
+def test_reflex_system_element_parity(kind):
+    """Truth source: existing element-array predictors with the same finite mass.
+
+    Tolerance basis: x64 rtol 1e-12, likelihood atol 1e-12; prediction absolute
+    floors are 1e-18 arcsec, 1e-12 m/s, and 1e-20 arcsec/day. These allow only
+    floating-point solver and unit-conversion differences, not model changes.
+    Fails if: the system seam changes mass, sign, units, epoch or window model.
+    """
+    term = _new_term(kind)
+    data = term.data
+    args = _element_args()
+    if kind == "stellar":
+        prediction = jnp.stack(predict_stellar_astrometry(data.times, **args))
+        expected = loglike_stellar_astrom(*prediction, data)
+        atol = 1e-18
+    elif kind == "rv":
+        a, e, _, inc, peri, mean, epoch = _ELEMENTS
+        motion = np.sqrt(G * (Msun2kg + _MASS * Mearth2kg) / a**3)
+        prediction = (
+            predict_rv(
+                data.times,
+                2 * np.pi / motion,
+                Msun2kg,
+                _MASS * Mearth2kg * np.sin(inc),
+                e,
+                np.cos(peri),
+                np.sin(peri),
+                epoch - mean / motion,
+                Mp=_MASS * Mearth2kg,
+            )
+            * RV_AU_PER_DAY_TO_M_PER_S
+        )
+        expected = loglike_rv_marginalized(
+            data.rv,
+            prediction,
+            data.rv_err,
+            data.inst_ids,
+            data.n_inst,
+            term.jitters,
+            data.is_valid,
+        )
+        atol = 1e-12
+    else:
+        prediction = predict_pm_anomaly(
+            data.t_hip,
+            data.t_gaia,
+            data.gaia_window,
+            term.n_epochs,
+            **args,
+        )
+        expected = loglike_pm_anomaly(prediction, data)
+        atol = 1e-20
+    actual, result = term(_system())
+    print(
+        f"{kind} parity: likelihood difference={float(actual - expected):.17g}; "
+        f"max prediction difference={float(jnp.max(jnp.abs(result - prediction))):.17g}"
+    )
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(result, prediction, rtol=1e-12, atol=atol)
+
+
+def _element_args():
+    """Map stored elements to the element-array forward parameterization."""
+    a, e, node, inc, peri, mean, epoch = _ELEMENTS
+    motion = np.sqrt(G * (Msun2kg + _MASS * Mearth2kg) / a**3)
+    return dict(
+        a=a,
+        e=e,
+        cos_i=np.cos(inc),
+        W=node,
+        cos_w=np.cos(peri),
+        sin_w=np.sin(peri),
+        tp=epoch - mean / motion,
+        Ms=Msun2kg,
+        Mp=_MASS * Mearth2kg,
+        dist_pc=10.0,
+    )
+
+
+def _new_term(kind, max_n=4):
+    """Small observations with residuals and nontrivial covariance/instruments."""
+    if kind == "stellar":
+        return StellarAstrometryTerm(
+            StellarAstromData.pad(
+                times=_TIMES,
+                ra=[1e-4, -2e-4, 3e-4, 2e-4],
+                dec=[-1e-4, 1e-4, 2e-4, -2e-4],
+                ra_err=[5e-5] * 4,
+                dec_err=[8e-5] * 4,
+                corr=[0.2, -0.3, 0.1, 0.0],
+                max_n=max_n,
+            )
+        )
+    if kind == "rv":
+        return RadialVelocityTerm(
+            RVData.pad(
+                times=_TIMES,
+                rv=[2.0, -4.0, 8.0, 1.0],
+                rv_err=[1.5] * 4,
+                inst_ids=[0, 1, 0, 1],
+                n_inst=3,
+                max_n=max_n,
+            ),
+            jitters=jnp.array([0.5, 0.8, 1.0]),
+        )
+    if kind == "pma":
+        return ProperMotionAnomalyTerm(
+            PMAnomalyData(
+                t_hip=jnp.array(0.0),
+                t_gaia=jnp.array(9000.0),
+                gaia_window=jnp.array(1023.0),
+                pm_anomaly=jnp.array([2e-7, -3e-7]),
+                pm_anomaly_cov=jnp.array([[4e-14, 1e-14], [1e-14, 9e-14]]),
+                is_valid=jnp.array(True),
+            )
+        )
+    return PhotometryTerm(
+        PhotometryData.from_dmag(
+            times=_TIMES,
+            dmag=[25.0, 25.2, 24.5, 26.0],
+            dmag_err=[0.2] * 4,
+            band_id=[0] * 4,
+            is_upper_limit=[False, True, False, True],
+            max_n=max_n,
+        ),
+        (Bandpass.tophat(600.0, 100.0),),
+    )
+
+
+@eqx.filter_jit
+def _new_term_value_grad(term, parameters):
+    """Compile each observable once, reusing data shapes for validity changes."""
+
+    def score(x):
+        return term(_system(x[:7], x[7]))
+
+    return jax.value_and_grad(score, has_aux=True)(parameters)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.parametrize("kind", ["stellar", "rv", "pma", "photometry"])
+def test_new_term_gradients_and_padding(kind):
+    """Truth source: central differences in all seven elements and planet mass.
+
+    Tolerance basis: x64 central steps 1e-5*max(1, abs(parameter)), rtol 2e-6,
+    atol 1e-6 cover O(h^2) truncation/cancellation. Padding agrees to 1e-12
+    relative and absolute; an all-invalid score and gradient are exactly zero.
+    Each observable needs its own compiled program; only the unpadded
+    comparison changes shape. Benign, poisoned and all-invalid data reuse it.
+    Fails if: element/mass gradients differ, padding affects a score, or NaNs
+    leak through invalid epochs, uncertainties, indices or PM covariance.
+    """
+    term = _new_term(kind, max_n=7)
+    parameters = jnp.asarray(np.r_[_ELEMENTS, _MASS])
+    (value, prediction), gradient = _new_term_value_grad(term, parameters)
+    steps = 1e-5 * np.maximum(1.0, np.abs(parameters))
+    central = []
+    for offset, step in zip(np.diag(steps), steps, strict=True):
+        plus = _new_term_value_grad(term, parameters + offset)[0][0]
+        minus = _new_term_value_grad(term, parameters - offset)[0][0]
+        central.append((plus - minus) / (2 * step))
+    assert np.all(np.isfinite(gradient))
+    np.testing.assert_allclose(gradient, central, rtol=2e-6, atol=1e-6)
+    unpadded = _new_term(kind)
+    (base, _), base_gradient = _new_term_value_grad(unpadded, parameters)
+    np.testing.assert_allclose(value, base, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(gradient, base_gradient, rtol=1e-12, atol=1e-12)
+
+    def poison(data):
+        def field(x):
+            if x.dtype == jnp.bool_:
+                return x
+            fill = -999 if jnp.issubdtype(x.dtype, jnp.integer) else jnp.nan
+            return jnp.where(data.is_valid, x, fill)
+
+        return jax.tree.map(field, data)
+
+    poisoned = eqx.tree_at(lambda t: t.data, term, poison(term.data))
+    (poison_value, poison_prediction), poison_grad = _new_term_value_grad(
+        poisoned, parameters
+    )
+    np.testing.assert_allclose(poison_value, value, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(poison_grad, gradient, rtol=1e-12, atol=1e-12)
+    assert np.all(np.isfinite(poison_prediction))
+    if kind != "pma":
+        np.testing.assert_array_equal(prediction[..., 4:], 0.0)
+    empty_data = eqx.tree_at(
+        lambda d: d.is_valid, term.data, jnp.zeros_like(term.data.is_valid)
+    )
+    empty = eqx.tree_at(lambda t: t.data, term, poison(empty_data))
+    (empty_value, empty_prediction), empty_grad = _new_term_value_grad(
+        empty, parameters
+    )
+    assert float(empty_value) == 0.0
+    np.testing.assert_array_equal(empty_prediction, 0.0)
+    np.testing.assert_array_equal(empty_grad, 0.0)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_contrast_detection_and_limits():
+    """Truth source: Gaussian density in contrast at the system band prediction.
+
+    Tolerance basis: x64 rtol 1e-13 for scalar arithmetic. A +12 sigma limit
+    has log CDF within 1e-30 of zero; a -40 sigma limit is finite below -800.
+    Fails if: detections use magnitudes or limits use the wrong tail/unstable CDF.
+    """
+    system = _system()
+    band = Bandpass.tophat(600.0, 100.0)
+    times = jnp.asarray(_TIMES[:3])
+    model = system.band_contrasts(band, times)[0]
+    err = model / 100.0
+    observed = model + jnp.array([0.7, 12.0, -40.0]) * err
+    data = PhotometryData(
+        times,
+        observed,
+        err,
+        jnp.zeros(3, dtype=int),
+        jnp.zeros(3, dtype=int),
+        jnp.array([False, True, True]),
+        jnp.ones(3, dtype=bool),
+    )
+    for i in range(3):
+        row = jax.tree.map(lambda x, i=i: x[i : i + 1], data)
+        value, prediction = PhotometryTerm(row, (band,))(system)
+        np.testing.assert_allclose(prediction, model[i : i + 1], rtol=1e-13)
+        if i == 0:
+            expected = -0.5 * ((observed[i] - model[i]) / err[i]) ** 2 - np.log(
+                err[i] * np.sqrt(2 * np.pi)
+            )
+            np.testing.assert_allclose(value, expected, rtol=1e-13)
+        elif i == 1:
+            assert abs(float(value)) < 1e-30
+        else:
+            assert np.isfinite(value) and value < -800
+
+
+@vv.case("scene-fits", "code-verification", basis="equivalence")
+@vv.seam("skyscapes", "photomancy")
+def test_photometry_band_planet_epoch_routing():
+    """Truth source: separate system calls for two bands, planets and epochs.
+
+    Tolerance basis: x64 rtol 1e-13 for repeated quadrature and orbit propagation.
+    Wavelength-dependent albedos make the bands distinguishable.
+    Fails if: any band, planet or epoch index is broadcast, swapped or reused.
+    """
+
+    class ColoredLambertian(LambertianPhysicalModel):
+        def contrast(self, phase_angle_rad, dist_AU, wavelength_nm, Rp_Rearth):
+            return (
+                super().contrast(phase_angle_rad, dist_AU, wavelength_nm, Rp_Rearth)
+                * wavelength_nm
+                / 600.0
+            )
+
+    first = _system().planets[0]
+    second = _system(_ELEMENTS * np.array([1.3, 1, 1, 1, 1, 2, 1])).planets[0]
+    planets = tuple(
+        eqx.tree_at(
+            lambda p: p.physical_model, planet, ColoredLambertian(jnp.array([albedo]))
+        )
+        for planet, albedo in ((first, 0.2), (second, 0.4))
+    )
+    system = eqx.tree_at(lambda s: s.planets, _system(), planets)
+    bands = (Bandpass.tophat(500.0, 100.0), Bandpass.tophat(900.0, 100.0))
+    band_ids, planet_ids = [1, 0, 1, 0], [0, 1, 1, 0]
+    data = PhotometryData.from_dmag(
+        times=_TIMES,
+        dmag=[25.0] * 4,
+        dmag_err=[0.2] * 4,
+        band_id=band_ids,
+        planet_id=planet_ids,
+    )
+    _, prediction = PhotometryTerm(data, bands, select=lambda m: m[0])((system,))
+    expected = [
+        system.band_contrasts(bands[b], jnp.array([t]))[p, 0]
+        for b, p, t in zip(band_ids, planet_ids, _TIMES, strict=True)
+    ]
+    np.testing.assert_allclose(prediction, expected, rtol=1e-13, atol=0)
+
+
+@vv.case("scene-fits", "code-verification", basis="monte-carlo")
+def test_dmag_contrast_error_propagation():
+    """Truth source: 200,000 Gaussian magnitude draws transformed by NumPy.
+
+    Tolerance basis: sigma_dmag=0.002 makes curvature negligible; std sampling
+    error 1/sqrt(2*N)=0.00158, so 1% relative exceeds six standard errors.
+    The central contrast matches to 1e-14 relative in x64.
+    Fails if: the magnitude sign, base, first-order error or padding is wrong.
+    """
+    data = PhotometryData.from_dmag(
+        times=[1.0], dmag=[15.0], dmag_err=[0.002], band_id=[1], max_n=3
+    )
+    draws = 10 ** (-0.4 * np.random.default_rng(0).normal(15.0, 0.002, 200_000))
+    np.testing.assert_allclose(data.contrast[0], 1e-6, rtol=1e-14)
+    np.testing.assert_allclose(data.contrast_err[0], draws.std(ddof=1), rtol=0.01)
+    np.testing.assert_array_equal(data.is_valid, [True, False, False])
+    np.testing.assert_array_equal(data.planet_id, [0, 0, 0])
+    np.testing.assert_array_equal(data.is_upper_limit, [False, False, False])
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_rv_default_jitter_and_selection():
+    """Truth source: explicit zero jitters versus the default with a model selector.
+
+    Tolerance basis: exact equality for identical arithmetic. Fails if: default
+    jitters add noise, select is ignored, or jitter shape mismatches go unchecked.
+    """
+    data = _new_term("rv").data
+    expected = RadialVelocityTerm(data, jitters=jnp.zeros(data.n_inst))(_system())
+    actual = RadialVelocityTerm(data, select=lambda m: m[0])((_system(),))
+    for a, b in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(a, b)
+    with pytest.raises(ValueError, match="jitters"):
+        RadialVelocityTerm(data, jitters=jnp.zeros(1))
