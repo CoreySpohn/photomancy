@@ -3,10 +3,13 @@
 import ineedvalidation as vv
 import numpy as np
 import pytest
+from hwoutils.epoch import Epoch
 from skyscapes.spectral import Bandpass
-from test_terms import _system
+from test_terms import _ELEMENTS, _system
 
 from photomancy import TermLogDensity, load_target
+
+_EPOCH = Epoch(2451545.0)
 
 _TOML = """
 [target]
@@ -68,7 +71,7 @@ def test_target_routing_and_composition(tmp_path):
     path = tmp_path / "target.toml"
     path.write_text(_TOML)
     bands = {"L'": Bandpass.tophat(3500.0, 100.0), "H": Bandpass.tophat(1600.0, 100.0)}
-    loaded = load_target(path, pixel_data_ids=("img-1",))
+    loaded = load_target(path, epoch=_EPOCH, pixel_data_ids=("img-1",))
     assert loaded.target["name"] == "X"
     assert loaded.band_names == ("L'",)
     assert loaded.relative_astrometry.times.size == 1
@@ -96,7 +99,7 @@ def test_target_routing_and_composition(tmp_path):
     model = {"system": _system()}
     expected = sum(term(model)[0] for term in terms)
     np.testing.assert_allclose(TermLogDensity(terms)(model), expected, rtol=1e-14)
-    pending = load_target(path, include_pending=True, bandpasses=bands)
+    pending = load_target(path, epoch=_EPOCH, include_pending=True, bandpasses=bands)
     assert pending.band_names == ("L'", "H")
     assert pending.relative_astrometry.times.size == 2
     np.testing.assert_array_equal(pending.photometry.is_upper_limit, [False, True])
@@ -116,19 +119,53 @@ def test_target_guards_and_empty(tmp_path):
     path = tmp_path / "target.toml"
     path.write_text(_TOML)
     with pytest.raises(ValueError, match=r"astrometry.*ground-1"):
-        load_target(path, pixel_data_ids=("ground-1",))
+        load_target(path, epoch=_EPOCH, pixel_data_ids=("ground-1",))
     with pytest.raises(ValueError, match=r"astrometry.*future"):
-        load_target(path, pixel_data_ids=("future",), include_pending=True)
-    load_target(path, pixel_data_ids=("future",))
+        load_target(
+            path, epoch=_EPOCH, pixel_data_ids=("future",), include_pending=True
+        )
+    load_target(path, epoch=_EPOCH, pixel_data_ids=("future",))
     path.write_text(_TOML.replace('use = "term"', 'use = "comparison"', 1))
     with pytest.raises(ValueError, match=r"photometry.*ground-1"):
-        load_target(path, pixel_data_ids=("ground-1",))
+        load_target(path, epoch=_EPOCH, pixel_data_ids=("ground-1",))
     path.write_text(_TOML.replace('use = "term"', 'use = "typo"', 1))
     with pytest.raises(ValueError, match="typo"):
-        load_target(path)
+        load_target(path, epoch=_EPOCH)
     path.write_text('[target]\nname = "empty"\n[unknown]\nx = 1\n')
-    empty = load_target(path)
+    empty = load_target(path, epoch=_EPOCH)
     assert empty.relative_astrometry is None
     assert empty.photometry is None
     assert empty.band_names == ()
     assert empty.terms() == ()
+
+
+@vv.case("scene-fits", "code-verification", basis="equivalence")
+@pytest.mark.parametrize("include_pending", [False, True])
+def test_target_epoch_invariance(tmp_path, include_pending):
+    """Fails if dates reach a device before subtraction or terms mix time origins.
+
+    Two split epochs differ by exactly 100.25 days. Time differences are exact;
+    likelihoods allow 1e-10 relative for x64 propagation with shifted references.
+    Pending rows exercise a second date and photometric band when enabled.
+    """
+    path = tmp_path / "target.toml"
+    path.write_text(_TOML)
+    bands = {"L'": Bandpass.tophat(3500.0, 100.0), "H": Bandpass.tophat(1600.0, 100.0)}
+    epochs = (Epoch(2460000.0, 0.125), Epoch(2460100.0, 0.375))
+    loaded = [
+        load_target(path, epoch=e, include_pending=include_pending, bandpasses=bands)
+        for e in epochs
+    ]
+    for name in ("relative_astrometry", "photometry"):
+        times = [np.asarray(getattr(data, name).times) for data in loaded]
+        np.testing.assert_array_equal(times[0] - times[1], 100.25)
+        dates = np.array([2460000.0, 2460100.0][: times[0].size], dtype=np.float64)
+        np.testing.assert_array_equal(times[0], epochs[0].days(dates))
+    values = []
+    for data in loaded:
+        elements = _ELEMENTS.copy()
+        elements[-1] += epochs[0].days_between(data.epoch)
+        system = _system(elements, epoch=data.epoch)
+        assert system.epoch is data.epoch
+        values.append([term(system)[0] for term in data.terms()])
+    np.testing.assert_allclose(values[0], values[1], rtol=1e-10, atol=0)

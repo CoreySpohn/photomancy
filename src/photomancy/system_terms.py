@@ -4,6 +4,9 @@ Each term holds a data container and calls the system object by method name, so 
 object that reports the same observables can be the model. ``select`` maps the fitted
 model to that object; the identity default makes a bare system a valid model, and a
 fit with no image terms is then an orbit fit.
+
+Data times are days from the selected system's epoch, including the Hipparcos
+and Gaia reference times. Absolute dates must be converted on the host first.
 """
 
 from collections.abc import Callable
@@ -46,10 +49,10 @@ class RelativeAstrometryTerm(AbstractTerm):
 
     Attributes:
         data: Relative astrometry in arcsec, with a planet index per epoch.
-        select: Maps the model to an object whose ``positions(times)`` returns
+        select: Maps the model to an object whose ``positions(time_d)`` returns
             shape ``(2, K, T)`` in arcsec, rows east and north. The identity
-            default accepts that object directly. Epochs use the same time
-            origin as the system.
+            default accepts that object directly. Data ``times`` are days from
+            the system's epoch.
 
     Predictions have shape ``(2, T)``; invalid rows are returned as zeros.
     """
@@ -72,7 +75,7 @@ class RelativeAstrometryTerm(AbstractTerm):
             planet_id=jnp.where(valid, self.data.planet_id, 0),
             is_valid=valid,
         )
-        pos = self.select(model).positions(data.times)
+        pos = self.select(model).positions(time_d=data.times)
         prediction = pos[:, data.planet_id, jnp.arange(data.times.shape[0])]
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         east, north = prediction
@@ -82,8 +85,9 @@ class RelativeAstrometryTerm(AbstractTerm):
 class StellarAstrometryTerm(AbstractTerm):
     """Score the stellar reflex path in arcsec with correlated Gaussian errors.
 
-    ``select`` maps the model to a system whose ``star_reflex(times)`` returns
+    ``select`` maps the model to a system whose ``star_reflex(time_d)`` returns
     east/north offsets of shape ``(2, T)``. The identity default accepts a system.
+    Data ``times`` are days from the system's epoch.
     Invalid rows are sanitized before prediction and returned as zeros.
     """
 
@@ -102,7 +106,7 @@ class StellarAstrometryTerm(AbstractTerm):
             corr=jnp.where(valid, self.data.corr, 0.0),
             is_valid=valid,
         )
-        prediction = self.select(model).star_reflex(data.times)
+        prediction = self.select(model).star_reflex(time_d=data.times)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         return loglike_stellar_astrom(*prediction, data), prediction
 
@@ -110,9 +114,10 @@ class StellarAstrometryTerm(AbstractTerm):
 class RadialVelocityTerm(AbstractTerm):
     """Score stellar RVs in m/s, marginalizing each instrument's constant offset.
 
-    ``select`` maps the model to a system with ``star_radial_velocity(times)``
+    ``select`` maps the model to a system with ``star_radial_velocity(time_d)``
     in m/s, positive receding. ``jitters`` has shape ``(data.n_inst,)`` in m/s;
     None uses zeros. Predictions have shape ``(T,)`` with invalid rows zeroed.
+    Data ``times`` are days from the system's epoch.
     """
 
     data: RVData
@@ -135,7 +140,7 @@ class RadialVelocityTerm(AbstractTerm):
             is_valid=valid,
             n_inst=self.data.n_inst,
         )
-        prediction = self.select(model).star_radial_velocity(data.times)
+        prediction = self.select(model).star_radial_velocity(time_d=data.times)
         prediction = jnp.where(valid, prediction, 0.0)
         jitters = jnp.zeros(data.n_inst) if self.jitters is None else self.jitters
         value = loglike_rv_marginalized(
@@ -153,10 +158,11 @@ class RadialVelocityTerm(AbstractTerm):
 class ProperMotionAnomalyTerm(AbstractTerm):
     """Score the Gaia-window reflex slope minus the Hipparcos-Gaia mean motion.
 
-    ``select`` maps the model to a system with ``star_reflex(times)`` in arcsec.
+    ``select`` maps the model to a system with ``star_reflex(time_d)`` in arcsec.
     ``n_epochs`` is the static number of samples across the Gaia window (at
     least two), independent of the data container's sampling metadata. The
     prediction is an east/north vector in arcsec/day, zero when invalid.
+    Data ``t_hip`` and ``t_gaia`` are days from the system's epoch.
     """
 
     data: PMAnomalyData
@@ -186,9 +192,13 @@ class ProperMotionAnomalyTerm(AbstractTerm):
             data.t_gaia + 0.5 * data.gaia_window,
             self.n_epochs,
         )
-        mu_gaia = _path_proper_motion(ts, *system.star_reflex(ts))
-        p_hip = system.star_reflex(jnp.atleast_1d(data.t_hip))[:, 0]
-        p_gaia = system.star_reflex(jnp.atleast_1d(data.t_gaia))[:, 0]
+        time_d = jnp.concatenate(
+            (ts, jnp.atleast_1d(data.t_hip), jnp.atleast_1d(data.t_gaia))
+        )
+        ephemeris = system.ephemeris(time_d=time_d)
+        path = system.star_reflex(time_d=time_d, ephemeris=ephemeris)
+        mu_gaia = _path_proper_motion(ts, *path[:, : self.n_epochs])
+        p_hip, p_gaia = path[:, -2], path[:, -1]
         mu_hg = (p_gaia - p_hip) / (data.t_gaia - data.t_hip)
         prediction = jnp.where(valid, mu_gaia - mu_hg, 0.0)
         return loglike_pm_anomaly(prediction, data), prediction
@@ -198,9 +208,10 @@ class PhotometryTerm(AbstractTerm):
     """Score linear contrasts using Gaussian detections or Gaussian upper limits.
 
     ``bandpasses`` is a tuple in ``data.band_id`` order. ``select`` maps the
-    model to a system with ``band_contrasts(bandpass, times)`` of shape ``(K, T)``.
+    model to a system with ``band_contrasts(bandpass, time_d)`` of shape ``(K, T)``.
     Each row selects its own band, planet and epoch. An upper limit contributes
     ``log Phi((limit - prediction) / contrast_err)``. Invalid rows return zero.
+    Data ``times`` are days from the system's epoch. Bands share one ephemeris.
     """
 
     data: PhotometryData
@@ -225,8 +236,12 @@ class PhotometryTerm(AbstractTerm):
             is_valid=valid,
         )
         system = self.select(model)
+        ephemeris = system.ephemeris(time_d=data.times)
         bands = jnp.stack(
-            [system.band_contrasts(b, data.times) for b in self.bandpasses]
+            [
+                system.band_contrasts(b, time_d=data.times, ephemeris=ephemeris)
+                for b in self.bandpasses
+            ]
         )
         prediction = bands[data.band_id, data.planet_id, jnp.arange(data.times.size)]
         prediction = jnp.where(valid, prediction, 0.0)

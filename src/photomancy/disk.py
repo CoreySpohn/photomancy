@@ -16,7 +16,7 @@ from photomancy.core import build_gaussian_fit
 from photomancy.priors import IndependentPrior, LogNormal, Normal
 
 
-def surface_brightness_forward(wavelength_nm, time_jd):
+def surface_brightness_forward(wavelength_nm, time_d):
     """Build the default disk forward: ``system -> surface-brightness image``.
 
     Reads ``midplane_inc_deg`` / ``midplane_pa_deg`` off the ``System`` so the shared
@@ -25,17 +25,21 @@ def surface_brightness_forward(wavelength_nm, time_jd):
 
     Args:
         wavelength_nm: Wavelength to render at (within the disk's grid).
-        time_jd: Epoch (ignored by static disks; part of the disk interface).
+        time_d: Time in days from the system's epoch (ignored by static disks).
 
     Returns:
         ``forward(system) -> image`` of shape ``(ny, nx)`` (contrast per pixel).
     """
     wl = jnp.asarray(wavelength_nm)
-    t = jnp.asarray(time_jd)
+    t = jnp.asarray(time_d)
 
     def forward(system):
         return system.disk.surface_brightness(
-            wl, t, system.midplane_inc_deg, system.midplane_pa_deg
+            wl,
+            time_d=t,
+            incl_deg=system.midplane_inc_deg,
+            pa_deg=system.midplane_pa_deg,
+            dist_pc=system.dist_pc,
         )
 
     return forward

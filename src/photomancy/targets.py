@@ -5,6 +5,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+from hwoutils.epoch import Epoch
+
 from photomancy.orbit.data import PhotometryData, RelativeAstromData
 from photomancy.system_terms import PhotometryTerm, RelativeAstrometryTerm, _identity
 
@@ -18,6 +21,8 @@ class TargetData:
     ``band_names`` lists filters in first-used order. ``comparisons`` maps
     table names to raw rows: comparison rows, skipped pending rows, and pixels.
     A bandpass mapping supplied at load time is the default for ``terms``.
+    Observation containers retain ``times``, in days from ``epoch``, the same
+    origin required by the system used to evaluate their terms.
     """
 
     target: dict
@@ -25,6 +30,7 @@ class TargetData:
     photometry: PhotometryData | None
     band_names: tuple[str, ...]
     comparisons: dict
+    epoch: Epoch
     _bandpasses: Mapping | None = field(default=None, repr=False, compare=False)
 
     def terms(self, select=_identity, bandpasses=None):
@@ -62,12 +68,15 @@ def _mean_error(value):
     return value
 
 
-def load_target(path, *, pixel_data_ids=(), include_pending=False, bandpasses=None):
+def load_target(
+    path, *, epoch: Epoch, pixel_data_ids=(), include_pending=False, bandpasses=None
+):
     """Read target metadata and astrometry/photometry rows from a TOML file.
 
     Asymmetric errors ``[minus, plus]`` become their arithmetic mean.
-    Separations and errors in mas are converted to arcsec; Julian dates retain
-    their time origin. Photometry is converted from dmag to linear contrast.
+    Separations and errors in mas are converted to arcsec. Julian dates are
+    converted to days from the required ``epoch`` in NumPy float64 on the host,
+    before building data containers. Photometry becomes linear contrast.
     Comparison rows and pending rows excluded by ``include_pending=False`` are
     retained in ``comparisons`` by table name. Pixel rows are also retained;
     unknown top-level tables are ignored. Only the explicit ``pixel_data_ids``
@@ -104,7 +113,7 @@ def load_target(path, *, pixel_data_ids=(), include_pending=False, bandpasses=No
     astrometry = None
     if rows:
         astrometry = RelativeAstromData.from_sep_pa(
-            times=[r["jd"] for r in rows],
+            times=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
             sep=[r["sep_mas"] / 1000.0 for r in rows],
             sep_err=[_mean_error(r["sep_err_mas"]) / 1000.0 for r in rows],
             pa_deg=[r["pa_deg"] for r in rows],
@@ -116,7 +125,7 @@ def load_target(path, *, pixel_data_ids=(), include_pending=False, bandpasses=No
     photometry = None
     if rows:
         photometry = PhotometryData.from_dmag(
-            times=[r["jd"] for r in rows],
+            times=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
             dmag=[r["dmag"] for r in rows],
             dmag_err=[_mean_error(r["dmag_err"]) for r in rows],
             band_id=[band_names.index(r["filter"]) for r in rows],
@@ -129,5 +138,6 @@ def load_target(path, *, pixel_data_ids=(), include_pending=False, bandpasses=No
         photometry,
         band_names,
         comparisons,
+        epoch,
         bandpasses,
     )

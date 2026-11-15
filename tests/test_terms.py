@@ -7,8 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg
-from orbix import KeplerianOrbit
-from orbix.kepler import markley_solve_trig
+from hwoutils.epoch import Epoch
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
@@ -34,6 +33,7 @@ from photomancy.orbit.data import (
     StellarAstromData,
 )
 from photomancy.orbit.forward import (
+    _path_proper_motion,
     predict_pm_anomaly,
     predict_relative_astrometry,
     predict_rv,
@@ -53,19 +53,32 @@ _TIMES = np.array([31.0, 120.0, 290.0, 470.0])
 
 
 _MASS = 317.8
+_EPOCH = Epoch(2451545.0)
 
 
-def _system(elements=_ELEMENTS, mass=_MASS):
+def _system(elements=_ELEMENTS, mass=_MASS, *, epoch=_EPOCH):
     """Build a finite-mass planet with explicit orbital elements and stellar context."""
-    a, e, node, inc, peri, mean, epoch = elements
-    orbit = KeplerianOrbit(a, e, node, inc, peri, mean, epoch)
+    a, e, node, inc, peri, mean, epoch_d = elements
     planet = Planet(
         Rp_Rearth=jnp.ones(1),
-        Mp_Mearth=jnp.atleast_1d(mass),
-        orbit=orbit,
         physical_model=LambertianPhysicalModel(Ag=jnp.array([0.3])),
     )
-    return System(FlatStar(Msun2kg, 10.0, 1.0), (planet,), markley_solve_trig)
+    return System.from_classical(
+        FlatStar(1.0),
+        (planet,),
+        star_mass_Msun=1.0,
+        planet_mass_Msun=mass * Mearth2kg / Msun2kg,
+        dist_pc=10.0,
+        a_AU=a,
+        e=e,
+        W_rad=node,
+        i_rad=inc,
+        w_rad=peri,
+        M0_rad=mean,
+        epoch_d=epoch_d,
+        epoch=epoch,
+        order=(0,),
+    )
 
 
 def _data(max_n=None):
@@ -249,8 +262,8 @@ def test_planet_and_epoch_routing():
     """
 
     class LinearSystem(eqx.Module):
-        def positions(self, times):
-            east = jnp.array([10.0, 30.0])[:, None] + times
+        def positions(self, time_d):
+            east = jnp.array([10.0, 30.0])[:, None] + time_d
             return jnp.stack((east, -2 * east))
 
     data = eqx.tree_at(lambda d: d.planet_id, _data(), jnp.array([1, 0, 1, 0]))
@@ -270,7 +283,7 @@ def test_mixed_sum_and_restriction(with_prior):
     """
     model = ExposureModel(jnp.array(2.0), (jnp.array(3.0),), _system())
     image = ExposureTerm(
-        lambda instrument, exposure, scene: instrument * exposure + scene.star.dist_pc,
+        lambda instrument, exposure, scene: instrument * exposure + scene.dist_pc,
         gaussian_loglike(jnp.array(15.0), 1.0),
     )
     astrometry = RelativeAstrometryTerm(_data(), select=lambda m: m.scene)
@@ -386,6 +399,43 @@ def _element_args():
         Mp=_MASS * Mearth2kg,
         dist_pc=10.0,
     )
+
+
+@vv.case("scene-fits", "code-verification", basis="equivalence")
+@pytest.mark.parametrize("n_epochs", [2, 25])
+def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
+    """Fails if sharing a solve changes the PM anomaly or solves more than once.
+
+    Truth is three independent scene calls: window, Hipparcos and Gaia.
+    The 1e-12 relative tolerance permits only x64 rounding for both the slope
+    and likelihood. Two samples and the standard window cover slice endpoints.
+    """
+    term = ProperMotionAnomalyTerm(_new_term("pma").data, n_epochs=n_epochs)
+    system = _system()
+    calls = []
+    original = System.ephemeris
+
+    def record(self, time_d, **kwargs):
+        calls.append(time_d)
+        return original(self, time_d, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(System, "ephemeris", record)
+        actual, prediction = term(system)
+    assert len(calls) == 1
+    data = term.data
+    ts = jnp.linspace(
+        data.t_gaia - 0.5 * data.gaia_window,
+        data.t_gaia + 0.5 * data.gaia_window,
+        n_epochs,
+    )
+    mu_gaia = _path_proper_motion(ts, *system.star_reflex(time_d=ts))
+    p_hip = system.star_reflex(time_d=jnp.atleast_1d(data.t_hip))[:, 0]
+    p_gaia = system.star_reflex(time_d=jnp.atleast_1d(data.t_gaia))[:, 0]
+    expected_prediction = mu_gaia - (p_gaia - p_hip) / (data.t_gaia - data.t_hip)
+    expected = loglike_pm_anomaly(expected_prediction, data)
+    np.testing.assert_allclose(prediction, expected_prediction, rtol=1e-12, atol=0)
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
 
 
 def _new_term(kind, max_n=4):
@@ -571,7 +621,22 @@ def test_photometry_band_planet_epoch_routing():
         )
         for planet, albedo in ((first, 0.2), (second, 0.4))
     )
-    system = eqx.tree_at(lambda s: s.planets, _system(), planets)
+    a, e, node, inc, peri, mean, epoch_d = _ELEMENTS
+    system = System.from_classical(
+        FlatStar(1.0),
+        planets,
+        star_mass_Msun=1.0,
+        planet_mass_Msun=_MASS * Mearth2kg / Msun2kg,
+        dist_pc=10.0,
+        a_AU=jnp.array([a, 1.3 * a]),
+        e=e,
+        W_rad=node,
+        i_rad=inc,
+        w_rad=peri,
+        M0_rad=jnp.array([mean, 2 * mean]),
+        epoch_d=epoch_d,
+        epoch=Epoch(2451545.0),
+    )
     bands = (Bandpass.tophat(500.0, 100.0), Bandpass.tophat(900.0, 100.0))
     band_ids, planet_ids = [1, 0, 1, 0], [0, 1, 1, 0]
     data = PhotometryData.from_dmag(

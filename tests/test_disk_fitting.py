@@ -7,7 +7,7 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-from orbix.kepler.shortcuts.grid import get_grid_solver  # noqa: E402
+from hwoutils.epoch import Epoch  # noqa: E402
 
 from photomancy.backends import LaplaceBackend  # noqa: E402
 from photomancy.disk import (  # noqa: E402
@@ -16,7 +16,6 @@ from photomancy.disk import (  # noqa: E402
 )
 
 WL, TIME = 500.0, 0.0
-SOLVER = get_grid_solver(level="scalar", E=False, trig=True, jit=True)
 
 
 def _FIT(s):
@@ -54,15 +53,23 @@ def make_system():
             nx=51,
             ny=51,
             pixel_scale_arcsec=0.2,
-            dist_pc=10.0,
             n_slices_los=31,
         )
-        star = FlatStar(Ms_kg=1.989e30, dist_pc=10.0, flux_phot_per_nm_m2=1e9)
-        return System(
+        star = FlatStar(flux_phot_per_nm_m2=1e9)
+        return System.from_classical(
             star=star,
             planets=(),
             disk=disk,
-            trig_solver=SOLVER,
+            star_mass_Msun=1.0,
+            planet_mass_Msun=jnp.empty(0),
+            dist_pc=10.0,
+            a_AU=jnp.empty(0),
+            e=jnp.empty(0),
+            i_rad=jnp.empty(0),
+            W_rad=jnp.empty(0),
+            w_rad=jnp.empty(0),
+            M0_rad=jnp.empty(0),
+            epoch=Epoch(2451545.0),
             midplane_inc_deg=jnp.array(incl),
             midplane_pa_deg=jnp.array(pa),
         )
