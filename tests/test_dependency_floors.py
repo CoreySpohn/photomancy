@@ -15,8 +15,8 @@ PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 # First release of each sibling that uses the (east, north, away) sky chart.
 SKY_FLOORS = {
-    "orbix": Version("4.0.0"),  # 4.0.0: the time keyword is time_jd
-    "skyscapes": Version("3.0.0"),  # 3.0.0: unit suffixes and time_jd renamed
+    "orbix": Version("4.1.0"),  # 4.1.0: the system dynamics API
+    "skyscapes": Version("4.0.0"),  # 4.0.0: times are days from the scene epoch
     "coronagraphoto": Version("4.2.0"),
     "coronalyze": Version("1.2.0"),
 }
