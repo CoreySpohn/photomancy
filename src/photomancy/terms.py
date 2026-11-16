@@ -7,8 +7,10 @@ system that are not images are others (:mod:`photomancy.system_terms`).
 
 from abc import abstractmethod
 from collections.abc import Callable
+from typing import Self
 
 import equinox as eqx
+import jax
 from jaxtyping import PyTree, Scalar
 
 from photomancy.core.model import AbstractLogDensity
@@ -22,6 +24,11 @@ class AbstractTerm(eqx.Module):
     @abstractmethod
     def __call__(self, model) -> tuple[Scalar, PyTree]:
         """Return a scalar log-likelihood and its prediction PyTree."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def sample(self, key, model) -> Self:
+        """Copy this term with a draw at ``model``, preserving invalid entries."""
         raise NotImplementedError
 
 
@@ -58,6 +65,15 @@ class TermLogDensity(AbstractLogDensity):
     def __call__(self, params):
         """Return the scalar log-density at ``params``."""
         return self.value_and_aux(params)[0]
+
+    def sample(self, key, model) -> Self:
+        """Copy with independent draws, splitting the key in term order."""
+        keys = jax.random.split(key, len(self.terms))
+        terms = tuple(
+            term.sample(subkey, model)
+            for term, subkey in zip(self.terms, keys, strict=True)
+        )
+        return eqx.tree_at(lambda density: density.terms, self, terms)
 
     def restrict(self, indices):
         """A view over the terms at ``indices``, with the same prior.

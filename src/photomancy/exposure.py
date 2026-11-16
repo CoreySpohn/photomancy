@@ -17,7 +17,7 @@ science target) against one shared parameter PyTree.
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Self
 
 import equinox as eqx
 
@@ -72,6 +72,18 @@ class ExposureTerm(AbstractTerm):
         """Return ``(log_likelihood, predicted_image)`` at ``model``."""
         image = self.predict(model)
         return self.likelihood(image), image
+
+    def sample(self, key, model) -> Self:
+        """Copy with a draw from an injected likelihood supporting ``sample``.
+
+        The likelihood must implement ``sample(key, predicted)`` returning a
+        likelihood containing the drawn image; arbitrary score callables cannot
+        define a generative law.
+        """
+        if not hasattr(self.likelihood, "sample"):
+            raise TypeError("image likelihood must implement sample(key, predicted)")
+        likelihood = self.likelihood.sample(key, self.predict(model))
+        return eqx.tree_at(lambda term: term.likelihood, self, likelihood)
 
 
 class ExposureLogDensity(TermLogDensity):

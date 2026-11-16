@@ -688,3 +688,146 @@ def test_rv_default_jitter_and_selection():
         np.testing.assert_array_equal(a, b)
     with pytest.raises(ValueError, match="jitters"):
         RadialVelocityTerm(data, jitters=jnp.zeros(1))
+
+
+class _SamplingSystem(eqx.Module):
+    """Cheap time-dependent observables isolate the measurement sampling laws."""
+
+    def positions(self, time_d):
+        east = 0.1 + 1e-5 * time_d
+        return jnp.stack((east[None, :], -2 * east[None, :]))
+
+    def ephemeris(self, time_d):
+        return time_d
+
+    def star_reflex(self, time_d, ephemeris=None):
+        return jnp.stack((1e-10 * time_d**2, -2e-10 * time_d**2))
+
+    def star_radial_velocity(self, time_d):
+        return time_d * 0.01
+
+    def band_contrasts(self, bandpass, time_d, ephemeris=None):
+        return jnp.full((1, time_d.size), 1e-10)
+
+
+@pytest.mark.parametrize("kind", ["relative", "stellar", "rv", "pma", "photometry"])
+def test_term_sampling_laws(kind):
+    """Fails if sampling loses masks, padding, jitter, covariance or censoring.
+
+    Each of five measurement types needs its own sampler structure. With n=2000
+    keys the Gaussian means and variances use 4/sqrt(n) and
+    4*sqrt(2/(n-1)); cross moments use 4/sqrt(n). This resolves mean biases
+    of about 0.09 sigma. Censoring fractions use four binomial standard errors.
+    JIT/eager differences allow 32 x64 eps from fused arithmetic.
+    """
+    from jax.scipy.special import ndtr
+
+    term = (
+        RelativeAstrometryTerm(_data(7))
+        if kind == "relative"
+        else _new_term(kind, max_n=7)
+    )
+    if kind != "pma":
+        valid = term.data.is_valid
+
+        def poison(x):
+            if x.dtype == jnp.bool_:
+                return x
+            fill = -999 if jnp.issubdtype(x.dtype, jnp.integer) else jnp.nan
+            return jnp.where(valid, x, fill)
+
+        term = eqx.tree_at(lambda t: t.data, term, jax.tree.map(poison, term.data))
+    model = _SamplingSystem()
+    prediction = term(model)[1]
+    keys = jax.random.split(jax.random.key(0), 2000)
+    draws = eqx.tree_at(
+        lambda t: t.data,
+        term,
+        eqx.filter_jit(jax.vmap(lambda key: term.sample(key, model).data))(keys),
+    )
+    one = term.sample(keys[0], model)
+    compiled_one = eqx.tree_at(
+        lambda t: t.data, term, jax.tree.map(lambda x: x[0], draws.data)
+    )
+    for a, b in zip(
+        jax.tree.leaves(one.data), jax.tree.leaves(compiled_one.data), strict=True
+    ):
+        np.testing.assert_allclose(a, b, rtol=32 * np.finfo(float).eps, atol=1e-20)
+    assert np.isfinite(one(model)[0])
+    np.testing.assert_array_equal(one.data.is_valid, term.data.is_valid)
+    for a, b in zip(jax.tree.leaves(one.data), jax.tree.leaves(term.data), strict=True):
+        assert a.shape == b.shape
+        np.testing.assert_array_equal(
+            np.asarray(a)[~term.data.is_valid], np.asarray(b)[~term.data.is_valid]
+        )
+    data = term.data
+    if kind in ("relative", "stellar"):
+        east = (draws.data.ra[:, :4] - prediction[0, :4]) / data.ra_err[:4]
+        north = (draws.data.dec[:, :4] - prediction[1, :4]) / data.dec_err[:4]
+        z = jnp.stack(
+            (east, (north - data.corr[:4] * east) / jnp.sqrt(1 - data.corr[:4] ** 2)),
+            axis=-1,
+        )
+        assert np.all(
+            np.abs(np.mean(z[..., 0] * z[..., 1], axis=0)) < 4 / np.sqrt(2000)
+        )
+    elif kind == "rv":
+        sigma = jnp.sqrt(data.rv_err[:4] ** 2 + term.jitters[data.inst_ids[:4]] ** 2)
+        z = (draws.data.rv[:, :4] - prediction[:4]) / sigma
+    elif kind == "pma":
+        z = np.linalg.solve(
+            np.linalg.cholesky(data.pm_anomaly_cov),
+            (draws.data.pm_anomaly - prediction).T,
+        ).T
+        empty = eqx.tree_at(lambda t: t.data.is_valid, term, jnp.array(False))
+        np.testing.assert_array_equal(
+            empty.sample(keys[0], model).data.pm_anomaly, data.pm_anomaly
+        )
+    else:
+        # Uncensored rows test Gaussian residuals; censored rows test their event law.
+        z = (
+            draws.data.contrast[:, [0, 2]] - prediction[jnp.array([0, 2])]
+        ) / data.contrast_err[jnp.array([0, 2])]
+        for row in (1, 3):
+            p = float(
+                ndtr((data.contrast[row] - prediction[row]) / data.contrast_err[row])
+            )
+            actual = np.asarray(draws.data.is_upper_limit[:, row])
+            assert abs(actual.mean() - p) <= 4 * np.sqrt(p * (1 - p) / 2000)
+            np.testing.assert_array_equal(
+                np.asarray(draws.data.contrast[:, row])[actual],
+                float(data.contrast[row]),
+            )
+            assert np.all(
+                np.asarray(draws.data.contrast[:, row])[~actual]
+                >= float(data.contrast[row])
+            )
+    z = np.asarray(z)
+    assert np.all(np.abs(z.mean(axis=0)) < 4 / np.sqrt(2000))
+    assert np.all(np.abs(z.var(axis=0, ddof=1) - 1) < 4 * np.sqrt(2 / 1999))
+
+
+def test_density_sampling_split_keys():
+    """Fails if terms reuse a key or sampling changes the prior.
+
+    Equality with each split subkey is exact algebra. Two identical terms over
+    n=2000 keys have cross moment within 4/sqrt(n) of zero (four MC errors).
+    """
+    term = _new_term("rv")
+    density = TermLogDensity((term, term), prior=lambda model: jnp.array(-2.0))
+    model = _SamplingSystem()
+    key = jax.random.key(0)
+    draw = density.sample(key, model)
+    assert draw.prior is density.prior
+    for sampled, subkey in zip(draw.terms, jax.random.split(key, 2), strict=True):
+        np.testing.assert_array_equal(
+            sampled.data.rv, term.sample(subkey, model).data.rv
+        )
+    assert not np.array_equal(draw.terms[0].data.rv, draw.terms[1].data.rv)
+    draws = eqx.filter_jit(
+        jax.vmap(lambda k: tuple(t.data for t in density.sample(k, model).terms))
+    )(jax.random.split(key, 2000))
+    sigma = jnp.sqrt(term.data.rv_err[0] ** 2 + term.jitters[0] ** 2)
+    prediction = term(model)[1][0]
+    z = [(d.rv[:, 0] - prediction) / sigma for d in draws]
+    assert abs(float(jnp.mean(z[0] * z[1]))) < 4 / np.sqrt(2000)

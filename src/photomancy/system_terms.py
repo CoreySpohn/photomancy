@@ -10,8 +10,10 @@ and Gaia reference times. Absolute dates must be converted on the host first.
 """
 
 from collections.abc import Callable
+from typing import Self
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 from jax.scipy.stats import norm
 
@@ -42,6 +44,42 @@ __all__ = [
 
 def _identity(model):
     return model
+
+
+def _relative_positions(system, time_d, planet_id):
+    """Read east/north offsets (2, T) for each row's planet and epoch."""
+    pos = system.positions(time_d=time_d)
+    return pos[:, planet_id, jnp.arange(time_d.size)]
+
+
+def _band_contrasts(system, bandpasses, time_d, band_id, planet_id):
+    """Read linear contrasts (T,) with one shared ephemeris across bands."""
+    ephemeris = system.ephemeris(time_d=time_d)
+    bands = jnp.stack(
+        [
+            system.band_contrasts(b, time_d=time_d, ephemeris=ephemeris)
+            for b in bandpasses
+        ]
+    )
+    return bands[band_id, planet_id, jnp.arange(time_d.size)]
+
+
+def _sample_radec(key, term, prediction):
+    """Sample correlated east/north errors without changing padded payloads."""
+    data = term.data
+    valid = data.is_valid
+    eps = jax.random.normal(key, (2, data.times.size), dtype=jnp.float64)
+    sx = jnp.where(valid, data.ra_err, 1.0)
+    sy = jnp.where(valid, data.dec_err, 1.0)
+    rho = jnp.where(valid, data.corr, 0.0)
+    east = prediction[0] + sx * eps[0]
+    north = prediction[1] + sy * (rho * eps[0] + jnp.sqrt(1 - rho**2) * eps[1])
+    sampled = eqx.tree_at(
+        lambda d: (d.ra, d.dec),
+        data,
+        (jnp.where(valid, east, data.ra), jnp.where(valid, north, data.dec)),
+    )
+    return eqx.tree_at(lambda t: t.data, term, sampled)
 
 
 class RelativeAstrometryTerm(AbstractTerm):
@@ -75,11 +113,14 @@ class RelativeAstrometryTerm(AbstractTerm):
             planet_id=jnp.where(valid, self.data.planet_id, 0),
             is_valid=valid,
         )
-        pos = self.select(model).positions(time_d=data.times)
-        prediction = pos[:, data.planet_id, jnp.arange(data.times.shape[0])]
+        prediction = _relative_positions(self.select(model), data.times, data.planet_id)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         east, north = prediction
         return loglike_relative_astrom(east, north, data), prediction
+
+    def sample(self, key, model) -> Self:
+        """Copy with correlated Gaussian positions at the same epochs."""
+        return _sample_radec(key, self, self(model)[1])
 
 
 class StellarAstrometryTerm(AbstractTerm):
@@ -109,6 +150,10 @@ class StellarAstrometryTerm(AbstractTerm):
         prediction = self.select(model).star_reflex(time_d=data.times)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         return loglike_stellar_astrom(*prediction, data), prediction
+
+    def sample(self, key, model) -> Self:
+        """Copy with correlated Gaussian positions at the same epochs."""
+        return _sample_radec(key, self, self(model)[1])
 
 
 class RadialVelocityTerm(AbstractTerm):
@@ -153,6 +198,25 @@ class RadialVelocityTerm(AbstractTerm):
             valid,
         )
         return value, prediction
+
+    def sample(self, key, model) -> Self:
+        """Draw Gaussian RV noise with zero instrument offsets.
+
+        The score marginalizes offsets against a flat measure and is therefore
+        improper on raw RVs. Zero offsets choose a representative; its residual
+        contrasts have exactly the marginalized Gaussian law. Jitter is added
+        in quadrature, as in the score.
+        """
+        data = self.data
+        valid = data.is_valid
+        ids = jnp.where(valid, data.inst_ids, 0)
+        jitter = jnp.zeros(data.n_inst) if self.jitters is None else self.jitters
+        sigma = jnp.sqrt(jnp.where(valid, data.rv_err, 1.0) ** 2 + jitter[ids] ** 2)
+        draw = self(model)[1] + sigma * jax.random.normal(
+            key, data.rv.shape, dtype=jnp.float64
+        )
+        sampled = eqx.tree_at(lambda d: d.rv, data, jnp.where(valid, draw, data.rv))
+        return eqx.tree_at(lambda t: t.data, self, sampled)
 
 
 class ProperMotionAnomalyTerm(AbstractTerm):
@@ -203,6 +267,19 @@ class ProperMotionAnomalyTerm(AbstractTerm):
         prediction = jnp.where(valid, mu_gaia - mu_hg, 0.0)
         return loglike_pm_anomaly(prediction, data), prediction
 
+    def sample(self, key, model) -> Self:
+        """Copy with a full-covariance Gaussian proper-motion anomaly."""
+        valid = self.data.is_valid
+        covariance = jnp.where(valid, self.data.pm_anomaly_cov, jnp.eye(2))
+        eps = jax.random.normal(key, (2,), dtype=jnp.float64)
+        draw = self(model)[1] + jnp.linalg.cholesky(covariance) @ eps
+        data = eqx.tree_at(
+            lambda d: d.pm_anomaly,
+            self.data,
+            jnp.where(valid, draw, self.data.pm_anomaly),
+        )
+        return eqx.tree_at(lambda t: t.data, self, data)
+
 
 class PhotometryTerm(AbstractTerm):
     """Score linear contrasts using Gaussian detections or Gaussian upper limits.
@@ -236,16 +313,36 @@ class PhotometryTerm(AbstractTerm):
             is_valid=valid,
         )
         system = self.select(model)
-        ephemeris = system.ephemeris(time_d=data.times)
-        bands = jnp.stack(
-            [
-                system.band_contrasts(b, time_d=data.times, ephemeris=ephemeris)
-                for b in self.bandpasses
-            ]
+        prediction = _band_contrasts(
+            system, self.bandpasses, data.times, data.band_id, data.planet_id
         )
-        prediction = bands[data.band_id, data.planet_id, jnp.arange(data.times.size)]
         prediction = jnp.where(valid, prediction, 0.0)
         z = (data.contrast - prediction) / data.contrast_err
         detection = -0.5 * z**2 - jnp.log(data.contrast_err * jnp.sqrt(2.0 * jnp.pi))
         rows = jnp.where(data.is_upper_limit, norm.logcdf(z), detection)
         return jnp.sum(jnp.where(valid, rows, 0.0)), prediction
+
+    def sample(self, key, model) -> Self:
+        """Draw Gaussian contrasts, censoring at each stored upper limit.
+
+        An upper-limit row retains its threshold and flag when the draw lies
+        below the threshold. Above it, the row becomes a measured detection.
+        Rows already measured as detections remain uncensored Gaussian draws.
+        """
+        data = self.data
+        valid = data.is_valid
+        sigma = jnp.where(valid, data.contrast_err, 1.0)
+        draw = self(model)[1] + sigma * jax.random.normal(
+            key, data.contrast.shape, dtype=jnp.float64
+        )
+        censored = data.is_upper_limit & (draw < data.contrast)
+        contrast = jnp.where(censored, data.contrast, draw)
+        sampled = eqx.tree_at(
+            lambda d: (d.contrast, d.is_upper_limit),
+            data,
+            (
+                jnp.where(valid, contrast, data.contrast),
+                jnp.where(valid, censored, data.is_upper_limit),
+            ),
+        )
+        return eqx.tree_at(lambda t: t.data, self, sampled)

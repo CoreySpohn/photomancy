@@ -32,6 +32,15 @@ from photomancy.posterior import (
     SamplePosterior,
 )
 from photomancy.posterior_utils import project_samples, sample_capped
+from photomancy.report import (
+    AbstractReportPredictor,
+    ReportLaw,
+    ReportPrediction,
+    ReportRows,
+    ReportTable,
+    ReportTerm,
+    TabulatedReportPredictor,
+)
 from photomancy.system_terms import (
     PhotometryTerm,
     ProperMotionAnomalyTerm,
@@ -51,6 +60,7 @@ __all__ = [
     "AbstractBackend",
     "AbstractLogDensity",
     "AbstractPosterior",
+    "AbstractReportPredictor",
     "AbstractTerm",
     "GaussianPosterior",
     "LaplaceBackend",
@@ -66,9 +76,15 @@ __all__ = [
     "ProperMotionAnomalyTerm",
     "RadialVelocityTerm",
     "RelativeAstrometryTerm",
+    "ReportLaw",
+    "ReportPrediction",
+    "ReportRows",
+    "ReportTable",
+    "ReportTerm",
     "SMCBackend",
     "SamplePosterior",
     "StellarAstrometryTerm",
+    "TabulatedReportPredictor",
     "TargetData",
     "TermLogDensity",
     "__version__",
