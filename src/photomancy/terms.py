@@ -7,11 +7,10 @@ system that are not images are others (:mod:`photomancy.system_terms`).
 
 from abc import abstractmethod
 from collections.abc import Callable
-from typing import Self
+from typing import Any, Self
 
 import equinox as eqx
 import jax
-from jaxtyping import PyTree, Scalar
 
 from photomancy.core.model import AbstractLogDensity
 
@@ -22,7 +21,7 @@ class AbstractTerm(eqx.Module):
     """One data contribution evaluated against a shared model."""
 
     @abstractmethod
-    def __call__(self, model) -> tuple[Scalar, PyTree]:
+    def __call__(self, model) -> tuple[jax.Array, Any]:
         """Return a scalar log-likelihood and its prediction PyTree."""
         raise NotImplementedError
 
