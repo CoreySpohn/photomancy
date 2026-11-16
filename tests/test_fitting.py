@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, Rearth2AU, d2s
-from orbix.kepler.core import diff_solve_trig
+from orbix.kepler import Halley, kepler
 from sky_reference import sky_position
 
 from photomancy.orbit.data import NullData, OrbitData, RelativeAstromData, RVData
@@ -71,27 +71,29 @@ def eccentric_orbit():
 # ============================================================================
 
 
-class TestDiffSolveTrig:
-    """Tests for the custom VJP Kepler solver."""
+class TestKepler:
+    """Tests for differentiable Kepler trig evaluation."""
 
-    def test_matches_original(self):
-        """diff_solve_trig should return identical values to solve_trig."""
-        from orbix.kepler.core import solve_trig
+    def test_matches_halley(self):
+        """Fails if default trig evaluation disagrees with independent Halley.
 
+        Absolute 1e-12 and relative 1e-5 tolerances retain the original
+        solver parity floor.
+        """
         M = jnp.linspace(0.01, 2 * jnp.pi - 0.01, 100)
         e = 0.5
 
-        sinE_orig, cosE_orig = solve_trig(M, e)
-        sinE_diff, cosE_diff = diff_solve_trig(M, e)
+        sinE_ref, cosE_ref = kepler(M, e, 0.0, solver=Halley())
+        sinE, cosE = kepler(M, e, 0.0)
 
-        assert jnp.allclose(sinE_orig, sinE_diff, atol=1e-12)
-        assert jnp.allclose(cosE_orig, cosE_diff, atol=1e-12)
+        assert jnp.allclose(sinE_ref, sinE, atol=1e-12)
+        assert jnp.allclose(cosE_ref, cosE, atol=1e-12)
 
     def test_grad_finite(self):
         """Gradients w.r.t. M and e should be finite."""
 
         def loss(M, e):
-            sinE, cosE = diff_solve_trig(M, e)
+            sinE, cosE = kepler(M, e, 0.0)
             return jnp.sum(sinE**2 + cosE**2)
 
         M = jnp.linspace(0.1, 6.0, 50)
@@ -104,11 +106,11 @@ class TestDiffSolveTrig:
         """At e=0: E=M, so d(sinE)/dM = cosM and d(cosE)/dM = -sinM."""
 
         def sinE_sum(M, e):
-            sinE, _ = diff_solve_trig(M, e)
+            sinE, _ = kepler(M, e, 0.0)
             return jnp.sum(sinE)
 
         def cosE_sum(M, e):
-            _, cosE = diff_solve_trig(M, e)
+            _, cosE = kepler(M, e, 0.0)
             return jnp.sum(cosE)
 
         M = jnp.linspace(0.1, 6.0, 20)
@@ -124,9 +126,9 @@ class TestDiffSolveTrig:
 
     def test_jit(self):
         """Should be JIT-compilable."""
-        f = jax.jit(diff_solve_trig)
+        f = jax.jit(kepler)
         M = jnp.array([0.5, 1.0, 2.0])
-        sinE, _cosE = f(M, 0.3)
+        sinE, _cosE = f(M, 0.3, 0.0)
         assert sinE.shape == (3,)
         assert jnp.all(jnp.isfinite(sinE))
 
@@ -137,7 +139,7 @@ class TestDiffSolveTrig:
         for e_val in [0.0, 0.1, 0.5, 0.8, 0.95]:
 
             def loss(e):
-                sinE, cosE = diff_solve_trig(M, e)
+                sinE, cosE = kepler(M, e, 0.0)
                 return jnp.sum(sinE + cosE)
 
             g = jax.grad(loss)(e_val)

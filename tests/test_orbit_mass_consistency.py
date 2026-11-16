@@ -72,7 +72,7 @@ def test_posterior_orbit_preserves_fitted_semimajor_axis(massive_orbit):
     """Posterior tracks reconstruct the model's a using the sampled mass."""
     _, _, phys = massive_orbit
     samples = {k: jnp.atleast_1d(v) for k, v in phys.items()}
-    orbit = orbits_from_samples(samples, Msun2kg)
+    orbit = orbits_from_samples(samples, Msun2kg, reference_day=0.0)
     np.testing.assert_allclose(orbit.a_AU, samples["a"], rtol=1e-12, atol=0)
 
 

@@ -10,6 +10,10 @@ operations (manifold projection, variance-capped sampling) live in
 
 import jax
 import jax.numpy as jnp
+from hwoutils.constants import G
+from orbix.equations import period_to_sma
+
+from photomancy.orbit._frame import frame_from_tp
 
 
 def sample_physical(posterior, problem, key, n):
@@ -30,36 +34,43 @@ def sample_physical(posterior, problem, key, n):
     return jax.vmap(problem.to_physical)(z)
 
 
-def orbits_from_samples(samples, Ms_kg):
-    """Turn a physical-sample dict into a ``(K,)``-batched ``KeplerianOrbit``.
+def orbits_from_samples(samples, Ms_kg, *, reference_day):
+    """Turn physical samples into a ``(K,)``-batched ``orbix.system.FrameOrbit``.
 
     The bridge from a fitted posterior to orbit-track visualization and any
     other propagation consumer: ``sample_physical`` output (or any dict with
     the ``T``/``e``/``cos_i``/``W``/``cos_w``/``sin_w``/``tp`` keys the
-    forward models use) goes straight into
-    ``orbix.KeplerianOrbit.from_period``, so a fan of posterior draws becomes
-    one batched orbit object in a single call.
+    forward models use) becomes one batched orbit object.
+
+    The forward models interpret ``tp`` and observation times as days from the
+    same zero; the sampling model defines ``tp = -M0 * T / (2*pi)``. Samples
+    do not identify a calendar epoch. ``reference_day`` locates that zero in
+    the returned orbit's time coordinate, in float days from the caller's
+    ``hwoutils.epoch.Epoch``. Periapsis is at ``reference_day + tp``; evaluate
+    with ``orbit.at(reference_day + observation_times)``. Use zero when the
+    caller's Epoch is already the observation-time origin.
 
     Args:
         samples: Dict of physical parameters keyed as ``to_physical`` emits
             them, each value scalar or ``(K,)``. Includes true planet mass
             ``Mp`` in kg when available; otherwise assumes negligible planet mass.
         Ms_kg: Stellar mass in kg (the fit argument, not a fitted parameter).
+        reference_day: Sample day zero in the caller's float-day coordinate.
 
     Returns:
-        A ``(K,)``-batched :class:`orbix.KeplerianOrbit`.
+        A :class:`orbix.system.FrameOrbit`, batched over the sample values.
+        Scalar inputs produce an unbatched orbit.
     """
-    from orbix import KeplerianOrbit
-
-    return KeplerianOrbit.from_period(
-        T_d=samples["T"],
-        e=samples["e"],
-        cos_i=samples["cos_i"],
-        W_rad=samples["W"],
-        cos_w=samples["cos_w"],
-        sin_w=samples["sin_w"],
-        tp_d=samples["tp"],
-        Ms_kg=Ms_kg + samples.get("Mp", 0.0),
+    total_mass = Ms_kg + samples.get("Mp", 0.0)
+    return frame_from_tp(
+        period_to_sma(samples["T"], total_mass),
+        samples["e"],
+        samples["cos_i"],
+        samples["W"],
+        samples["cos_w"],
+        samples["sin_w"],
+        reference_day + samples["tp"],
+        G * total_mass,
     )
 
 

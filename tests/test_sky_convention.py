@@ -5,8 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg
-from orbix import KeplerianOrbit
-from orbix.kepler import markley_solve_trig
+from orbix.system import FrameOrbit, phase_angle_rad
 from sky_reference import position_au, sky_position
 
 from photomancy.orbit.data import RelativeAstromData
@@ -283,14 +282,10 @@ def test_k16_fit_recovers_orientation(k16):
         sin_w=jnp.sin(sites["w_raw"]),
         tp=result.tp,  # Keep the epoch: initialization clips M0 off its boundary.
     )
-    orbit = orbits_from_samples(samples, k16["Ms"])
-    positions = orbit.position_arcsec(
-        trig_solver=markley_solve_trig,
-        time_jd=jnp.asarray(times),
-        Ms_kg=k16["Ms"],
-        dist_pc=k16["dist_pc"],
-    )
-    np.testing.assert_allclose(np.asarray(positions)[:, 0], truth, atol=1e-7, rtol=0)
+    orbit = orbits_from_samples(samples, k16["Ms"], reference_day=0.0)
+    positions, _ = orbit.at(jnp.asarray(times))
+    offsets = np.asarray(positions)[0, :, :2].T / k16["dist_pc"]
+    np.testing.assert_allclose(offsets, truth, atol=1e-7, rtol=0)
 
 
 @pytest.mark.parametrize("oracle", ["numpy", "orbix"])
@@ -300,24 +295,18 @@ def test_relative_astrometry_east_north(k16, oracle):
     if oracle == "numpy":
         expected = reference(times, k16)
     else:
-        orbit = KeplerianOrbit.from_period(
-            T_d=k16["T"],
+        orbit = FrameOrbit.from_classical(
+            a_AU=k16["a"],
             e=k16["e"],
-            cos_i=k16["cos_i"],
+            i_rad=jnp.arccos(k16["cos_i"]),
             W_rad=k16["W"],
-            cos_w=k16["cos_w"],
-            sin_w=k16["sin_w"],
-            tp_d=k16["tp"],
-            Ms_kg=k16["Ms"],
+            w_rad=jnp.arctan2(k16["sin_w"], k16["cos_w"]),
+            M0_rad=0.0,
+            epoch_d=k16["tp"],
+            mu_AU3_per_d2=G * k16["Ms"],
         )
-        expected = np.asarray(
-            orbit.position_arcsec(
-                trig_solver=markley_solve_trig,
-                time_jd=times,
-                Ms_kg=k16["Ms"],
-                dist_pc=k16["dist_pc"],
-            )
-        )[:, 0]
+        position, _ = orbit.at(times)
+        expected = np.asarray(position)[..., :2].T / k16["dist_pc"]
     actual = predict_relative_astrometry(times, **forward_params(k16))
     np.testing.assert_allclose(actual, expected, atol=1e-9, rtol=0)
 
@@ -330,23 +319,21 @@ def test_raw_rows_and_forward_match_classical_ti(k16, cos_i):
     expected = position_au(
         times, **{k: v for k, v in p.items() if k not in ("Ms", "dist_pc")}
     )
-    orbit = KeplerianOrbit.from_period(
-        T_d=p["T"],
+    orbit = FrameOrbit.from_classical(
+        a_AU=p["a"],
         e=p["e"],
-        cos_i=p["cos_i"],
+        i_rad=jnp.arccos(p["cos_i"]),
         W_rad=p["W"],
-        cos_w=p["cos_w"],
-        sin_w=p["sin_w"],
-        tp_d=p["tp"],
-        Ms_kg=p["Ms"],
+        w_rad=jnp.arctan2(p["sin_w"], p["cos_w"]),
+        M0_rad=0.0,
+        epoch_d=p["tp"],
+        mu_AU3_per_d2=G * p["Ms"],
     )
-    rows, beta, radius = orbit.propagate(
-        trig_solver=markley_solve_trig, time_jd=times, Ms_kg=p["Ms"]
-    )
-    np.testing.assert_allclose(rows[0], expected, atol=1e-9, rtol=0)
-    np.testing.assert_allclose(
-        np.cos(beta[0]), expected[2] / radius[0], atol=1e-12, rtol=0
-    )
+    rows, _ = orbit.at(times)
+    beta = phase_angle_rad(rows)
+    radius = jnp.linalg.norm(rows, axis=-1)
+    np.testing.assert_allclose(rows.T, expected, atol=1e-9, rtol=0)
+    np.testing.assert_allclose(np.cos(beta), expected[2] / radius, atol=1e-12, rtol=0)
     actual = predict_relative_astrometry(times, **forward_params(p))
     np.testing.assert_allclose(actual, expected[:2] / p["dist_pc"], atol=1e-9, rtol=0)
 

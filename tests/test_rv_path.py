@@ -260,18 +260,25 @@ def test_predict_rv_matches_orbit_radial_velocity():
     The x64 tolerance (rtol 1e-12, atol 1e-10 m/s) allows solver and conversion
     rounding for a finite-mass, eccentric, inclined orbit.
     """
-    from orbix import KeplerianOrbit
-    from orbix.kepler import markley_solve_trig
+    from hwoutils.constants import G
+    from orbix.equations import period_to_sma
+    from orbix.system import FrameOrbit, radial_velocity_m_per_s
 
     period, e, cos_i, node, cos_w, sin_w, tp = (430.0, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)
     mass = 0.1 * Msun2kg
     times = jnp.array([-120.0, 0.0, 137.0, 690.0])
-    orbit = KeplerianOrbit.from_period(
-        period, e, cos_i, node, cos_w, sin_w, tp, Ms_kg=Msun2kg, Mp_kg=mass
+    orbit = FrameOrbit.from_classical(
+        period_to_sma(period, Msun2kg + mass),
+        e,
+        jnp.arccos(cos_i),
+        node,
+        jnp.arctan2(sin_w, cos_w),
+        0.0,
+        mu_AU3_per_d2=G * (Msun2kg + mass),
+        epoch_d=tp,
     )
-    expected = orbit.radial_velocity_m_s(
-        trig_solver=markley_solve_trig, time_jd=times, Ms_kg=Msun2kg, Mp_kg=mass
-    )[0]
+    _, relative_velocity = orbit.at(times)
+    expected = radial_velocity_m_per_s(-mass / (Msun2kg + mass) * relative_velocity)
     actual = predict_rv(
         times,
         period,
@@ -381,30 +388,28 @@ def test_reflex_orbit_closes_at_total_mass_period():
 @pytest.mark.parametrize("known_mass", [False, True])
 def test_predict_rv_is_receding_positive_stellar_velocity(known_mass):
     """RV is +dz_star/dt in the right-handed (east, north, away) frame."""
-    from hwoutils.constants import two_pi
+    from hwoutils.constants import G
     from orbix.equations import period_to_sma
-    from orbix.equations.orbit import AB_matrices_reduced
-    from orbix.equations.propagation import single_r
-    from orbix.kepler.core import diff_solve_trig
+    from orbix.system import FrameOrbit
 
     period, e, cos_i, node, omega, tp = 430.0, 0.37, 0.43, 1.1, 0.72, 31.0
     mass = (0.1 if known_mass else 1e-4) * Msun2kg
     sin_i = jnp.sqrt(1 - cos_i**2)
     a = period_to_sma(period, Msun2kg + mass)
-    A, B = AB_matrices_reduced(
+    orbit = FrameOrbit.from_classical(
         a,
-        jnp.sqrt(1 - e**2),
-        sin_i,
-        cos_i,
-        jnp.sin(node),
-        jnp.cos(node),
-        jnp.sin(omega),
-        jnp.cos(omega),
+        e,
+        jnp.arccos(cos_i),
+        node,
+        omega,
+        0.0,
+        mu_AU3_per_d2=G * (Msun2kg + mass),
+        epoch_d=tp,
     )
 
     def stellar_z(time):
-        sinE, cosE = diff_solve_trig(jnp.atleast_1d(two_pi * (time - tp) / period), e)
-        z_planet = single_r(A, B, e, jnp.atleast_1d(sinE), jnp.atleast_1d(cosE))[2, 0]
+        position, _ = orbit.at(time)
+        z_planet = position[2]
         return -(mass / (Msun2kg + mass)) * z_planet
 
     times = jnp.linspace(0.0, 2.0 * period, 31)

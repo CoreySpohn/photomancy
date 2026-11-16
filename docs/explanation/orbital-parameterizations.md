@@ -26,6 +26,21 @@ matched to its job:
   parameters. The design matrix stays well conditioned at any eccentricity;
   the classical angles are extracted only afterwards.
 
+## Posterior tracks and time origins
+
+`orbits_from_samples(samples, Ms_kg, *, reference_day)` returns an
+`orbix.system.FrameOrbit` batched over the posterior draws. It uses `T`, `e`,
+`cos_i`, `W`, `cos_w`, `sin_w`, and `tp`, plus true planet mass `Mp` when
+present. The semimajor axis follows from `T` and the total mass.
+
+The forward models use days from a common observation-time zero. The sampling
+model defines `tp = -M0 * T / (2*pi)`, with no calendar epoch in the samples.
+Supply `reference_day` as that zero in float days from your `hwoutils.epoch.Epoch`.
+Evaluate tracks with `orbit.at(reference_day + observation_times)`; the returned
+position and velocity arrays have shape `(K, N, 3)` in AU and AU/day, with
+coordinates `(east, north, away)`. Use `reference_day=0.0` when the Epoch already
+matches the observation-time origin. Scalar samples produce an unbatched orbit.
+
 ## Custom likelihoods and planet scales
 
 {py:func}`~photomancy.orbit.model.build_model`,
