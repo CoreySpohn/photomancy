@@ -3,7 +3,7 @@
 photomancy reimplements no disk physics -- the forward is skyscapes' own ``System`` /
 disk render. Only the inference glue lives here: select the fitted leaves, build a
 Gaussian-image likelihood, and delegate to ``build_scene_logdensity``. The forward is an
-injected callable, so the surface-brightness render now and a coronagraph render later
+injected callable, so the radiance render now and a coronagraph render later
 share one code path.
 """
 
@@ -16,31 +16,28 @@ from photomancy.core import build_gaussian_fit
 from photomancy.priors import IndependentPrior, LogNormal, Normal
 
 
-def surface_brightness_forward(wavelength_nm, time_d):
-    """Build the default disk forward: ``system -> surface-brightness image``.
+def radiance_forward(wavelength_nm, time_d, *, grid):
+    """Build the default disk forward: ``system -> photon radiance image``.
 
-    Reads ``midplane_inc_deg`` / ``midplane_pa_deg`` off the ``System`` so the shared
-    orientation is the live, fitted geometry. The coronagraph forward has the same
-    signature (``system -> image``) and drops in without touching the rest of the fit.
+    Calls ``system.photon_radiance`` so the shared midplane orientation is the live,
+    fitted geometry. A coronagraph forward has the same signature (``system -> image``)
+    and drops in without touching the rest of the fit.
 
     Args:
         wavelength_nm: Wavelength to render at (within the disk's grid).
         time_d: Time in days from the system's epoch (ignored by static disks).
+        grid: The sky ``PixelGrid`` (arcsec, with an orientation) to sample on.
 
     Returns:
-        ``forward(system) -> image`` of shape ``(ny, nx)`` (contrast per pixel).
+        ``forward(system) -> image`` of shape ``grid.shape``: the disk photon radiance
+        in ph s^-1 m^-2 nm^-1 sr^-1 at the pixel centres (a density, independent of
+        the pixel size).
     """
     wl = jnp.asarray(wavelength_nm)
     t = jnp.asarray(time_d)
 
     def forward(system):
-        return system.disk.surface_brightness(
-            wl,
-            time_d=t,
-            incl_deg=system.midplane_inc_deg,
-            pa_deg=system.midplane_pa_deg,
-            dist_pc=system.dist_pc,
-        )
+        return system.photon_radiance(wl, t, grid=grid).data
 
     return forward
 
@@ -58,7 +55,7 @@ def build_disk_logdensity(
 
     Args:
         system: A skyscapes ``System`` (the scene; its selected leaves are the params).
-        image: Observed surface-brightness image, shape ``(ny, nx)``.
+        image: Observed disk image, shape ``(ny, nx)``.
         fit_leaves: ``system -> list[leaf]`` selecting the leaves to fit (e.g.
             ``lambda s: [s.disk.sma_AU, s.midplane_inc_deg, ...]``).
         noise_sigma: Per-pixel Gaussian noise sigma (scalar).
@@ -90,7 +87,7 @@ _DISK_PRIOR_SPECS = (
     ("normal", 3.0),  # alpha_out -- outer radial slope
     ("lognormal", 0.5),  # ksi0_AU -- positive vertical scale
     ("normal", 20.0),  # midplane_inc_deg -- orientation angle (deg)
-    ("normal", 20.0),  # midplane_pa_deg -- orientation angle (deg)
+    ("normal", 20.0),  # midplane_position_angle_deg -- orientation angle (deg)
 )
 
 
@@ -98,8 +95,8 @@ def disk_fit_leaves(system):
     """The canonical disk fit-leaves: radial / vertical shape + shared orientation.
 
     Returns the six leaves ``sma_AU, alpha_in, alpha_out, ksi0_AU, midplane_inc_deg,
-    midplane_pa_deg`` -- the selection ``default_disk_prior`` is aligned to. Pass it as
-    ``build_disk_logdensity``'s ``fit_leaves``.
+    midplane_position_angle_deg`` -- the selection ``default_disk_prior`` is aligned
+    to. Pass it as ``build_disk_logdensity``'s ``fit_leaves``.
     """
     return [
         system.disk.sma_AU,
@@ -107,7 +104,7 @@ def disk_fit_leaves(system):
         system.disk.alpha_out,
         system.disk.ksi0_AU,
         system.midplane_inc_deg,
-        system.midplane_pa_deg,
+        system.midplane_position_angle_deg,
     ]
 
 

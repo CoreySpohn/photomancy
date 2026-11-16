@@ -8,14 +8,16 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from hwoutils.epoch import Epoch  # noqa: E402
+from hwoutils.grids import PixelGrid, SkyOrientation  # noqa: E402
 
 from photomancy.backends import LaplaceBackend  # noqa: E402
 from photomancy.disk import (  # noqa: E402
     build_disk_logdensity,
-    surface_brightness_forward,
+    radiance_forward,
 )
 
 WL, TIME = 500.0, 0.0
+GRID = PixelGrid.regular((51, 51), 0.2, "arcsec", orientation=SkyOrientation(0.0))
 
 
 def _FIT(s):
@@ -26,7 +28,7 @@ def _FIT(s):
         s.disk.alpha_out,
         s.disk.ksi0_AU,
         s.midplane_inc_deg,
-        s.midplane_pa_deg,
+        s.midplane_position_angle_deg,
     ]
 
 
@@ -35,6 +37,7 @@ def make_system():
     """Import the scene stack only on the worker that executes these disk tests."""
     from skyscapes.disk import GraterDisk
     from skyscapes.scene import FlatStar, System
+    from zodi import DensityDust
 
     def build(sma=50.0, alpha_in=5.0, alpha_out=-5.0, ksi0=1.0, incl=55.0, pa=30.0):
         """Star + GraterDisk System; orientation held as arrays so it is fittable."""
@@ -50,9 +53,9 @@ def make_system():
             wavelengths_nm=jnp.array([400.0, 1000.0]),
             g_HG_grid=jnp.array([0.3, 0.3]),
             Ag_grid=jnp.array([0.5, 0.5]),
-            nx=51,
-            ny=51,
-            pixel_scale_arcsec=0.2,
+            amplitude=DensityDust(
+                level=1.0, profile_id="grater-1999", calibration_id="unit-profile"
+            ),
             n_slices_los=31,
         )
         star = FlatStar(flux_phot_per_nm_m2=1e9)
@@ -71,7 +74,7 @@ def make_system():
             M0_rad=jnp.empty(0),
             epoch=Epoch(2451545.0),
             midplane_inc_deg=jnp.array(incl),
-            midplane_pa_deg=jnp.array(pa),
+            midplane_position_angle_deg=jnp.array(pa),
         )
 
     return build
@@ -82,7 +85,7 @@ def make_system():
 def test_build_disk_logdensity_is_finite_and_differentiable(make_system):
     """The disk logdensity builds over the fitted leaves and is grad-safe at z0."""
     system = make_system()
-    forward = surface_brightness_forward(WL, TIME)
+    forward = radiance_forward(WL, TIME, grid=GRID)
     image = forward(system)
     sigma = 0.02 * float(jnp.max(jnp.abs(image)))
     logdensity, z0, unravel = build_disk_logdensity(
@@ -99,7 +102,7 @@ def test_build_disk_logdensity_is_finite_and_differentiable(make_system):
 def test_laplace_recovers_disk_shape_and_orientation(make_system):
     """Laplace MAP recovers the truth disk shape + orientation from a noisy image."""
     truth = make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
-    forward = surface_brightness_forward(WL, TIME)
+    forward = radiance_forward(WL, TIME, grid=GRID)
     clean = forward(truth)
     sigma = 0.02 * float(jnp.max(jnp.abs(clean)))
     rng = np.random.default_rng(0)
@@ -117,7 +120,7 @@ def test_laplace_recovers_disk_shape_and_orientation(make_system):
     assert abs(float(fit.disk.sma_AU) - 50.0) / 50.0 < 0.15
     assert abs(float(fit.disk.ksi0_AU) - 1.0) < 0.4
     assert abs(float(fit.midplane_inc_deg) - 55.0) < 6.0
-    assert abs(float(fit.midplane_pa_deg) - 30.0) < 6.0
+    assert abs(float(fit.midplane_position_angle_deg) - 30.0) < 6.0
 
 
 # Medium: this consumer can pay for the deferred scene-stack import.
@@ -125,7 +128,7 @@ def test_laplace_recovers_disk_shape_and_orientation(make_system):
 def test_forward_is_swappable(make_system):
     """A swapped forward (stand-in for a coronagraph stage) fits end to end."""
     system = make_system()
-    base = surface_brightness_forward(WL, TIME)
+    base = radiance_forward(WL, TIME, grid=GRID)
 
     def alt_forward(s):  # stand-in for a coronagraph/PSF stage
         return 0.7 * base(s)
@@ -147,7 +150,7 @@ def test_default_disk_prior_aligns_and_centers_on_system(make_system):
     from photomancy.priors import IndependentPrior
 
     system = make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
-    forward = surface_brightness_forward(WL, TIME)
+    forward = radiance_forward(WL, TIME, grid=GRID)
     prior = default_disk_prior(system)
     assert isinstance(prior, IndependentPrior)
 
