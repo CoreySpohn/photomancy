@@ -16,6 +16,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.stats import norm
+from orbix.system import System
 
 from photomancy.orbit.data import (
     PhotometryData,
@@ -48,6 +49,12 @@ def _identity(model):
 
 def _relative_positions(system, time_d, planet_id):
     """Read east/north offsets (2, T) for each row's planet and epoch."""
+    if isinstance(system, System):
+        ephemeris = system.solve(time_d)
+        pos = jnp.stack(
+            ephemeris.offset_arcsec(jnp.arange(1, system.orbits.a_AU.size + 1))
+        )
+        return pos[:, planet_id, jnp.arange(time_d.size)]
     pos = system.positions(time_d=time_d)
     return pos[:, planet_id, jnp.arange(time_d.size)]
 
@@ -90,7 +97,9 @@ class RelativeAstrometryTerm(AbstractTerm):
         select: Maps the model to an object whose ``positions(time_d)`` returns
             shape ``(2, K, T)`` in arcsec, rows east and north. The identity
             default accepts that object directly. Data ``times`` are days from
-            the system's epoch.
+            the system's epoch. A bare ``orbix.system.System`` is also accepted,
+            using ``solve`` and its public ``offset_arcsec`` observable; planet
+            indices then refer to zero-based Jacobi chain order.
 
     Predictions have shape ``(2, T)``; invalid rows are returned as zeros.
     """

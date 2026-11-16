@@ -6,6 +6,9 @@ SMC's initial particles, and ``forward`` / ``inverse`` / ``log_prob`` for jaxns 
 ``_JaxnsPrior`` adapter in ``backends/nested.py``). Priors are over ``z`` (the raveled
 fitted leaves) -- the same space ``build_scene_logdensity`` uses.
 
+``orbit_log_prior`` instead scores a physical orbit against the orbit charts'
+reference measure, for assembly with a chart volume in ``SystemLogDensity``.
+
 Each distribution we need has a closed-form inverse-CDF, so owning them is a few lines
 each and keeps the core free of a heavy distribution dependency.
 """
@@ -17,6 +20,7 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import erf, erfinv, logsumexp
+from jax.scipy.stats import beta
 
 _SQRT2 = 1.4142135623730951  # plain float: no import-time array, no precision lock
 
@@ -24,6 +28,40 @@ _MIXTURE_NO_CUBE = (
     "MixturePrior has no closed-form unit-cube transform; use it with a gradient / "
     "sample backend (Laplace / NUTS / SMC), not jaxns."
 )
+
+
+def orbit_log_prior(orbit, *, period_range_d=(1.0, 100000.0)):
+    """Default one-planet log prior against the charts' reference measure.
+
+    ``orbit`` is a scalar FrameOrbit; period bounds are positive and increasing.
+    The eccentricity law is Beta(0.867, 3.03), with isotropic orientation and
+    uniform phase. Angles are interpreted on one 2*pi fundamental cell.
+
+    Write l=ln(a/AU), c=cos(i), and dnu=e de dc dW dw dM dl.
+    At fixed mass dln(P)=3/2 dl; uniform ln(P), c, W, w, M gives
+    p_nu = 3 Beta(e;0.867,3.03) / [4 ln(Pmax/Pmin) (2*pi)^3 e].
+
+    Thus the 1/e factor divides out the polar eccentricity area in dnu.
+    The density diverges as e approaches zero but is integrable against dnu.
+    We assign -inf at the measure-zero circular boundary, at e>=1, and
+    outside the inclusive period interval. No clipping changes the interior
+    law. Invalid eccentricities are sanitized before logarithms.
+    """
+    e = orbit.e
+    period_d = orbit.period_d
+    low_d, high_d = period_range_d
+    valid_e = (e > 0) & (e < 1)
+    safe_e = jnp.where(valid_e, e, 0.5)
+    log_density = (
+        beta.logpdf(safe_e, 0.867, 3.03)
+        - jnp.log(safe_e)
+        + jnp.log(1.5)
+        - jnp.log(jnp.log(high_d / low_d))
+        - jnp.log(2.0)
+        - 3 * jnp.log(2 * jnp.pi)
+    )
+    valid = valid_e & (period_d >= low_d) & (period_d <= high_d)
+    return jnp.where(valid, log_density, -jnp.inf)
 
 
 def _std_normal_quantile(u):

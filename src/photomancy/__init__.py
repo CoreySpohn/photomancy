@@ -41,6 +41,7 @@ from photomancy.report import (
     ReportTerm,
     TabulatedReportPredictor,
 )
+from photomancy.system_density import SystemLogDensity
 from photomancy.system_terms import (
     PhotometryTerm,
     ProperMotionAnomalyTerm,
@@ -84,6 +85,7 @@ __all__ = [
     "SMCBackend",
     "SamplePosterior",
     "StellarAstrometryTerm",
+    "SystemLogDensity",
     "TabulatedReportPredictor",
     "TargetData",
     "TermLogDensity",
