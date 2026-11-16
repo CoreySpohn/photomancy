@@ -28,6 +28,27 @@
   refit rather than converted. Pass east offsets (Delta RA cos Dec), not
   Delta RA, as `RelativeAstromData.ra`.
 
+## [1.0.0](https://github.com/CoreySpohn/photomancy/compare/v0.6.0...v1.0.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* every term samples its own data; a coronagraphic report term with an exact law and a tabulated surrogate
+* system terms, disk term and target loader use days from the scene epoch
+
+### Features
+
+* a general term type, a sum of terms, and a relative-astrometry term scored on a system ([c6fe7b1](https://github.com/CoreySpohn/photomancy/commit/c6fe7b16698ac5aa683bbbae7c08aa5bbf14deb0))
+* every term samples its own data; a coronagraphic report term with an exact law and a tabulated surrogate ([9a1f7ed](https://github.com/CoreySpohn/photomancy/commit/9a1f7edfb88a17aca66f7f0d35059af9692bf3c4))
+* photometry, radial-velocity, stellar-astrometry and proper-motion-anomaly terms on a system, and a target-file loader ([f36656b](https://github.com/CoreySpohn/photomancy/commit/f36656bb8a728d474cc8d9e47bd58ac1b79578e1))
+* system terms, disk term and target loader use days from the scene epoch ([e707cf6](https://github.com/CoreySpohn/photomancy/commit/e707cf6efeb6a0086abb069e75a97bf40bcb9597))
+
+
+### Bug Fixes
+
+* **orbit:** add the frame-orbit builder module the propagators import ([d606498](https://github.com/CoreySpohn/photomancy/commit/d60649806802eefd51c9ce48c8ba47ba567b9b4a))
+* **terms:** annotate with declared packages only ([c7eb55f](https://github.com/CoreySpohn/photomancy/commit/c7eb55f4aebddde8f7b194e9f1671a772b4cac79))
+
 ## [0.6.0](https://github.com/CoreySpohn/photomancy/compare/v0.5.0...v0.6.0) (2026-11-15)
 
 
