@@ -19,6 +19,7 @@ import pytest  # noqa: E402
 from hwoutils.constants import G, Msun2kg, two_pi  # noqa: E402
 from jax.scipy.special import betainc  # noqa: E402
 from jax.scipy.stats import beta as beta_dist  # noqa: E402
+from orbix.equations.orbit import thiele_innes_constants  # noqa: E402
 
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import MU_SUN  # noqa: E402
@@ -64,6 +65,61 @@ def test_prior_density_carries_the_constants_jacobian():
     assert float(target.log_prior(CHART) - log_e) == pytest.approx(
         float(log_det), abs=1e-9
     )
+
+
+def test_prior_matches_the_discriminant_formula_and_support():
+    """Fails if the stable Jacobian changes the old prior or mass-window mask."""
+    target = physical_prior_target(1.0, DIST_PC)
+    rng = np.random.default_rng(0)
+    n = 32
+    period = rng.uniform(100.0, 800.0, n)
+    cos_i = rng.uniform(-0.9, 0.9, n)
+    node, omega = rng.uniform(0.0, two_pi, (2, n))
+    mu = MU_SUN * np.tile([0.8, 0.95, 1.05, 1.2], n // 4)
+    a = (mu * (period / two_pi) ** 2) ** (1.0 / 3.0)
+    A, B, F, G_ti = a * jnp.stack(thiele_innes_constants(node, np.arccos(cos_i), omega))
+    theta = jnp.column_stack(
+        [rng.uniform(0.05, 0.8, n), np.log(period), rng.uniform(size=n), B, G_ti, A, F]
+    )
+    e, _, _, east_x, east_y, north_x, north_y = theta.T
+    u = jnp.sum(theta[:, 3:] ** 2, axis=1)
+    v = east_x * north_y - east_y * north_x
+    disc = jnp.sqrt(jnp.maximum(u**2 - 4 * v**2, 1e-300))
+    log_e = beta_dist.logpdf(e, ECC_ALPHA, ECC_BETA) - jnp.log(
+        betainc(ECC_ALPHA, ECC_BETA, target.model.e_max)
+    )
+    expected = log_e - jnp.log((u + disc) / 2) - jnp.log(disc)
+    valid = (mu >= target.model.mu_lo) & (mu <= target.model.mu_hi)
+    actual = jax.jit(jax.vmap(target.log_prior))(theta)
+    np.testing.assert_array_equal(jnp.isneginf(actual), ~valid)
+    # abs(cos_i) <= 0.9 bounds cancellation in the old discriminant,
+    # giving a few dozen float64 eps of error before the logarithms.
+    np.testing.assert_allclose(actual[valid], expected[valid], rtol=1e-12, atol=1e-13)
+
+
+@pytest.mark.parametrize("direction", [-1.0, 1.0])
+def test_prior_at_exact_face_on_keeps_its_floor_and_gradient(direction):
+    """Fails if the gap floor or its finite face-on gradient is lost."""
+    target = physical_prior_target(1.0, DIST_PC)
+    theta = jnp.array([0.2, np.log(130.0), 0.3, 0.5, 0.0, 0.0, direction * 0.5])
+    log_e = beta_dist.logpdf(theta[0], ECC_ALPHA, ECC_BETA) - jnp.log(
+        betainc(ECC_ALPHA, ECC_BETA, target.model.e_max)
+    )
+    disc_floor = 1e-150
+    prior, grad = jax.jit(jax.value_and_grad(target.log_prior))(theta)
+    expected = log_e - jnp.log((0.5 + disc_floor) / 2) - jnp.log(disc_floor)
+    np.testing.assert_allclose(prior, expected, rtol=1e-14)
+    # The floor is constant in a neighborhood, so only log(a^2) contributes.
+    np.testing.assert_allclose(grad[3:], -2 * theta[3:] / 0.5, atol=1e-14, rtol=0)
+    for invalid in (
+        theta.at[0].set(0.0),
+        theta.at[0].set(target.model.e_max),
+        theta.at[1].set(target.model.lnP_lo),
+        theta.at[1].set(target.model.lnP_hi),
+        theta.at[3:].set(0.0),
+        theta.at[3].set(jnp.nan),
+    ):
+        assert float(target.log_prior(invalid)) == -np.inf
 
 
 @pytest.mark.parametrize("branch", [0, 1])

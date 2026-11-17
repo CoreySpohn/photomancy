@@ -47,7 +47,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import G, Msun2kg, two_pi
 from orbix.equations import lambert_solve
-from orbix.system import FrameOrbit
+from orbix.system import FrameOrbit, sky_block_geometry
 
 from photomancy.orbit._frame import plane_from_phase
 from photomancy.orbit.likelihoods import loglike_relative_astrom
@@ -56,20 +56,6 @@ from photomancy.posterior import SamplePosterior
 MU_SUN = G * Msun2kg  # AU^3 / day^2
 
 TI_PARAM_NAMES = ("e", "lnP", "tau", "east_X", "east_Y", "north_X", "north_Y")
-
-
-def ti_semimajor_axis(east_X, east_Y, north_X, north_Y):
-    """Semi-major axis implied by the TI constants (Campbell relations).
-
-    Solves ``a^4 - u a^2 + v^2 = 0``, where u is the sum of squared
-    coefficients, ``a^2 (1 + cos^2 i)``. The east-first determinant is
-    ``v = east_X * north_Y - north_X * east_Y = -a^2 cos i``.
-    Only its square enters the plus root, so the axis order does not affect a.
-    """
-    u = east_X**2 + north_X**2 + east_Y**2 + north_Y**2
-    v = east_X * north_Y - north_X * east_Y
-    disc = jnp.sqrt(jnp.maximum(u**2 - 4.0 * v**2, 0.0))
-    return jnp.sqrt((u + disc) / 2.0)
 
 
 class TIBasisModel(eqx.Module):
@@ -120,7 +106,8 @@ class TIBasisModel(eqx.Module):
     def in_support(self, theta):
         """Whether theta satisfies the bounds and the implied-mass window."""
         e, lnP = theta[0], theta[1]
-        a = ti_semimajor_axis(theta[3], theta[4], theta[5], theta[6])
+        east_x, east_y, north_x, north_y = theta[3:]
+        a, _ = sky_block_geometry(north_x, east_x, north_y, east_y)
         mu = (two_pi / jnp.exp(lnP)) ** 2 * a**3
         return (
             (e > 0.0)

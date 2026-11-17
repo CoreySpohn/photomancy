@@ -365,9 +365,8 @@ def ti_quadrature(setup, counts, chunk=2**15):
     import jax
     import jax.numpy as jnp
     import numpy as np
+    from orbix.system import sky_block_geometry
     from scipy.special import ndtr  # noqa: F401  (used by wedge_masses)
-
-    from photomancy.orbit.few_epoch import ti_semimajor_axis
 
     target = setup["target"]
     model = target.model
@@ -415,7 +414,8 @@ def ti_quadrature(setup, counts, chunk=2**15):
         period = jnp.exp(u[1])
         a_lo = (model.mu_lo * (period / two_pi) ** 2) ** (1.0 / 3.0)
         a_hi = (model.mu_hi * (period / two_pi) ** 2) ** (1.0 / 3.0)
-        a_m = ti_semimajor_axis(*mean)
+        east_x, east_y, north_x, north_y = mean
+        a_m, _ = sky_block_geometry(north_x, east_x, north_y, east_y)
 
         def tail(radius):
             x = jnp.where(radius > 0.0, radius**2 / lam_max, 0.0)

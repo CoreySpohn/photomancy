@@ -48,9 +48,9 @@ from jax.scipy.special import betainc, log_ndtr, logsumexp, ndtr
 from jax.scipy.stats import beta as beta_dist
 from jax.scipy.stats import norm
 from orbix.equations.orbit import mean_motion, thiele_innes_to_elements
-from orbix.system import FrameOrbit
+from orbix.system import sky_block_geometry, sky_block_to_frame
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
-from orbix.system.rotation import from_basis
+from orbix.system.rotation import rotate
 
 from photomancy.orbit._contrast import interpolate_contrast_curve
 from photomancy.orbit._frame import plane_from_phase
@@ -108,9 +108,9 @@ class PhysicalPriorTarget(ThieleInnesTarget):
 
     :meth:`log_prior` is the physical density in the chart, not the Gaussian
     product of the parent: it is ``Beta(0.867, 3.03)`` on ``e`` truncated to
-    ``e_max`` minus ``log(a^2 sqrt(u^2 - 4 v^2))``, and ``-inf`` outside the
-    model's support. The density that remains constant over the support is
-    :meth:`log_prior_constant`.
+    ``e_max`` minus ``log(a^2 gap)``, with the squared-singular-value gap
+    floored, and ``-inf`` outside the model's support. The density's constant
+    factor is given by :meth:`log_prior_constant`.
 
     The photometric scale ``ln(Ag Rp^2)`` (AU^2, the ``Lambda`` of
     :func:`~photomancy.orbit.forward.predict_photometry`) is uniform in its
@@ -156,17 +156,19 @@ class PhysicalPriorTarget(ThieleInnesTarget):
         Returns:
             Scalar; ``-inf`` outside ``model.in_support``.
         """
-        c = theta[3:]
-        u = jnp.sum(c**2)
-        v = c[0] * c[3] - c[2] * c[1]
-        disc = jnp.sqrt(jnp.maximum(u**2 - 4.0 * v**2, _TINY))
-        log_a2 = jnp.log((u + disc) / 2.0)
+        east_x, east_y, north_x, north_y = theta[3:]
+        a, gap = sky_block_geometry(north_x, east_x, north_y, east_y)
+        gap_floor = jnp.sqrt(jnp.asarray(_TINY, dtype=gap.dtype))
+        # The floored gap enters both the Jacobian and a^2 = (u + gap) / 2,
+        # where u is the sum of squared sky constants.
+        log_a2 = jnp.log(a**2 + 0.5 * jnp.maximum(gap_floor - gap, 0.0))
+        log_gap = jnp.log(jnp.maximum(gap, gap_floor))
         e = jnp.clip(theta[0], _TINY, 1.0 - 1e-12)
         log_e = beta_dist.logpdf(e, ECC_ALPHA, ECC_BETA) - jnp.log(
             betainc(ECC_ALPHA, ECC_BETA, self.model.e_max)
         )
         return jnp.where(
-            self.model.in_support(theta), log_e - log_a2 - jnp.log(disc), -jnp.inf
+            self.model.in_support(theta), log_e - log_a2 - log_gap, -jnp.inf
         )
 
     def log_prior_constant(self):
@@ -518,53 +520,44 @@ def _report_xy(target, theta, data):
     return xy[..., 0], xy[..., 1]
 
 
+def _ti_positions(theta, xy):
+    """Return (2, N, 3) positions in AU, in ``ti_to_elements`` branch order."""
+    x, y = xy
+    east_x, east_y, north_x, north_y = theta[3:]
+    block = (north_x, east_x, north_y, east_y)
+    a, positive = sky_block_to_frame(*block, branch=1)
+    _, negative = sky_block_to_frame(*block, branch=-1)
+    # Orbix signs the largest away coefficient. The away row of Campbell
+    # branch 0 points along (sin(omega), cos(omega)). Reverse the order if
+    # the away row of orbix +1 has a negative dot product with that direction.
+    _, _, _, omega = thiele_innes_to_elements(*block)
+    away_direction = jnp.stack([jnp.sin(omega), jnp.cos(omega), jnp.zeros_like(omega)])
+    reverse = rotate(positive, away_direction)[2] < 0.0
+    quats = jnp.stack([positive, negative])
+    quats = jnp.where(reverse, quats[::-1], quats)
+    return a * rotate(quats[:, None, :], jnp.stack([x, y, jnp.zeros_like(x)], -1))
+
+
 def _ti_geometry(target, theta, xy, data):
     """Noise level ``(N,)`` and unit-scale log counts ``(2, N)`` of a chart point.
 
-    The constants are ``A = a P`` and ``B = a Q`` for orthonormal in-plane
-    vectors, so the line-of-sight components follow from ``|A| = |B| = a`` and
-    ``A . B = 0`` up to the joint sign that distinguishes the mirror orbits
-    (row 0 is the orbit of ``ti_to_elements(theta, 0)``).
+    Row b contains the orbit of ``ti_to_elements(theta, b)``.
     """
-    x, y = xy
-    east_x, east_y, north_x, north_y = theta[3], theta[4], theta[5], theta[6]
-    a, _, _, omega = thiele_innes_to_elements(north_x, east_x, north_y, east_y)
-    a2 = a**2
-    z_a = jnp.sqrt(jnp.maximum(a2 - east_x**2 - north_x**2, 0.0))
-    z_b = jnp.sqrt(jnp.maximum(a2 - east_y**2 - north_y**2, 0.0))
-    z_b = jnp.where(east_x * east_y + north_x * north_y > 0.0, -z_b, z_b)
-    p = jnp.stack([east_x, north_x, z_a]) / a
-    q = jnp.stack([east_y, north_y, z_b]) / a
-    plane = plane_from_phase(theta[0], theta[1], theta[2], target.model.t_ref)
-    orbit = FrameOrbit(
-        a,
-        plane.n_rad_per_d,
-        plane.ex,
-        plane.ey,
-        from_basis(p, q, jnp.cross(p, q)),
-        plane.epoch_d,
-    )
-    r_xyz = orbit.plane_basis() @ jnp.stack([x, y])
-    positions = r_xyz.T
-    alpha = separation_arcsec(positions, target.dist_pc)
-    dist = distance_AU(positions)
+    positions = _ti_positions(theta, xy)
+    alpha = separation_arcsec(positions[0], target.dist_pc)
+    dist = distance_AU(positions[0])
     model, radius_Rearth = lambertian_from_area(jnp.exp(target.ln_lam_ref))
     dmag0, limit = interpolate_contrast_curve(
         alpha, data.sep_grid, data.dmag0_grid, data.limit_grid
     )
 
-    def branch(sign):
-        mirrored = positions * jnp.array([1.0, 1.0, sign])
+    def branch(position):
         contrast = model.contrast(
-            phase_angle_rad(mirrored)[None, :], dist[None, :], None, radius_Rearth
+            phase_angle_rad(position)[None, :], dist[None, :], None, radius_Rearth
         )[0]
         return _unit_counts(limit, dmag0, jnp.log(jnp.maximum(contrast, _TINY)), data)
 
-    # The sign of the line-of-sight component of the first constant, ``a sin(omega)
-    # sin(i)``, is that of ``sin(omega)`` of the orbit ``ti_to_elements(theta, 0)``
-    # (its mirror has the opposite one); that fixes which sign is row 0.
-    s0 = jnp.where(jnp.sin(omega) >= 0.0, 1.0, -1.0)
-    return limit, jnp.stack([branch(s0), branch(-s0)])
+    return limit, jax.vmap(branch)(positions)
 
 
 def _ti_report_terms(target, theta, xy, data):

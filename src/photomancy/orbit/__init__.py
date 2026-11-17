@@ -35,7 +35,6 @@ from photomancy.orbit.few_epoch import (
     admissible_region_fit,
     lambert_depth_fit,
     state_to_theta,
-    ti_semimajor_axis,
 )
 from photomancy.orbit.forward import (
     predict_photometry,
@@ -169,6 +168,5 @@ __all__ = [
     "thiele_innes_fit",
     "thiele_innes_grid_search",
     # Initialization
-    "ti_semimajor_axis",
     "ti_to_init",
 ]

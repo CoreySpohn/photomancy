@@ -18,6 +18,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi  # noqa: E402
+from orbix.system import FrameOrbit  # noqa: E402
 from scipy import stats  # noqa: E402
 
 from photomancy.orbit import refit  # noqa: E402
@@ -157,6 +158,28 @@ def test_report_detection_below_the_threshold_has_no_density_and_padding_is_free
     assert float(loglike_report(alpha, d_mag, padded)) == pytest.approx(
         float(loglike_report(alpha[1:], d_mag[1:], one)), abs=1e-15
     )
+
+
+def test_chart_mirror_positions_follow_the_element_branches():
+    """Fails if either orbix pivot changes the ordering of the mirror orbits."""
+    rng = np.random.default_rng(0)
+    constants = rng.normal(0.0, 0.5, (24, 4))
+    theta = jnp.column_stack([jnp.broadcast_to(CHART[:3], (24, 3)), constants])
+    xy = jnp.array([[1.0, 0.0, -0.3], [0.0, 1.0, 0.7]])
+    actual = jax.jit(jax.vmap(lambda th: refit._ti_positions(th, xy)))(theta)
+    elements = jax.vmap(
+        lambda th: jax.vmap(lambda b: ti_to_elements(th, b))(jnp.arange(2))
+    )(theta)
+    ln_period, e, cos_i, node, omega, _, ln_mass, _ = jnp.moveaxis(elements, -1, 0)
+    mu = G * Msun2kg * jnp.exp(ln_mass)
+    a = (mu * (jnp.exp(ln_period) / two_pi) ** 2) ** (1.0 / 3.0)
+    orbit = FrameOrbit.from_classical(
+        a, e, jnp.arccos(cos_i), node, omega, 0.0, mu_AU3_per_d2=mu
+    )
+    expected = jnp.swapaxes(orbit.plane_basis() @ xy, -1, -2)
+    # Several rotations and a mass/period round trip in x64.
+    np.testing.assert_allclose(actual, expected, atol=2e-13, rtol=2e-13)
+    assert np.all(np.max(np.abs(expected[:, 0] - expected[:, 1]), axis=(1, 2)) > 0.1)
 
 
 @pytest.mark.medium(

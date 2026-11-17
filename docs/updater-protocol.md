@@ -333,7 +333,7 @@ lanes) from orbit geometry.
   $\sim \mathcal{N}(0, s_\mathrm{TI}^2)$ in AU; restricted to the implied-mass
   window $\mu_\mathrm{lo} \le (2\pi/P)^2 a^3 \le \mu_\mathrm{hi}$, where $a$ is
   the semimajor axis implied by the TI constants
-  (`few_epoch.ti_semimajor_axis`).
+  (`orbix.system.sky_block_geometry`).
 - **Defaults, as the code has them** (`TIBasisModel` field defaults):
   $s_\mathrm{TI} = 2$ AU, $e_\mathrm{max} = 0.9$, $P$ from 50 to 5,000 days,
   $\mu_\mathrm{lo} = GM_\odot/3$ and $\mu_\mathrm{hi} = 3GM_\odot$ (a window of

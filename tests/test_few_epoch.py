@@ -7,6 +7,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from orbix.system import sky_block_geometry, sky_block_to_frame  # noqa: E402
+from orbix.system.rotation import rotate  # noqa: E402
 
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import (  # noqa: E402
@@ -16,7 +18,6 @@ from photomancy.orbit.few_epoch import (  # noqa: E402
     admissible_region_fit,
     lambert_depth_fit,
     state_to_theta,
-    ti_semimajor_axis,
 )
 
 DIST_PC = 10.0
@@ -198,8 +199,8 @@ def test_ti_parameter_names_multiply_declared_axes():
 
 
 @pytest.mark.parametrize("cos_i", [0.7, -0.7])
-def test_ti_semimajor_axis_east_first(cos_i):
-    """East-first determinant is -a^2 cos(i); its square preserves a."""
+def test_ti_sky_block_mapping(cos_i):
+    """Fails if the orbix input mapping swaps sky rows or plane axes."""
     a, W, w = 2.3, 1.1, 0.8
     cW, sW, cw, sw = np.cos(W), np.sin(W), np.cos(w), np.sin(w)
     coefficients = dict(
@@ -213,8 +214,14 @@ def test_ti_semimajor_axis_east_first(cos_i):
         - coefficients["north_X"] * coefficients["east_Y"]
     )
     assert determinant == pytest.approx(-(a**2) * cos_i, abs=1e-12, rel=0)
-    assert float(ti_semimajor_axis(**coefficients)) == pytest.approx(
-        a, abs=1e-12, rel=0
+    east_x, east_y, north_x, north_y = coefficients.values()
+    block = (north_x, east_x, north_y, east_y)
+    scale, _ = sky_block_geometry(*block)
+    assert float(scale) == pytest.approx(a, abs=1e-12, rel=0)
+    scale, quat = sky_block_to_frame(*block)
+    projected = scale * rotate(quat, jnp.eye(3)[:2]).T[:2]
+    np.testing.assert_allclose(
+        projected, [[east_x, east_y], [north_x, north_y]], atol=1e-12, rtol=0
     )
 
 
