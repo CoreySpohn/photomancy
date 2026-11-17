@@ -5,9 +5,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.spectral import Transmission
 from scipy.special import ndtr
 from scipy.stats import norm
-from skyscapes.spectral import Bandpass
 
 from photomancy import (
     AbstractReportPredictor,
@@ -50,7 +50,7 @@ class _ExtraVariance(AbstractReportPredictor):
 @pytest.fixture(scope="module")
 def report_case():
     """Two modes, one padded grid bank and three shared exposure rows."""
-    bands = (Bandpass.tophat(600.0, 100.0), Bandpass.tophat(900.0, 100.0))
+    bands = (Transmission.tophat(600.0, 100.0), Transmission.tophat(900.0, 100.0))
     table = ReportTable(
         jnp.array([[0.05, 0.25, 0.4, jnp.inf], [0.05, 0.25, jnp.inf, jnp.inf]]),
         jnp.array([[100.0, 200.0, 400.0, 0.0], [300.0, 500.0, 0.0, 0.0]]),

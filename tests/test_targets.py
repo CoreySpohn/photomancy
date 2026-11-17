@@ -4,7 +4,7 @@ import ineedvalidation as vv
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
-from skyscapes.spectral import Bandpass
+from hwoutils.spectral import Transmission
 from test_terms import _ELEMENTS, _system
 
 from photomancy import TermLogDensity, load_target
@@ -70,7 +70,10 @@ def test_target_routing_and_composition(tmp_path):
     """
     path = tmp_path / "target.toml"
     path.write_text(_TOML)
-    bands = {"L'": Bandpass.tophat(3500.0, 100.0), "H": Bandpass.tophat(1600.0, 100.0)}
+    bands = {
+        "L'": Transmission.tophat(3500.0, 100.0),
+        "H": Transmission.tophat(1600.0, 100.0),
+    }
     loaded = load_target(path, epoch=_EPOCH, pixel_data_ids=("img-1",))
     assert loaded.target["name"] == "X"
     assert loaded.band_names == ("L'",)
@@ -150,7 +153,10 @@ def test_target_epoch_invariance(tmp_path, include_pending):
     """
     path = tmp_path / "target.toml"
     path.write_text(_TOML)
-    bands = {"L'": Bandpass.tophat(3500.0, 100.0), "H": Bandpass.tophat(1600.0, 100.0)}
+    bands = {
+        "L'": Transmission.tophat(3500.0, 100.0),
+        "H": Transmission.tophat(1600.0, 100.0),
+    }
     epochs = (Epoch(2460000.0, 0.125), Epoch(2460100.0, 0.375))
     loaded = [
         load_target(path, epoch=e, include_pending=include_pending, bandpasses=bands)

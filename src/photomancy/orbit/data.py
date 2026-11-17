@@ -13,6 +13,7 @@ For JIT-cache stability, data containers support padding to fixed
 
 import equinox as eqx
 import jax.numpy as jnp
+from hwoutils.conversions import contrast_to_delta_mag, delta_mag_to_contrast
 
 # ---------------------------------------------------------------------------
 # Static shape limits (for JIT-cacheable fitting)
@@ -358,7 +359,7 @@ class NullData(eqx.Module):
         """
         epochs = jnp.asarray(epochs)
         sep_grids = jnp.asarray(sep_grids)
-        dmag0_grid = -2.5 * jnp.log10(contrast_grids)
+        dmag0_grid = contrast_to_delta_mag(contrast_grids)
         n = epochs.shape[0]
         return cls(
             epochs=_pad_1d(epochs, max_n),
@@ -735,7 +736,7 @@ class PhotometryData(eqx.Module):
         to zero, limit flags to False, and ``max_n=None`` keeps all rows valid.
         """
         times = jnp.asarray(times)
-        contrast = 10.0 ** (-0.4 * jnp.asarray(dmag))
+        contrast = delta_mag_to_contrast(jnp.asarray(dmag))
         if planet_id is None:
             planet_id = jnp.zeros(times.shape, dtype=int)
         if is_upper_limit is None:

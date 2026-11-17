@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
+from hwoutils.spectral import Transmission
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
 from skyscapes.scene.system import System
-from skyscapes.spectral import Bandpass
 
 from photomancy import (
     AbstractTerm,
@@ -484,7 +484,7 @@ def _new_term(kind, max_n=4):
             is_upper_limit=[False, True, False, True],
             max_n=max_n,
         ),
-        (Bandpass.tophat(600.0, 100.0),),
+        (Transmission.tophat(600.0, 100.0),),
     )
 
 
@@ -566,7 +566,7 @@ def test_contrast_detection_and_limits():
     Fails if: detections use magnitudes or limits use the wrong tail/unstable CDF.
     """
     system = _system()
-    band = Bandpass.tophat(600.0, 100.0)
+    band = Transmission.tophat(600.0, 100.0)
     times = jnp.asarray(_TIMES[:3])
     model = system.band_contrasts(band, times)[0]
     err = model / 100.0
@@ -637,7 +637,7 @@ def test_photometry_band_planet_epoch_routing():
         epoch_d=epoch_d,
         epoch=Epoch(2451545.0),
     )
-    bands = (Bandpass.tophat(500.0, 100.0), Bandpass.tophat(900.0, 100.0))
+    bands = (Transmission.tophat(500.0, 100.0), Transmission.tophat(900.0, 100.0))
     band_ids, planet_ids = [1, 0, 1, 0], [0, 1, 1, 0]
     data = PhotometryData.from_dmag(
         times=_TIMES,

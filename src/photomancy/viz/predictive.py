@@ -33,13 +33,6 @@ def _track_color(ep):
     return ep.SourceStyles(["track"])["track"]["color"]
 
 
-def _neutral_color():
-    """The mode's text color, for data markers that must survive any theme."""
-    import matplotlib as mpl
-
-    return mpl.rcParams["text.color"]
-
-
 def _valid_slice(data):
     """Length of the valid prefix of a padded data container."""
     return int(np.asarray(data.is_valid).sum())
@@ -91,7 +84,7 @@ def plot_rv(
             np.asarray(data.rv)[:n],
             yerr=np.asarray(data.rv_err)[:n],
             fmt="o",
-            color=_neutral_color(),
+            color=ep.neutral(1.0),
             markersize=4,
             lw=1.0,
             zorder=5,
@@ -146,7 +139,7 @@ def plot_dmag(
     lines = [ax.plot(t, curve, **kw)[0] for curve in curves]
     artists = {"lines": lines}
 
-    neutral = _neutral_color()
+    neutral = ep.neutral(1.0)
     if limit_dmag is not None:
         artists["line"] = ax.axhline(
             limit_dmag, color=neutral, ls="--", lw=0.8, alpha=0.6
@@ -229,7 +222,7 @@ def plot_detectability(
     kw.update(scatter_kw or {})
     artists = {"scatter": ax.scatter(sep, dm, **kw)}
 
-    neutral = _neutral_color()
+    neutral = ep.neutral(1.0)
     if contrast_curve is not None:
         cc_sep = np.asarray(contrast_curve[0], float).reshape(-1)
         cc_dmag = np.asarray(contrast_curve[1], float).reshape(-1)

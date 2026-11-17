@@ -14,6 +14,7 @@ All computations use natural units:
 
 import jax.numpy as jnp
 from hwoutils.constants import G, two_pi
+from hwoutils.conversions import contrast_to_delta_mag
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 
 from photomancy.orbit._frame import frame_from_tp, plane_from_motion
@@ -266,6 +267,6 @@ def predict_photometry(
     )[0]
 
     # Delta-magnitude
-    dMag = -2.5 * jnp.log10(jnp.maximum(contrast, 1e-300))
+    dMag = contrast_to_delta_mag(jnp.maximum(contrast, 1e-300))
 
     return alpha_arcsec, dMag
