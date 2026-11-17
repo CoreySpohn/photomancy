@@ -8,7 +8,7 @@ both expose ``contrast_cube`` -- so swapping the strategy never touches the fit.
 """
 
 
-def contrast_forward(*, phase, dist_pc, wavelengths_nm, Rp):
+def contrast_forward(*, phase_angle_rad, dist_AU, wavelengths_nm, Rp_Rearth):
     """Build the atmosphere forward: ``pm -> reflected-light contrast spectrum``.
 
     Reads ``pm.contrast_cube`` at the given observing geometry and returns the single
@@ -16,16 +16,21 @@ def contrast_forward(*, phase, dist_pc, wavelengths_nm, Rp):
     forward can drop in with the same ``pm -> spectrum`` signature.
 
     Args:
-        phase: Orbital phase angle(s), shape ``(K, 1)`` (skyscapes convention).
-        dist_pc: Distance(s), shape ``(K, 1)``.
-        wavelengths_nm: Wavelength grid, shape ``(n_wavelengths,)``.
-        Rp: Planet radius/radii, shape ``(K,)``.
+        phase_angle_rad: Orbital phase angles in radians, shape ``(K, 1)``.
+        dist_AU: Star-planet distances in AU, shape ``(K, 1)``.
+        wavelengths_nm: Wavelength grid in nm, shape ``(n_wavelengths,)``.
+        Rp_Rearth: Planet radii in Earth radii, shape ``(K,)``.
 
     Returns:
         ``forward(pm) -> spectrum`` of shape ``(n_wavelengths,)``.
     """
 
     def forward(pm):
-        return pm.contrast_cube(phase, dist_pc, wavelengths_nm, Rp)[:, 0, 0]
+        return pm.contrast_cube(
+            phase_angle_rad=phase_angle_rad,
+            dist_AU=dist_AU,
+            wavelengths_nm=wavelengths_nm,
+            Rp_Rearth=Rp_Rearth,
+        )[:, 0, 0]
 
     return forward

@@ -50,6 +50,9 @@ def interpolate_contrast_curve(alpha_pred, sep_grid, dmag0_grid, limit_grid=None
         )
 
     dmag0 = jax.vmap(_one)(alpha_pred, xp, fp)
+    # The artificial tail keeps interpolation well defined. A query beyond
+    # the last real knot is undetectable even within that tail.
+    dmag0 = jnp.where(alpha_pred > max_real[:, 0], _UNDETECTABLE_DMAG0, dmag0)
     if limit_grid is None:
         return dmag0
     real_sep = jnp.where(is_pad, -jnp.inf, sep_grid)

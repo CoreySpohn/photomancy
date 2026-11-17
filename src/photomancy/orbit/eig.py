@@ -21,6 +21,7 @@ from photomancy.eig import (
     geometric_eig,
 )
 from photomancy.eig import evaluate_candidates as _eval_candidates
+from photomancy.orbit._contrast import interpolate_contrast_curve
 from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
 from photomancy.posterior import MixturePosterior
 
@@ -151,16 +152,18 @@ def _orbit_evaluate(
 
     has_imaging = Lambda is not None and contrast_curve is not None
     detectable = None
+    detectable_args = ()
     if has_imaging:
-        csep = jnp.asarray(contrast_curve[0])
-        cdmag = jnp.asarray(contrast_curve[1])
+        detectable_args = tuple(map(jnp.asarray, contrast_curve))
 
-        def detectable(z, t):
+        def detectable(z, t, csep, cdmag):
             sep, dmag = _predict_sep_dmag_pure(
                 z, t, unflatten, constrain, Ms, dist_pc, Lambda
             )
-            dmag_limit = jnp.interp(sep, csep, cdmag, left=jnp.inf, right=jnp.inf)
-            return ((sep > iwa) & (dmag < dmag_limit)).astype(jnp.float64)
+            dmag_limit = interpolate_contrast_curve(
+                sep[None], csep[None, :], cdmag[None, :]
+            )[0]
+            return ((sep > iwa) & (dmag < dmag_limit)).astype(sep.dtype)
 
     # id(unflatten) is a stable per-config identity: _MODEL_CACHE keeps one unflatten
     # per model config alive for the process lifetime, so the id never dangles or
@@ -174,6 +177,7 @@ def _orbit_evaluate(
         forward,
         obs_variance,
         detectable=detectable,
+        detectable_args=detectable_args,
         cache_key=cache_key,
     )
 
@@ -214,9 +218,9 @@ def evaluate_orbit_candidates(
 
     Without ``Lambda`` and ``contrast_curve`` every epoch is assumed to yield
     reported relative astrometry with fixed measurement noise. With both, each mode
-    is reported or not according to its mean orbit (outside ``iwa`` and brighter
-    than the contrast curve), which is the per-mode reporting probability of the
-    restricted reporting model in :func:`photomancy.eig.evaluate_candidates`. The
+    is reported according to its mean orbit (outside ``iwa``, within the curve's
+    separation range and brighter than its limit). This gives the per-mode reporting
+    probability in :func:`photomancy.eig.evaluate_candidates`. The
     threshold is not applied within a mode, so selection that cuts through a mode's
     predicted position or brightness is not represented.
     """

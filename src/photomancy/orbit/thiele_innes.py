@@ -1,7 +1,7 @@
 r"""Thiele-Innes linear orbit fitter -- pure JAX.
 
 Given trial values of ``(T, e, tp)`` and relative astrometry data, solves
-for the optimal Thiele-Innes constants ``(A, B, F, G)`` via ordinary
+for the optimal Thiele-Innes constants ``(A, B, F, G)`` via weighted
 least squares. Since the astrometric model is *linear* in the TI constants
 for fixed ``(T, e, tp)``, this is an O(N) exact solve -- no iterative
 optimization needed.
@@ -27,9 +27,12 @@ frame, with positive dz/dt receding. Its sky rows use (B, A) and (G, F).
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from orbix.equations import thiele_innes_to_elements
+from hwoutils.constants import G, two_pi
+from hwoutils.conversions import arcsec_to_au
+from orbix.equations import period_to_sma, thiele_innes_to_elements
+from orbix.system.linear import fit_linear_map
 
-from photomancy.orbit._frame import plane_from_motion
+from photomancy.orbit._frame import frame_from_tp
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -42,9 +45,9 @@ class TIFitResult(eqx.Module):
     Attributes:
         A: TI constant A (AU). Scalar.
         B: TI constant B (AU). Scalar.
-        F: TI constant F (AU). Scalar.
-        G_ti: TI constant G (AU). Scalar. Named ``G_ti`` to avoid
-            collision with the gravitational constant.
+        F: TI constant F including ``sqrt(1 - e**2)`` (AU). Scalar.
+        G_ti: TI constant G including ``sqrt(1 - e**2)`` (AU). Scalar.
+            Named ``G_ti`` to avoid collision with the gravitational constant.
         a: Semi-major axis (AU). Scalar.
         e: Eccentricity (input). Scalar.
         cos_i: Cosine of inclination. Scalar.
@@ -73,159 +76,6 @@ class TIFitResult(eqx.Module):
     log_likelihood: jnp.ndarray
 
 
-# ---------------------------------------------------------------------------
-# Core linear solver
-# ---------------------------------------------------------------------------
-
-
-def _solve_abfg(X, Y, ra, dec, ra_err, dec_err, corr):
-    """Solve for (A, B, F, G) via weighted least squares.
-
-    The astrometric model (in arcsec) is::
-
-        DEC(t) = (A*X(t) + F*Y(t)) / dist_pc
-        RA(t)  = (B*X(t) + G*Y(t)) / dist_pc
-
-    After absorbing dist_pc into (A, B, F, G), we can write this as two
-    independent 2-parameter weighted linear regressions::
-
-        DEC(t) = A'*X(t) + F'*Y(t)
-        RA(t)  = B'*X(t) + G'*Y(t)
-
-    where A' = A/dist_pc, etc. We solve for (A', F') and (B', G')
-    separately, then multiply by dist_pc to recover (A, B, F, G) in AU.
-
-    When RA/DEC are correlated (corr != 0), we use the full bivariate
-    weighted least squares.
-
-    Args:
-        X: cosE - e, shape (N,).
-        Y: sinE, shape (N,).
-        ra: Observed RA offsets (arcsec), shape (N,).
-        dec: Observed DEC offsets (arcsec), shape (N,).
-        ra_err: RA uncertainties (arcsec), shape (N,).
-        dec_err: DEC uncertainties (arcsec), shape (N,).
-        corr: RA/DEC correlation coefficient, shape (N,).
-
-    Returns:
-        Tuple of (A', F', B', G') -- TI constants divided by dist_pc.
-    """
-    # For uncorrelated or weakly correlated data, RA and DEC decouple.
-    # For the general case with correlations, we stack into a single
-    # system and use the full inverse-covariance weighting.
-
-    # Build the (2N, 2N) block-diagonal inverse-covariance matrix.
-    # For the bivariate Gaussian at each point:
-    #   C_i = [[sx^2, rho*sx*sy], [rho*sx*sy, sy^2]]
-    #   C_i^{-1} = 1/(1-rho^2) * [[1/sx^2, -rho/(sx*sy)], [-rho/(sx*sy), 1/sy^2]]
-    #
-    # Rather than forming the full 2Nx2N matrix, we use the normal
-    # equations directly: (D^T W D) beta = D^T W d
-
-    one_minus_rho2 = jnp.maximum(1.0 - corr**2, 1e-30)
-
-    # Weights for the normal equations (block-diagonal structure)
-    w_xx = 1.0 / (dec_err**2 * one_minus_rho2)  # North self-weight
-    w_yy = 1.0 / (ra_err**2 * one_minus_rho2)  # East self-weight
-    w_xy = -corr / (ra_err * dec_err * one_minus_rho2)  # Cross-weight
-
-    # Normal equation: D^T W D (4x4)
-    # The (i,j) element is sum_k D_ki * W_kk' * D_k'j
-    # With the block structure, we can compute this efficiently.
-
-    # North-north block (weighted by w_xx)
-    XwX = jnp.sum(w_xx * X * X)
-    XwY = jnp.sum(w_xx * X * Y)
-    YwY = jnp.sum(w_xx * Y * Y)
-
-    # East-east block (weighted by w_yy)
-    XvX = jnp.sum(w_yy * X * X)
-    XvY = jnp.sum(w_yy * X * Y)
-    YvY = jnp.sum(w_yy * Y * Y)
-
-    # North-east cross block (weighted by w_xy)
-    XcX = jnp.sum(w_xy * X * X)
-    XcY = jnp.sum(w_xy * X * Y)
-    YcX = jnp.sum(w_xy * Y * X)
-    YcY = jnp.sum(w_xy * Y * Y)
-
-    # 4x4 normal matrix
-    # [A', F', B', G']
-    normal_mat = jnp.array(
-        [
-            [XwX, XwY, XcX, XcY],
-            [XwY, YwY, YcX, YcY],
-            [XcX, XcY, XvX, XvY],
-            [XcY, YcY, XvY, YvY],
-        ]
-    )
-
-    # Right-hand side: D^T W d (4,)
-    rhs = jnp.array(
-        [
-            jnp.sum(w_xx * X * dec) + jnp.sum(w_xy * X * ra),
-            jnp.sum(w_xx * Y * dec) + jnp.sum(w_xy * Y * ra),
-            jnp.sum(w_xy * X * dec) + jnp.sum(w_yy * X * ra),
-            jnp.sum(w_xy * Y * dec) + jnp.sum(w_yy * Y * ra),
-        ]
-    )
-
-    # Tikhonov regularization for rank-deficient systems (N=1,2 obs).
-    # For well-determined systems the penalty is negligible.
-    lambda_reg = 1e-4
-    normal_mat_reg = normal_mat + lambda_reg * jnp.eye(4)
-
-    # Solve the regularized 4x4 system
-    params = jnp.linalg.solve(normal_mat_reg, rhs)
-
-    return params[0], params[1], params[2], params[3]
-
-
-def _compute_chi2_and_ll(X, Y, A_s, F_s, B_s, G_s, ra, dec, ra_err, dec_err, corr):
-    """Compute chi^2 and log-likelihood for a TI fit.
-
-    Args:
-        X: Basis function cosE - e, shape (N,).
-        Y: Basis function sinE, shape (N,).
-        A_s: Scaled TI constant A / dist_pc.
-        F_s: Scaled TI constant F / dist_pc.
-        B_s: Scaled TI constant B / dist_pc.
-        G_s: Scaled TI constant G / dist_pc.
-        ra: Observed RA offsets (arcsec), shape (N,).
-        dec: Observed DEC offsets (arcsec), shape (N,).
-        ra_err: RA uncertainties (arcsec), shape (N,).
-        dec_err: DEC uncertainties (arcsec), shape (N,).
-        corr: RA/DEC correlation coefficients, shape (N,).
-
-    Returns:
-        Tuple of (chi2, log_likelihood).
-    """
-    dec_pred = A_s * X + F_s * Y
-    ra_pred = B_s * X + G_s * Y
-
-    dx = ra - ra_pred
-    dy = dec - dec_pred
-
-    one_minus_rho2 = jnp.maximum(1.0 - corr**2, 1e-30)
-    z = (
-        dx**2 / ra_err**2
-        + dy**2 / dec_err**2
-        - 2.0 * corr * dx * dy / (ra_err * dec_err)
-    ) / one_minus_rho2
-
-    chi2 = jnp.sum(z)
-    log_norm = jnp.sum(
-        jnp.log(ra_err * dec_err * jnp.sqrt(one_minus_rho2)) + jnp.log(2.0 * jnp.pi)
-    )
-
-    return chi2, -0.5 * chi2 - log_norm
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def thiele_innes_fit(relative_astrom_data, T, e, tp, Ms, dist_pc):
     """Fit Thiele-Innes constants via linear least squares.
 
@@ -246,63 +96,44 @@ def thiele_innes_fit(relative_astrom_data, T, e, tp, Ms, dist_pc):
         A :class:`TIFitResult` with the best-fit TI constants, recovered
         orbital elements, and goodness-of-fit statistics.
     """
-    orbit = plane_from_motion(e, tp, 2.0 * jnp.pi / T)
-    xy, _ = orbit.perifocal_coordinates(relative_astrom_data.times)
-    X = xy[..., 0]
-    # F and G include sqrt(1-e^2), so retain the public unscaled Y basis.
-    Y = xy[..., 1] / jnp.sqrt(1.0 - e**2)
-
-    # Solve for (A', F', B', G') = (A/dist_pc, F/dist_pc, B/dist_pc, G/dist_pc)
-    A_s, F_s, B_s, G_s = _solve_abfg(
-        X,
-        Y,
-        relative_astrom_data.ra,
-        relative_astrom_data.dec,
-        relative_astrom_data.ra_err,
-        relative_astrom_data.dec_err,
-        relative_astrom_data.corr,
+    data = relative_astrom_data
+    mask = data.is_valid
+    # The Keplerian size sets the trial mean motion; the fitted size is free.
+    orbit_shape = frame_from_tp(period_to_sma(T, Ms), e, 1.0, 0.0, 1.0, 0.0, tp, G * Ms)
+    block, _, chi2, _ = fit_linear_map(
+        orbit_shape,
+        data.times,
+        arcsec_to_au(data.ra, dist_pc),
+        arcsec_to_au(data.dec, dist_pc),
+        (
+            arcsec_to_au(data.ra_err, dist_pc),
+            arcsec_to_au(data.dec_err, dist_pc),
+            data.corr,
+        ),
+        mask=mask,
     )
-
-    # Recover orbital elements from scaled constants
+    (B, G_ti), (A, F) = block
+    a, cos_i, W, w = thiele_innes_to_elements(A, B, F, G_ti)
     scale = jnp.sqrt(1.0 - e**2)
-    a_scaled, cos_i, W, w = thiele_innes_to_elements(A_s, B_s, F_s / scale, G_s / scale)
-    cos_w, sin_w = jnp.cos(w), jnp.sin(w)
 
-    # Convert a from arcsec-scale to AU
-    a_AU = a_scaled * dist_pc
-
-    # Compute chi^2 and log-likelihood
-    chi2, ll = _compute_chi2_and_ll(
-        X,
-        Y,
-        A_s,
-        F_s,
-        B_s,
-        G_s,
-        relative_astrom_data.ra,
-        relative_astrom_data.dec,
-        relative_astrom_data.ra_err,
-        relative_astrom_data.dec_err,
-        relative_astrom_data.corr,
-    )
-
-    # TI constants in AU
-    A_AU = A_s * dist_pc
-    F_AU = F_s * dist_pc
-    B_AU = B_s * dist_pc
-    G_AU = G_s * dist_pc
+    # Normalize in the observed angular units, masking before taking logarithms.
+    sx = jnp.where(mask, data.ra_err, 1.0)
+    sy = jnp.where(mask, data.dec_err, 1.0)
+    corr = jnp.where(mask, data.corr, 0.0)
+    log_norm = jnp.log(two_pi) + jnp.log(sx) + jnp.log(sy) + 0.5 * jnp.log1p(-(corr**2))
+    ll = -0.5 * chi2 - jnp.sum(jnp.where(mask, log_norm, 0.0))
 
     return TIFitResult(
-        A=A_AU,
-        B=B_AU,
-        F=F_AU,
-        G_ti=G_AU,
-        a=a_AU,
+        A=A,
+        B=B,
+        F=F * scale,
+        G_ti=G_ti * scale,
+        a=a,
         e=e,
         cos_i=cos_i,
         W=W,
-        cos_w=cos_w,
-        sin_w=sin_w,
+        cos_w=jnp.cos(w),
+        sin_w=jnp.sin(w),
         T=T,
         tp=tp,
         chi2=chi2,

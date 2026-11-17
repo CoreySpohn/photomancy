@@ -5,7 +5,6 @@ is tested without a HITRAN download; the real ExoJAX retrieval lives in the demo
 """
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -17,8 +16,6 @@ from photomancy.atmosphere import (
 )
 from photomancy.backends import LaplaceBackend
 from photomancy.priors import Uniform
-
-jax.config.update("jax_enable_x64", True)
 
 _WL = jnp.linspace(0.0, 1.0, 24)
 _B0 = jnp.exp(-((_WL - 0.3) ** 2) / 0.01)
@@ -100,14 +97,15 @@ def test_contrast_forward_extracts_single_planet_spectrum():
     class _CubeAtmo(eqx.Module):
         spec: jnp.ndarray
 
-        def contrast_cube(self, phase, dist_pc, wavelengths_nm, Rp):
+        def contrast_cube(self, *, phase_angle_rad, dist_AU, wavelengths_nm, Rp_Rearth):
+            np.testing.assert_array_equal(dist_AU, [[2.5]])
             return self.spec[:, None, None]  # (n_wl, 1 planet, 1 column)
 
     fwd = contrast_forward(
-        phase=jnp.zeros((1, 1)),
-        dist_pc=jnp.ones((1, 1)),
+        phase_angle_rad=jnp.zeros((1, 1)),
+        dist_AU=jnp.full((1, 1), 2.5),
         wavelengths_nm=jnp.array([500.0, 600.0, 700.0]),
-        Rp=jnp.ones((1,)),
+        Rp_Rearth=jnp.ones((1,)),
     )
     out = fwd(_CubeAtmo(spec=jnp.array([1.0, 2.0, 3.0])))
     assert jnp.allclose(out, jnp.array([1.0, 2.0, 3.0]))

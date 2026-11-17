@@ -22,8 +22,6 @@ from photomancy.orbit.init import ti_to_init
 from photomancy.orbit.ofti import _scale_rotate_score
 from photomancy.orbit.thiele_innes import thiele_innes_fit
 
-jax.config.update("jax_enable_x64", True)
-
 _FORWARD_TIMES = np.array([-120.0, 0.0, 137.0, 690.0])
 _ECCENTRIC_ELEMENTS = (2.7, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)
 
@@ -286,6 +284,45 @@ def test_k16_fit_recovers_orientation(k16):
     positions, _ = orbit.at(jnp.asarray(times))
     offsets = np.asarray(positions)[0, :, :2].T / k16["dist_pc"]
     np.testing.assert_allclose(offsets, truth, atol=1e-7, rtol=0)
+
+
+def test_ti_fit_ignores_garbage_in_padded_row(k16):
+    """A masked row with invalid inputs leaves the fitted orbit and score unchanged."""
+    times = k16["T"] * np.array([0.0, 0.17, 0.35, 0.79])
+    data = astrometry(times, reference(times, k16), 1e-3, 2e-3, 0.4)
+    padded = RelativeAstromData(
+        times=jnp.append(data.times, jnp.nan),
+        ra=jnp.append(data.ra, 100.0),
+        dec=jnp.append(data.dec, -200.0),
+        ra_err=jnp.append(data.ra_err, -1.0),
+        dec_err=jnp.append(data.dec_err, 0.0),
+        corr=jnp.append(data.corr, 2.0),
+        planet_id=jnp.append(data.planet_id, 0),
+        is_valid=jnp.append(data.is_valid, False),
+    )
+    solve = jax.jit(lambda observations: fit(observations, k16))
+    expected, actual = solve(data), solve(padded)
+    # The extra zero-weight row changes the QR shape, allowing x64 roundoff.
+    for name in (
+        "A",
+        "B",
+        "F",
+        "G_ti",
+        "a",
+        "cos_i",
+        "W",
+        "cos_w",
+        "sin_w",
+        "chi2",
+        "log_likelihood",
+    ):
+        np.testing.assert_allclose(
+            getattr(actual, name),
+            getattr(expected, name),
+            rtol=1e-12,
+            atol=1e-12,
+            err_msg=name,
+        )
 
 
 @pytest.mark.parametrize("oracle", ["numpy", "orbix"])

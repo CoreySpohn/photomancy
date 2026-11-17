@@ -421,7 +421,7 @@ def _build_eig_batch_fn(forward, detectable=None):
         jac = jax.jacrev(lambda zz: forward(zz, candidate))(z)
         return y, jac
 
-    def _one_candidate(candidate, means, covs, weights, obs_var):
+    def _one_candidate(candidate, means, covs, weights, obs_var, detectable_args):
         y_preds, jacobians = jax.vmap(lambda z: _pred_and_jac(z, candidate))(means)
         geom_eigs = jax.vmap(lambda cov, jac: geometric_eig(cov, jac, obs_var)[0])(
             covs, jacobians
@@ -438,7 +438,9 @@ def _build_eig_batch_fn(forward, detectable=None):
             # I(M; D, Y) = I(M; D) + p_det I(M; Y | D=1), with the reported
             # modes weighted by w_k d_k, and the within-mode gain accruing only
             # to reported records.
-            det_w = jax.vmap(lambda z: detectable(z, candidate))(means)
+            det_w = jax.vmap(lambda z: detectable(z, candidate, *detectable_args))(
+                means
+            )
             p_det = jnp.sum(weights * det_w)
             reported = p_det > 0.0
             det_weights = jnp.where(
@@ -453,16 +455,23 @@ def _build_eig_batch_fn(forward, detectable=None):
         return weighted_geom + alias_val, weighted_geom, alias_val, y_preds, det_w
 
     @jax.jit
-    def _batch(candidates, means, covs, weights, obs_var):
-        return jax.vmap(lambda c: _one_candidate(c, means, covs, weights, obs_var))(
-            candidates
-        )
+    def _batch(candidates, means, covs, weights, obs_var, detectable_args):
+        return jax.vmap(
+            lambda c: _one_candidate(c, means, covs, weights, obs_var, detectable_args)
+        )(candidates)
 
     return _batch
 
 
 def evaluate_candidates(
-    posterior, candidates, forward, obs_variance, *, detectable=None, cache_key=None
+    posterior,
+    candidates,
+    forward,
+    obs_variance,
+    *,
+    detectable=None,
+    detectable_args=(),
+    cache_key=None,
 ):
     """Approximate EIG of a batch of candidate observations for a mixture posterior.
 
@@ -475,10 +484,10 @@ def evaluate_candidates(
     :func:`alias_breaking_eig_from_covariances`.
 
     Reporting model. Without ``detectable`` every observation is reported. With
-    ``detectable``, the supported model is restricted: mode ``k`` produces a report
-    (``D = 1``) with probability ``d_k = detectable(mean_k, candidate)``, and the
-    reporting event is conditionally independent of the continuous Gaussian
-    observation within each mode. A report carries the value ``Y``, and a
+    ``detectable``, mode ``k`` produces a report (``D = 1``) with probability
+    ``d_k = detectable(mean_k, candidate, *detectable_args)``. The reporting event
+    is conditionally independent of the continuous Gaussian observation within
+    each mode. A report carries the value ``Y``, and a
     nondetection carries no value. Under this model the chain rule gives
 
     ``I(M; D, Y) = I(M; D) + p_det * I(M; Y | D = 1)``,
@@ -501,10 +510,12 @@ def evaluate_candidates(
         candidates: Batch of candidate designs (opaque to the core). Shape ``(N, ...)``.
         forward: ``forward(z, candidate) -> y (n_obs,)``, differentiable in flat ``z``.
         obs_variance: Scalar or ``(n_obs,)`` measurement variance.
-        detectable: Optional ``detectable(z, candidate) -> float`` in ``[0, 1]``,
-            evaluated at each mode mean to give the per-mode reporting probability
-            ``d_k`` of the restricted reporting model above. When omitted, every
-            observation is reported.
+        detectable: Optional ``detectable(z, candidate, *detectable_args)`` returning
+            a reporting probability in ``[0, 1]`` at each mode mean. When omitted,
+            every observation is reported.
+        detectable_args: Optional tuple of JAX inputs to ``detectable``, shared
+            across candidates and modes. Values are supplied to the cached evaluator
+            at call time.
         cache_key: Optional hashable key; when given, the compiled batch function is
             cached and reused (so the warm path stays fast).
 
@@ -530,7 +541,12 @@ def evaluate_candidates(
 
     weights = jnp.exp(posterior.log_weights)
     total, geom, alias, preds, det_w = batch_fn(
-        jnp.asarray(candidates), posterior.means, posterior.covs, weights, obs_var
+        jnp.asarray(candidates),
+        posterior.means,
+        posterior.covs,
+        weights,
+        obs_var,
+        detectable_args,
     )
     return {
         "total_eig": total,

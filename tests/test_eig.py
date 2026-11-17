@@ -1,25 +1,23 @@
 """Tests for the analytic Fisher EIG (Bayesian experimental design)."""
 
 import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from hwoutils.constants import Msun2kg, Rearth2AU, two_pi
+from orbix.equations import period_to_sma
 
-jax.config.update("jax_enable_x64", True)
-
-import jax.numpy as jnp  # noqa: E402
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
-from orbix.equations import period_to_sma  # noqa: E402
-
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
-from photomancy.orbit.eig import (  # noqa: E402
+from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.eig import (
     alias_breaking_eig,
     detectability_eig,
     evaluate_orbit_candidates,
     geometric_eig,
 )
-from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
-from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
+from photomancy.orbit.forward import predict_relative_astrometry
+from photomancy.orbit.inference import build_orbit_logdensity
+from photomancy.posterior import MixturePosterior
 
-MSUN_KG = 1.989e30
 DIST_PC = 10.0
 TRUE_T = 1096.0
 LOG_P_RANGE = (float(np.log10(600.0)), float(np.log10(1600.0)))
@@ -52,6 +50,88 @@ def test_detectability_eig_zero_when_modes_agree():
     assert detectability_eig(weights, jnp.array([1.0, 0.0])) > 0.0
 
 
+@pytest.fixture(scope="module")
+def imaging_problem():
+    """One mode on an eccentric orbit, for imaging decisions at a few epochs."""
+    astrom = RelativeAstromData.pad(
+        times=[0.0, 30.0],
+        ra=[0.10, 0.13],
+        dec=[0.10, 0.07],
+        ra_err=[0.01, 0.01],
+        dec_err=[0.01, 0.01],
+        corr=[0.0, 0.0],
+        planet_id=[0, 0],
+        max_n=2,
+    )
+    problem = build_orbit_logdensity(
+        Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
+    )
+    sites = dict(
+        log_P=np.log10(TRUE_T), e_raw=0.4, cos_i=0.95, W=2.3, w_raw=0.8, M0=1.0
+    )
+    mean = problem.init_to_z(
+        {name: jnp.array([value]) for name, value in sites.items()}
+    )
+    mix = MixturePosterior(
+        means=mean[None, :],
+        covs=0.01 * jnp.eye(mean.size)[None, :, :],
+        log_evidences=jnp.zeros(1),
+    )
+    tp = -TRUE_T / two_pi
+    return problem, mix, jnp.array([tp, tp + TRUE_T / 2])
+
+
+# Medium: either test can trigger the cold NumPyro model trace and EIG compile.
+@pytest.mark.medium
+def test_orbit_eig_reports_no_detection_outside_contrast_curve(imaging_problem):
+    """Periapsis and apoapsis place the same orbit on opposite sides of the grid."""
+    problem, mix, epochs = imaging_problem
+    sep_grid = jnp.array([0.15, 0.25])
+    result = evaluate_orbit_candidates(
+        mix,
+        problem,
+        epochs,
+        1e-5,
+        Msun2kg,
+        DIST_PC,
+        Lambda=0.3 * Rearth2AU**2,
+        contrast_curve=(sep_grid, jnp.array([50.0, 50.0])),
+    )
+    assert 0 < result["separation"][0, 0] < sep_grid[0]
+    assert result["separation"][1, 0] > sep_grid[-1]
+    assert jnp.all(result["dMag"] < 50.0)
+    np.testing.assert_array_equal(result["detectability"], jnp.zeros((2, 1)))
+    np.testing.assert_array_equal(result["total_eig"], jnp.zeros(2))
+
+
+@pytest.mark.medium
+def test_orbit_eig_uses_current_contrast_curve_on_repeat_call(imaging_problem):
+    """Changing only the magnitude limits changes the score for a cached evaluator."""
+    problem, mix, epochs = imaging_problem
+    sep_grid = jnp.array([0.05, 0.4])
+    deep, shallow = [
+        evaluate_orbit_candidates(
+            mix,
+            problem,
+            epochs,
+            1e-5,
+            Msun2kg,
+            DIST_PC,
+            Lambda=0.3 * Rearth2AU**2,
+            contrast_curve=(sep_grid, jnp.full(2, depth)),
+        )
+        for depth in (50.0, 1.0)
+    ]
+    assert jnp.all(
+        (sep_grid[0] < deep["separation"]) & (deep["separation"] < sep_grid[-1])
+    )
+    assert jnp.all((1.0 < deep["dMag"]) & (deep["dMag"] < 50.0))
+    np.testing.assert_array_equal(deep["detectability"], jnp.ones((2, 1)))
+    np.testing.assert_array_equal(shallow["detectability"], jnp.zeros((2, 1)))
+    assert jnp.all(deep["total_eig"] > 0.0)
+    np.testing.assert_array_equal(shallow["total_eig"], jnp.zeros(2))
+
+
 # Medium: OFTI, clustering and the EIG forward each include a cold program.
 @pytest.mark.medium
 def test_ofti_to_eig_end_to_end():
@@ -60,11 +140,11 @@ def test_ofti_to_eig_end_to_end():
     from photomancy.orbit.ofti import ofti
     from photomancy.posterior import cluster_to_mixture
 
-    a = float(period_to_sma(TRUE_T, MSUN_KG))
-    tp = -1.5 / (2.0 * jnp.pi / TRUE_T)
+    a = float(period_to_sma(TRUE_T, Msun2kg))
+    tp = -1.5 / (two_pi / TRUE_T)
     times = jnp.linspace(0.0, 0.08 * TRUE_T, 4)  # short arc -> OFTI's regime
     ra, dec = predict_relative_astrometry(
-        times, a, 0.15, 0.5, 2.3, jnp.cos(0.8), jnp.sin(0.8), tp, MSUN_KG, DIST_PC
+        times, a, 0.15, 0.5, 2.3, jnp.cos(0.8), jnp.sin(0.8), tp, Msun2kg, DIST_PC
     )
     err = 5.0e-3
     astrom = RelativeAstromData(
@@ -78,11 +158,11 @@ def test_ofti_to_eig_end_to_end():
         is_valid=jnp.ones(4, dtype=bool),
     )
     problem = build_orbit_logdensity(
-        MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
+        Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     samp = ofti(
         astrom,
-        Ms=MSUN_KG,
+        Ms=Msun2kg,
         dist_pc=DIST_PC,
         key=jax.random.key(0),
         n_accept=1000,
@@ -91,11 +171,11 @@ def test_ofti_to_eig_end_to_end():
         batch=50000,
         max_batches=300,
     )
-    zpost = to_unconstrained(samp, problem, MSUN_KG)
+    zpost = to_unconstrained(samp, problem, Msun2kg)
     mix = cluster_to_mixture(zpost, 4, key=jax.random.key(1))
     epochs = jnp.linspace(0.0, 3.0 * TRUE_T, 12)
     res = evaluate_orbit_candidates(
-        mix, problem, epochs, (5.0e-3) ** 2, MSUN_KG, DIST_PC
+        mix, problem, epochs, (5.0e-3) ** 2, Msun2kg, DIST_PC
     )
     assert res["total_eig"].shape == (12,)
     assert jnp.all(jnp.isfinite(res["total_eig"]))
