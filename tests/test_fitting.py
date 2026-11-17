@@ -1171,7 +1171,7 @@ class TestInit:
             dist_pc=orbit["dist_pc"],
         )
 
-        init_dict = ti_to_init(result, orbit["Ms"])
+        init_dict = ti_to_init(result)
         expected_keys = {"log_P", "e_raw", "w_raw", "cos_i", "W", "M0"}
         assert set(init_dict.keys()) == expected_keys
 
@@ -1191,7 +1191,7 @@ class TestInit:
             dist_pc=orbit["dist_pc"],
         )
 
-        init_dict = ti_to_init(result, orbit["Ms"])
+        init_dict = ti_to_init(result)
 
         # log_P should match
         assert jnp.allclose(

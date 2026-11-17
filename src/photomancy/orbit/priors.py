@@ -40,6 +40,8 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.distributions import constraints
 
+from photomancy.priors import ECC_ALPHA, ECC_BETA
+
 # ---------------------------------------------------------------------------
 # Pure-JAX transforms (no NumPyro dependency)
 # ---------------------------------------------------------------------------
@@ -127,7 +129,7 @@ _ECC_DISTRIBUTIONS = {
     "disk": lambda: dist.Uniform(0.0, 1.0),
     "rayleigh": lambda: _TruncatedRayleigh(0.3),
     "vaneylen19": lambda: _TruncatedRayleigh(0.049),
-    "kipping13": lambda: dist.Beta(0.867, 3.03),
+    "kipping13": lambda: dist.Beta(ECC_ALPHA, ECC_BETA),
 }
 
 

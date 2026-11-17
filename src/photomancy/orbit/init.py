@@ -82,14 +82,13 @@ def elements_to_sites(T, e, cos_i, W, cos_w, sin_w, tp, n_planets=1):
     }
 
 
-def ti_to_init(ti_result, Ms, n_planets=1):
+def ti_to_init(ti_result, n_planets=1):
     """Convert a :class:`TIFitResult` to a NumPyro ``init_to_value`` dict.
 
     Thin wrapper over :func:`elements_to_sites` for the TI-recovered elements.
 
     Args:
         ti_result: A :class:`TIFitResult` from the TI fitter or grid search.
-        Ms: Stellar mass (kg). Unused; kept for call-site compatibility.
         n_planets: Number of planets in the model. Default 1.
 
     Returns:
@@ -211,7 +210,7 @@ def find_init(
     )
     kep_ll = _kepler_consistent_loglike(results, relative_astrom_data, Ms, dist_pc)
     best = jax.tree.map(lambda x: x[jnp.argmax(kep_ll)], results)
-    return ti_to_init(best, Ms, n_planets=n_planets)
+    return ti_to_init(best, n_planets=n_planets)
 
 
 def find_init_top_k(
@@ -260,5 +259,5 @@ def find_init_top_k(
     init_dicts = []
     for idx in top_k_indices:
         single = jax.tree.map(lambda x, i=idx: x[i], results)
-        init_dicts.append(ti_to_init(single, Ms, n_planets=n_planets))
+        init_dicts.append(ti_to_init(single, n_planets=n_planets))
     return init_dicts

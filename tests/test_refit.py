@@ -24,8 +24,6 @@ from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import MU_SUN  # noqa: E402
 from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.refit import (  # noqa: E402
-    ECC_ALPHA,
-    ECC_BETA,
     ReportData,
     _systematic_indices,
     collapsed_refit,
@@ -34,6 +32,7 @@ from photomancy.orbit.refit import (  # noqa: E402
     ti_to_elements,
 )
 from photomancy.orbit.updater import UpdaterStatus  # noqa: E402
+from photomancy.priors import ECC_ALPHA, ECC_BETA  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "data" / "refit_golden.json"
 DIST_PC = 10.0

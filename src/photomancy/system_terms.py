@@ -25,7 +25,7 @@ from photomancy.orbit.data import (
     RVData,
     StellarAstromData,
 )
-from photomancy.orbit.forward import _path_proper_motion
+from photomancy.orbit.forward import _proper_motion_anomaly
 from photomancy.orbit.likelihoods import (
     loglike_pm_anomaly,
     loglike_relative_astrom,
@@ -260,20 +260,18 @@ class ProperMotionAnomalyTerm(AbstractTerm):
             n_epochs=self.data.n_epochs,
         )
         system = self.select(model)
-        ts = jnp.linspace(
-            data.t_gaia - 0.5 * data.gaia_window,
-            data.t_gaia + 0.5 * data.gaia_window,
-            self.n_epochs,
+
+        def reflex_path(time_d):
+            ephemeris = system.ephemeris(time_d=time_d)
+            return system.star_reflex(time_d=time_d, ephemeris=ephemeris)
+
+        prediction = jnp.where(
+            valid,
+            _proper_motion_anomaly(
+                data.t_hip, data.t_gaia, data.gaia_window, self.n_epochs, reflex_path
+            ),
+            0.0,
         )
-        time_d = jnp.concatenate(
-            (ts, jnp.atleast_1d(data.t_hip), jnp.atleast_1d(data.t_gaia))
-        )
-        ephemeris = system.ephemeris(time_d=time_d)
-        path = system.star_reflex(time_d=time_d, ephemeris=ephemeris)
-        mu_gaia = _path_proper_motion(ts, *path[:, : self.n_epochs])
-        p_hip, p_gaia = path[:, -2], path[:, -1]
-        mu_hg = (p_gaia - p_hip) / (data.t_gaia - data.t_hip)
-        prediction = jnp.where(valid, mu_gaia - mu_hg, 0.0)
         return loglike_pm_anomaly(prediction, data), prediction
 
     def sample(self, key, model) -> Self:

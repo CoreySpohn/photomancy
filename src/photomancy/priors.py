@@ -22,6 +22,9 @@ from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import erf, erfinv, logsumexp
 from jax.scipy.stats import beta
 
+ECC_ALPHA = 0.867
+ECC_BETA = 3.03
+
 _SQRT2 = 1.4142135623730951  # plain float: no import-time array, no precision lock
 
 _MIXTURE_NO_CUBE = (
@@ -53,7 +56,7 @@ def orbit_log_prior(orbit, *, period_range_d=(1.0, 100000.0)):
     valid_e = (e > 0) & (e < 1)
     safe_e = jnp.where(valid_e, e, 0.5)
     log_density = (
-        beta.logpdf(safe_e, 0.867, 3.03)
+        beta.logpdf(safe_e, ECC_ALPHA, ECC_BETA)
         - jnp.log(safe_e)
         + jnp.log(1.5)
         - jnp.log(jnp.log(high_d / low_d))

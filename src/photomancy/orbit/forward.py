@@ -14,9 +14,10 @@ All computations use natural units:
 
 import jax.numpy as jnp
 from hwoutils.constants import G, two_pi
-from orbix.equations.phase import lambert_phase_exact
+from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 
 from photomancy.orbit._frame import frame_from_tp, plane_from_motion
+from photomancy.orbit._photometry import lambertian_from_area
 
 
 def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp, *, Mp=0.0):
@@ -203,18 +204,28 @@ def predict_pm_anomaly(
     Returns:
         The proper-motion anomaly ``(pm_ra, pm_dec)``, shape ``(2,)`` in arcsec/day.
     """
-    mu_gaia = _reflex_proper_motion(
-        t_gaia, gaia_window, n_epochs, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
-    )
-    ra_hip, dec_hip = predict_stellar_astrometry(
-        jnp.atleast_1d(t_hip), a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
-    )
-    ra_gaia, dec_gaia = predict_stellar_astrometry(
-        jnp.atleast_1d(t_gaia), a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
-    )
-    p_hip = jnp.stack([ra_hip[0], dec_hip[0]])
-    p_gaia = jnp.stack([ra_gaia[0], dec_gaia[0]])
-    mu_hg = (p_gaia - p_hip) / (t_gaia - t_hip)
+
+    def reflex_path(time_d):
+        return jnp.stack(
+            predict_stellar_astrometry(
+                time_d, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
+            )
+        )
+
+    return _proper_motion_anomaly(t_hip, t_gaia, gaia_window, n_epochs, reflex_path)
+
+
+def _proper_motion_anomaly(t_hip, t_gaia, window, n_epochs, reflex_path):
+    """Gaia window slope minus Hipparcos-Gaia slope of an east/north path.
+
+    reflex_path maps day epochs (N,) to angular offsets (2, N) in arcseconds.
+    Both system terms and single-orbit predictions use this mission-window fit.
+    """
+    ts = jnp.linspace(t_gaia - 0.5 * window, t_gaia + 0.5 * window, n_epochs)
+    time_d = jnp.concatenate((ts, jnp.atleast_1d(t_hip), jnp.atleast_1d(t_gaia)))
+    path = reflex_path(time_d)
+    mu_gaia = _path_proper_motion(ts, *path[:, :n_epochs])
+    mu_hg = (path[:, -1] - path[:, -2]) / (t_gaia - t_hip)
     return mu_gaia - mu_hg
 
 
@@ -248,23 +259,11 @@ def predict_photometry(
     orbit = frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, G * (Ms + Mp))
     r, _ = orbit.at(times)
 
-    # Angular separation on the sky
-    # Sky-plane distance: sqrt(x^2 + y^2), observer along z-axis
-    sky_sep_AU = jnp.sqrt(r[..., 0] ** 2 + r[..., 1] ** 2)
-    alpha_arcsec = sky_sep_AU / dist_pc
-
-    # Standard star-planet-observer phase: cos(beta) = z/|r|, z away.
-    r_mag = jnp.sqrt(r[..., 0] ** 2 + r[..., 1] ** 2 + r[..., 2] ** 2)
-    r_mag_safe = jnp.maximum(r_mag, 1e-30)
-    cos_beta = r[..., 2] / r_mag_safe
-    sin_beta = jnp.sqrt(jnp.maximum(1.0 - cos_beta**2, 0.0))
-
-    # Lambert phase function
-    phase = lambert_phase_exact(cos_beta, sin_beta)
-
-    # Contrast: Fp/Fs = Lambda * phase / r^2
-    # Lambda = Ag * Rp^2 (both in AU^2 when Rp is in AU)
-    contrast = Lambda * phase / jnp.maximum(r_mag**2, 1e-60)
+    alpha_arcsec = separation_arcsec(r, dist_pc)
+    model, radius_Rearth = lambertian_from_area(Lambda)
+    contrast = model.contrast(
+        phase_angle_rad(r)[None, :], distance_AU(r)[None, :], None, radius_Rearth
+    )[0]
 
     # Delta-magnitude
     dMag = -2.5 * jnp.log10(jnp.maximum(contrast, 1e-300))

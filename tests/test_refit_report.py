@@ -28,8 +28,6 @@ from photomancy.orbit.forward import (  # noqa: E402
 )
 from photomancy.orbit.likelihoods import loglike_null  # noqa: E402
 from photomancy.orbit.refit import (  # noqa: E402
-    ECC_ALPHA,
-    ECC_BETA,
     ReportData,
     _element_terms,
     _report_xy,
@@ -45,6 +43,7 @@ from photomancy.orbit.refit import (  # noqa: E402
     ti_to_elements,
 )
 from photomancy.orbit.updater import UpdaterStatus  # noqa: E402
+from photomancy.priors import ECC_ALPHA, ECC_BETA  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "data" / "refit_report_golden.json"
 DIST_PC = 10.0

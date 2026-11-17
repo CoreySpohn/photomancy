@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import G, Msun2kg
+from hwoutils.constants import G, Msun2kg, Rearth2AU
 from orbix.system import FrameOrbit, phase_angle_rad
 from sky_reference import position_au, sky_position
 
@@ -272,7 +272,7 @@ def test_k16_fit_recovers_orientation(k16):
     assert float(result.chi2) < 1e-12
 
     # The fitted angles pass unchanged through initialization and diagnostics.
-    sites = ti_to_init(result, k16["Ms"])
+    sites = ti_to_init(result)
     samples = dict(
         T=result.T,
         e=result.e,
@@ -452,43 +452,65 @@ def test_eig_astrometry_east_north(k16):
 
 
 @pytest.mark.parametrize("predictor", ["eig", "forward"])
-def test_standard_lambert_phase(predictor):
-    """Sobolev (1975); Brown (2005), Eq. 4: beta=30 deg gives Phi=0.88084.
+@pytest.mark.parametrize("case", ["eccentric", "near-full", "near-new"])
+def test_standard_lambert_phase(predictor, case):
+    """Fails if photometry changes phase convention, radius units or inverse square.
 
-    For a=1 AU, i=60 deg, Omega=omega=0 and M=90 deg, the raw
-    (east, north, away) position is (0.5, 0, sqrt(3)/2) AU.
-    The components follow the right-handed raw-row order.
+    Exact-algebra basis: independent Cartesian positions, beta=atan2(hypot(x,y),z),
+    Phi=(sin(beta)+(pi-beta)*cos(beta))/pi, C=Ag*(Rp_AU/r)^2*Phi.
+    Float64 tolerance is 2e-15 absolute in contrast divided by area: near new
+    phase loses relative precision through cancellation in the Lambert numerator.
+    Six cases cover two prediction paths and three distinct orbit/phase regimes.
     """
-    period = 2 * np.pi / np.sqrt(G * Msun2kg)
-    Lambda = 1e-9
+    a, e, cos_i, W, omega, M0 = 1.7, 0.4, 0.4, 0.6, 0.3, 1.1
+    if case != "eccentric":
+        a, e, cos_i, W, omega = 1.0, 0.0, 1e-3, 0.0, 0.0
+        M0 = np.pi / 2 if case == "near-full" else 3 * np.pi / 2
+    period = 2 * np.pi * np.sqrt(a**3 / (G * Msun2kg))
+    Ag, Rp_AU = 0.3, 1.4 * Rearth2AU
+    area = Ag * Rp_AU**2
     if predictor == "eig":
         phys = dict(
-            log_P=np.log10(period), e_raw=0.0, cos_i=0.5, W=0.0, w_raw=0.0, M0=np.pi / 2
+            log_P=np.log10(period), e_raw=e, cos_i=cos_i, W=W, w_raw=omega, M0=M0
         )
         sep, dmag = _predict_sep_dmag_pure(
-            phys, 0.0, lambda x: x, lambda x: x, Msun2kg, 10.0, Lambda
+            phys, 0.0, lambda x: x, lambda x: x, Msun2kg, 10.0, area
         )
     else:
         sep, dmag = np.asarray(
             predict_photometry(
-                jnp.array([period / 4]),
-                1.0,
-                0.0,
-                0.5,
-                0.0,
-                1.0,
-                0.0,
-                0.0,
+                jnp.array([0.0]),
+                a,
+                e,
+                cos_i,
+                W,
+                np.cos(omega),
+                np.sin(omega),
+                -M0 * period / (2 * np.pi),
                 Msun2kg,
-                Lambda,
+                area,
                 10.0,
             )
         )[:, 0]
-    beta = np.pi / 6
+    position = position_au(
+        [0.0],
+        T=period,
+        a=a,
+        e=e,
+        cos_i=cos_i,
+        W=W,
+        cos_w=np.cos(omega),
+        sin_w=np.sin(omega),
+        tp=-M0 * period / (2 * np.pi),
+    )[:, 0]
+    radius = np.linalg.norm(position)
+    beta = np.arctan2(np.hypot(*position[:2]), position[2])
     phase = (np.sin(beta) + (np.pi - beta) * np.cos(beta)) / np.pi
-    assert phase == pytest.approx(0.88084, abs=5e-6)
-    assert float(sep) == pytest.approx(0.05, abs=1e-12)
-    assert float(10 ** (-0.4 * dmag) / Lambda) == pytest.approx(phase, abs=1e-12)
+    expected = Ag * (Rp_AU / radius) ** 2 * phase
+    np.testing.assert_allclose(sep, np.hypot(*position[:2]) / 10.0, atol=2e-14, rtol=0)
+    np.testing.assert_allclose(
+        10 ** (-0.4 * dmag) / area, expected / area, atol=2e-15, rtol=2e-13
+    )
 
 
 @pytest.mark.parametrize("observable", ["stellar", "proper_motion", "pm_anomaly"])

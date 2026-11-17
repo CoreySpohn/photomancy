@@ -112,6 +112,7 @@ from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.posterior import SamplePosterior
+from photomancy.priors import ECC_ALPHA, ECC_BETA
 
 
 def _as_float(x):
@@ -619,8 +620,8 @@ class FixedMassTarget(AbstractUpdateTarget):
     period_hi_day: jax.Array = eqx.field(converter=_as_float, default=5000.0)
     e_max: jax.Array = eqx.field(converter=_as_float, default=0.9)
     # Kipping (2013) Beta shapes, the "kipping13" prior of photomancy.orbit.priors.
-    ecc_alpha: jax.Array = eqx.field(converter=_as_float, default=0.867)
-    ecc_beta: jax.Array = eqx.field(converter=_as_float, default=3.03)
+    ecc_alpha: jax.Array = eqx.field(converter=_as_float, default=ECC_ALPHA)
+    ecc_beta: jax.Array = eqx.field(converter=_as_float, default=ECC_BETA)
     t_ref_day: jax.Array = eqx.field(converter=_as_float, default=0.0)
 
     param_names: ClassVar[tuple[str, ...]] = (

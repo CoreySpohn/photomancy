@@ -8,8 +8,6 @@ sequential updater (``OrbitUpdater``) that assimilates one record at a time.
 Built on orbix geometry (``orbix.equations``, ``orbix.kepler``).
 """
 
-from orbix.equations import period_to_sma
-
 from photomancy.orbit.data import (
     ImagingData,
     NullData,
@@ -161,7 +159,6 @@ __all__ = [
     # Nested sampling (NumPyro/jaxns) -> evidence / model comparison
     "orbit_nested_sampling",
     "orbits_from_samples",
-    "period_to_sma",
     "predict_photometry",
     "predict_pm_anomaly",
     "predict_relative_astrometry",

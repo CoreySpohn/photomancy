@@ -11,7 +11,8 @@ from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
-from hwoutils.constants import G, Mearth2kg
+from hwoutils.constants import Mearth2kg
+from orbix.equations import period_to_sma
 
 from photomancy.eig import (
     alias_breaking_eig,
@@ -63,9 +64,7 @@ def _predict_astrom_pure(
 
     # Derived quantities
     Mp = 10.0 ** phys["log_Mp"] * Mearth2kg if "log_Mp" in phys else 0.0
-    mu = G * (Ms + Mp)
-    a_cubed = mu * T**2 / (4.0 * jnp.pi**2)
-    a = a_cubed ** (1.0 / 3.0)
+    a = period_to_sma(T, Ms + Mp)
     tp = -M0 / (2.0 * jnp.pi / T)
     cos_w = jnp.cos(w)
     sin_w = jnp.sin(w)
@@ -102,9 +101,7 @@ def _predict_sep_dmag_pure(
     M0 = phys["M0"]
 
     Mp = 10.0 ** phys["log_Mp"] * Mearth2kg if "log_Mp" in phys else 0.0
-    mu = G * (Ms + Mp)
-    a_cubed = mu * T**2 / (4.0 * jnp.pi**2)
-    a = a_cubed ** (1.0 / 3.0)
+    a = period_to_sma(T, Ms + Mp)
     tp = -M0 / (2.0 * jnp.pi / T)
     cos_w = jnp.cos(w)
     sin_w = jnp.sin(w)

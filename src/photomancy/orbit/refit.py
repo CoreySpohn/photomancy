@@ -48,11 +48,12 @@ from jax.scipy.special import betainc, log_ndtr, logsumexp, ndtr
 from jax.scipy.stats import beta as beta_dist
 from jax.scipy.stats import norm
 from orbix.equations.orbit import mean_motion
-from orbix.equations.phase import lambert_phase_exact
 from orbix.system import FrameOrbit
+from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 from orbix.system.rotation import from_basis
 
 from photomancy.orbit._frame import plane_from_phase
+from photomancy.orbit._photometry import lambertian_from_area
 from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel, ti_semimajor_axis
 from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.ofti import _scale_rotate_score
@@ -62,9 +63,8 @@ from photomancy.orbit.updater import (
     _linear_gaussian,
     _rest_log_prior,
 )
+from photomancy.priors import ECC_ALPHA, ECC_BETA
 
-ECC_ALPHA = 0.867
-ECC_BETA = 3.03
 ELEMENT_NAMES = (
     "ln_period",
     "e",
@@ -392,14 +392,14 @@ def loglike_report(alpha_pred, dMag_pred, data):
     return _report_sum(counts_pred, limit, data)
 
 
-def _unit_counts(target, limit, dmag0, ln_ratio, data):
+def _unit_counts(limit, dmag0, ln_contrast, data):
     """Log expected counts at the middle of the scale range, shape ``(N,)``.
 
-    ``ln_ratio`` is ``ln(phase / r^2)`` (the log contrast at unit ``Lambda``), so
-    the counts at a scale offset ``t`` from the middle are ``exp(log_g + t)``.
+    ``ln_contrast`` is evaluated at the middle of the scale range, so counts
+    at a scale offset ``t`` from the middle are ``exp(log_g + t)``.
     """
     log_limit = jnp.log(data.snr_thresh * jnp.maximum(limit, _TINY))
-    return log_limit + 0.4 * _LN10 * dmag0 + ln_ratio + target.ln_lam_ref
+    return log_limit + 0.4 * _LN10 * dmag0 + ln_contrast
 
 
 def _counts_at(log_g, limit, t, data):
@@ -581,18 +581,18 @@ def _ti_geometry(target, theta, xy, data):
         plane.epoch_d,
     )
     r_xyz = orbit.plane_basis() @ jnp.stack([x, y])
-    east, north, z0 = r_xyz[0], r_xyz[1], r_xyz[2]
-    alpha = jnp.hypot(east, north) / target.dist_pc
-    r2 = east**2 + north**2 + z0**2
-    r = jnp.sqrt(r2)
+    positions = r_xyz.T
+    alpha = separation_arcsec(positions, target.dist_pc)
+    dist = distance_AU(positions)
+    model, radius_Rearth = lambertian_from_area(jnp.exp(target.ln_lam_ref))
     dmag0, limit = _interp_report(alpha, data)
 
     def branch(sign):
-        cos_beta = jnp.clip(sign * z0 / jnp.maximum(r, 1e-30), -1.0, 1.0)
-        sin_beta = jnp.sqrt(jnp.maximum(1.0 - cos_beta**2, 0.0))
-        phase = lambert_phase_exact(cos_beta, sin_beta)
-        ln_ratio = jnp.log(jnp.maximum(phase, _TINY)) - jnp.log(jnp.maximum(r2, 1e-60))
-        return _unit_counts(target, limit, dmag0, ln_ratio, data)
+        mirrored = positions * jnp.array([1.0, 1.0, sign])
+        contrast = model.contrast(
+            phase_angle_rad(mirrored)[None, :], dist[None, :], None, radius_Rearth
+        )[0]
+        return _unit_counts(limit, dmag0, jnp.log(jnp.maximum(contrast, _TINY)), data)
 
     # The sign of the line-of-sight component of the first constant, ``a sin(omega)
     # sin(i)``, is that of ``sin(omega)`` of the orbit ``ti_to_elements(theta, 0)``
@@ -624,11 +624,11 @@ def _element_geometry(target, el, data):
         jnp.sin(el[4]),
         target.model.t_ref + el[5] * period,
         mass,
-        1.0,
+        jnp.exp(target.ln_lam_ref),
         target.dist_pc,
     )
     dmag0, limit = _interp_report(alpha, data)
-    return limit, _unit_counts(target, limit, dmag0, -0.4 * _LN10 * d_mag, data)
+    return limit, _unit_counts(limit, dmag0, -0.4 * _LN10 * d_mag, data)
 
 
 def _element_terms(target, el, data):
