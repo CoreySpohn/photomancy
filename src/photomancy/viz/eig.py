@@ -62,7 +62,7 @@ def plot_eig(
 
         _, ax = plt.subplots(layout="constrained")
 
-    styles = ep.SourceStyles([name for _, name in _COMPONENTS])
+    styles = ep.style.SourceStyles([name for _, name in _COMPONENTS])
     lines = []
     # Total is the SUM of the two components, not a third peer measurement
     # (evaluate_candidates returns weighted_geom + alias_val, weighted_geom,

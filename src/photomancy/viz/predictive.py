@@ -30,7 +30,7 @@ def _new_axes():
 
 def _track_color(ep):
     """The single track color, resolved from the active palette per call."""
-    return ep.SourceStyles(["track"])["track"]["color"]
+    return ep.style.SourceStyles(["track"])["track"]["color"]
 
 
 def _valid_slice(data):
@@ -84,7 +84,7 @@ def plot_rv(
             np.asarray(data.rv)[:n],
             yerr=np.asarray(data.rv_err)[:n],
             fmt="o",
-            color=ep.neutral(1.0),
+            color=ep.style.neutral(1.0),
             markersize=4,
             lw=1.0,
             zorder=5,
@@ -139,7 +139,7 @@ def plot_dmag(
     lines = [ax.plot(t, curve, **kw)[0] for curve in curves]
     artists = {"lines": lines}
 
-    neutral = ep.neutral(1.0)
+    neutral = ep.style.neutral(1.0)
     if limit_dmag is not None:
         artists["line"] = ax.axhline(
             limit_dmag, color=neutral, ls="--", lw=0.8, alpha=0.6
@@ -222,7 +222,7 @@ def plot_detectability(
     kw.update(scatter_kw or {})
     artists = {"scatter": ax.scatter(sep, dm, **kw)}
 
-    neutral = ep.neutral(1.0)
+    neutral = ep.style.neutral(1.0)
     if contrast_curve is not None:
         cc_sep = np.asarray(contrast_curve[0], float).reshape(-1)
         cc_dmag = np.asarray(contrast_curve[1], float).reshape(-1)

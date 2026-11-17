@@ -5,7 +5,7 @@ into a physical-sample dict (``sample_physical``), which parameters are
 worth showing by default (and that ``ll_total`` never is), the axis-label
 vocabulary, and per-parameter axis ranges -- the one feature whose absence
 kept a third hand-rolled corner implementation alive. The triangle itself
-is ``eyepiece.corner`` / ``eyepiece.corner_overlay``.
+is ``eyepiece.plot.corner`` / ``eyepiece.plot.corner_overlay``.
 """
 
 from collections.abc import Mapping
@@ -105,7 +105,7 @@ def plot_corner(
     ep = eyepiece()
     samples = _resolve_samples(samples_or_posterior, problem, key, n)
     resolved_params = params or default_corner_params(samples)
-    result = ep.corner(
+    result = ep.plot.corner(
         samples,
         resolved_params,
         truths=truths,
@@ -149,7 +149,7 @@ def plot_corner_overlay(
     ep = eyepiece()
     converted = [_as_sample_dict(samples) for samples in datasets]
     resolved_params = params or default_corner_params(converted[0])
-    result = ep.corner_overlay(
+    result = ep.plot.corner_overlay(
         converted,
         resolved_params,
         axes=axes,
