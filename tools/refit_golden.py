@@ -47,8 +47,6 @@ from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import MU_SUN
 from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
 from photomancy.orbit.refit import (
-    ECC_ALPHA,
-    ECC_BETA,
     ReportData,
     _counts_at,
     _element_geometry,
@@ -58,6 +56,7 @@ from photomancy.orbit.refit import (
     physical_prior_target,
     scale_rotate_draw,
 )
+from photomancy.priors import ECC_ALPHA, ECC_BETA
 
 jax.config.update("jax_enable_x64", True)
 
