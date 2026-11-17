@@ -27,6 +27,7 @@ frame, with positive dz/dt receding. Its sky rows use (B, A) and (G, F).
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from orbix.equations import thiele_innes_to_elements
 
 from photomancy.orbit._frame import plane_from_motion
 
@@ -180,134 +181,6 @@ def _solve_abfg(X, Y, ra, dec, ra_err, dec_err, corr):
     return params[0], params[1], params[2], params[3]
 
 
-def _abfg_to_elements(A_scaled, F_scaled, B_scaled, G_scaled, e):
-    """Convert scaled TI constants to orbital elements.
-
-    The TI constants relate to orbital elements as::
-
-        A = a * (cosW*cosw - sinW*sinw*cosi)
-        B = a * (sinW*cosw + cosW*sinw*cosi)
-        F = a*sqrt(1-e^2) * (-cosW*sinw - sinW*cosw*cosi)
-        G = a*sqrt(1-e^2) * (-sinW*sinw + cosW*cosw*cosi)
-
-    From these we can recover (a, i, W, w) using the standard
-    identities::
-
-        A^2 + B^2 = a^2 * (cos^2w + sin^2w*cos^2i) = a^2 * alpha
-        F^2 + G^2 = a^2(1-e^2) * (sin^2w + cos^2w*cos^2i) = a^2(1-e^2) * beta
-        AF + BG = a^2sqrt(1-e^2) * (-cosw*sinw(1-cos^2i)) = a^2sqrt(1-e^2) * gamma
-        AG - BF = a^2sqrt(1-e^2) * cosi
-
-    The last identity gives cos(i) directly (up to sign of a^2sqrt(1-e^2)).
-
-    Args:
-        A_scaled: TI constant A / dist_pc (arcsec-scale). Scalar.
-        F_scaled: TI constant F / dist_pc (arcsec-scale). Scalar.
-        B_scaled: TI constant B / dist_pc (arcsec-scale). Scalar.
-        G_scaled: TI constant G / dist_pc (arcsec-scale). Scalar.
-        e: Eccentricity. Scalar.
-
-    Returns:
-        Tuple of (a_scaled, cos_i, W, cos_w, sin_w).
-        a_scaled is in arcsec-scale (multiply by dist_pc for AU).
-    """
-    sqrt_1me2 = jnp.sqrt(1.0 - e**2)
-
-    # Semi-major axis from the two quadratic invariants:
-    # A^2 + B^2 + F^2 + G^2 = a^2(1 + cos^2i) + a^2(1-e^2)(1 + cos^2i) ... nope
-    # Better approach: use the two independent sums.
-    #
-    # p^2 = A^2 + B^2 = a^2(cos^2w + sin^2w*cos^2i)
-    # q^2 = F^2 + G^2 = a^2(1-e^2)(sin^2w + cos^2w*cos^2i)
-    # And: AG - BF = a^2sqrt(1-e^2)*cosi
-
-    p2 = A_scaled**2 + B_scaled**2
-    q2 = F_scaled**2 + G_scaled**2
-
-    # a^2 from: p^2 + q^2/(1-e^2) = a^2(1 + cos^2i)
-    # and: (AG-BF)^2 = a^4(1-e^2)*cos^2i
-    # So a^4(1-e^2)*cos^2i = (AG-BF)^2
-    # And a^2(1+cos^2i) = p^2 + q^2/(1-e^2)
-    #
-    # Alternative direct formula:
-    # a^2(cos^2w + sin^2w*cos^2i) = p^2
-    # a^2(1-e^2)(sin^2w + cos^2w*cos^2i) = q^2
-    # Sum: a^2[cos^2w + sin^2w*cos^2i + (1-e^2)(sin^2w + cos^2w*cos^2i)]
-    #    = a^2[(cos^2w + (1-e^2)sin^2w) + cos^2i(sin^2w + (1-e^2)cos^2w)]
-    #    = a^2[1 - e^2sin^2w + cos^2i(1 - e^2cos^2w)]
-    # This is messy. The standard approach uses:
-    #
-    # d = AG - BF = a^2sqrt(1-e^2)*cosi
-    # s = A^2 + B^2 + (F^2 + G^2)/(1-e^2)
-    #   = a^2(cos^2w + sin^2w*cos^2i + sin^2w + cos^2w*cos^2i)
-    #   = a^2(1 + cos^2i)
-    #
-    # Then a^4(1-e^2)cos^2i = d^2
-    # and  a^2(1+cos^2i) = s
-    #
-    # From these: let u = a^2*cos^2i  (unknown)
-    # d^2 = (1-e^2)*u*a^2  ->  a^2 = d^2/((1-e^2)*u)
-    # s = a^2 + u + a^2 - a^2  ... hmm, s = a^2(1+cos^2i) = a^2 + u
-    # So a^2 = s - u
-    # And d^2 = (1-e^2)*u*(s-u)
-    # This is a quadratic in u:
-    #   (1-e^2)*u^2 - (1-e^2)*s*u + d^2 = 0
-    #   u = [(1-e^2)*s +/- sqrt((1-e^2)^2s^2 - 4(1-e^2)d^2)] / (2(1-e^2))
-    #   u = [s +/- sqrt(s^2 - 4d^2/(1-e^2))] / 2
-
-    d = A_scaled * G_scaled - B_scaled * F_scaled  # = a^2sqrt(1-e^2)*cosi / dist_pc^2
-    s = p2 + q2 / jnp.maximum(1.0 - e**2, 1e-30)  # = a^2(1+cos^2i) / dist_pc^2
-
-    # Quadratic for u = a^2*cos^2i / dist_pc^2
-    discriminant = jnp.maximum(s**2 - 4.0 * d**2 / jnp.maximum(1.0 - e**2, 1e-30), 0.0)
-    sqrt_disc = jnp.sqrt(discriminant)
-
-    # Two solutions: u = (s +/- sqrt_disc) / 2
-    # Since cos^2i <= 1, we need u <= a^2 = s - u, i.e., u <= s/2.
-    # The minus root gives the smaller u -> cos^2i <= 1.
-    u = (s - sqrt_disc) / 2.0
-
-    # a^2 = s - u
-    a2 = jnp.maximum(s - u, 1e-30)
-    a_scaled = jnp.sqrt(a2)
-
-    # cos_i from d = a^2sqrt(1-e^2)*cosi -> cosi = d / (a^2sqrt(1-e^2))
-    cos_i = d / jnp.maximum(a2 * sqrt_1me2, 1e-30)
-    cos_i = jnp.clip(cos_i, -1.0, 1.0)
-
-    # Recover W and w from the TI constants.
-    #
-    # The four key identities (derived by expanding the TI definitions):
-    #   A + G = (1+cosi) * cos(W+w)
-    #   B - F = (1+cosi) * sin(W+w)
-    #   A - G = (1-cosi) * cos(W-w)
-    #   B + F = (1-cosi) * sin(W-w)
-    #
-    # These hold for the *unit* TI constants (a=1, e=0).  When e!=0,
-    # F and G carry an extra sqrt(1-e^2) factor that must be divided out
-    # before forming the sums.
-
-    # Scale F, G by 1/sqrt(1-e^2) to put them on the same footing as A, B
-    F_norm = F_scaled / jnp.maximum(sqrt_1me2, 1e-30)
-    G_norm = G_scaled / jnp.maximum(sqrt_1me2, 1e-30)
-
-    # W + w  from atan2(B-F_norm, A+G_norm)
-    # W - w  from atan2(B+F_norm, A-G_norm)
-    W_plus_w = jnp.arctan2(B_scaled - F_norm, A_scaled + G_norm)
-    W_minus_w = jnp.arctan2(B_scaled + F_norm, A_scaled - G_norm)
-
-    W = (W_plus_w + W_minus_w) / 2.0
-    w = (W_plus_w - W_minus_w) / 2.0
-
-    # Ensure W in [0, 2pi)
-    W = W % (2.0 * jnp.pi)
-
-    cos_w = jnp.cos(w)
-    sin_w = jnp.sin(w)
-
-    return a_scaled, cos_i, W, cos_w, sin_w
-
-
 def _compute_chi2_and_ll(X, Y, A_s, F_s, B_s, G_s, ra, dec, ra_err, dec_err, corr):
     """Compute chi^2 and log-likelihood for a TI fit.
 
@@ -391,7 +264,9 @@ def thiele_innes_fit(relative_astrom_data, T, e, tp, Ms, dist_pc):
     )
 
     # Recover orbital elements from scaled constants
-    a_scaled, cos_i, W, cos_w, sin_w = _abfg_to_elements(A_s, F_s, B_s, G_s, e)
+    scale = jnp.sqrt(1.0 - e**2)
+    a_scaled, cos_i, W, w = thiele_innes_to_elements(A_s, B_s, F_s / scale, G_s / scale)
+    cos_w, sin_w = jnp.cos(w), jnp.sin(w)
 
     # Convert a from arcsec-scale to AU
     a_AU = a_scaled * dist_pc

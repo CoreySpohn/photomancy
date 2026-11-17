@@ -47,14 +47,15 @@ from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
 from jax.scipy.special import betainc, log_ndtr, logsumexp, ndtr
 from jax.scipy.stats import beta as beta_dist
 from jax.scipy.stats import norm
-from orbix.equations.orbit import mean_motion
+from orbix.equations.orbit import mean_motion, thiele_innes_to_elements
 from orbix.system import FrameOrbit
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 from orbix.system.rotation import from_basis
 
+from photomancy.orbit._contrast import interpolate_contrast_curve
 from photomancy.orbit._frame import plane_from_phase
 from photomancy.orbit._photometry import lambertian_from_area
-from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel, ti_semimajor_axis
+from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel
 from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.ofti import _scale_rotate_score
 from photomancy.orbit.updater import (
@@ -77,7 +78,6 @@ ELEMENT_NAMES = (
 )
 
 _TINY = 1e-300
-_UNDETECTABLE_DMAG0 = -1e8
 _LN10 = jnp.log(10.0)
 _TAU_IMAGES = jnp.arange(-2.0, 3.0)
 _MAP_BATCH = 2**14
@@ -306,44 +306,6 @@ class ReportData(eqx.Module):
         )
 
 
-def _interp_report(alpha, data):
-    """Interpolate the dmag0 limit and the noise level at the predicted separations.
-
-    The limit follows :func:`photomancy.orbit.likelihoods._interp_dmag0`: padded
-    columns (``dmag0 == -inf``) become an increasing tail and separations outside
-    the curve get a finite "undetectable" sentinel, so the expected counts there
-    are zero. The noise level is held at its edge values outside the curve.
-
-    Args:
-        alpha: Predicted separations (arcsec). Shape ``(N,)``.
-        data: A :class:`ReportData`.
-
-    Returns:
-        ``(dmag0, limit)``, each shape ``(N,)``.
-    """
-    is_pad = ~jnp.isfinite(data.dmag0_grid)
-    real_sep = jnp.where(is_pad, -jnp.inf, data.sep_grid)
-    max_real = jnp.max(real_sep, axis=1, keepdims=True)
-    max_real = jnp.where(jnp.isfinite(max_real), max_real, 0.0)
-    xp = jnp.where(
-        is_pad,
-        max_real + (jnp.arange(data.sep_grid.shape[1]) + 1.0) * 1e-6,
-        data.sep_grid,
-    )
-    last = jnp.argmax(real_sep, axis=1)[:, None]
-    edge_limit = jnp.take_along_axis(data.limit_grid, last, axis=1)
-    fp_dmag0 = jnp.where(is_pad, _UNDETECTABLE_DMAG0, data.dmag0_grid)
-    fp_limit = jnp.where(is_pad, edge_limit, data.limit_grid)
-
-    def one(a, x, f0, fl):
-        dmag0 = jnp.interp(
-            a, x, f0, left=_UNDETECTABLE_DMAG0, right=_UNDETECTABLE_DMAG0
-        )
-        return dmag0, jnp.interp(a, x, fl)
-
-    return jax.vmap(one)(alpha, xp, fp_dmag0, fp_limit)
-
-
 def _log_counts_pred(dmag0, limit, ln_contrast, data):
     """Log of the expected planet counts from the contrast and the detection limit.
 
@@ -386,7 +348,9 @@ def loglike_report(alpha_pred, dMag_pred, data):
     Returns:
         Scalar log likelihood; padded rows contribute zero.
     """
-    dmag0, limit = _interp_report(alpha_pred, data)
+    dmag0, limit = interpolate_contrast_curve(
+        alpha_pred, data.sep_grid, data.dmag0_grid, data.limit_grid
+    )
     ln_contrast = -0.4 * _LN10 * dMag_pred
     counts_pred = jnp.exp(_log_counts_pred(dmag0, limit, ln_contrast, data))
     return _report_sum(counts_pred, limit, data)
@@ -564,11 +528,11 @@ def _ti_geometry(target, theta, xy, data):
     """
     x, y = xy
     east_x, east_y, north_x, north_y = theta[3], theta[4], theta[5], theta[6]
-    a2 = ti_semimajor_axis(east_x, east_y, north_x, north_y) ** 2
+    a, _, _, omega = thiele_innes_to_elements(north_x, east_x, north_y, east_y)
+    a2 = a**2
     z_a = jnp.sqrt(jnp.maximum(a2 - east_x**2 - north_x**2, 0.0))
     z_b = jnp.sqrt(jnp.maximum(a2 - east_y**2 - north_y**2, 0.0))
     z_b = jnp.where(east_x * east_y + north_x * north_y > 0.0, -z_b, z_b)
-    a = jnp.sqrt(a2)
     p = jnp.stack([east_x, north_x, z_a]) / a
     q = jnp.stack([east_y, north_y, z_b]) / a
     plane = plane_from_phase(theta[0], theta[1], theta[2], target.model.t_ref)
@@ -585,7 +549,9 @@ def _ti_geometry(target, theta, xy, data):
     alpha = separation_arcsec(positions, target.dist_pc)
     dist = distance_AU(positions)
     model, radius_Rearth = lambertian_from_area(jnp.exp(target.ln_lam_ref))
-    dmag0, limit = _interp_report(alpha, data)
+    dmag0, limit = interpolate_contrast_curve(
+        alpha, data.sep_grid, data.dmag0_grid, data.limit_grid
+    )
 
     def branch(sign):
         mirrored = positions * jnp.array([1.0, 1.0, sign])
@@ -597,9 +563,7 @@ def _ti_geometry(target, theta, xy, data):
     # The sign of the line-of-sight component of the first constant, ``a sin(omega)
     # sin(i)``, is that of ``sin(omega)`` of the orbit ``ti_to_elements(theta, 0)``
     # (its mirror has the opposite one); that fixes which sign is row 0.
-    sigma = jnp.arctan2(east_x - north_y, north_x + east_y)
-    phi = jnp.arctan2(east_x + north_y, north_x - east_y)
-    s0 = jnp.where(jnp.sin((sigma - phi) / 2.0) >= 0.0, 1.0, -1.0)
+    s0 = jnp.where(jnp.sin(omega) >= 0.0, 1.0, -1.0)
     return limit, jnp.stack([branch(s0), branch(-s0)])
 
 
@@ -627,7 +591,9 @@ def _element_geometry(target, el, data):
         jnp.exp(target.ln_lam_ref),
         target.dist_pc,
     )
-    dmag0, limit = _interp_report(alpha, data)
+    dmag0, limit = interpolate_contrast_curve(
+        alpha, data.sep_grid, data.dmag0_grid, data.limit_grid
+    )
     return limit, _unit_counts(limit, dmag0, -0.4 * _LN10 * d_mag, data)
 
 
@@ -716,15 +682,10 @@ def ti_to_elements(theta, branch):
         Elements in the order of ``ELEMENT_NAMES``, with ``ln_lam`` NaN.
     """
     east_x, east_y, north_x, north_y = theta[3], theta[4], theta[5], theta[6]
-    r_plus = jnp.hypot(north_x + east_y, east_x - north_y)
-    r_minus = jnp.hypot(north_x - east_y, east_x + north_y)
-    sigma = jnp.arctan2(east_x - north_y, north_x + east_y)
-    phi = jnp.arctan2(east_x + north_y, north_x - east_y)
+    a, cos_i, node, omega = thiele_innes_to_elements(north_x, east_x, north_y, east_y)
     shift = jnp.pi * branch
-    node = jnp.mod((sigma + phi) / 2.0 + shift, two_pi)
-    omega = jnp.mod((sigma - phi) / 2.0 + shift, two_pi)
-    a = ti_semimajor_axis(east_x, east_y, north_x, north_y)
-    cos_i = (r_plus - r_minus) / (r_plus + r_minus)
+    node = jnp.mod(node + shift, two_pi)
+    omega = jnp.mod(omega + shift, two_pi)
     ln_mu = 2.0 * jnp.log(two_pi) - 2.0 * theta[1] + 3.0 * jnp.log(a)
     return jnp.stack(
         [

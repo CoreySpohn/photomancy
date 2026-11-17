@@ -43,42 +43,6 @@ from numpyro.distributions import constraints
 from photomancy.priors import ECC_ALPHA, ECC_BETA
 
 # ---------------------------------------------------------------------------
-# Pure-JAX transforms (no NumPyro dependency)
-# ---------------------------------------------------------------------------
-
-
-def eccentricity_disk_transform(e_x, e_y):
-    """Normal->Disk bijective map: (x, y) -> (e, cos_w, sin_w).
-
-    .. deprecated::
-       This transform creates pathological HMC geometry (exploding
-       gradients at origin, vanishing gradients at large radius).
-       Use direct sampling via :func:`sample_ecc_prior` instead.
-
-    Maps two values to eccentricity and argument of periapsis via the
-    chi^2(2) CDF. When ``(e_x, e_y) ~ N(0, 1)^2``, the induced marginal
-    on *e* is Uniform(0, 1). When ``(e_x, e_y) ~ N(0, sigma)^2`` with
-    ``sigma < 1``, the induced marginal is Exponential(sigma^2), **not**
-    Rayleigh(sigma).
-
-    Args:
-        e_x: First sample. Scalar.
-        e_y: Second sample. Scalar.
-
-    Returns:
-        Tuple of ``(e, cos_w, sin_w)``.
-    """
-    r2 = e_x**2 + e_y**2
-    r_safe = jnp.maximum(jnp.sqrt(r2), 1e-10)
-
-    e = 1.0 - jnp.exp(-r2 / 2.0)
-    cos_w = e_x / r_safe
-    sin_w = e_y / r_safe
-
-    return e, cos_w, sin_w
-
-
-# ---------------------------------------------------------------------------
 # Eccentricity distributions (sampler-context-free)
 # ---------------------------------------------------------------------------
 

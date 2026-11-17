@@ -69,7 +69,6 @@ from photomancy.orbit.ofti import AbstractConditioner, ScaleAndRotate, ofti
 from photomancy.orbit.priors import (
     ECC_PRIOR_NAMES,
     ecc_distribution,
-    eccentricity_disk_transform,
     sample_ecc_prior,
 )
 from photomancy.orbit.projected import astrometric_loss, make_astrometric_evaluator
@@ -135,7 +134,6 @@ __all__ = [
     # Orbital-mechanics primitives (re-exported from orbix)
     "ecc_distribution",
     # Priors
-    "eccentricity_disk_transform",
     "evaluate_orbit_candidates",
     "find_init",
     "find_init_top_k",
