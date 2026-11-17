@@ -477,7 +477,7 @@ def test_beta_selection_skips_bisection_when_endpoints_decide(
         lr = jnp.zeros_like(lr)
     terms = (marginal, jnp.zeros((256, 2)), lr)
     log_q, beta_min = jnp.zeros(256), jnp.asarray(0.0)
-    kish = refit._kish
+    kish = refit.kish_ess
 
     @eqx.filter_jit
     def reference(terms, log_q, beta_min):
@@ -504,7 +504,7 @@ def test_beta_selection_skips_bisection_when_endpoints_decide(
         jax.debug.callback(lambda x: calls.append(float(x)), value, ordered=True)
         return value
 
-    monkeypatch.setattr(refit, "_kish", counted)
+    monkeypatch.setattr(refit, "kish_ess", counted)
 
     @eqx.filter_jit
     def select(terms, log_q, beta_min):
@@ -554,6 +554,53 @@ def _fixture(k):
         ln_lam_range=fx["ln_lam_range"],
     )
     return golden, records, report, target
+
+
+@pytest.mark.parametrize(
+    "k, expected",
+    [
+        (1, [-188.70835632582998, -42.77645264579748, -124.5767879437972]),
+        (2, [-226.86078430485819, -64.06980163775118, -228.8387957961779]),
+        (3, [-244.2141709927125, -110.52166845219584, -389.6743730315404]),
+    ],
+)
+def test_report_likelihood_matches_pre_refactor_fixtures(k, expected):
+    """Values from the previous count scorer on detections, nulls and padding."""
+    _, _, report, _ = _fixture(k)
+    alpha = jnp.full(report.epochs.shape, 0.1)
+    magnitudes = jnp.broadcast_to(
+        jnp.array([24.0, 25.0, 27.0])[:, None], (3, alpha.size)
+    )
+    score = jax.value_and_grad(lambda mag: loglike_report(alpha, mag, report))
+    values, gradients = jax.jit(jax.vmap(score))(magnitudes)
+    np.testing.assert_allclose(values, expected, rtol=5e-15, atol=0)
+    assert np.all(np.isfinite(gradients))
+
+
+def test_seeded_refit_preserves_the_report_cloud():
+    """The shared scorer and resampler preserve the seeded one-record cloud."""
+    _, records, report, target = _fixture(1)
+    cloud = importance_refit(
+        target, records, report, jax.random.key(0), n_particles=8, n_round=256
+    )
+    np.testing.assert_allclose(
+        cloud.elements[0],
+        [
+            5.746854861797827,
+            0.2875570481933743,
+            0.1641687089910362,
+            1.1662538488590632,
+            0.24129306843394063,
+            0.6952386964661965,
+            -0.01156283784766643,
+            -21.7615249815884,
+        ],
+        rtol=2e-14,
+        atol=2e-15,
+    )
+    assert int(cloud.status) == UpdaterStatus.LOW_ESS
+    assert float(cloud.ess) == pytest.approx(52.59028889585855, rel=2e-14)
+    assert float(cloud.log_evidence) == pytest.approx(-8.101139324964999, rel=2e-14)
 
 
 @pytest.mark.medium(reason="the refit must run to see the scale move, 5 s cold")

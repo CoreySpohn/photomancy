@@ -182,6 +182,21 @@ def test_same_keys_same_belief(fitted):
     assert not np.array_equal(np.asarray(a.particles), np.asarray(c.particles))
 
 
+def test_seeded_update_preserves_particle_draws(fitted):
+    """The resampling and move keys reproduce the pre-refactor seeded fixture."""
+    belief, _, diag = fitted
+    np.testing.assert_allclose(
+        belief.particles[0, :3],
+        [
+            [0.8853808189247385, 0.32282698714462976],
+            [0.5890001363532312, 0.25714480441916443],
+            [0.5642745059652821, 0.2357530287004017],
+        ],
+        rtol=2e-14,
+    )
+    assert float(diag.ess[0]) == pytest.approx(153.70062798401298, rel=2e-14)
+
+
 def test_duplicate_record_adds_no_likelihood(fitted):
     """Re-sending an accepted record id is a no-op; a new id is accepted.
 
@@ -421,6 +436,23 @@ def test_wrap_maps_periodic_coordinates_only():
         rtol=0,
         atol=1e-12,
     )
+
+
+@pytest.mark.parametrize("offset", [-1e4, 1e4])
+def test_log_weight_normalization_at_large_offsets(offset):
+    """A common offset changes the total without changing proportions or ESS."""
+    from photomancy.particles import kish_ess, normalize_log_weights
+
+    raw = jnp.array([offset, offset, offset - 1.0, -jnp.inf])
+    normalized, log_total, no_support = jax.jit(normalize_log_weights)(raw)
+    weights = np.array([1.0, 1.0, np.exp(-1.0), 0.0])
+    total = weights.sum()
+    np.testing.assert_allclose(jnp.exp(normalized), weights / total, rtol=2e-15)
+    np.testing.assert_allclose(log_total, offset + np.log(total), rtol=0, atol=2e-12)
+    np.testing.assert_allclose(
+        kish_ess(raw), total**2 / (weights @ weights), rtol=2e-15
+    )
+    assert not no_support
 
 
 def test_large_common_likelihood_offset_keeps_ess():

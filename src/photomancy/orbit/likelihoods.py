@@ -12,9 +12,9 @@ entries (``is_valid == False``) contribute exactly zero to the sum.
 
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import log_ndtr
 
 from photomancy.orbit._contrast import interpolate_contrast_curve
+from photomancy.report import ReportLaw, ReportPrediction
 
 
 def loglike_rv_marginalized(
@@ -151,20 +151,31 @@ def loglike_pm_anomaly(anom_pred, data):
     return jnp.where(data.is_valid, ll, 0.0)
 
 
+def _fixed_noise_null(alpha_pred, dMag_pred, data):
+    """Score censored photometry in units of planet-free noise."""
+    dmag0 = interpolate_contrast_curve(alpha_pred, data.sep_grid, data.dmag0_grid)
+    # Clip the exponent when the sampler proposes an implausibly bright orbit.
+    exp_arg = jnp.clip(-0.4 * (dMag_pred - dmag0), max=200.0)
+    law = ReportLaw(threshold=data.snr_thresh)
+    counts = law.detection_limit(1.0) * 10.0**exp_arg
+    zero = jnp.zeros_like(counts)
+    prediction = ReportPrediction(counts, jnp.ones_like(counts), zero, zero)
+    return law.log_null_probability(1.0, prediction)
+
+
 def loglike_null(alpha_pred, dMag_pred, data):
     """Non-detection log-likelihood via exact flux-space z-score.
 
-    Uses :func:`jax.scipy.special.log_ndtr` for the cumulative normal
-    log-probability, which is numerically stable at extreme z-scores.
+    Uses the reporting law with fixed noise in flux space.
 
     Sign convention: larger dMag = fainter. If a planet is brighter than
     the detection limit (``dMag_pred < dMag0_limit``), the flux ratio
     exceeds 1, producing a negative z-score and a heavy log-likelihood
     penalty.
 
-    Planets outside the contrast curve receive zero penalty: the limit maps to a
-    finite "undetectable" sentinel (see :func:`interpolate_contrast_curve`) giving
-    ``flux_ratio -> 0`` -> ``z = snr_thresh`` -> ``log_ndtr ~= 0``.
+    Outside the contrast curve, the finite "undetectable" sentinel from
+    :func:`interpolate_contrast_curve` gives a flux ratio near zero and a null
+    probability near one.
 
     Args:
         alpha_pred: Predicted angular separation (arcsec). Shape
@@ -175,21 +186,9 @@ def loglike_null(alpha_pred, dMag_pred, data):
     Returns:
         Scalar log-likelihood value.
     """
-    mask = data.is_valid  # boolean
-
-    dMag0_limit = interpolate_contrast_curve(alpha_pred, data.sep_grid, data.dmag0_grid)
-
-    # Exact flux ratio: F_pred / F_limit
-    # Clip the exponent to prevent float64 overflow (10**309 = inf)
-    # when the sampler proposes an implausibly bright orbit.
-    exp_arg = jnp.clip(-0.4 * (dMag_pred - dMag0_limit), max=200.0)
-    flux_ratio = 10.0**exp_arg
-
-    # z > 0: planet fainter than limit -> no penalty
-    # z < 0: planet brighter -> should have been detected -> penalty
-    z = data.snr_thresh * (1.0 - flux_ratio)
-
-    return jnp.sum(jnp.where(mask, log_ndtr(z), 0.0))
+    return jnp.sum(
+        jnp.where(data.is_valid, _fixed_noise_null(alpha_pred, dMag_pred, data), 0.0)
+    )
 
 
 def loglike_imaging(alpha_pred, dMag_pred, data):
@@ -217,12 +216,7 @@ def loglike_imaging(alpha_pred, dMag_pred, data):
     """
     mask = data.is_valid  # boolean
 
-    # --- Null branch: flux-space z-score ---
-    dMag0_limit = interpolate_contrast_curve(alpha_pred, data.sep_grid, data.dmag0_grid)
-    exp_arg = jnp.clip(-0.4 * (dMag_pred - dMag0_limit), max=200.0)
-    flux_ratio = 10.0**exp_arg
-    z = data.snr_thresh * (1.0 - flux_ratio)
-    ll_null = log_ndtr(z)
+    ll_null = _fixed_noise_null(alpha_pred, dMag_pred, data)
 
     # --- Detection branch: Gaussian on measured dMag ---
     residual = dMag_pred - data.dmag_obs

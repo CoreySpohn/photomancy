@@ -50,7 +50,6 @@ from photomancy.orbit.refit import (
     ReportData,
     _counts_at,
     _element_geometry,
-    _report_sum,
     importance_refit,
     loglike_report,
     physical_prior_target,
@@ -301,13 +300,15 @@ def fine_scale_terms(tg, el, rep, row):
     t = -half + (2.0 * half / N_SCALE_GRID) * (jnp.arange(N_SCALE_GRID) + 0.5)
     limit, log_g = _element_geometry(tg, el, rep)
     ll = jax.vmap(
-        lambda ti: _report_sum(_counts_at(log_g, limit, ti, rep), limit, rep)
+        lambda ti: rep.log_likelihood(_counts_at(log_g, limit, ti, rep), limit)
     )(t)
     limit_f, log_g_f = _element_geometry(tg, el, row)
     pd = jax.vmap(
         lambda ti: (
             1.0
-            - jnp.exp(_report_sum(_counts_at(log_g_f, limit_f, ti, row), limit_f, row))
+            - jnp.exp(
+                row.log_likelihood(_counts_at(log_g_f, limit_f, ti, row), limit_f)
+            )
         )
     )(t)
     marginal = jax.scipy.special.logsumexp(ll) - jnp.log(N_SCALE_GRID)

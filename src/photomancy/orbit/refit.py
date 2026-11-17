@@ -44,9 +44,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
-from jax.scipy.special import betainc, log_ndtr, logsumexp, ndtr
+from jax.scipy.special import betainc, logsumexp, ndtr
 from jax.scipy.stats import beta as beta_dist
-from jax.scipy.stats import norm
 from orbix.equations.orbit import mean_motion, thiele_innes_to_elements
 from orbix.system import sky_block_geometry, sky_block_to_frame
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
@@ -64,7 +63,9 @@ from photomancy.orbit.updater import (
     _linear_gaussian,
     _rest_log_prior,
 )
+from photomancy.particles import kish_ess, normalize_log_weights, systematic_indices
 from photomancy.priors import ECC_ALPHA, ECC_BETA
+from photomancy.report import ReportLaw, ReportPrediction
 
 ELEMENT_NAMES = (
     "ln_period",
@@ -293,6 +294,16 @@ class ReportData(eqx.Module):
     is_valid: jax.Array
     snr_thresh: float = eqx.field(static=True, default=5.0)
 
+    def log_likelihood(self, counts_pred, limit):
+        """Score valid rows under the counts-only reporting law."""
+        law = ReportLaw(threshold=self.snr_thresh)
+        prediction = ReportPrediction.from_limit(counts_pred, limit)
+        log_det = law.log_counts_density(self.counts, limit, prediction)
+        log_det = jnp.where(jnp.isnan(self.counts), -jnp.inf, log_det)
+        log_null = law.log_null_probability(limit, prediction)
+        row = jnp.where(self.is_detected, log_det, log_null)
+        return jnp.sum(jnp.where(self.is_valid, row, 0.0))
+
     @classmethod
     def zeros(cls, max_n, max_pts, snr_thresh=5.0):
         """An all-invalid placeholder: ``max_n`` epochs, ``max_pts`` grid points."""
@@ -320,17 +331,6 @@ def _log_counts_pred(dmag0, limit, ln_contrast, data):
     )
 
 
-def _report_sum(counts_pred, limit, data):
-    """Summed log report likelihood for the expected counts ``(N,)``."""
-    variance = limit**2 + counts_pred
-    s = jnp.sqrt(jnp.where(variance > 0.0, variance, 1.0))
-    log_null = log_ndtr((data.snr_thresh * limit - counts_pred) / s)
-    on_region = data.counts >= data.snr_thresh * limit
-    log_det = jnp.where(on_region, norm.logpdf(data.counts, counts_pred, s), -jnp.inf)
-    row = jnp.where(data.is_detected, log_det, log_null)
-    return jnp.sum(jnp.where(data.is_valid, row, 0.0))
-
-
 def loglike_report(alpha_pred, dMag_pred, data):
     """Report log likelihood: detections and nulls in the reporting-law form.
 
@@ -355,7 +355,7 @@ def loglike_report(alpha_pred, dMag_pred, data):
     )
     ln_contrast = -0.4 * _LN10 * dMag_pred
     counts_pred = jnp.exp(_log_counts_pred(dmag0, limit, ln_contrast, data))
-    return _report_sum(counts_pred, limit, data)
+    return data.log_likelihood(counts_pred, limit)
 
 
 def _unit_counts(limit, dmag0, ln_contrast, data):
@@ -400,7 +400,8 @@ def _scale_fit(limit, log_g, data):
     sd = jnp.sqrt(safe_gg) / safe_cg
     chi2 = s_cc - jnp.where(has, s_cg**2 / safe_gg, 0.0)
     log_norm = jnp.sum(jnp.where(det, -0.5 * jnp.log(2.0 * jnp.pi * var), 0.0))
-    on_region = jnp.all(~det | (data.counts >= data.snr_thresh * limit))
+    law = ReportLaw(threshold=data.snr_thresh)
+    on_region = jnp.all(~det | (data.counts >= law.detection_limit(limit)))
     return has, t_hat, sd, chi2, log_norm, on_region, g
 
 
@@ -430,8 +431,9 @@ def _scale_marginal(target, limit, log_g, data):
         has, t_hat, sd, chi2, log_norm, on_region, g = _scale_fit(limit, log_g, data)
         inside = ndtr((half - t_hat) / sd) - ndtr((-half - t_hat) / sd)
         counts = jnp.exp(t_hat) * g
-        null = log_ndtr(
-            (data.snr_thresh * limit - counts) / jnp.sqrt(limit**2 + counts)
+        law = ReportLaw(threshold=data.snr_thresh)
+        null = law.log_null_probability(
+            limit, ReportPrediction.from_limit(counts, limit)
         )
         nulls = jnp.sum(jnp.where(data.is_valid & ~data.is_detected, null, 0.0))
         val = (
@@ -446,7 +448,7 @@ def _scale_marginal(target, limit, log_g, data):
         return jnp.where(has & on_region & (inside > 0.0), val, -jnp.inf)
 
     def node(i, acc):
-        ll = _report_sum(_counts_at(log_g, limit, half * _GL_X[i], data), limit, data)
+        ll = data.log_likelihood(_counts_at(log_g, limit, half * _GL_X[i], data), limit)
         return jnp.logaddexp(acc, jnp.log(_GL_W[i]) + ll)
 
     # The nodes run in a loop whose trip count is zero with a detection, so a lane
@@ -480,7 +482,7 @@ def _scale_draw(key, target, limit, log_g, data):
 
     def best(i, carry):
         top, pick, top_flat, pick_flat = carry
-        ll = _report_sum(_counts_at(log_g, limit, mid[i], data), limit, data)
+        ll = data.log_likelihood(_counts_at(log_g, limit, mid[i], data), limit)
         score = ll + noise[i]
         take = score > top
         take_flat = noise[i] > top_flat
@@ -694,44 +696,22 @@ def ti_to_elements(theta, branch):
     )
 
 
-def _kish(log_w):
-    """Kish effective size of log weights (0 when none is finite)."""
-    peak = jnp.max(log_w)
-    safe = jnp.where(jnp.isfinite(peak), peak, 0.0)
-    w = jnp.exp(log_w - safe)
-    total = jnp.sum(w)
-    return jnp.where(total > 0.0, total**2 / jnp.sum(w**2), 0.0)
-
-
-def _max_weight(log_w):
-    """Largest normalized weight of log weights (0 when none is finite)."""
-    peak = jnp.max(log_w)
-    safe = jnp.where(jnp.isfinite(peak), peak, 0.0)
-    w = jnp.exp(log_w - safe)
-    total = jnp.sum(w)
-    return jnp.where(total > 0.0, 1.0 / jnp.where(total > 0.0, total, 1.0), 0.0)
-
-
-def _status(ess, log_w, ess_floor):
-    """Refit status from the last round."""
-    no_support = ~jnp.isfinite(jnp.max(log_w))
-    return jnp.where(
+def _weight_summary(log_w, ess_floor):
+    """Evidence total, weight concentration and status from the last round."""
+    normalized, log_total, no_support = normalize_log_weights(log_w)
+    ess = kish_ess(log_w)
+    status = jnp.where(
         no_support,
         UpdaterStatus.NO_SUPPORT,
         jnp.where(ess < ess_floor, UpdaterStatus.LOW_ESS, UpdaterStatus.OK),
     ).astype(jnp.int32)
+    return ess, log_total, jnp.exp(jnp.max(normalized)), status
 
 
-def _systematic_indices(key, log_weights, n):
-    """Systematic resampling indices for ``n`` picks from normalized log weights.
-
-    A copy of the updater's helper, which clips to ``n - 1`` and so is correct
-    only when the picks are as many as the weights.
-    """
-    cdf = jnp.cumsum(jnp.exp(log_weights))
-    cdf = cdf / cdf[-1]
-    u = (jax.random.uniform(key) + jnp.arange(n)) / n
-    return jnp.clip(jnp.searchsorted(cdf, u, side="right"), 0, cdf.shape[0] - 1)
+def _sampling_log_weights(log_w):
+    """Normalize proposals, using uniform weights if the pool has no support."""
+    normalized, _, no_support = normalize_log_weights(log_w)
+    return jnp.where(no_support, -jnp.log(log_w.size), normalized)
 
 
 def _resample_elements(key, log_w, n_particles, to_elements, draw=None):
@@ -740,13 +720,8 @@ def _resample_elements(key, log_w, n_particles, to_elements, draw=None):
     ``draw(idx, key)`` replaces the equal-probability mirror branch by the
     caller's own draw of the branch (and the photometric node) per particle.
     """
-    peak = jnp.max(log_w)
-    safe = jnp.where(jnp.isfinite(peak), peak, 0.0)
-    w = jnp.exp(log_w - safe)
-    total = jnp.sum(w)
-    w = jnp.where(total > 0.0, w / jnp.where(total > 0.0, total, 1.0), 1.0 / w.size)
     k_idx, k_branch = jax.random.split(key)
-    idx = _systematic_indices(k_idx, jnp.log(jnp.maximum(w, _TINY)), n_particles)
+    idx = systematic_indices(k_idx, _sampling_log_weights(log_w), n_particles)
     if draw is not None:
         return draw(idx, k_branch)
     branch = jax.random.bernoulli(k_branch, 0.5, (n_particles,)).astype(float)
@@ -768,11 +743,8 @@ def _kernel_fit(key, u, log_w, lo, hi, n_centers):
     its circular mean) times the squared Silverman bandwidth, plus a floor of
     1e-3 of the box width.
     """
-    peak = jnp.max(log_w)
-    safe = jnp.where(jnp.isfinite(peak), peak, 0.0)
-    w = jnp.exp(log_w - safe)
-    total = jnp.sum(w)
-    w = jnp.where(total > 0.0, w / jnp.where(total > 0.0, total, 1.0), 1.0 / w.size)
+    normalized = _sampling_log_weights(log_w)
+    w = jnp.exp(normalized)
     angle = two_pi * u[:, 2]
     mean_tau = jnp.arctan2(jnp.sum(w * jnp.sin(angle)), jnp.sum(w * jnp.cos(angle)))
     mean_tau = mean_tau / two_pi
@@ -780,11 +752,10 @@ def _kernel_fit(key, u, log_w, lo, hi, n_centers):
     mean = w @ x
     centered = x - mean
     cov = (centered * w[:, None]).T @ centered / (1.0 - jnp.sum(w**2))
-    h = 0.969 * jnp.maximum(1.0 / jnp.sum(w**2), 4.0) ** (-1.0 / 7.0)
+    h = 0.969 * jnp.maximum(kish_ess(normalized), 4.0) ** (-1.0 / 7.0)
     floor = 1e-3 * (hi - lo)
     cov = h**2 * cov + jnp.diag(floor**2)
-    grid = (jax.random.uniform(key) + jnp.arange(n_centers)) / n_centers
-    idx = jnp.minimum(jnp.searchsorted(jnp.cumsum(w), grid), w.size - 1)
+    idx = systematic_indices(key, normalized, n_centers)
     return u[idx], jnp.linalg.cholesky(cov)
 
 
@@ -938,14 +909,14 @@ def _pick_beta(terms, log_q, beta_min):
     the previous power still moves. Power one is taken when it holds the floor;
     otherwise bisection on the Kish size.
     """
-    full = _kish(_tempered(terms, log_q, 1.0))
-    here = _kish(_tempered(terms, log_q, beta_min))
+    full = kish_ess(_tempered(terms, log_q, 1.0))
+    here = kish_ess(_tempered(terms, log_q, beta_min))
     floor = jnp.clip(_LADDER_SHRINK * here, _LADDER_FLOOR_MIN, _LADDER_FLOOR)
 
     def bisect(_, lohi):
         lo, hi = lohi
         mid = 0.5 * (lo + hi)
-        ok = _kish(_tempered(terms, log_q, mid)) >= floor
+        ok = kish_ess(_tempered(terms, log_q, mid)) >= floor
         return jnp.where(ok, mid, lo), jnp.where(ok, hi, mid)
 
     def search():
@@ -972,13 +943,10 @@ def _local_fit(key, u, log_w, lo, hi, n_centers):
     so that about ``_K_DISTINCT`` distinct points sit under each kernel as the
     Kish size falls. Returns ``(centers, chols)`` with ``chols`` ``(n_centers, 3, 3)``.
     """
-    peak = jnp.max(log_w)
-    w = jnp.exp(log_w - jnp.where(jnp.isfinite(peak), peak, 0.0))
-    total = jnp.sum(w)
-    w = jnp.where(total > 0.0, w / jnp.where(total > 0.0, total, 1.0), 1.0 / w.size)
+    normalized = _sampling_log_weights(log_w)
+    w = jnp.exp(normalized)
     k_support, k_centers = jax.random.split(key)
-    grid = (jax.random.uniform(k_support) + jnp.arange(_N_SUPPORT)) / _N_SUPPORT
-    support = u[jnp.minimum(jnp.searchsorted(jnp.cumsum(w), grid), w.size - 1)]
+    support = u[systematic_indices(k_support, normalized, _N_SUPPORT)]
     angle = two_pi * u[:, 2]
     mean_tau = jnp.arctan2(jnp.sum(w * jnp.sin(angle)), jnp.sum(w * jnp.cos(angle)))
     mean_tau = mean_tau / two_pi
@@ -989,7 +957,9 @@ def _local_fit(key, u, log_w, lo, hi, n_centers):
     centers = support[
         jax.random.choice(k_centers, _N_SUPPORT, (n_centers,), replace=False)
     ]
-    k_use = jnp.clip(_K_DISTINCT * _N_SUPPORT * jnp.sum(w**2), _K_NEAR, _K_NEAR_MAX)
+    k_use = jnp.clip(
+        _K_DISTINCT * _N_SUPPORT / kish_ess(normalized), _K_NEAR, _K_NEAR_MAX
+    )
     use = (jnp.arange(_K_NEAR_MAX) < k_use).astype(float)
 
     def one(center):
@@ -1086,7 +1056,7 @@ def _ladder_rounds(
     log_q0 = jnp.full(n_round, -jnp.sum(jnp.log(hi - lo)))
     terms0 = _score_terms(target, records, report, u0, k_score0, n_constants)
     beta0 = _pick_beta(terms0, log_q0, 0.0)
-    ess0 = _kish(_tempered(terms0, log_q0, beta0))
+    ess0 = kish_ess(_tempered(terms0, log_q0, beta0))
 
     def stop(state):
         r, _, _, _, beta, ess, prev = state
@@ -1111,7 +1081,7 @@ def _ladder_rounds(
         u, log_q, k_next = propose(state, jax.random.fold_in(key, 3 * r + 3), n_round)
         terms = _score_terms(target, records, report, u, k_next, n_constants)
         new_beta = _pick_beta(terms, log_q, beta)
-        ess = _kish(_tempered(terms, log_q, new_beta))
+        ess = kish_ess(_tempered(terms, log_q, new_beta))
         return r + 1, u, log_q, terms, new_beta, ess, beta
 
     state = (jnp.asarray(0), u0, log_q0, terms0, beta0, ess0, jnp.zeros(()))
@@ -1124,7 +1094,7 @@ def _ladder_rounds(
 
     def low(carry):
         j, *_, log_w = carry
-        return (j < _RETRIES) & (_kish(log_w) < ess_floor)
+        return (j < _RETRIES) & (kish_ess(log_w) < ess_floor)
 
     def retry(carry):
         j, u, _, _, _, log_w = carry
@@ -1244,10 +1214,8 @@ def collapsed_refit(
             target, records, u, keys[3 * r + 2], n_constants
         )
         log_w = jnp.where(jnp.isfinite(log_marginal), log_marginal - log_q, -jnp.inf)
-    ess = _kish(log_w)
-    log_evidence = (
-        logsumexp(log_w) - jnp.log(sizes[-1]) + _evidence_constant(target, records)
-    )
+    ess, log_total, max_weight, status = _weight_summary(log_w, ess_floor)
+    log_evidence = log_total - jnp.log(sizes[-1]) + _evidence_constant(target, records)
     elements = _resample_elements(
         keys[-1],
         log_w,
@@ -1258,9 +1226,9 @@ def collapsed_refit(
         elements=elements,
         log_evidence=jnp.where(jnp.isfinite(ess) & (ess > 0), log_evidence, -jnp.inf),
         ess=ess,
-        status=_status(ess, log_w, ess_floor),
+        status=status,
         rounds=jnp.asarray(n_rounds),
-        max_weight=_max_weight(log_w),
+        max_weight=max_weight,
     )
 
 
@@ -1293,10 +1261,8 @@ def _collapsed_refit_report(
         ess_floor,
         max_rounds,
     )
-    ess = _kish(log_w)
-    log_evidence = (
-        logsumexp(log_w) - jnp.log(n_last) + _evidence_constant(target, records)
-    )
+    ess, log_total, max_weight, status = _weight_summary(log_w, ess_floor)
+    log_evidence = log_total - jnp.log(n_last) + _evidence_constant(target, records)
     point_keys = jax.random.split(k_score, n_last)
     _, rest, lr = terms
 
@@ -1323,9 +1289,9 @@ def _collapsed_refit_report(
         elements=elements,
         log_evidence=jnp.where(jnp.isfinite(ess) & (ess > 0), log_evidence, -jnp.inf),
         ess=ess,
-        status=_status(ess, log_w, ess_floor),
+        status=status,
         rounds=n_done,
-        max_weight=_max_weight(log_w),
+        max_weight=max_weight,
     )
 
 
@@ -1467,8 +1433,8 @@ def scale_rotate_refit(
     elements, log_w, log_offset = scale_rotate_draw(
         target, records, k_draw, n_proposals=n_proposals, report=report
     )
-    ess = _kish(log_w)
-    log_evidence = logsumexp(log_w) - jnp.log(n_proposals) - log_offset
+    ess, log_total, max_weight, status = _weight_summary(log_w, ess_floor)
+    log_evidence = log_total - jnp.log(n_proposals) - log_offset
     draw = None
     if report is not None:
 
@@ -1482,9 +1448,9 @@ def scale_rotate_refit(
         elements=picked,
         log_evidence=jnp.where(ess > 0, log_evidence, -jnp.inf),
         ess=ess,
-        status=_status(ess, log_w, ess_floor),
+        status=status,
         rounds=jnp.asarray(1),
-        max_weight=_max_weight(log_w),
+        max_weight=max_weight,
     )
 
 
@@ -1641,7 +1607,7 @@ def first_tier(target, elements, report, key, *, n_particles, ess_floor=400.0):
         report likelihood over the prior draws.
     """
     log_w = report_log_weights(target, elements, report)
-    ess = _kish(log_w)
+    ess, log_total, max_weight, status = _weight_summary(log_w, ess_floor)
     k_pick, k_draw = jax.random.split(key)
     picked = _resample_elements(
         k_pick,
@@ -1652,11 +1618,9 @@ def first_tier(target, elements, report, key, *, n_particles, ess_floor=400.0):
     )
     return RefitCloud(
         elements=picked,
-        log_evidence=jnp.where(
-            ess > 0, logsumexp(log_w) - jnp.log(log_w.size), -jnp.inf
-        ),
+        log_evidence=jnp.where(ess > 0, log_total - jnp.log(log_w.size), -jnp.inf),
         ess=ess,
-        status=_status(ess, log_w, ess_floor),
+        status=status,
         rounds=jnp.asarray(1),
-        max_weight=_max_weight(log_w),
+        max_weight=max_weight,
     )

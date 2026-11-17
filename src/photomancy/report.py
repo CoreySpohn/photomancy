@@ -15,7 +15,6 @@ import jax.numpy as jnp
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 
-from photomancy.system_terms import _band_contrasts, _relative_positions
 from photomancy.terms import AbstractTerm
 
 __all__ = [
@@ -30,7 +29,9 @@ __all__ = [
 
 
 def _float64(value):
-    return jnp.asarray(value, dtype=jnp.float64)
+    return jnp.asarray(
+        value, dtype=jnp.float64 if jax.config.x64_enabled else jnp.float32
+    )
 
 
 class ReportLaw(eqx.Module):
@@ -49,10 +50,16 @@ class ReportLaw(eqx.Module):
         if not math.isfinite(self.corr) or not -1 < self.corr < 1:
             raise ValueError("corr must be finite and lie in (-1, 1)")
 
+    def detection_limit(self, limit_counts):
+        """Minimum reported counts for a detection at the given noise level."""
+        return self.threshold * limit_counts
+
     def log_null_probability(self, limit_counts, prediction):
         """Log probability of counts below the detection threshold, shape (R,)."""
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
-        return log_ndtr((self.threshold * limit_counts - prediction.counts) / noise)
+        return log_ndtr(
+            (self.detection_limit(limit_counts) - prediction.counts) / noise
+        )
 
     def log_counts_density(self, counts, limit_counts, prediction):
         """Unconditional counts log density on the detection region, shape (R,)."""
@@ -61,7 +68,7 @@ class ReportLaw(eqx.Module):
         return jnp.where(
             jnp.isnan(counts),
             jnp.nan,
-            jnp.where(counts >= self.threshold * limit_counts, value, -jnp.inf),
+            jnp.where(counts >= self.detection_limit(limit_counts), value, -jnp.inf),
         )
 
 
@@ -140,6 +147,16 @@ class ReportPrediction(eqx.Module):
     ra: jax.Array = eqx.field(converter=_float64)
     dec: jax.Array = eqx.field(converter=_float64)
 
+    @classmethod
+    def from_limit(cls, counts, limit_counts, ra=None, dec=None) -> Self:
+        """Combine planet-free variance and shot noise, with optional positions."""
+        return cls(
+            counts,
+            limit_counts**2 + counts,
+            jnp.zeros_like(counts) if ra is None else ra,
+            jnp.zeros_like(counts) if dec is None else dec,
+        )
+
 
 class AbstractReportPredictor(eqx.Module):
     """Predict counts, their variance and the centroid for a row bank."""
@@ -193,6 +210,9 @@ class TabulatedReportPredictor(AbstractReportPredictor):
 
     def __call__(self, model, rows: ReportRows) -> ReportPrediction:
         """Predict linear-interpolated counts and sky positions for all rows."""
+        # System terms use orbit likelihoods, which also import the report law.
+        from photomancy.system_terms import _band_contrasts, _relative_positions
+
         clean = _prediction_rows(rows)
         planet_id = jnp.full(clean.time_d.shape, self.planet, jnp.int32)
         ra, dec = _relative_positions(model, clean.time_d, planet_id)
@@ -214,7 +234,7 @@ class TabulatedReportPredictor(AbstractReportPredictor):
         )(sep, xp, fp)
         rate = jnp.where((sep >= first) & (sep <= last), rate, 0.0)
         counts = contrast * rate * clean.science_s
-        return ReportPrediction(counts, clean.limit_counts**2 + counts, ra, dec)
+        return ReportPrediction.from_limit(counts, clean.limit_counts, ra, dec)
 
 
 def _prediction_rows(rows):
@@ -322,7 +342,7 @@ class ReportTerm(AbstractTerm):
         eps = jax.random.normal(key, (rows.time_d.size, 3), dtype=jnp.float64)
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
         counts = prediction.counts + noise * eps[:, 0]
-        detected = valid & (counts >= self.law.threshold * clean.limit_counts)
+        detected = valid & (counts >= self.law.detection_limit(clean.limit_counts))
         reported_counts = jnp.where(detected, counts, 0.0)
         snr = reported_counts / jnp.sqrt(
             clean.limit_counts**2 + jnp.maximum(reported_counts, 0.0)

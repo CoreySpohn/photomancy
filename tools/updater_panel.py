@@ -1857,6 +1857,7 @@ def protocol_budgets(
 # and its targets, the reference samplers and the forward model).
 RECORD_MODULES = (
     "photomancy.orbit.updater",
+    "photomancy.particles",
     "photomancy.orbit.few_epoch",
     "photomancy.orbit.ofti",
     "photomancy.orbit.forward",

@@ -26,7 +26,6 @@ from photomancy.orbit.few_epoch import MU_SUN  # noqa: E402
 from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.refit import (  # noqa: E402
     ReportData,
-    _systematic_indices,
     collapsed_refit,
     importance_refit,
     physical_prior_target,
@@ -188,14 +187,31 @@ def test_proposals_above_the_density_block_must_divide_into_blocks():
         )
 
 
-def test_a_small_cloud_resamples_from_every_proposal():
-    """Eight picks from 64 equal weights span the proposals, not the first eight.
+@pytest.mark.parametrize("n", [3, 5, 19])
+def test_systematic_resampling_uses_one_grid_for_any_output_size(n):
+    """Every source gets its rounded expected count, including late sources."""
+    from photomancy.particles import systematic_indices
 
-    Fails if the resampler clips its indices to the number of picks, which makes a
-    1024-draw cloud a copy of the first 1024 proposals.
-    """
-    idx = _systematic_indices(jax.random.key(0), jnp.full(64, -jnp.log(64.0)), 8)
-    assert int(idx.max()) >= 56 and len(set(np.asarray(idx).tolist())) == 8
+    weights = np.array([0.07, 0.13, 0.0, 0.50, 0.30])
+    log_weights = jnp.log(weights)
+    draw = jax.jit(lambda key: systematic_indices(key, log_weights, n))
+    for seed in range(4):
+        idx = np.asarray(draw(jax.random.key(seed)))
+        assert idx.shape == (n,)
+        assert np.all((0 <= idx) & (idx < weights.size))
+        counts = np.bincount(idx, minlength=weights.size)
+        np.testing.assert_array_equal(counts[weights == 0], 0)
+        assert np.all(np.abs(counts - n * weights) <= 1.0)
+
+
+def test_systematic_resampling_excludes_zero_mass_at_float32_endpoint():
+    """The final grid point can round to one with float32 arithmetic."""
+    from photomancy.particles import systematic_indices
+
+    with jax.enable_x64(False):
+        key = jax.random.key(27762, impl="threefry2x32")
+        idx = systematic_indices(key, jnp.array([0.0, -jnp.inf, -jnp.inf]), 4096)
+    np.testing.assert_array_equal(idx, 0)
 
 
 # -- acceptance test ---------------------------------------------------------------

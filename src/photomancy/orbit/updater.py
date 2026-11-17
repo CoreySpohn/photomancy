@@ -111,6 +111,7 @@ from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.likelihoods import loglike_relative_astrom
+from photomancy.particles import kish_ess, normalize_log_weights, systematic_indices
 from photomancy.posterior import SamplePosterior
 from photomancy.priors import ECC_ALPHA, ECC_BETA
 
@@ -774,43 +775,6 @@ class UpdaterBelief(eqx.Module):
         )
 
 
-def _kish_ess(log_weights):
-    """Kish effective sample size of normalized log weights (0 if all -inf)."""
-    total = jnp.sum(jnp.exp(2.0 * log_weights))
-    return jnp.where(total > 0.0, 1.0 / jnp.where(total > 0.0, total, 1.0), 0.0)
-
-
-def _normalize(log_weights):
-    """Normalize log weights in max-shifted form.
-
-    NaN counts as zero weight. Shifting by the largest weight before the
-    log-sum-exp keeps the normalized weights exact when every weight carries
-    a large common offset (a log likelihood of order -1e17 has a float spacing
-    larger than ``log n``).
-
-    Returns:
-        Tuple ``(normalized, log_total, no_support)``: normalized log weights
-        (all ``-inf`` when nothing is supported), the log of the unnormalized
-        total, and whether no weight is finite.
-    """
-    log_weights = jnp.where(jnp.isnan(log_weights), -jnp.inf, log_weights)
-    peak = jnp.max(log_weights)
-    no_support = ~jnp.isfinite(peak)
-    shifted = log_weights - jnp.where(no_support, 0.0, peak)
-    lse = logsumexp(shifted)
-    normalized = jnp.where(no_support, -jnp.inf, shifted - lse)
-    log_total = jnp.where(no_support, -jnp.inf, peak + lse)
-    return normalized, log_total, no_support
-
-
-def _systematic_indices(key, log_weights, n):
-    """Systematic resampling indices from normalized log weights."""
-    cdf = jnp.cumsum(jnp.exp(log_weights))
-    cdf = cdf / cdf[-1]
-    u = (jax.random.uniform(key) + jnp.arange(n)) / n
-    return jnp.clip(jnp.searchsorted(cdf, u, side="right"), 0, n - 1)
-
-
 def _check_key(key):
     """Require a typed threefry key (trace-safe: reads only the dtype)."""
     if not jnp.issubdtype(key.dtype, jax.dtypes.prng_key):
@@ -1336,7 +1300,7 @@ class OrbitUpdater(eqx.Module):
         _check_key(key)
         particles = target.sample_prior(key, self.n_particles)
         log_prior = jax.vmap(target.log_prior)(particles)
-        log_w, _, no_support = _normalize(
+        log_w, _, no_support = normalize_log_weights(
             jnp.where(jnp.isfinite(log_prior), 0.0, -jnp.inf)
         )
         status = jnp.where(no_support, UpdaterStatus.NO_SUPPORT, UpdaterStatus.OK)
@@ -1349,7 +1313,7 @@ class OrbitUpdater(eqx.Module):
             n_records=jnp.asarray(0, dtype=int),
             key=key,
             diagnostics=self._diagnostics(
-                status, False, False, _kish_ess(log_w), _count_unique(particles, log_w)
+                status, False, False, kish_ess(log_w), _count_unique(particles, log_w)
             ),
         )
 
@@ -1413,7 +1377,7 @@ class OrbitUpdater(eqx.Module):
             status,
             False,
             duplicate,
-            _kish_ess(belief.log_weights),
+            kish_ess(belief.log_weights),
             _count_unique(belief.particles, belief.log_weights),
         )
 
@@ -1513,7 +1477,7 @@ class OrbitUpdater(eqx.Module):
             )
 
         log_prior, ll_rest, ll_new = jax.vmap(evaluate)(belief.particles)
-        _, _, no_support = _normalize(belief.log_weights + ll_new)
+        _, _, no_support = normalize_log_weights(belief.log_weights + ll_new)
 
         def shift(state):
             """New-record log likelihoods minus their weighted-support maximum."""
@@ -1526,7 +1490,7 @@ class OrbitUpdater(eqx.Module):
             """Weights times ``u = exp(delta l)``; evidence and CESS updates."""
             increment = jnp.where(jnp.isfinite(shifted), delta * shifted, -jnp.inf)
             cess = n * jnp.exp(_log_cess_fraction(state.log_weights, increment))
-            log_w, log_total, _ = _normalize(state.log_weights + increment)
+            log_w, log_total, _ = normalize_log_weights(state.log_weights + increment)
             return eqx.tree_at(
                 lambda s: (s.log_weights, s.log_z, s.min_cess),
                 state,
@@ -1549,7 +1513,7 @@ class OrbitUpdater(eqx.Module):
                 step_chol = step_scale * _weighted_cholesky(
                     state.particles[:, moving], state.log_weights, periods[moving]
                 )
-                idx = _systematic_indices(k_resample, state.log_weights, n)
+                idx = systematic_indices(k_resample, state.log_weights, n)
                 particles = state.particles[idx]
                 aux = (state.log_prior[idx], state.ll_rest[idx], state.ll_new[idx])
                 zero = jnp.asarray(0, dtype=int)

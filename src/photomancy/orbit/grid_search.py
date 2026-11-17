@@ -15,6 +15,7 @@ from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.quasi_random import roberts_sequence
+from photomancy.particles import normalize_log_weights
 from photomancy.posterior import SamplePosterior
 
 
@@ -315,9 +316,8 @@ def grid_search(
     u2, log_q = sampler.stage2(k2, u1[order], n_particles)
     phys2, rows2 = physical_rows(u2)
     ll2 = batched_loglike(ev, phys2, n_particles, chunk_size)
-    log_w_raw = ll2 - log_q
-    log_Z = jax.scipy.special.logsumexp(log_w_raw) - jnp.log(n_particles)
-    log_w = log_w_raw - jax.scipy.special.logsumexp(log_w_raw)
+    log_w, log_total, _ = normalize_log_weights(ll2 - log_q)
+    log_Z = log_total - jnp.log(n_particles)
 
     return SamplePosterior(
         samples=rows2, log_weights=log_w, evidence=log_Z, param_names=phys_names
