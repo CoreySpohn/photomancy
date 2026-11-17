@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.epoch import Epoch
 from hwoutils.spectral import Transmission
 from scipy.special import ndtr
 from scipy.stats import norm
@@ -22,6 +23,7 @@ from photomancy import (
 
 class _Scene(eqx.Module):
     contrast: jax.Array
+    epoch: Epoch = eqx.field(static=True, default=Epoch())
 
     def positions(self, time_d):
         east = jnp.stack((0.1 + 0.01 * time_d, 0.15 + 0.01 * time_d))
@@ -56,6 +58,7 @@ def report_case():
         jnp.array([[100.0, 200.0, 400.0, 0.0], [300.0, 500.0, 0.0, 0.0]]),
         jnp.array([0.03, 0.05]),
         bands,
+        Epoch(),
     )
     rows = ReportRows.planned(
         jnp.array([0.0, 1.0, 2.0]),
@@ -196,7 +199,16 @@ def test_surrogate_and_routing(report_case):
     from test_terms import _system
 
     system = _system()
-    actual = TabulatedReportPredictor(table, 0)(system, term.rows)
+    sys_table = ReportTable(
+        table.sep_arcsec,
+        table.counts_per_contrast_s,
+        table.lod_arcsec,
+        table.bandpasses,
+        system.epoch,
+    )
+    actual = TabulatedReportPredictor(sys_table, 0)(system, term.rows)
+    with pytest.raises(ValueError, match="epoch"):
+        TabulatedReportPredictor(table, 0)(system, term.rows)
     contrasts = jnp.stack(
         [system.band_contrasts(b, term.rows.time_d) for b in table.bandpasses]
     )
@@ -361,3 +373,14 @@ def test_transformations_and_gradient(report_case):
     central = (score(1.0 + 1e-6) - score(1.0 - 1e-6)) / (2e-6)
     assert np.isfinite(gradient)
     np.testing.assert_allclose(gradient, central, rtol=1e-6)
+
+
+def test_epoch_mismatch_raises(report_case):
+    """Fails if a table is paired with a model on a different time origin."""
+    model, term = report_case
+    other = Epoch(2460000.5)
+    bad = _Scene(model.contrast, other)
+    with pytest.raises(ValueError, match="epoch"):
+        term(bad)
+    same = _Scene(model.contrast, Epoch())
+    assert float(term(same)[0]) == float(term(model)[0])

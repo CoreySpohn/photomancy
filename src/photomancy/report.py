@@ -1,6 +1,7 @@
 """Joint counts and astrometry reports, with an interchangeable count predictor.
 
-Times are days from the selected system's epoch. Positions, errors and diffraction
+Times are days from the selected system's epoch; a report table carries that epoch
+and a predictor refuses a model whose epoch differs. Positions, errors and diffraction
 scales are in arcsec. A null is a censored counts measurement; a detection carries
 counts and a position with covariance determined by its own reported observables.
 """
@@ -12,6 +13,7 @@ from typing import Self
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from hwoutils.epoch import Epoch
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 
@@ -174,13 +176,15 @@ class ReportTable(eqx.Module):
     padding is a trailing +inf separation with zero rate. Rates are expected
     planet counts per unit linear contrast per second. ``bandpasses`` contains
     one bandpass per mode, used by the same model reader as PhotometryTerm.
-    Diffraction scales have shape (n_modes,).
+    Diffraction scales have shape (n_modes,). ``epoch`` is the static origin of
+    the report times; a predictor raises if the model's epoch differs.
     """
 
     sep_arcsec: jax.Array = eqx.field(converter=_float64)
     counts_per_contrast_s: jax.Array = eqx.field(converter=_float64)
     lod_arcsec: jax.Array = eqx.field(converter=_float64)
     bandpasses: tuple
+    epoch: Epoch = eqx.field(static=True)
 
     def __check_init__(self):
         """Require compatible mode-bank dimensions."""
@@ -213,6 +217,11 @@ class TabulatedReportPredictor(AbstractReportPredictor):
         # System terms use orbit likelihoods, which also import the report law.
         from photomancy.system_terms import _band_contrasts, _relative_positions
 
+        if model.epoch != self.table.epoch:
+            raise ValueError(
+                f"report table epoch {self.table.epoch} differs from "
+                f"model epoch {model.epoch}"
+            )
         clean = _prediction_rows(rows)
         planet_id = jnp.full(clean.time_d.shape, self.planet, jnp.int32)
         ra, dec = _relative_positions(model, clean.time_d, planet_id)
