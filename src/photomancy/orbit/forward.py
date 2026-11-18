@@ -14,11 +14,10 @@ All computations use natural units:
 
 import jax.numpy as jnp
 from hwoutils.constants import G, two_pi
-from hwoutils.conversions import contrast_to_delta_mag
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 
 from photomancy.orbit._frame import frame_from_tp, plane_from_motion
-from photomancy.orbit._photometry import lambertian_from_area
+from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 
 
 def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp, *, Mp=0.0):
@@ -135,32 +134,6 @@ def predict_stellar_astrometry(
     return -frac * ra_rel, -frac * dec_rel
 
 
-def _reflex_proper_motion(
-    t_center, window, n_epochs, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
-):
-    """Least-squares proper motion of the stellar reflex over a mission window.
-
-    Samples ``n_epochs`` epochs across ``[t_center - window/2, t_center + window/2]``,
-    evaluates the reflex sky-path, and returns the linear slope (the proper motion a
-    mission would report by fitting a moving photocenter). Octofitter's 25-epoch
-    approximation to the smearing of the photocenter, without htof.
-    """
-    ts = jnp.linspace(t_center - 0.5 * window, t_center + 0.5 * window, n_epochs)
-    ra, dec = predict_stellar_astrometry(
-        ts, a, e, cos_i, W, cos_w, sin_w, tp, Ms, Mp, dist_pc
-    )
-    return _path_proper_motion(ts, ra, dec)
-
-
-def _path_proper_motion(ts, ra, dec):
-    """Least-squares east/north slopes of an angular path at day epochs."""
-    dt = ts - jnp.mean(ts)
-    denom = jnp.sum(dt**2)
-    pm_ra = jnp.sum(dt * (ra - jnp.mean(ra))) / denom
-    pm_dec = jnp.sum(dt * (dec - jnp.mean(dec))) / denom
-    return jnp.stack([pm_ra, pm_dec])
-
-
 def predict_pm_anomaly(
     t_hip,
     t_gaia,
@@ -205,6 +178,7 @@ def predict_pm_anomaly(
     Returns:
         The proper-motion anomaly ``(pm_ra, pm_dec)``, shape ``(2,)`` in arcsec/day.
     """
+    from photomancy.system_terms import _proper_motion_anomaly
 
     def reflex_path(time_d):
         return jnp.stack(
@@ -214,20 +188,6 @@ def predict_pm_anomaly(
         )
 
     return _proper_motion_anomaly(t_hip, t_gaia, gaia_window, n_epochs, reflex_path)
-
-
-def _proper_motion_anomaly(t_hip, t_gaia, window, n_epochs, reflex_path):
-    """Gaia window slope minus Hipparcos-Gaia slope of an east/north path.
-
-    reflex_path maps day epochs (N,) to angular offsets (2, N) in arcseconds.
-    Both system terms and single-orbit predictions use this mission-window fit.
-    """
-    ts = jnp.linspace(t_gaia - 0.5 * window, t_gaia + 0.5 * window, n_epochs)
-    time_d = jnp.concatenate((ts, jnp.atleast_1d(t_hip), jnp.atleast_1d(t_gaia)))
-    path = reflex_path(time_d)
-    mu_gaia = _path_proper_motion(ts, *path[:, :n_epochs])
-    mu_hg = (path[:, -1] - path[:, -2]) / (t_gaia - t_hip)
-    return mu_gaia - mu_hg
 
 
 def predict_photometry(
@@ -262,11 +222,6 @@ def predict_photometry(
 
     alpha_arcsec = separation_arcsec(r, dist_pc)
     model, radius_Rearth = lambertian_from_area(Lambda)
-    contrast = model.contrast(
-        phase_angle_rad(r)[None, :], distance_AU(r)[None, :], None, radius_Rearth
-    )[0]
-
-    # Delta-magnitude
-    dMag = contrast_to_delta_mag(jnp.maximum(contrast, 1e-300))
-
-    return alpha_arcsec, dMag
+    return alpha_arcsec, lambertian_dmag(
+        phase_angle_rad(r), distance_AU(r), model, radius_Rearth
+    )

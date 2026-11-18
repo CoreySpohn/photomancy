@@ -1,11 +1,8 @@
 """Physical-space diagnostics for fitted orbit posteriors.
 
-The orbit-specific views over a fitted posterior, as free functions on a
-``(posterior, problem)`` pair: draw physical samples and summarize the modes. The
-posterior is a generic ``MixturePosterior`` / ``GaussianPosterior`` (pure stats); the
-``OrbitProblem`` supplies the ``to_physical`` coordinate map. Domain-agnostic posterior
-operations (manifold projection, variance-capped sampling) live in
-``photomancy.posterior_utils``.
+Chart-space mixtures expose the predictions and likelihoods of the fitted system's
+terms at each mode mean. For NumPyro fits, an ``OrbitProblem`` supplies the
+``to_physical`` coordinate map for samples and mode summaries.
 """
 
 import jax
@@ -14,6 +11,16 @@ from hwoutils.constants import G
 from orbix.equations import period_to_sma
 
 from photomancy.orbit._frame import frame_from_tp
+
+
+def mode_observables(posterior, density, *, unflatten):
+    """Return term log likelihoods and predictions at each chart-space mode.
+
+    Supply the chart fit's flat-vector to parameter PyTree map as ``unflatten``.
+    The result has the same ``term_values`` and ``predictions`` tuples as
+    ``SystemLogDensity.value_and_aux``, with a leading mode axis on each array.
+    """
+    return jax.vmap(lambda z: density.value_and_aux(unflatten(z))[1])(posterior.means)
 
 
 def sample_physical(posterior, problem, key, n):

@@ -11,6 +11,7 @@ from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.eig import (
     alias_breaking_eig,
     detectability_eig,
+    evaluate_chart_candidates,
     evaluate_orbit_candidates,
     geometric_eig,
 )
@@ -130,6 +131,75 @@ def test_orbit_eig_uses_current_contrast_curve_on_repeat_call(imaging_problem):
     np.testing.assert_array_equal(shallow["detectability"], jnp.zeros((2, 1)))
     assert jnp.all(deep["total_eig"] > 0.0)
     np.testing.assert_array_equal(shallow["total_eig"], jnp.zeros(2))
+
+
+@pytest.mark.medium(reason="differentiate the complete chart-to-astrometry map")
+def test_chart_eig_and_mode_predictions():
+    """Fails if candidate scoring drops a photometric scale or swaps mode/epoch axes."""
+    from jax.flatten_util import ravel_pytree
+    from orbix.system import EccentricityVectorChart
+    from test_system_priors import _orbits, _scene
+    from test_terms import _data
+
+    from photomancy import RelativeAstrometryTerm, ScalarCoordinate
+    from photomancy.orbit.diagnostics import mode_observables
+    from photomancy.orbit.inference import build_chart_logdensity
+
+    chart = EccentricityVectorChart()
+    orbit = jax.tree.map(lambda x: x[1], _orbits(17.0))
+    term = RelativeAstrometryTerm(_data())
+    density = build_chart_logdensity(
+        chart,
+        _scene,
+        lambda system: 0.0,
+        star_mass_kg=Msun2kg,
+        terms=(term,),
+        scalars={
+            "albedo": ScalarCoordinate(None),
+            "mass_Mearth": ScalarCoordinate(None),
+            "radius_AU": ScalarCoordinate(None),
+        },
+        body_inputs=("albedo", "radius_AU"),
+    )
+    params = {"orbit": chart.from_orbit(orbit), "mass_Mearth": jnp.log(17.0)}
+    bright, unflatten = ravel_pytree(
+        dict(params, albedo=jnp.log(0.8), radius_AU=jnp.log(Rearth2AU))
+    )
+    faint, _ = ravel_pytree(
+        dict(params, albedo=jnp.log(0.08), radius_AU=jnp.log(0.5 * Rearth2AU))
+    )
+    means = jnp.stack((bright, faint))
+    posterior = MixturePosterior(
+        means=means,
+        covs=jnp.tile(0.01 * jnp.eye(bright.size), (2, 1, 1)),
+        log_evidences=jnp.zeros(2),
+    )
+    aux = mode_observables(posterior, density, unflatten=unflatten)
+    times = term.data.times
+    result = evaluate_chart_candidates(
+        posterior,
+        density,
+        times,
+        1e-5,
+        unflatten=unflatten,
+        contrast_curve=(jnp.array([0.0, 1.0]), jnp.array([80.0, 80.0])),
+    )
+    # Mode diagnostics carry (K, 2, T), whereas EIG carries (T, K, 2).
+    np.testing.assert_allclose(
+        result["predictions"],
+        aux["predictions"][0].transpose(2, 0, 1),
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        result["dMag"][:, 1] - result["dMag"][:, 0],
+        2.5 * np.log10(40.0),
+        rtol=0,
+        atol=1e-12,
+    )
+    np.testing.assert_array_equal(
+        result["detectability"], jnp.ones_like(result["dMag"])
+    )
 
 
 # Medium: OFTI, clustering and the EIG forward each include a cold program.

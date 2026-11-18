@@ -251,6 +251,31 @@ def _scene(orbit, *, mass_Mearth, radius_AU, albedo):
     )
 
 
+def _orbit_sites(orbit):
+    """Constrained orbit sites at the same period, phase and orientation."""
+    elem = orbit.to_classical()
+    return dict(
+        log_P=jnp.log10(orbit.period_d),
+        e_raw=orbit.e,
+        cos_i=jnp.cos(elem["i_rad"]),
+        W=elem["W_rad"],
+        w_raw=elem["w_rad"],
+        M0=elem["M0_rad"],
+    )
+
+
+def _scale_coordinates(jitter_scale):
+    """Physical measures for the three body scales and instrument jitters."""
+    scalars = {
+        name: ScalarCoordinate(partial(log_uniform_prior, bounds=bounds))
+        for name, bounds in BOUNDS.items()
+    }
+    scalars["jitter_m_per_s"] = ScalarCoordinate(
+        partial(half_normal_log_prior, scale=jitter_scale)
+    )
+    return scalars
+
+
 @pytest.mark.medium
 def test_old_unconstrained_joint_with_sampled_jitter():
     """Differentiate the full map to the actual unconstrained NumPyro sites."""
@@ -271,13 +296,7 @@ def test_old_unconstrained_joint_with_sampled_jitter():
         ecc_prior="disk",
         jitter_scale=0.8,
     )
-    scalars = {
-        name: ScalarCoordinate(partial(log_uniform_prior, bounds=bounds))
-        for name, bounds in BOUNDS.items()
-    }
-    scalars["jitter_m_per_s"] = ScalarCoordinate(
-        partial(half_normal_log_prior, scale=0.8)
-    )
+    scalars = _scale_coordinates(0.8)
     poisoned = eqx.tree_at(
         lambda d: (d.rv, d.rv_err, d.times, d.inst_ids),
         data,
@@ -314,14 +333,8 @@ def test_old_unconstrained_joint_with_sampled_jitter():
         orbit = chart.to_orbit(
             x[:6], mu_AU3_per_d2=G * (Msun2kg + Mearth2kg * jnp.exp(x[6]))
         )
-        elem = orbit.to_classical()
         sites = dict(
-            log_P=jnp.log10(orbit.period_d),
-            e_raw=orbit.e,
-            cos_i=jnp.cos(elem["i_rad"]),
-            W=elem["W_rad"],
-            w_raw=elem["w_rad"],
-            M0=elem["M0_rad"],
+            **_orbit_sites(orbit),
             log_Mp=x[6] / jnp.log(10),
             log_Rp=x[7] / jnp.log(10),
             log_Ag=x[8] / jnp.log(10),

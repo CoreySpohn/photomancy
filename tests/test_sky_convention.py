@@ -12,7 +12,6 @@ from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.diagnostics import orbits_from_samples
 from photomancy.orbit.eig import _predict_astrom_pure, _predict_sep_dmag_pure
 from photomancy.orbit.forward import (
-    _reflex_proper_motion,
     predict_photometry,
     predict_pm_anomaly,
     predict_relative_astrometry,
@@ -21,6 +20,7 @@ from photomancy.orbit.forward import (
 from photomancy.orbit.init import ti_to_init
 from photomancy.orbit.ofti import _scale_rotate_score
 from photomancy.orbit.thiele_innes import thiele_innes_fit
+from photomancy.system_terms import _path_proper_motion
 
 _FORWARD_TIMES = np.array([-120.0, 0.0, 137.0, 690.0])
 _ECCENTRIC_ELEMENTS = (2.7, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)
@@ -568,7 +568,9 @@ def test_reflex_observables_east_north(k16, observable):
         dt = times - times.mean()
         expected = positions @ dt / (dt @ dt)
         if observable == "proper_motion":
-            actual = _reflex_proper_motion(gaia, window, n, **params)
+            actual = _path_proper_motion(
+                times, *predict_stellar_astrometry(times, **params)
+            )
         else:
             actual = predict_pm_anomaly(hip, gaia, window, n, **params)
             ends = fraction * reference([hip, gaia], k16)

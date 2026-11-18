@@ -33,6 +33,10 @@ class ScalarCoordinate(eqx.Module):
 class SystemLogDensity(AbstractLogDensity):
     """Build once and sum a physical prior, scalar priors, volumes and terms.
 
+    A custom data likelihood is an explicit callable in ``terms``. It returns
+    a scalar score and an auxiliary prediction (which may be None). Supply
+    each measurement once, including any joint or censored report data.
+
     With named scalar coordinates, params is a mapping containing their raw
     values. Pass decoded scalars as keyword arguments to the system builder
     via body_inputs, and to individual likelihoods via term_inputs (keyed by
@@ -63,14 +67,22 @@ class SystemLogDensity(AbstractLogDensity):
             coord.log_volume(params[name]) for name, coord in self.scalars.items()
         )
 
-    def value_and_aux(self, params):
-        """Return the joint and ordered tuples of term values and predictions."""
+    def _system_and_scalars(self, params):
         physical = {
             name: coord.physical(params[name]) for name, coord in self.scalars.items()
         }
         system = self.build(
             params, **{name: physical[name] for name in self.body_inputs}
         )
+        return system, physical
+
+    def build_system(self, params):
+        """Build the system at these sampler coordinates for observable predictions."""
+        return self._system_and_scalars(params)[0]
+
+    def value_and_aux(self, params):
+        """Return the joint and ordered tuples of term values and predictions."""
+        system, physical = self._system_and_scalars(params)
         results = tuple(
             term(
                 system, **{name: physical[name] for name in self.term_inputs.get(i, ())}
@@ -78,6 +90,8 @@ class SystemLogDensity(AbstractLogDensity):
             for i, term in enumerate(self.terms)
         )
         values = tuple(value for value, _ in results)
+        if any(jnp.ndim(value) != 0 for value in values):
+            raise ValueError("Each term must return a scalar log-likelihood.")
         predictions = tuple(prediction for _, prediction in results)
         scalar_prior = sum(
             jnp.sum(coord.prior(physical[name]))

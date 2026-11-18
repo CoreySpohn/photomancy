@@ -1,18 +1,17 @@
 """Orbit-domain Expected Information Gain (a thin wrapper over the generic layer).
 
-Supplies the orbit forward model (unconstrained ``z`` -> sky position via Kepler) and
-the contrast-curve detectability, then delegates the analytic EIG to
-:mod:`photomancy.eig`. The geometric / alias-breaking / detectability primitives are
-re-exported from there. ``evaluate_orbit_candidates`` (a z-space MixturePosterior + an
-OrbitProblem) schedules through this layer.
+Both chart-space mixtures and NumPyro orbit problems use the system terms' sky
+positions and Lambertian dMag predictions. Candidate scoring applies the contrast
+curve and delegates the analytic EIG to :mod:`photomancy.eig`.
 """
 
 from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
-from hwoutils.constants import Mearth2kg
-from orbix.equations import period_to_sma
+from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
+from hwoutils.epoch import Epoch
+from orbix.system import Body, SkyFrame, System
 
 from photomancy.eig import (
     alias_breaking_eig,
@@ -22,13 +21,14 @@ from photomancy.eig import (
 )
 from photomancy.eig import evaluate_candidates as _eval_candidates
 from photomancy.orbit._contrast import interpolate_contrast_curve
-from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
-from photomancy.posterior import MixturePosterior
+from photomancy.orbit._photometry import system_separation_dmag
+from photomancy.orbit.diagnostics import orbits_from_samples
 
 __all__ = [
     "alias_breaking_eig",
     "alias_breaking_eig_from_covariances",
     "detectability_eig",
+    "evaluate_chart_candidates",
     "evaluate_orbit_candidates",
     "geometric_eig",
 ]
@@ -39,89 +39,62 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def _predict_astrom_pure(
-    z_flat: jnp.ndarray,
-    t: float,
-    unflatten: Callable,
-    constrain: Callable,
-    Ms: float,
-    dist_pc: float,
-) -> jnp.ndarray:
-    """Predict (RA, Dec) from unconstrained z at a single time.
-
-    ``constrain`` applies the forward bijectors (no NumPyro model trace), squeezing each
-    param to a scalar for the Kepler solver under double-vmap. Returns shape ``(2,)``
-    array ``[RA, Dec]`` in arcsec.
-    """
+def _system_from_sites(z_flat, unflatten, constrain, Ms, dist_pc):
+    """Build a single star/companion pair in the sample sites' day coordinate."""
     phys = constrain(unflatten(z_flat))
-
-    log_P = phys["log_P"]
-    T = 10.0**log_P
-    e = phys["e_raw"]  # after transform: physical eccentricity
-    cos_i = phys["cos_i"]
-    W = phys["W"]
-    w = phys["w_raw"]  # after transform: physical omega
-    M0 = phys["M0"]
-
-    # Derived quantities
-    Mp = 10.0 ** phys["log_Mp"] * Mearth2kg if "log_Mp" in phys else 0.0
-    a = period_to_sma(T, Ms + Mp)
-    tp = -M0 / (2.0 * jnp.pi / T)
-    cos_w = jnp.cos(w)
-    sin_w = jnp.sin(w)
-
-    ra, dec = predict_relative_astrometry(
-        jnp.atleast_1d(t), a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc, Mp=Mp
+    period_d = 10.0 ** phys["log_P"]
+    mass_kg = 10.0 ** phys["log_Mp"] * Mearth2kg if "log_Mp" in phys else 0.0
+    samples = {
+        "T": period_d,
+        "Mp": mass_kg,
+        "e": phys["e_raw"],
+        "cos_i": phys["cos_i"],
+        "W": phys["W"],
+        "cos_w": jnp.cos(phys["w_raw"]),
+        "sin_w": jnp.sin(phys["w_raw"]),
+        "tp": -phys["M0"] * period_d / two_pi,
+    }
+    orbit = orbits_from_samples(samples, Ms, reference_day=0.0)
+    return System(
+        Body(Ms / Msun2kg),
+        Body(jnp.atleast_1d(mass_kg / Msun2kg)),
+        jax.tree.map(lambda x: x[None], orbit),
+        SkyFrame(dist_pc, Epoch()),
     )
-    return jnp.array([ra[0], dec[0]])
+
+
+def _astrometry(system, t, planet):
+    # The system terms import this orbit package through their data containers.
+    from photomancy.system_terms import _sky_positions
+
+    positions = _sky_positions(system, jnp.atleast_1d(t))
+    count = positions.shape[1]
+    if not 0 <= planet < count:
+        raise ValueError(f"Planet index {planet} outside system of {count} planets")
+    return positions[:, planet, 0]
+
+
+def _photometry(system, t, area_AU2):
+    sep, dmag = system_separation_dmag(system, jnp.atleast_1d(t), area_AU2=area_AU2)
+    return jnp.stack((sep[0], dmag[0]))
+
+
+def _predict_astrom_pure(
+    z_flat, t, unflatten: Callable, constrain: Callable, Ms, dist_pc
+):
+    """Predict the first planet's east/north offsets (arcsec) from a site vector."""
+    return _astrometry(
+        _system_from_sites(z_flat, unflatten, constrain, Ms, dist_pc), t, 0
+    )
 
 
 def _predict_sep_dmag_pure(
-    z_flat: jnp.ndarray,
-    t: float,
-    unflatten: Callable,
-    constrain: Callable,
-    Ms: float,
-    dist_pc: float,
-    Lambda: float,
-) -> jnp.ndarray:
-    """Predict separation (arcsec) and dMag from unconstrained z.
-
-    Same orbital mechanics as ``_predict_astrom_pure`` plus the Lambert phase function.
-    ``Lambda = Ag * Rp^2`` is a known constant (the planet was detected once). Returns
-    shape ``(2,)`` array ``[sep_arcsec, dMag]``.
-    """
-    phys = constrain(unflatten(z_flat))
-
-    log_P = phys["log_P"]
-    T = 10.0**log_P
-    e = phys["e_raw"]
-    cos_i = phys["cos_i"]
-    W = phys["W"]
-    w = phys["w_raw"]
-    M0 = phys["M0"]
-
-    Mp = 10.0 ** phys["log_Mp"] * Mearth2kg if "log_Mp" in phys else 0.0
-    a = period_to_sma(T, Ms + Mp)
-    tp = -M0 / (2.0 * jnp.pi / T)
-    cos_w = jnp.cos(w)
-    sin_w = jnp.sin(w)
-
-    sep, dmag = predict_photometry(
-        jnp.atleast_1d(t),
-        a,
-        e,
-        cos_i,
-        W,
-        cos_w,
-        sin_w,
-        tp,
-        Ms,
-        Lambda,
-        dist_pc,
-        Mp=Mp,
+    z_flat, t, unflatten: Callable, constrain: Callable, Ms, dist_pc, Lambda
+):
+    """Predict angular separation and dMag with the fitted orbit and fixed area."""
+    return _photometry(
+        _system_from_sites(z_flat, unflatten, constrain, Ms, dist_pc), t, Lambda
     )
-    return jnp.array([sep[0], dmag[0]])
 
 
 # ---------------------------------------------------------------------------
@@ -130,46 +103,29 @@ def _predict_sep_dmag_pure(
 
 
 def _orbit_evaluate(
-    means,
-    covs,
-    log_evidences,
-    unflatten,
-    constrain,
+    posterior,
     candidate_epochs,
     obs_variance,
-    Ms,
-    dist_pc,
-    *,
-    Lambda,
+    forward,
+    photometry,
     contrast_curve,
-    iwa,
+    iwa_arcsec,
+    *,
+    cache_key=None,
 ):
-    """Shared orbit-EIG core: build forward + detectability, delegate, add sep/dMag."""
-    posterior = MixturePosterior(means=means, covs=covs, log_evidences=log_evidences)
-
-    def forward(z, t):
-        return _predict_astrom_pure(z, t, unflatten, constrain, Ms, dist_pc)
-
-    has_imaging = Lambda is not None and contrast_curve is not None
+    """Score east/north measurements with optional dMag selection at each mode."""
     detectable = None
     detectable_args = ()
-    if has_imaging:
+    if contrast_curve is not None:
         detectable_args = tuple(map(jnp.asarray, contrast_curve))
 
         def detectable(z, t, csep, cdmag):
-            sep, dmag = _predict_sep_dmag_pure(
-                z, t, unflatten, constrain, Ms, dist_pc, Lambda
-            )
+            sep, dmag = photometry(z, t)
             dmag_limit = interpolate_contrast_curve(
                 sep[None], csep[None, :], cdmag[None, :]
             )[0]
-            return ((sep > iwa) & (dmag < dmag_limit)).astype(sep.dtype)
+            return ((sep > iwa_arcsec) & (dmag < dmag_limit)).astype(sep.dtype)
 
-    # id(unflatten) is a stable per-config identity: _MODEL_CACHE keeps one unflatten
-    # per model config alive for the process lifetime, so the id never dangles or
-    # aliases. A param-name key would be wrong here -- two configs with the same sites
-    # but different prior ranges share param_names yet need distinct compiled kernels.
-    cache_key = (id(unflatten), Ms, dist_pc, has_imaging, Lambda, iwa)
     epochs = jnp.asarray(candidate_epochs)
     res = _eval_candidates(
         posterior,
@@ -181,13 +137,9 @@ def _orbit_evaluate(
         cache_key=cache_key,
     )
 
-    if has_imaging:
+    if contrast_curve is not None:
         sep_dmag = jax.vmap(
-            lambda t: jax.vmap(
-                lambda z: _predict_sep_dmag_pure(
-                    z, t, unflatten, constrain, Ms, dist_pc, Lambda
-                )
-            )(posterior.means)
+            lambda t: jax.vmap(photometry, in_axes=(0, None))(posterior.means, t)
         )(epochs)
         res["separation"] = sep_dmag[..., 0]
         res["dMag"] = sep_dmag[..., 1]
@@ -224,17 +176,62 @@ def evaluate_orbit_candidates(
     threshold is not applied within a mode, so selection that cuts through a mode's
     predicted position or brightness is not represented.
     """
+    unflatten, constrain = problem.unflatten, problem.constrain
+
+    def forward(z, t):
+        return _predict_astrom_pure(z, t, unflatten, constrain, Ms, dist_pc)
+
+    def photometry(z, t):
+        return _predict_sep_dmag_pure(z, t, unflatten, constrain, Ms, dist_pc, Lambda)
+
+    curve = contrast_curve if Lambda is not None else None
+    # The model cache retains one unflatten per config (including prior bounds).
+    cache_key = (id(unflatten), Ms, dist_pc, curve is not None, Lambda, iwa)
     return _orbit_evaluate(
-        posterior.means,
-        posterior.covs,
-        posterior.log_evidences,
-        problem.unflatten,
-        problem.constrain,
+        posterior,
         candidate_epochs,
         obs_variance,
-        Ms,
-        dist_pc,
-        Lambda=Lambda,
-        contrast_curve=contrast_curve,
-        iwa=iwa,
+        forward,
+        photometry,
+        curve,
+        iwa,
+        cache_key=cache_key,
+    )
+
+
+def evaluate_chart_candidates(
+    posterior,
+    density,
+    time_d,
+    obs_variance,
+    *,
+    unflatten,
+    planet=0,
+    contrast_curve=None,
+    area_AU2=None,
+    iwa_arcsec=0.0,
+):
+    """Score a planet's relative astrometry at days from the system epoch.
+
+    The mixture means and covariances are in flat chart coordinates. Supply the
+    fit's ``unflatten(z) -> params`` map (e.g. from ``jax.flatten_util.ravel_pytree``).
+    The chart density builds the physical system, including sampled body properties.
+    The zero-based ``planet`` index follows scene order for a scene system and
+    Jacobi chain order for a bare orbix system.
+
+    Each reported measurement has variance ``obs_variance`` in arcsec squared.
+    An optional ``(sep_arcsec, dMag_limit)`` curve enables the same mode-wise
+    reporting decision as ``evaluate_orbit_candidates`` for a single planet.
+    The Lambert scale defaults to the scene's albedo times squared radius.
+    Supply ``area_AU2`` to use a fixed scale, including with a bare orbix system.
+    """
+
+    def forward(z, t):
+        return _astrometry(density.build_system(unflatten(z)), t, planet)
+
+    def photometry(z, t):
+        return _photometry(density.build_system(unflatten(z)), t, area_AU2)
+
+    return _orbit_evaluate(
+        posterior, time_d, obs_variance, forward, photometry, contrast_curve, iwa_arcsec
     )

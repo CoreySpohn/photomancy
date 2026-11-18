@@ -19,6 +19,7 @@ from photomancy.orbit.data import (
     StellarAstromData,
 )
 from photomancy.orbit.diagnostics import (
+    mode_observables,
     mode_scalars,
     mode_summary,
     orbits_from_samples,
@@ -27,6 +28,7 @@ from photomancy.orbit.diagnostics import (
 from photomancy.orbit.eig import (
     alias_breaking_eig,
     alias_breaking_eig_from_covariances,
+    evaluate_chart_candidates,
     evaluate_orbit_candidates,
     geometric_eig,
 )
@@ -138,6 +140,7 @@ __all__ = [
     # Orbital-mechanics primitives (re-exported from orbix)
     "ecc_distribution",
     # Priors
+    "evaluate_chart_candidates",
     "evaluate_orbit_candidates",
     "find_init",
     "find_init_top_k",
@@ -155,6 +158,7 @@ __all__ = [
     "map_laplace_fit",
     "map_laplace_mixture_fit",
     "migrate_sky_convention",
+    "mode_observables",
     "mode_scalars",
     "mode_summary",
     "ofti",

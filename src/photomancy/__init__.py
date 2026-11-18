@@ -43,6 +43,8 @@ from photomancy.report import (
 )
 from photomancy.system_density import ScalarCoordinate, SystemLogDensity
 from photomancy.system_terms import (
+    ImagingTerm,
+    NullTerm,
     PhotometryTerm,
     ProperMotionAnomalyTerm,
     RadialVelocityTerm,
@@ -64,12 +66,14 @@ __all__ = [
     "AbstractReportPredictor",
     "AbstractTerm",
     "GaussianPosterior",
+    "ImagingTerm",
     "LaplaceBackend",
     "LaplaceMixtureBackend",
     "MAPBackend",
     "MCLMCBackend",
     "MixturePosterior",
     "NUTSBackend",
+    "NullTerm",
     "PathfinderBackend",
     "PathfinderMixtureBackend",
     "PhotometryTerm",

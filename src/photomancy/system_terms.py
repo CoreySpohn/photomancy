@@ -7,6 +7,10 @@ fit with no image terms is then an orbit fit.
 
 Data times are days from the selected system's epoch, including the Hipparcos
 and Gaia reference times. Absolute dates must be converted on the host first.
+RV and astrometric terms accept a bare orbix System or scene observables.
+For several companions, orbix propagates the supplied Jacobi chain. Each
+orbit refers to the interior centre of mass. The element-based model sums
+independent star-companion orbits, which gives different predictions.
 """
 
 from collections.abc import Callable
@@ -19,15 +23,19 @@ from hwoutils.spectral import Quadrature, Transmission
 from jax.scipy.stats import norm
 from orbix.system import System
 
+from photomancy.orbit._photometry import system_separation_dmag
 from photomancy.orbit.data import (
+    ImagingData,
+    NullData,
     PhotometryData,
     PMAnomalyData,
     RelativeAstromData,
     RVData,
     StellarAstromData,
 )
-from photomancy.orbit.forward import _proper_motion_anomaly
 from photomancy.orbit.likelihoods import (
+    loglike_imaging,
+    loglike_null,
     loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
@@ -36,6 +44,8 @@ from photomancy.orbit.likelihoods import (
 from photomancy.terms import AbstractTerm
 
 __all__ = [
+    "ImagingTerm",
+    "NullTerm",
     "PhotometryTerm",
     "ProperMotionAnomalyTerm",
     "RadialVelocityTerm",
@@ -48,16 +58,49 @@ def _identity(model):
     return model
 
 
-def _relative_positions(system, time_d, planet_id):
-    """Read east/north offsets (2, T) for each row's planet and epoch."""
+def _sky_positions(system, time_d):
+    """Star-relative east/north offsets in arcsec, shape (2, K, T)."""
     if isinstance(system, System):
         ephemeris = system.solve(time_d)
-        pos = jnp.stack(
+        return jnp.stack(
             ephemeris.offset_arcsec(jnp.arange(1, system.orbits.a_AU.size + 1))
         )
-        return pos[:, planet_id, jnp.arange(time_d.size)]
-    pos = system.positions(time_d=time_d)
-    return pos[:, planet_id, jnp.arange(time_d.size)]
+    return system.positions(time_d=time_d)
+
+
+def _relative_positions(system, time_d, planet_id):
+    """Read east/north offsets (2, T) for each row's planet and epoch."""
+    return _sky_positions(system, time_d)[:, planet_id, jnp.arange(time_d.size)]
+
+
+def _stellar_reflex(system, time_d):
+    """Stellar barycentric east/north offsets (arcsec), excluding frame motion."""
+    if isinstance(system, System):
+        return jnp.stack(system.solve(time_d).offset_arcsec(0, "barycenter"))
+    return system.star_reflex(time_d=time_d)
+
+
+def _path_proper_motion(ts, ra, dec):
+    """Least-squares east/north slopes of an angular path at day epochs."""
+    dt = ts - jnp.mean(ts)
+    denom = jnp.sum(dt**2)
+    pm_ra = jnp.sum(dt * (ra - jnp.mean(ra))) / denom
+    pm_dec = jnp.sum(dt * (dec - jnp.mean(dec))) / denom
+    return jnp.stack([pm_ra, pm_dec])
+
+
+def _proper_motion_anomaly(t_hip, t_gaia, window, n_epochs, reflex_path):
+    """Gaia window slope minus Hipparcos-Gaia slope of an east/north path.
+
+    reflex_path maps day epochs (N,) to angular offsets (2, N) in arcseconds.
+    Both system terms and single-orbit predictions use this mission-window fit.
+    """
+    ts = jnp.linspace(t_gaia - 0.5 * window, t_gaia + 0.5 * window, n_epochs)
+    time_d = jnp.concatenate((ts, jnp.atleast_1d(t_hip), jnp.atleast_1d(t_gaia)))
+    path = reflex_path(time_d)
+    mu_gaia = _path_proper_motion(ts, *path[:, :n_epochs])
+    mu_hg = (path[:, -1] - path[:, -2]) / (t_gaia - t_hip)
+    return mu_gaia - mu_hg
 
 
 def _band_contrasts(system, quadrature, bandpasses, time_d, band_id, planet_id):
@@ -157,7 +200,7 @@ class StellarAstrometryTerm(AbstractTerm):
             corr=jnp.where(valid, self.data.corr, 0.0),
             is_valid=valid,
         )
-        prediction = self.select(model).star_reflex(time_d=data.times)
+        prediction = _stellar_reflex(self.select(model), data.times)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         return loglike_stellar_astrom(*prediction, data), prediction
 
@@ -205,7 +248,13 @@ class RadialVelocityTerm(AbstractTerm):
             is_valid=valid,
             n_inst=self.data.n_inst,
         )
-        prediction = self.select(model).star_radial_velocity(time_d=data.times)
+        system = self.select(model)
+        if isinstance(system, System):
+            prediction = system.solve(data.times).radial_velocity_m_per_s(
+                0, "barycenter"
+            )
+        else:
+            prediction = system.star_radial_velocity(time_d=data.times)
         prediction = jnp.where(valid, prediction, 0.0)
         value = loglike_rv_marginalized(
             data.rv,
@@ -242,19 +291,18 @@ class ProperMotionAnomalyTerm(AbstractTerm):
     """Score the Gaia-window reflex slope minus the Hipparcos-Gaia mean motion.
 
     ``select`` maps the model to a system with ``star_reflex(time_d)`` in arcsec.
-    ``n_epochs`` is the static number of samples across the Gaia window (at
-    least two), independent of the data container's sampling metadata. The
-    prediction is an east/north vector in arcsec/day, zero when invalid.
+    ``data.n_epochs`` sets the number of samples across the Gaia window (at
+    least two). The prediction is an east/north vector in arcsec/day,
+    zero when invalid.
     Data ``t_hip`` and ``t_gaia`` are days from the system's epoch.
     """
 
     data: PMAnomalyData
     select: Callable = _identity
-    n_epochs: int = eqx.field(static=True, default=25)
 
     def __check_init__(self):
         """Require enough samples to define a slope."""
-        if self.n_epochs < 2:
+        if self.data.n_epochs < 2:
             raise ValueError("n_epochs must be at least two")
 
     def __call__(self, model):
@@ -272,13 +320,12 @@ class ProperMotionAnomalyTerm(AbstractTerm):
         system = self.select(model)
 
         def reflex_path(time_d):
-            ephemeris = system.ephemeris(time_d=time_d)
-            return system.star_reflex(time_d=time_d, ephemeris=ephemeris)
+            return _stellar_reflex(system, time_d)
 
         prediction = jnp.where(
             valid,
             _proper_motion_anomaly(
-                data.t_hip, data.t_gaia, data.gaia_window, self.n_epochs, reflex_path
+                data.t_hip, data.t_gaia, data.gaia_window, data.n_epochs, reflex_path
             ),
             0.0,
         )
@@ -296,6 +343,48 @@ class ProperMotionAnomalyTerm(AbstractTerm):
             jnp.where(valid, draw, self.data.pm_anomaly),
         )
         return eqx.tree_at(lambda t: t.data, self, data)
+
+
+def _imaging_prediction(system, data, area_AU2):
+    valid = data.is_valid
+    prediction = system_separation_dmag(
+        system, jnp.where(valid, data.epochs, 0.0), area_AU2=area_AU2
+    )
+    return tuple(jnp.where(valid, x, 0.0) for x in prediction)
+
+
+class NullTerm(eqx.Module):
+    """Score single-planet non-detections against per-epoch contrast curves.
+
+    The prediction is a pair of vectors (separation in arcsec, dMag), zero
+    on padded rows. A scene supplies its Lambertian albedo and radius, or
+    pass the photometric area explicitly for a bare dynamical system.
+    """
+
+    data: NullData
+    select: Callable = _identity
+
+    def __call__(self, model, *, area_AU2=None):
+        """Return the total log probability of the observed nulls and predictions."""
+        prediction = _imaging_prediction(self.select(model), self.data, area_AU2)
+        return loglike_null(*prediction, self.data), prediction
+
+
+class ImagingTerm(eqx.Module):
+    """Score single-planet Gaussian dMag measurements and contrast-curve nulls.
+
+    As for NullTerm, the prediction is a pair of vectors (arcsec, dMag).
+    Measured dMag is a Gaussian observable at detected epochs; null epochs
+    use the censored flux likelihood of the supplied contrast curve.
+    """
+
+    data: ImagingData
+    select: Callable = _identity
+
+    def __call__(self, model, *, area_AU2=None):
+        """Return the combined dMag and null likelihood and predictions."""
+        prediction = _imaging_prediction(self.select(model), self.data, area_AU2)
+        return loglike_imaging(*prediction, self.data), prediction
 
 
 class PhotometryTerm(AbstractTerm):

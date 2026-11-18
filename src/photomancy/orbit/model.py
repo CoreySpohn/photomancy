@@ -83,8 +83,8 @@ def build_model(
             provided.
         has_stellar_astrom: Whether stellar-reflex astrometry will be provided.
         has_pm_anomaly: Whether a Hipparcos-Gaia proper-motion anomaly will be provided.
-        has_null: Whether null-detection data will be provided.
-        has_imaging: Whether unified imaging data will be provided.
+        has_null: Whether single-planet null-detection data will be provided.
+        has_imaging: Whether single-planet unified imaging data will be provided.
         custom_loglike: Optional JAX-compatible ``params -> scalar`` data
             log-likelihood (default None), added once with ``numpyro.factor``.
             Return a scalar log-likelihood without prior terms; vector returns
@@ -115,6 +115,10 @@ def build_model(
         A callable ``model(Ms, dist_pc, data)`` suitable for ``numpyro.infer.MCMC``
         and for use with ``dynamic_args=True`` in ``initialize_model``.
     """
+    if n_planets != 1 and (has_null or has_imaging):
+        raise ValueError(
+            "Multi-planet null and imaging require a detection model per planet"
+        )
     has_builtin = any(
         [
             has_rv,

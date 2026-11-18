@@ -1,5 +1,7 @@
 """Likelihood composition and relative astrometry across the system interface."""
 
+from dataclasses import replace
+
 import equinox as eqx
 import ineedvalidation as vv
 import jax
@@ -33,7 +35,6 @@ from photomancy.orbit.data import (
     StellarAstromData,
 )
 from photomancy.orbit.forward import (
-    _path_proper_motion,
     predict_pm_anomaly,
     predict_relative_astrometry,
     predict_rv,
@@ -46,6 +47,7 @@ from photomancy.orbit.likelihoods import (
     loglike_stellar_astrom,
 )
 from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
+from photomancy.system_terms import _path_proper_motion
 
 # a [AU], e, node [rad], inclination [rad], periapsis [rad], M0 [rad], t0 [day].
 _ELEMENTS = np.array([1.7, 0.31, 1.1, 0.8, 0.6, 0.4, 24.0])
@@ -369,7 +371,7 @@ def test_reflex_system_element_parity(kind):
             data.t_hip,
             data.t_gaia,
             data.gaia_window,
-            term.n_epochs,
+            data.n_epochs,
             **args,
         )
         expected = loglike_pm_anomaly(prediction, data)
@@ -410,7 +412,7 @@ def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
     The 1e-12 relative tolerance permits only x64 rounding for both the slope
     and likelihood. Two samples and the standard window cover slice endpoints.
     """
-    term = ProperMotionAnomalyTerm(_new_term("pma").data, n_epochs=n_epochs)
+    term = ProperMotionAnomalyTerm(replace(_new_term("pma").data, n_epochs=n_epochs))
     system = _system()
     calls = []
     original = System.ephemeris
