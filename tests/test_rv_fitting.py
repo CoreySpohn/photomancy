@@ -16,7 +16,7 @@ from photomancy.orbit.forward import (  # noqa: E402
     predict_relative_astrometry,
     predict_rv,
 )
-from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
+from photomancy.orbit.inference import build_numpyro_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init_top_k  # noqa: E402
 from photomancy.posterior import MixturePosterior  # noqa: E402
 
@@ -79,7 +79,7 @@ def test_rv_only_fit_recovers_period_from_seed():
     fit is seeded from a period guess; it then recovers the true period.
     """
     rv = _make_rv()
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         MSUN_KG, DIST_PC, rv_data=rv, log_P_range=LOG_P_RANGE
     )
     z0 = problem.init_to_z({"log_P": jnp.array([float(np.log10(TRUE_T))])})
@@ -95,7 +95,7 @@ def test_joint_rv_astrometry_recovers_period_and_mass():
     """A joint RV + astrometry fit recovers the period (astrometry) and mass (RV)."""
     rv = _make_rv()
     astrom = _make_astrom()
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         MSUN_KG,
         DIST_PC,
         rv_data=rv,

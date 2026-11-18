@@ -3,7 +3,7 @@
 The NumPyro model has an ``n_planets > 1`` branch (vmap over planets, ``planet_id``
 indexing of astrometry), but the high-level fit builders previously hardcoded
 ``n_planets = 1``. These tests reach the multi-planet path through
-``build_orbit_logdensity`` and check it builds, evaluates, and recovers two periods
+``build_numpyro_logdensity`` and check it builds, evaluates, and recovers two periods
 when seeded near truth (blind multi-planet initialization is separate, future work).
 """
 
@@ -19,7 +19,7 @@ from orbix.equations import period_to_sma  # noqa: E402
 from photomancy.backends import LaplaceBackend  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
-from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
+from photomancy.orbit.inference import build_numpyro_logdensity  # noqa: E402
 
 MSUN_KG = 1.989e30
 DIST_PC = 10.0
@@ -71,7 +71,7 @@ def _make_two_planet_astrom(seed=11):
 def test_build_orbit_logdensity_two_planets_builds_and_evaluates():
     """The API exposes n_planets and a 2-planet astrometry model evaluates finitely."""
     astrom = _make_two_planet_astrom()
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         MSUN_KG,
         DIST_PC,
         relative_astrom_data=astrom,
@@ -92,7 +92,7 @@ def test_two_planet_fit_recovers_both_periods_from_seed():
     near their true elements; the fit then refines and holds both periods.
     """
     astrom = _make_two_planet_astrom()
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         MSUN_KG,
         DIST_PC,
         relative_astrom_data=astrom,

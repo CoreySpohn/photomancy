@@ -80,9 +80,7 @@ class SystemLogDensity(AbstractLogDensity):
         """Build the system at these sampler coordinates for observable predictions."""
         return self._system_and_scalars(params)[0]
 
-    def value_and_aux(self, params):
-        """Return the joint and ordered tuples of term values and predictions."""
-        system, physical = self._system_and_scalars(params)
+    def _terms(self, system, physical):
         results = tuple(
             term(
                 system, **{name: physical[name] for name in self.term_inputs.get(i, ())}
@@ -93,6 +91,9 @@ class SystemLogDensity(AbstractLogDensity):
         if any(jnp.ndim(value) != 0 for value in values):
             raise ValueError("Each term must return a scalar log-likelihood.")
         predictions = tuple(prediction for _, prediction in results)
+        return values, predictions
+
+    def _logprior(self, params, system, physical):
         scalar_prior = sum(
             jnp.sum(coord.prior(physical[name]))
             for name, coord in self.scalars.items()
@@ -106,9 +107,23 @@ class SystemLogDensity(AbstractLogDensity):
             | jnp.isneginf(scalar_prior)
             | jnp.isneginf(volume)
         )
-        total = jnp.where(
-            excluded, -jnp.inf, system_prior + scalar_prior + volume + sum(values)
-        )
+        return jnp.where(excluded, -jnp.inf, system_prior + scalar_prior + volume)
+
+    def logprior(self, params):
+        """Normalized-prior contribution in sampler coordinates, including volumes."""
+        return self._logprior(params, *self._system_and_scalars(params))
+
+    def loglikelihood(self, params):
+        """Score data alone for nested sampling or tempering."""
+        values, _ = self._terms(*self._system_and_scalars(params))
+        return sum(values, jnp.asarray(0.0))
+
+    def value_and_aux(self, params):
+        """Return the joint and ordered tuples of term values and predictions."""
+        system, physical = self._system_and_scalars(params)
+        values, predictions = self._terms(system, physical)
+        prior = self._logprior(params, system, physical)
+        total = jnp.where(jnp.isneginf(prior), -jnp.inf, prior + sum(values))
         return total, {"term_values": values, "predictions": predictions}
 
     def __call__(self, params):

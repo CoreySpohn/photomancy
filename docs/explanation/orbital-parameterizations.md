@@ -10,9 +10,12 @@ adding a sampler, a prior, or a new orbit forward model.
 
 ## Coordinates in the current engine
 
-Three tiers of the orbit stack use three different coordinate systems, each
-matched to its job:
+The orbit fit, its NumPyro reference, and the discovery algorithms use different
+coordinates:
 
+- **Chart inference** uses an orbix Classical, EccentricityVector, Frame, or
+  Cartesian chart and explicit scalar coordinates. All backends evaluate the
+  same system and data terms.
 - **The NumPyro model** samples $\log_{10} P$ uniformly, eccentricity from
   the Kipping (2013) Beta prior by default, the angles $\omega$, $\Omega$,
   and $M_0$ uniformly, and $\cos i$ uniformly. These are the classical
@@ -41,11 +44,37 @@ position and velocity arrays have shape `(K, N, 3)` in AU and AU/day, with
 coordinates `(east, north, away)`. Use `reference_day=0.0` when the Epoch already
 matches the observation-time origin. Scalar samples produce an unbatched orbit.
 
-## Custom likelihoods and planet scales
+## Fitting in chart coordinates
+
+Construct a one-planet density with
+{py:func}`~photomancy.orbit.inference.build_chart_logdensity`, then pass it and a
+representative parameter dictionary to {py:class}`~photomancy.orbit.ChartOrbitProblem`.
+The dictionary contains an `orbit` vector in the chosen chart and a leaf for
+each sampled body property or instrument nuisance. The same system builder and
+epoch determine the likelihood, posterior predictions, and EIG.
+
+For an interior chart position, `start = problem.flatten(position)` yields the
+flat vector expected by MAP, Laplace, NUTS, MCLMC, and Pathfinder. Pass
+`problem.logdensity` as the scalar callable, for example
+`NUTSBackend().run(problem.logdensity, start, key)`. The orbit Laplace facade
+accepts the problem directly as `map_laplace_fit(problem, start)`.
+
+For normalized prior draws, use {py:class}`~photomancy.priors.FactorizedOrbitPrior`
+and give each independent scalar coordinate a
+{py:class}`~photomancy.priors.LogUniformPrior` or
+{py:class}`~photomancy.priors.HalfNormalPrior`. The sampled companion mass enters
+the two-body orbit in both the prior transform and likelihood.
+`SMCBackend().run_chart(problem, n_particles=128, key=key)` draws initial
+particles from this prior and tempers the data terms.
+`orbit_nested_sampling(problem, key=key)` integrates those terms over the same
+prior. Both return chart rows. Use `problem.to_physical(posterior.samples[i])`
+to decode row `i` with the original fit's chart and epoch.
+
+## NumPyro custom likelihoods and planet scales
 
 {py:func}`~photomancy.orbit.model.build_model`,
-{py:func}`~photomancy.orbit.inference.build_orbit_logdensity`, and
-{py:func}`~photomancy.orbit.nested.orbit_nested_sampling` accept the same
+{py:func}`~photomancy.orbit.inference.build_numpyro_logdensity`, and
+{py:func}`~photomancy.orbit.nested.numpyro_nested_sampling` accept the same
 custom-likelihood and planet-scale arguments:
 
 - `custom_loglike=None`: a JAX-compatible callable taking one parameter dictionary

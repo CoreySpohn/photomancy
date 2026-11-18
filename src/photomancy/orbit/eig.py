@@ -28,7 +28,7 @@ __all__ = [
     "alias_breaking_eig",
     "alias_breaking_eig_from_covariances",
     "detectability_eig",
-    "evaluate_chart_candidates",
+    "evaluate_numpyro_candidates",
     "evaluate_orbit_candidates",
     "geometric_eig",
 ]
@@ -149,7 +149,7 @@ def _orbit_evaluate(
     return res
 
 
-def evaluate_orbit_candidates(
+def evaluate_numpyro_candidates(
     posterior,
     problem,
     candidate_epochs,
@@ -199,13 +199,12 @@ def evaluate_orbit_candidates(
     )
 
 
-def evaluate_chart_candidates(
+def evaluate_orbit_candidates(
     posterior,
-    density,
+    problem,
     time_d,
     obs_variance,
     *,
-    unflatten,
     planet=0,
     contrast_curve=None,
     area_AU2=None,
@@ -213,24 +212,28 @@ def evaluate_chart_candidates(
 ):
     """Score a planet's relative astrometry at days from the system epoch.
 
-    The mixture means and covariances are in flat chart coordinates. Supply the
-    fit's ``unflatten(z) -> params`` map (e.g. from ``jax.flatten_util.ravel_pytree``).
-    The chart density builds the physical system, including sampled body properties.
+    The mixture means and covariances are in the flat chart coordinates of the
+    fitted ``ChartOrbitProblem``. Its density builds the physical system, including
+    sampled body properties.
     The zero-based ``planet`` index follows scene order for a scene system and
     Jacobi chain order for a bare orbix system.
 
     Each reported measurement has variance ``obs_variance`` in arcsec squared.
-    An optional ``(sep_arcsec, dMag_limit)`` curve enables the same mode-wise
-    reporting decision as ``evaluate_orbit_candidates`` for a single planet.
+    An optional ``(sep_arcsec, dMag_limit)`` curve enables mode-wise
+    detection for a single planet above the inner working angle.
     The Lambert scale defaults to the scene's albedo times squared radius.
     Supply ``area_AU2`` to use a fixed scale, including with a bare orbix system.
     """
 
     def forward(z, t):
-        return _astrometry(density.build_system(unflatten(z)), t, planet)
+        return _astrometry(
+            problem.density.build_system(problem.unflatten(z)), t, planet
+        )
 
     def photometry(z, t):
-        return _photometry(density.build_system(unflatten(z)), t, area_AU2)
+        return _photometry(
+            problem.density.build_system(problem.unflatten(z)), t, area_AU2
+        )
 
     return _orbit_evaluate(
         posterior, time_d, obs_variance, forward, photometry, contrast_curve, iwa_arcsec

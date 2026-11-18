@@ -16,8 +16,8 @@ from photomancy.orbit import _numpyro_bridge
 from photomancy.orbit import inference as inference_module
 from photomancy.orbit import nested as nested_module
 from photomancy.orbit.data import NullData, RelativeAstromData
-from photomancy.orbit.inference import build_orbit_logdensity
-from photomancy.orbit.nested import orbit_nested_sampling
+from photomancy.orbit.inference import build_numpyro_logdensity
+from photomancy.orbit.nested import numpyro_nested_sampling
 from photomancy.posterior import SamplePosterior
 
 jax.config.update("jax_enable_x64", True)
@@ -87,7 +87,7 @@ def capped_nested_run(monkeypatch):
         return state
 
     monkeypatch.setattr(NestedSampler, "run", capture)
-    post = orbit_nested_sampling(
+    post = numpyro_nested_sampling(
         Msun2kg,
         10.0,
         custom_loglike=_toy_loglike,
@@ -168,9 +168,9 @@ def test_nested_and_logdensity_share_model_construction(monkeypatch):
         log_Ag_range=(-1.8, -0.1),
         ecc_prior="disk",
     )
-    problem = build_orbit_logdensity(Msun2kg, 10.0, **config)
+    problem = build_numpyro_logdensity(Msun2kg, 10.0, **config)
     with pytest.raises(ConstructionCaptured):
-        orbit_nested_sampling(Msun2kg, 10.0, **config, key=jax.random.key(0))
+        numpyro_nested_sampling(Msun2kg, 10.0, **config, key=jax.random.key(0))
     assert len(constructed) == 2
     assert constructed[0] == constructed[1]
     z = jnp.linspace(-0.7, 0.8, len(problem.param_names))
@@ -203,13 +203,13 @@ def test_custom_nested_and_generic_backend_agree_with_gaussian_posterior():
     """
     data = {"mean": jnp.array([-3.8, -0.8]), "sigma": jnp.array([0.18, 0.13])}
     config = dict(custom_loglike=_toy_loglike, custom_data=data, ecc_prior="disk")
-    problem = build_orbit_logdensity(Msun2kg, 10.0, **config)
+    problem = build_numpyro_logdensity(Msun2kg, 10.0, **config)
     init = problem.init_to_z({})
     mcmc_key, nested_key = jax.random.split(jax.random.key(0))
     mcmc = NUTSBackend(n_warmup=512, n_samples=1024).run(
         problem.logdensity, init, key=mcmc_key
     )
-    nested = orbit_nested_sampling(
+    nested = numpyro_nested_sampling(
         Msun2kg,
         10.0,
         **config,
@@ -270,7 +270,7 @@ def test_nested_retains_photometric_columns_and_reports_stopping_reason(mode):
             allow_overlap=True,
         ),
     )
-    post = orbit_nested_sampling(
+    post = numpyro_nested_sampling(
         Msun2kg,
         10.0,
         **configs[mode],
@@ -305,7 +305,7 @@ def test_nested_custom_overlap_is_rejected(channel):
         RelativeAstromData.zeros() if channel == "relative_astrom" else NullData.zeros()
     )
     with pytest.raises(ValueError, match="allow_overlap=True"):
-        orbit_nested_sampling(
+        numpyro_nested_sampling(
             Msun2kg,
             10.0,
             **{f"{channel}_data": data},

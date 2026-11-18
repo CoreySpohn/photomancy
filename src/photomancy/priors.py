@@ -1,6 +1,6 @@
 """Unified prior layer: distributions over the fitted-leaf vector ``z``.
 
-photomancy-owned and tfp-free. One ``AbstractPrior`` interface serves every backend:
+One ``AbstractPrior`` interface serves the fitted-leaf backends:
 ``log_prob`` for BlackJAX / Laplace (folded into the target logdensity), ``sample`` for
 SMC's initial particles, and ``forward`` / ``inverse`` / ``log_prob`` for jaxns (via the
 ``_JaxnsPrior`` adapter in ``backends/nested.py``). Priors are over ``z`` (the raveled
@@ -9,11 +9,13 @@ fitted leaves) -- the same space ``build_scene_logdensity`` uses.
 ``orbit_log_prior`` instead scores a physical orbit against the orbit charts'
 reference measure, for assembly with a chart volume in ``SystemLogDensity``.
 
-Each distribution we need has a closed-form inverse-CDF, so owning them is a few lines
-each and keeps the core free of a heavy distribution dependency.
+Physical orbit and scalar priors pair normalized densities with their quantiles.
+The beta quantile is imported only when a Kipping eccentricity draw is requested.
 """
 
+import math
 from abc import abstractmethod
+from collections.abc import Callable
 from typing import Protocol
 
 import equinox as eqx
@@ -40,6 +42,16 @@ RAYLEIGH_SCALES = {"rayleigh": 0.3, "vaneylen19": 0.049}
 
 def _rayleigh_cdf(e, sigma):
     return -jnp.expm1(-0.5 * (e / sigma) ** 2)
+
+
+def _rayleigh_icdf(unit, sigma, e_max):
+    e = sigma * jnp.sqrt(-2.0 * jnp.log1p(-unit * _rayleigh_cdf(e_max, sigma)))
+    return jnp.minimum(e, jnp.nextafter(jnp.asarray(e_max, dtype=e.dtype), 0.0))
+
+
+def _log_uniform_icdf(unit, bounds):
+    low, high = bounds
+    return jnp.exp(jnp.log(low) + unit * (jnp.log(high) - jnp.log(low)))
 
 
 def _rayleigh_log_area(e, sigma, e_max):
@@ -110,6 +122,95 @@ def half_normal_log_prior(value, *, scale):
         0.5 * jnp.log(2 / jnp.pi) - jnp.log(scale) - 0.5 * (value / scale) ** 2,
         -jnp.inf,
     )
+
+
+class LogUniformPrior(eqx.Module):
+    """Independent log-uniform scalar in positive physical units."""
+
+    bounds: tuple[float, float]
+
+    def __check_init__(self):
+        """Require a proper positive log-uniform interval."""
+        low, high = self.bounds
+        if not 0 < low < high or not math.isfinite(high):
+            raise ValueError("Log-uniform bounds must be positive, finite and ordered.")
+
+    def __call__(self, value):
+        """Elementwise log density against the physical differential."""
+        return log_uniform_prior(value, bounds=self.bounds)
+
+    def icdf(self, unit):
+        """Map a unit probability to its physical quantile."""
+        return _log_uniform_icdf(unit, self.bounds)
+
+
+class HalfNormalPrior(eqx.Module):
+    """Independent nonnegative physical scalar, e.g. instrument jitter."""
+
+    scale: float
+
+    def __check_init__(self):
+        """Require a proper half-normal scale."""
+        if not self.scale > 0 or not math.isfinite(self.scale):
+            raise ValueError("Half-normal scale must be positive and finite.")
+
+    def __call__(self, value):
+        """Elementwise log density against the physical differential."""
+        return half_normal_log_prior(value, scale=self.scale)
+
+    def icdf(self, unit):
+        """Map a unit probability to its physical quantile."""
+        return self.scale * _SQRT2 * erfinv(unit)
+
+
+class FactorizedOrbitPrior(eqx.Module):
+    """One-planet orbit prior with independent classical elements.
+
+    ``get_orbit(system)`` selects the scalar orbit scored by the density.
+    The same bounds and eccentricity law define its nested-sampling quantiles.
+    """
+
+    get_orbit: Callable
+    period_range_d: tuple[float, float] = (1.0, 100000.0)
+    ecc_prior: str = "kipping13"
+    e_max: float = 1.0
+
+    def __check_init__(self):
+        """Validate the family and truncation before sampling."""
+        low, high = self.period_range_d
+        if not 0 < low < high or not math.isfinite(high):
+            raise ValueError("Period bounds must be positive, finite and ordered.")
+        if not 0 < self.e_max <= 1:
+            raise ValueError("e_max must lie in (0, 1].")
+        if self.ecc_prior not in ("disk", "kipping13", *RAYLEIGH_SCALES):
+            raise ValueError(f"Unknown ecc_prior={self.ecc_prior!r}")
+
+    def __call__(self, system):
+        """Score the selected orbit against the physical orbit measure."""
+        return orbit_log_prior(
+            self.get_orbit(system),
+            period_range_d=self.period_range_d,
+            ecc_prior=self.ecc_prior,
+            e_max=self.e_max,
+        )
+
+    def period_icdf(self, unit):
+        """Quantile of the log-uniform period in days."""
+        return _log_uniform_icdf(unit, self.period_range_d)
+
+    def eccentricity_icdf(self, unit):
+        """Quantile of the named eccentricity law conditioned on e < e_max."""
+        if self.ecc_prior == "disk":
+            return unit * self.e_max
+        if self.ecc_prior in RAYLEIGH_SCALES:
+            return _rayleigh_icdf(unit, RAYLEIGH_SCALES[self.ecc_prior], self.e_max)
+        from tensorflow_probability.substrates.jax.math import betaincinv
+
+        alpha, beta = (jnp.asarray(x, dtype=unit.dtype) for x in (ECC_ALPHA, ECC_BETA))
+        probability = unit * betainc(
+            alpha, beta, jnp.asarray(self.e_max, dtype=unit.dtype)
+        )
+        return betaincinv(alpha, beta, probability)
 
 
 class PopulationIntensity(Protocol):

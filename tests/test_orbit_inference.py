@@ -1,4 +1,4 @@
-"""Tests for the orbit -> generic-backend bridge (build_orbit_logdensity)."""
+"""Tests for the orbit -> generic-backend bridge (build_numpyro_logdensity)."""
 
 import jax
 import jax.numpy as jnp
@@ -13,7 +13,7 @@ from orbix.equations import period_a, period_to_sma  # noqa: E402
 from photomancy.backends import LaplaceMixtureBackend  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
-from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
+from photomancy.orbit.inference import build_numpyro_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init_top_k  # noqa: E402
 from photomancy.posterior import MixturePosterior  # noqa: E402
 
@@ -70,7 +70,7 @@ def orbit_problem_and_inits():
     bridge and backend. Keep two starts and the original period recovery bound.
     """
     astrom = _make_astrom(5)
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         MSUN_KG, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     # Endpoint seeds have infinite inverse support transforms. Keep the blind
@@ -175,11 +175,11 @@ def test_to_unconstrained_round_trips_known_orbit(orbit_problem_and_inits):
 @pytest.mark.slow
 def test_orbit_nested_sampling_recovers_period_and_evidence():
     """Nested sampling (jaxns) on the NumPyro orbit model -> SamplePosterior + log Z."""
-    from photomancy.orbit.nested import orbit_nested_sampling
+    from photomancy.orbit.nested import numpyro_nested_sampling
     from photomancy.posterior import SamplePosterior
 
     astrom = _make_astrom(6)
-    post = orbit_nested_sampling(
+    post = numpyro_nested_sampling(
         MSUN_KG,
         DIST_PC,
         relative_astrom_data=astrom,

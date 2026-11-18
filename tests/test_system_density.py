@@ -306,3 +306,130 @@ def test_bare_system_matches_scene(fits):
     np.testing.assert_allclose(
         bare_value, scene_value, rtol=0, atol=_floor(bare_value, scene_value)
     )
+
+
+def test_tempering_split_shares_system_and_scalar_units():
+    """The prior includes every Jacobian. Only the data score is tempered."""
+    from photomancy.system_density import ScalarCoordinate
+
+    build = Mock(side_effect=lambda params, mass: mass + params["orbit"])
+    term = Mock(side_effect=lambda model, jitter: (model / jitter, None))
+    prior = Mock(side_effect=lambda model: -model)
+    volume = Mock(return_value=0.75)
+    density = SystemLogDensity(
+        build,
+        (term,),
+        prior,
+        volume,
+        {
+            "mass": ScalarCoordinate(lambda mass: -mass),
+            "jitter": ScalarCoordinate(lambda jitter: -jitter),
+        },
+        ("mass",),
+        {0: ("jitter",)},
+    )
+    p = {"orbit": 1.0, "mass": jnp.log(2.0), "jitter": jnp.log(3.0)}
+    ll = density.loglikelihood(p)
+    assert term.call_count == build.call_count == 1
+    assert prior.call_count == volume.call_count == 0
+    lp = density.logprior(p)
+    assert term.call_count == 1
+    np.testing.assert_allclose(ll, 1.0, atol=1e-14, rtol=0)
+    np.testing.assert_allclose(lp, -8.0 + 0.75 + np.log(6.0), atol=1e-14, rtol=0)
+    np.testing.assert_allclose(density(p), ll + lp, atol=1e-14, rtol=0)
+
+
+@pytest.fixture(scope="module")
+def sampling_problem():
+    """One synthetic measurement of a planet's log semimajor axis."""
+    from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
+    from photomancy.priors import FactorizedOrbitPrior
+
+    def orbit_of(system):
+        return jax.tree.map(lambda leaf: leaf[0], system.orbits)
+
+    def build(orbit):
+        return System(
+            Body(1.0),
+            Body(jnp.zeros(1)),
+            jax.tree.map(lambda leaf: leaf[None], orbit),
+            SkyFrame(10.0, Epoch()),
+        )
+
+    def measurement(system):
+        log_a = jnp.log(orbit_of(system).a_AU)
+        return -0.5 * ((log_a - 0.35) / 0.8) ** 2, log_a
+
+    # Broad orbital data and two draws exercise each transition and decoder;
+    # they are not an estimate of posterior moments.
+    position = {"orbit": jnp.array([0.25, -1.0, -0.2, 2.0, 2.1, 3.0])}
+    density = build_chart_logdensity(
+        ClassicalChart(),
+        build,
+        FactorizedOrbitPrior(orbit_of, ecc_prior="disk"),
+        terms=(measurement,),
+        star_mass_kg=Msun2kg,
+    )
+    return ChartOrbitProblem(density, position)
+
+
+@pytest.mark.medium(reason="Exercises a compiled backend transition on one orbit.")
+@pytest.mark.parametrize(
+    "engine", ["map", "nuts", "mclmc", "pathfinder", "pathfinder_mixture", "smc"]
+)
+def test_chart_backend_step(sampling_problem, engine):
+    """A fit or transition must move from its start to a finite chart density."""
+    import optax
+
+    from photomancy.backends import (
+        MAPBackend,
+        MCLMCBackend,
+        NUTSBackend,
+        PathfinderBackend,
+        PathfinderMixtureBackend,
+        SMCBackend,
+    )
+    from photomancy.backends.staged import FitStage
+
+    problem = sampling_problem
+    z = problem.flatten(problem.position_template)
+    key = jax.random.key(14)
+    if engine == "smc":
+        posterior = SMCBackend(step_size=0.05, n_mcmc_steps=1).run_chart(
+            problem,
+            n_particles=8,
+            key=key,
+        )
+        rows = posterior.samples
+        assert np.isfinite(posterior.evidence)
+    elif engine == "map":
+        backend = MAPBackend(
+            "orbit", {"orbit": optax.adam(0.01)}, (FitStage(1, ("orbit",)),)
+        )
+        post = backend.run(problem.logdensity, z)
+        rows = post.params[None, :]
+        assert post.log_density > problem.logdensity(z)
+    elif engine == "pathfinder_mixture":
+        starts = jnp.stack((z, z.at[0].add(0.1)))
+        post = PathfinderMixtureBackend(maxiter=6, maxcor=3).run(
+            problem.logdensity, starts, key
+        )
+        rows = post.means
+        # An ELBO draw outside the chart cell scores -inf, so a short path can
+        # give -inf; NaN would mean a broken fit.
+        assert not np.any(np.isnan(post.log_evidences))
+    elif engine == "pathfinder":
+        post = PathfinderBackend(maxiter=6, maxcor=3).run(problem.logdensity, z, key)
+        rows = post.mean[None, :]
+        assert np.all(np.linalg.eigvalsh(post.cov) > 0)
+    else:
+        backend = (
+            NUTSBackend(n_warmup=10, n_samples=2)
+            if engine == "nuts"
+            else MCLMCBackend(n_tune=100, n_samples=2)
+        )
+        rows = backend.run(problem.logdensity, z, key).samples
+        assert not np.array_equal(rows[0], rows[1])
+    assert rows.shape[-1] == len(problem.param_names)
+    assert np.any(np.asarray(rows) != z)
+    assert np.all(np.isfinite(jax.vmap(problem.logdensity)(rows)))

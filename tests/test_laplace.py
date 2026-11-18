@@ -4,24 +4,36 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import Msun2kg, two_pi
+from hwoutils.epoch import Epoch
+from numpyro.infer.util import log_density
+from orbix.equations import period_to_sma
+from orbix.system import Body, ClassicalChart, SkyFrame, System
+from scipy.optimize import minimize
+from sky_reference import sky_position
 
-jax.config.update("jax_enable_x64", True)
-
-from orbix.equations import period_to_sma  # noqa: E402
-from sky_reference import sky_position  # noqa: E402
-
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
-from photomancy.orbit.diagnostics import sample_physical  # noqa: E402
-from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
-from photomancy.orbit.init import find_init  # noqa: E402
-from photomancy.orbit.laplace import map_laplace_fit  # noqa: E402
-from photomancy.posterior import GaussianPosterior  # noqa: E402
+from photomancy import RelativeAstrometryTerm
+from photomancy.orbit.data import OrbitData, RelativeAstromData
+from photomancy.orbit.diagnostics import sample_physical
+from photomancy.orbit.inference import (
+    ChartOrbitProblem,
+    build_chart_logdensity,
+    build_numpyro_logdensity,
+)
+from photomancy.orbit.init import find_init
+from photomancy.orbit.laplace import (
+    map_laplace_fit,
+    map_laplace_mixture_fit,
+    numpyro_map_laplace_fit,
+)
+from photomancy.orbit.model import build_model
+from photomancy.posterior import GaussianPosterior
+from photomancy.priors import orbit_log_prior
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-Msun2kg = 1.989e30
 DIST_PC = 10.0
 TRUE_T = 1096.0
 LOG_P_RANGE = (float(jnp.log10(600.0)), float(jnp.log10(1600.0)))
@@ -80,14 +92,14 @@ def fitted():
     """Fit the five-epoch scenario once for all posterior contract checks."""
     astrom = _make_astrom(5)
     init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-    result = map_laplace_fit(
+    result = numpyro_map_laplace_fit(
         Msun2kg,
         DIST_PC,
         relative_astrom_data=astrom,
         log_P_range=LOG_P_RANGE,
         init_vals=init_vals,
     )
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     return result, problem
@@ -123,7 +135,7 @@ def test_covariance_positive_definite():
     for n_obs in [1, 2, 3]:
         astrom = _make_astrom(n_obs)
         init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-        result = map_laplace_fit(
+        result = numpyro_map_laplace_fit(
             Msun2kg,
             DIST_PC,
             relative_astrom_data=astrom,
@@ -157,3 +169,87 @@ def test_log_prob_finite(fitted):
     chol = jnp.linalg.cholesky(result.cov)
     expected = -0.5 * d * jnp.log(2 * jnp.pi) - jnp.sum(jnp.log(jnp.diag(chol)))
     assert jnp.allclose(lp, expected, atol=1e-5)
+
+
+# Medium: optimize and differentiate both independent orbital likelihoods.
+@pytest.mark.medium
+def test_chart_map_and_laplace_match_numpyro():
+    """Fails if the chart fit shifts the mode or curvature of the pulled-back joint."""
+    astrom = _make_astrom(12, seed=0)
+    frame = SkyFrame(DIST_PC, Epoch())
+
+    def build(orbit):
+        return System(
+            Body(1.0), Body(jnp.zeros(1)), jax.tree.map(lambda x: x[None], orbit), frame
+        )
+
+    def prior(system):
+        orbit = jax.tree.map(lambda leaf: leaf[0], system.orbits)
+        return orbit_log_prior(orbit, period_range_d=(600.0, 1600.0))
+
+    density = build_chart_logdensity(
+        ClassicalChart(),
+        build,
+        prior,
+        star_mass_kg=Msun2kg,
+        terms=(RelativeAstrometryTerm(astrom),),
+    )
+    log_a = jnp.log(period_to_sma(TRUE_T, Msun2kg))
+    x0 = jnp.array([log_a, -1.6, 0.55, 2.25, 0.75, 1.55])
+    params = {"orbit": x0}
+    problem = ChartOrbitProblem(density, params)
+    fitted = map_laplace_fit(problem, problem.flatten(params), min_eigenvalue=1e-10)
+
+    model = build_model(has_relative_astrom=True, log_P_range=LOG_P_RANGE)
+    model_args = (Msun2kg, DIST_PC, OrbitData(relative_astrom=astrom))
+
+    def negative_joint(x):
+        # Kepler's law gives dlog10(P)/dln(a) = 1.5 / ln(10).
+        e, cos_i = jax.nn.sigmoid(x[1]), jnp.tanh(x[2])
+        log_p = jnp.log10(TRUE_T) + 1.5 * (x[0] - log_a) / jnp.log(10.0)
+        sites = dict(log_P=log_p, e_raw=e, cos_i=cos_i, W=x[3], w_raw=x[4], M0=x[5])
+        joint, _ = log_density(
+            model, model_args, {}, jax.tree.map(jnp.atleast_1d, sites)
+        )
+        jac = 1.5 / jnp.log(10.0) * e * (1 - e) * (1 - cos_i**2)
+        return -joint - jnp.log(jac)
+
+    # Independent optimizer and direct Hessian factorization, without eigenvalue
+    # clipping: these epochs resolve all six coordinates.
+    reference = minimize(
+        jax.jit(jax.value_and_grad(negative_joint)),
+        x0,
+        jac=True,
+        method="BFGS",
+        options={"gtol": 1e-8},
+    )
+    precision = np.asarray(jax.jit(jax.hessian(negative_joint))(reference.x))
+    root = np.linalg.cholesky(precision)
+    # Measure residual gradients and MAP displacements in posterior sigma.
+    # A 1e-10 nat objective floor resolves displacements sqrt(2e-10) sigma.
+    sigma_floor = np.sqrt(2e-10)
+    assert np.linalg.norm(np.linalg.solve(root, reference.jac)) < sigma_floor
+    mode_delta = np.linalg.norm(root.T @ (fitted.mean - reference.x))
+    # Whitening gives a unit covariance. Compare principal variances to
+    # 1 ppm, well below the uncertainty of the Gaussian approximation.
+    cov_delta = np.linalg.norm(root.T @ fitted.cov @ root - np.eye(6), ord=2)
+    log_z = -reference.fun + 3 * np.log(two_pi) - np.log(np.diag(root)).sum()
+    evidence_delta = abs(float(fitted.evidence) - log_z)
+    print(
+        f"MAP delta {mode_delta:.5g} sigma; whitened covariance delta "
+        f"{cov_delta:.5g}; Laplace log Z delta {evidence_delta:.5g} nat"
+    )
+    assert mode_delta < sigma_floor
+    assert cov_delta < 1e-6
+    # A 1 ppm relative variance shift changes 0.5 log(det cov) by 0.5 ppm
+    # per dimension at first order.
+    assert evidence_delta < 3.1e-6
+
+    # Relative astrometry is invariant under the simultaneous pi shift of
+    # node and periapsis. The two resolved modes have the same evidence.
+    starts = jnp.stack([x0, x0.at[3:5].add(jnp.pi)])
+    mixture = map_laplace_mixture_fit(problem, starts, min_eigenvalue=1e-10)
+    mirror_free_means = mixture.means.at[1, 3:5].add(-jnp.pi)
+    displacements = (mirror_free_means - reference.x) @ root
+    assert np.max(np.linalg.norm(displacements, axis=1)) < sigma_floor
+    np.testing.assert_allclose(mixture.log_evidences, log_z, rtol=0, atol=3.1e-6)

@@ -28,7 +28,7 @@ from photomancy.orbit.forward import (  # noqa: E402
     predict_photometry,
     predict_relative_astrometry,
 )
-from photomancy.orbit.inference import build_orbit_logdensity  # noqa: E402
+from photomancy.orbit.inference import build_numpyro_logdensity  # noqa: E402
 from photomancy.orbit.init import find_init_top_k  # noqa: E402
 from photomancy.orbit.likelihoods import (  # noqa: E402
     loglike_imaging,
@@ -173,7 +173,7 @@ def test_joint_astrom_imaging_fit_recovers_period():
         null_dmag0_grid=jnp.zeros((0, npts)),
     )
 
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         msun,
         dist,
         relative_astrom_data=astrom,

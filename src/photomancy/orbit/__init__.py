@@ -28,7 +28,7 @@ from photomancy.orbit.diagnostics import (
 from photomancy.orbit.eig import (
     alias_breaking_eig,
     alias_breaking_eig_from_covariances,
-    evaluate_chart_candidates,
+    evaluate_numpyro_candidates,
     evaluate_orbit_candidates,
     geometric_eig,
 )
@@ -54,12 +54,18 @@ from photomancy.orbit.grid_search import (
     grid_search,
 )
 from photomancy.orbit.inference import (
+    ChartOrbitProblem,
     OrbitProblem,
     build_chart_logdensity,
-    build_orbit_logdensity,
+    build_numpyro_logdensity,
 )
 from photomancy.orbit.init import find_init, find_init_top_k, ti_to_init
-from photomancy.orbit.laplace import map_laplace_fit, map_laplace_mixture_fit
+from photomancy.orbit.laplace import (
+    map_laplace_fit,
+    map_laplace_mixture_fit,
+    numpyro_map_laplace_fit,
+    numpyro_map_laplace_mixture_fit,
+)
 from photomancy.orbit.likelihoods import (
     loglike_imaging,
     loglike_null,
@@ -69,7 +75,11 @@ from photomancy.orbit.likelihoods import (
     loglike_stellar_astrom,
 )
 from photomancy.orbit.migration import migrate_sky_convention
-from photomancy.orbit.nested import orbit_nested_sampling
+from photomancy.orbit.nested import (
+    OrbitPriorTransform,
+    numpyro_nested_sampling,
+    orbit_nested_sampling,
+)
 from photomancy.orbit.ofti import AbstractConditioner, ScaleAndRotate, ofti
 from photomancy.orbit.priors import (
     ECC_PRIOR_NAMES,
@@ -104,6 +114,7 @@ __all__ = [
     # Fixed-capacity sequential updater
     "AbstractUpdateTarget",
     "AdaptiveImportanceSampler",
+    "ChartOrbitProblem",
     "ConjugateGaussianTarget",
     "EccVectorShape",
     "FixedMassTarget",
@@ -111,6 +122,7 @@ __all__ = [
     "NullData",
     # Orbit -> generic-backend bridge
     "OrbitData",
+    "OrbitPriorTransform",
     "OrbitProblem",
     "OrbitUpdater",
     "PMAnomalyData",
@@ -136,11 +148,11 @@ __all__ = [
     "alias_breaking_eig_from_covariances",
     "astrometric_loss",
     "build_chart_logdensity",
-    "build_orbit_logdensity",
+    "build_numpyro_logdensity",
     # Orbital-mechanics primitives (re-exported from orbix)
     "ecc_distribution",
     # Priors
-    "evaluate_chart_candidates",
+    "evaluate_numpyro_candidates",
     "evaluate_orbit_candidates",
     "find_init",
     "find_init_top_k",
@@ -161,8 +173,11 @@ __all__ = [
     "mode_observables",
     "mode_scalars",
     "mode_summary",
+    "numpyro_map_laplace_fit",
+    "numpyro_map_laplace_mixture_fit",
+    "numpyro_nested_sampling",
     "ofti",
-    # Nested sampling (NumPyro/jaxns) -> evidence / model comparison
+    # Nested sampling (jaxns) -> evidence / model comparison
     "orbit_nested_sampling",
     "orbits_from_samples",
     "predict_photometry",

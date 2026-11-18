@@ -20,7 +20,7 @@ from hwoutils.constants import Mearth2kg  # noqa: E402
 from photomancy import LaplaceBackend, build_scene_logdensity  # noqa: E402
 from photomancy.orbit import (  # noqa: E402
     StellarAstromData,
-    build_orbit_logdensity,
+    build_numpyro_logdensity,
     loglike_relative_astrom,
     loglike_stellar_astrom,
     predict_relative_astrometry,
@@ -180,7 +180,7 @@ def test_mass_is_identifiable_from_reflex():
 # Medium: Wiring the stellar channel includes the first NumPyro model trace.
 @pytest.mark.medium
 def test_numpyro_model_wires_stellar_channel():
-    """build_orbit_logdensity wires the stellar channel and fits the mass."""
+    """build_numpyro_logdensity wires the stellar channel and fits the mass."""
     times = jnp.linspace(0.0, 4000.0, 10)
     Mp = 317.8 * Mearth2kg
     ra, dec = predict_stellar_astrometry(
@@ -195,7 +195,7 @@ def test_numpyro_model_wires_stellar_channel():
         corr=jnp.zeros(times.shape),
         is_valid=jnp.ones(times.shape, dtype=bool),
     )
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         MSUN_KG, DIST_PC, stellar_astrom_data=sd, log_P_range=(3.0, 4.0)
     )
     # the planet mass is a fitted parameter once stellar astrometry is present

@@ -20,7 +20,7 @@ from orbix.equations.orbit import period_a, period_to_sma  # noqa: E402
 from photomancy import LaplaceBackend, build_scene_logdensity  # noqa: E402
 from photomancy.orbit import (  # noqa: E402
     PMAnomalyData,
-    build_orbit_logdensity,
+    build_numpyro_logdensity,
     loglike_pm_anomaly,
     predict_pm_anomaly,
     predict_relative_astrometry,
@@ -188,7 +188,7 @@ def test_joint_relative_astrom_and_pma_recovers_mass():
 
 
 def test_numpyro_model_wires_pm_anomaly_channel():
-    """build_orbit_logdensity with a PMa fits the mass and gives a finite logp."""
+    """build_numpyro_logdensity with a PMa fits the mass and gives a finite logp."""
     anom = _anom(317.8 * Mearth2kg)
     data = PMAnomalyData(
         t_hip=jnp.array(T_HIP),
@@ -198,7 +198,7 @@ def test_numpyro_model_wires_pm_anomaly_channel():
         pm_anomaly_cov=(0.02e-3 / YR) ** 2 * jnp.eye(2),
         is_valid=jnp.array(True),
     )
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         MSUN_KG, DIST_PC, pm_anomaly_data=data, log_P_range=(3.0, 4.0)
     )
     assert "log_Mp" in problem.param_names

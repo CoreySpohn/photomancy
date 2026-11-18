@@ -67,8 +67,8 @@ def fitted_orbit_mixture():
     from sky_reference import sky_position
 
     from photomancy.orbit.data import RelativeAstromData
-    from photomancy.orbit.inference import build_orbit_logdensity
-    from photomancy.orbit.laplace import map_laplace_mixture_fit
+    from photomancy.orbit.inference import build_numpyro_logdensity
+    from photomancy.orbit.laplace import numpyro_map_laplace_mixture_fit
 
     mass, distance, period, error = 1.989e30, 10.0, 1096.0, 5e-3
     log_range = (float(np.log10(600.0)), float(np.log10(1600.0)))
@@ -125,7 +125,7 @@ def fitted_orbit_mixture():
             ),
         )
     ]
-    post = map_laplace_mixture_fit(
+    post = numpyro_map_laplace_mixture_fit(
         mass,
         distance,
         relative_astrom_data=data,
@@ -134,7 +134,7 @@ def fitted_orbit_mixture():
         init_list=starts,
         n_steps=100,
     )
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         mass, distance, relative_astrom_data=data, log_P_range=log_range
     )
     return post, problem

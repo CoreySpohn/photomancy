@@ -32,7 +32,7 @@ from photomancy import RadialVelocityTerm, SystemLogDensity
 from photomancy.orbit.data import RVData
 from photomancy.orbit.inference import (
     build_chart_logdensity,
-    build_orbit_logdensity,
+    build_numpyro_logdensity,
     orbit_chart_log_volume,
 )
 from photomancy.orbit.priors import ecc_distribution
@@ -288,7 +288,7 @@ def test_old_unconstrained_joint_with_sampled_jitter():
         n_inst=2,
         is_valid=jnp.array([True, True, True, True, False]),
     )
-    old = build_orbit_logdensity(
+    old = build_numpyro_logdensity(
         Msun2kg,
         10.0,
         rv_data=data,

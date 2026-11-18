@@ -10,8 +10,8 @@ from photomancy.orbit.data import RVData
 from photomancy.orbit.diagnostics import orbits_from_samples
 from photomancy.orbit.eig import _predict_astrom_pure, _predict_sep_dmag_pure
 from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
-from photomancy.orbit.inference import build_orbit_logdensity, to_unconstrained
-from photomancy.orbit.nested import orbit_nested_sampling
+from photomancy.orbit.inference import build_numpyro_logdensity, to_unconstrained
+from photomancy.orbit.nested import numpyro_nested_sampling
 from photomancy.posterior import SamplePosterior
 
 jax.config.update("jax_enable_x64", True)
@@ -22,7 +22,7 @@ ORBIT_NAMES = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
 @pytest.fixture
 def massive_orbit():
     """A fitted 400-day orbit with true mass ratio 0.1."""
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         Msun2kg,
         10.0,
         rv_data=RVData.zeros(),
@@ -99,7 +99,7 @@ def test_to_unconstrained_round_trips_total_mass_period(massive_orbit):
 def test_nested_posterior_carries_true_mass_for_period_inversion():
     """Nested rows keep the mass needed to invert their derived semimajor axis."""
     log_mass = float(jnp.log10(0.1 * Msun2kg / Mearth2kg))
-    post = orbit_nested_sampling(
+    post = numpyro_nested_sampling(
         Msun2kg,
         10.0,
         rv_data=RVData.zeros(),
@@ -112,7 +112,7 @@ def test_nested_posterior_carries_true_mass_for_period_inversion():
         key=jax.random.key(12),
     )
     assert post.param_names == (*ORBIT_NAMES, "Mp")
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         Msun2kg,
         10.0,
         rv_data=RVData.zeros(),

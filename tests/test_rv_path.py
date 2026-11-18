@@ -57,7 +57,7 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
 
 def test_cached_rv_jitter_matches_instrument_count():
     """Cached templates retain a separate jitter for each instrument."""
-    from photomancy.orbit.inference import build_orbit_logdensity
+    from photomancy.orbit.inference import build_numpyro_logdensity
 
     for n_inst in (1, 2, 1):
         data = RVData(
@@ -68,7 +68,7 @@ def test_cached_rv_jitter_matches_instrument_count():
             is_valid=jnp.ones(2, dtype=bool),
             n_inst=n_inst,
         )
-        problem = build_orbit_logdensity(Msun2kg, 10.0, rv_data=data)
+        problem = build_numpyro_logdensity(Msun2kg, 10.0, rv_data=data)
         physical = problem.to_physical(problem.init_to_z({}))
         assert jnp.atleast_1d(physical["jitter"]).shape == (n_inst,)
 

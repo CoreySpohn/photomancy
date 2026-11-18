@@ -1,17 +1,4 @@
-"""Sampler densities for chart-based and NumPyro orbit models.
-
-``build_orbit_logdensity`` turns an orbit fitting problem (data + priors) into a
-flat ``logdensity(z)`` over the unconstrained NumPyro position, plus the maps a
-backend result needs: ``to_physical`` (flat z -> named physical parameters) and
-``init_to_z`` (a blind-initializer dict -> flat z). Tracing the model once, caching
-the potential, and the constraint transforms are reused from
-``photomancy.orbit.laplace``. With this, orbit fitting runs through any generic
-backend (Laplace, Laplace mixture, NUTS, SMC) and returns a uniform ``Posterior``.
-
-The orbit-specific ``map_laplace_fit`` / ``map_laplace_mixture_fit`` remain the
-high-throughput path (static-arg JIT reuses one compilation across many fits); this
-bridge is the engine-agnostic path that closure-captures the (small, padded) data.
-"""
+"""One-planet chart densities and the NumPyro orbit inference route."""
 
 import math
 from collections.abc import Callable
@@ -72,10 +59,15 @@ def orbit_chart_log_volume(chart, coords):
     return jnp.where(in_cell, volume, -jnp.inf)
 
 
-def _build_chart_system(chart, build, star_mass_kg, params, **body):
-    mass_kg = star_mass_kg + Mearth2kg * body.get("mass_Mearth", 0.0)
-    orbit = chart.to_orbit(params["orbit"], mu_AU3_per_d2=G * mass_kg)
-    return build(orbit, **body)
+class _ChartSystemBuilder(eqx.Module):
+    chart: ClassicalChart | EccentricityVectorChart | FrameChart | CartesianChart
+    build: Callable
+    star_mass_kg: float | jax.Array
+
+    def __call__(self, params, **body):
+        mass_kg = self.star_mass_kg + Mearth2kg * body.get("mass_Mearth", 0.0)
+        orbit = self.chart.to_orbit(params["orbit"], mu_AU3_per_d2=G * mass_kg)
+        return self.build(orbit, **body)
 
 
 def _orbit_volume(chart, params):
@@ -106,7 +98,7 @@ def build_chart_logdensity(
     if "mass_Mearth" in scalars and "mass_Mearth" not in body_inputs:
         body_inputs = (*body_inputs, "mass_Mearth")
     return SystemLogDensity(
-        eqx.Partial(_build_chart_system, chart, build, star_mass_kg),
+        _ChartSystemBuilder(chart, build, star_mass_kg),
         tuple(terms),
         prior,
         eqx.Partial(_orbit_volume, chart),
@@ -114,6 +106,79 @@ def build_chart_logdensity(
         body_inputs,
         {} if term_inputs is None else term_inputs,
     )
+
+
+class ChartOrbitProblem(eqx.Module):
+    """Ravel a one-planet chart density for fitting, sampling and prediction.
+
+    Pass the output of ``build_chart_logdensity`` and one position specifying
+    the shape of each coordinate. The flat vector follows JAX's sorted dict
+    order. Use ``logdensity`` for gradient backends, and ``logprior`` and
+    ``loglikelihood`` for tempered SMC with particles drawn from the prior.
+    """
+
+    density: SystemLogDensity
+    position_template: dict
+    unflatten: Callable
+    param_names: tuple[str, ...]
+
+    def __init__(self, density, position_template):
+        """Bind the coordinate layout used for all flat backend positions."""
+        if not isinstance(density.build, _ChartSystemBuilder):
+            raise ValueError("Construct the density with build_chart_logdensity")
+        if set(position_template) != {"orbit", *density.scalars}:
+            raise ValueError("Position must contain orbit and the declared scalars")
+        position = jax.tree.map(jnp.asarray, position_template)
+        if position["orbit"].shape != (density.build.chart.n_coords,):
+            raise ValueError("Expected one orbit vector for the selected chart")
+        if any(not jnp.issubdtype(v.dtype, jnp.floating) for v in position.values()):
+            raise ValueError("Sampler coordinates must have floating-point dtype")
+        self.density = density
+        self.position_template = position
+        _, self.unflatten = ravel_pytree(position)
+        self.param_names = tuple(
+            label
+            for name in sorted(position)
+            for label in (
+                (name,)
+                if position[name].ndim == 0
+                else tuple(f"{name}[{i}]" for i in range(position[name].size))
+            )
+        )
+
+    @property
+    def chart(self):
+        """The chart used to build and score the orbit."""
+        return self.density.build.chart
+
+    @property
+    def star_mass_kg(self):
+        """Stellar mass used in the two-body orbit."""
+        return self.density.build.star_mass_kg
+
+    def flatten(self, params):
+        """Pack one position with the same coordinate shapes as the template."""
+        if params.keys() != self.position_template.keys() or any(
+            jnp.shape(params[k]) != v.shape for k, v in self.position_template.items()
+        ):
+            raise ValueError("Position keys and shapes must match the chart template")
+        return ravel_pytree(params)[0]
+
+    def logdensity(self, z):
+        """Joint density against the flat chart differential."""
+        return self.density(self.unflatten(z))
+
+    def logprior(self, z):
+        """Physical and scalar priors with their chart volumes."""
+        return self.density.logprior(self.unflatten(z))
+
+    def loglikelihood(self, z):
+        """Sum of the fitted system's data terms."""
+        return self.density.loglikelihood(self.unflatten(z))
+
+    def to_physical(self, z):
+        """Decode one flat chart draw into physical orbit and nuisance values."""
+        return _chart_physical(self.density, self.unflatten(z))
 
 
 class OrbitProblem(eqx.Module):
@@ -139,7 +204,7 @@ class OrbitProblem(eqx.Module):
     param_names: tuple[str, ...] = eqx.field(static=True)
 
 
-def build_orbit_logdensity(
+def build_numpyro_logdensity(
     Ms,
     dist_pc,
     *,
@@ -333,3 +398,47 @@ def to_unconstrained(posterior, problem, Ms):
         evidence=posterior.evidence,
         param_names=problem.param_names,
     )
+
+
+def _chart_physical(density, params):
+    """Decode a one-planet system and all fitted scalars at one chart position.
+
+    Report angles in radians, mass in kg, semimajor axis and radius in AU, and
+    period and periapsis time in days relative to the system's reference epoch.
+    Instrument nuisance coordinates retain their declared names and shapes.
+    """
+    from hwoutils.constants import Msun2kg
+    from orbix.system import System
+
+    system, scalars = density._system_and_scalars(params)
+    dynamics = system if isinstance(system, System) else system.dynamics
+    if dynamics.orbits.a_AU.shape != (1,):
+        raise ValueError("Chart physical decoding requires a one-planet system")
+    orbit = jax.tree.map(lambda leaf: leaf[0], dynamics.orbits)
+    elements = orbit.to_classical()
+    inclination = elements["i_rad"]
+    mass_kg = dynamics.planets.mass_Msun[0] * Msun2kg
+    physical = dict(
+        T=orbit.period_d,
+        a=orbit.a_AU,
+        e=orbit.e,
+        cos_i=jnp.cos(inclination),
+        W=elements["W_rad"] % two_pi,
+        cos_w=jnp.cos(elements["w_rad"]),
+        sin_w=jnp.sin(elements["w_rad"]),
+        tp=orbit.epoch_d - (elements["M0_rad"] % two_pi) * orbit.period_d / two_pi,
+        Mp=mass_kg,
+        Mp_sini=mass_kg * jnp.sin(inclination),
+    )
+    if "radius_AU" in scalars:
+        physical["Rp"] = scalars["radius_AU"]
+    if "albedo" in scalars:
+        physical["Ag"] = scalars["albedo"]
+    if "Rp" in physical and "Ag" in physical:
+        physical["Lambda"] = physical["Ag"] * physical["Rp"] ** 2
+    physical.update(
+        (name, value)
+        for name, value in scalars.items()
+        if name not in {"mass_Mearth", "radius_AU", "albedo"}
+    )
+    return physical

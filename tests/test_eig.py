@@ -11,12 +11,12 @@ from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.eig import (
     alias_breaking_eig,
     detectability_eig,
-    evaluate_chart_candidates,
+    evaluate_numpyro_candidates,
     evaluate_orbit_candidates,
     geometric_eig,
 )
 from photomancy.orbit.forward import predict_relative_astrometry
-from photomancy.orbit.inference import build_orbit_logdensity
+from photomancy.orbit.inference import build_numpyro_logdensity
 from photomancy.posterior import MixturePosterior
 
 DIST_PC = 10.0
@@ -64,7 +64,7 @@ def imaging_problem():
         planet_id=[0, 0],
         max_n=2,
     )
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     sites = dict(
@@ -88,7 +88,7 @@ def test_orbit_eig_reports_no_detection_outside_contrast_curve(imaging_problem):
     """Periapsis and apoapsis place the same orbit on opposite sides of the grid."""
     problem, mix, epochs = imaging_problem
     sep_grid = jnp.array([0.15, 0.25])
-    result = evaluate_orbit_candidates(
+    result = evaluate_numpyro_candidates(
         mix,
         problem,
         epochs,
@@ -111,7 +111,7 @@ def test_orbit_eig_uses_current_contrast_curve_on_repeat_call(imaging_problem):
     problem, mix, epochs = imaging_problem
     sep_grid = jnp.array([0.05, 0.4])
     deep, shallow = [
-        evaluate_orbit_candidates(
+        evaluate_numpyro_candidates(
             mix,
             problem,
             epochs,
@@ -136,14 +136,17 @@ def test_orbit_eig_uses_current_contrast_curve_on_repeat_call(imaging_problem):
 @pytest.mark.medium(reason="differentiate the complete chart-to-astrometry map")
 def test_chart_eig_and_mode_predictions():
     """Fails if candidate scoring drops a photometric scale or swaps mode/epoch axes."""
-    from jax.flatten_util import ravel_pytree
     from orbix.system import EccentricityVectorChart
     from test_system_priors import _orbits, _scene
     from test_terms import _data
 
     from photomancy import RelativeAstrometryTerm, ScalarCoordinate
-    from photomancy.orbit.diagnostics import mode_observables
-    from photomancy.orbit.inference import build_chart_logdensity
+    from photomancy.orbit.diagnostics import (
+        mode_observables,
+        mode_summary,
+        orbits_from_samples,
+    )
+    from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 
     chart = EccentricityVectorChart()
     orbit = jax.tree.map(lambda x: x[1], _orbits(17.0))
@@ -158,14 +161,19 @@ def test_chart_eig_and_mode_predictions():
             "albedo": ScalarCoordinate(None),
             "mass_Mearth": ScalarCoordinate(None),
             "radius_AU": ScalarCoordinate(None),
+            "jitter_m_per_s": ScalarCoordinate(None),
         },
         body_inputs=("albedo", "radius_AU"),
     )
-    params = {"orbit": chart.from_orbit(orbit), "mass_Mearth": jnp.log(17.0)}
-    bright, unflatten = ravel_pytree(
-        dict(params, albedo=jnp.log(0.8), radius_AU=jnp.log(Rearth2AU))
-    )
-    faint, _ = ravel_pytree(
+    params = {
+        "orbit": chart.from_orbit(orbit),
+        "mass_Mearth": jnp.log(17.0),
+        "jitter_m_per_s": jnp.log(jnp.array([0.4, 1.6])),
+    }
+    bright_params = dict(params, albedo=jnp.log(0.8), radius_AU=jnp.log(Rearth2AU))
+    problem = ChartOrbitProblem(density, bright_params)
+    bright = problem.flatten(bright_params)
+    faint = problem.flatten(
         dict(params, albedo=jnp.log(0.08), radius_AU=jnp.log(0.5 * Rearth2AU))
     )
     means = jnp.stack((bright, faint))
@@ -174,14 +182,24 @@ def test_chart_eig_and_mode_predictions():
         covs=jnp.tile(0.01 * jnp.eye(bright.size), (2, 1, 1)),
         log_evidences=jnp.zeros(2),
     )
-    aux = mode_observables(posterior, density, unflatten=unflatten)
     times = term.data.times
-    result = evaluate_chart_candidates(
+    summary = mode_summary(posterior, problem)
+    for mode, area_AU2 in zip(
+        summary, (0.8 * Rearth2AU**2, 0.08 * (0.5 * Rearth2AU) ** 2), strict=True
+    ):
+        physical = mode["params"]
+        decoded = orbits_from_samples(physical, Msun2kg, reference_day=0.0)
+        np.testing.assert_allclose(
+            decoded.at(times)[0], orbit.at(times)[0], rtol=1e-12, atol=1e-14
+        )
+        np.testing.assert_allclose(physical["Lambda"], area_AU2, rtol=1e-12, atol=0)
+        np.testing.assert_allclose(physical["jitter_m_per_s"], [0.4, 1.6], rtol=1e-12)
+    aux = mode_observables(posterior, problem)
+    result = evaluate_orbit_candidates(
         posterior,
-        density,
+        problem,
         times,
         1e-5,
-        unflatten=unflatten,
         contrast_curve=(jnp.array([0.0, 1.0]), jnp.array([80.0, 80.0])),
     )
     # Mode diagnostics carry (K, 2, T), whereas EIG carries (T, K, 2).
@@ -227,7 +245,7 @@ def test_ofti_to_eig_end_to_end():
         planet_id=jnp.zeros(4, dtype=int),
         is_valid=jnp.ones(4, dtype=bool),
     )
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
     )
     samp = ofti(
@@ -244,7 +262,7 @@ def test_ofti_to_eig_end_to_end():
     zpost = to_unconstrained(samp, problem, Msun2kg)
     mix = cluster_to_mixture(zpost, 4, key=jax.random.key(1))
     epochs = jnp.linspace(0.0, 3.0 * TRUE_T, 12)
-    res = evaluate_orbit_candidates(
+    res = evaluate_numpyro_candidates(
         mix, problem, epochs, (5.0e-3) ** 2, Msun2kg, DIST_PC
     )
     assert res["total_eig"].shape == (12,)

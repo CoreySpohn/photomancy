@@ -1,8 +1,8 @@
 """Physical-space diagnostics for fitted orbit posteriors.
 
 Chart-space mixtures expose the predictions and likelihoods of the fitted system's
-terms at each mode mean. For NumPyro fits, an ``OrbitProblem`` supplies the
-``to_physical`` coordinate map for samples and mode summaries.
+terms at each mode mean. The fitted problem supplies ``to_physical`` for posterior
+samples and mode summaries.
 """
 
 import jax
@@ -13,14 +13,16 @@ from orbix.equations import period_to_sma
 from photomancy.orbit._frame import frame_from_tp
 
 
-def mode_observables(posterior, density, *, unflatten):
+def mode_observables(posterior, problem):
     """Return term log likelihoods and predictions at each chart-space mode.
 
-    Supply the chart fit's flat-vector to parameter PyTree map as ``unflatten``.
+    The chart problem uses the same flat coordinates as the mixture.
     The result has the same ``term_values`` and ``predictions`` tuples as
     ``SystemLogDensity.value_and_aux``, with a leading mode axis on each array.
     """
-    return jax.vmap(lambda z: density.value_and_aux(unflatten(z))[1])(posterior.means)
+    return jax.vmap(lambda z: problem.density.value_and_aux(problem.unflatten(z))[1])(
+        posterior.means
+    )
 
 
 def sample_physical(posterior, problem, key, n):
@@ -28,7 +30,7 @@ def sample_physical(posterior, problem, key, n):
 
     Args:
         posterior: A fitted posterior (``MixturePosterior`` / ``GaussianPosterior``).
-        problem: The :class:`~photomancy.orbit.inference.OrbitProblem` whose
+        problem: The fitted orbit problem whose
             ``to_physical`` maps a flat ``z`` to named physical parameters.
         key: PRNG key.
         n: Number of samples.
@@ -90,8 +92,7 @@ def mode_scalars(posterior, problem, name):
 
     Args:
         posterior: A :class:`~photomancy.posterior.MixturePosterior`.
-        problem: The :class:`~photomancy.orbit.inference.OrbitProblem`
-            supplying ``to_physical``.
+        problem: The fitted orbit problem supplying ``to_physical``.
         name: Physical parameter name (``"T"``, ``"e"``, ...).
 
     Returns:
@@ -111,7 +112,7 @@ def mode_summary(posterior, problem):
 
     Args:
         posterior: A :class:`~photomancy.posterior.MixturePosterior`.
-        problem: The :class:`~photomancy.orbit.inference.OrbitProblem` supplying
+        problem: The fitted orbit problem supplying
             ``to_physical``.
 
     Returns:
@@ -126,7 +127,7 @@ def mode_summary(posterior, problem):
             {
                 "weight": float(weights[k]),
                 "log_evidence": float(posterior.log_evidences[k]),
-                "params": {kk: float(jnp.squeeze(v)) for kk, v in phys.items()},
+                "params": {kk: jnp.squeeze(v).tolist() for kk, v in phys.items()},
             }
         )
     return out

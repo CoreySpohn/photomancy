@@ -1,18 +1,6 @@
-"""MAP + Laplace approximation for orbit fitting.
+"""Orbit MAP and Laplace fits in flat chart coordinates.
 
-Provides a fast alternative to MCMC by computing the maximum a posteriori
-(MAP) point and approximating the posterior with a multivariate Gaussian
-centered at the MAP.
-
-JIT-cache architecture
-----------------------
-The module maintains a ``_MODEL_CACHE`` keyed by the *static* model
-configuration (prior ranges, eccentricity prior, data-channel flags).
-On first call, ``initialize_model`` traces the NumPyro model once,
-extracting constraint transforms and building a compilable potential
-function.  Subsequent calls with different data (but same shapes, via
-static padding) reuse the cached XLA compilation -- dropping warm-start
-time from ~8 s to < 500 ms.
+The explicit NumPyro fits retain their cached potential and site coordinates.
 """
 
 from __future__ import annotations
@@ -26,14 +14,50 @@ import jax.flatten_util
 import jax.numpy as jnp
 import optax
 
-from photomancy.backends.laplace import laplace_covariance
+from photomancy.backends.laplace import (
+    LaplaceBackend,
+    LaplaceMixtureBackend,
+    laplace_covariance,
+)
 from photomancy.orbit._numpyro_bridge import (
     _get_or_build_cached,
     _init_dict_to_z_flat,
 )
 from photomancy.orbit.data import OrbitData
+from photomancy.orbit.inference import ChartOrbitProblem
 from photomancy.orbit.init import find_init, find_init_top_k
 from photomancy.posterior import GaussianPosterior, MixturePosterior
+
+
+def map_laplace_fit(
+    problem: ChartOrbitProblem,
+    init: jax.Array,
+    *,
+    n_steps: int = 100,
+    min_eigenvalue: float = 1.0,
+) -> GaussianPosterior:
+    """Fit a Gaussian at the MAP in the problem's flat chart coordinates.
+
+    Pass an interior initial position from ``problem.flatten(params)``. The
+    eigenvalue floor is applied to the precision matrix in these coordinates.
+    """
+    return LaplaceBackend(n_steps=n_steps, min_eigenvalue=min_eigenvalue).run(
+        problem.logdensity, init
+    )
+
+
+def map_laplace_mixture_fit(
+    problem: ChartOrbitProblem,
+    init: jax.Array,
+    *,
+    n_steps: int = 100,
+    min_eigenvalue: float = 1.0,
+) -> MixturePosterior:
+    """Fit one Laplace mode per row of an array of flat chart starts."""
+    return LaplaceMixtureBackend(n_steps=n_steps, min_eigenvalue=min_eigenvalue).run(
+        problem.logdensity, init
+    )
+
 
 # ---------------------------------------------------------------------------
 # MAP optimizer (Static-Arg JIT)
@@ -127,7 +151,7 @@ def fisher_covariance_jvp(
 # ---------------------------------------------------------------------------
 
 
-def map_laplace_fit(
+def numpyro_map_laplace_fit(
     Ms: float,
     dist_pc: float,
     *,
@@ -261,7 +285,7 @@ def map_laplace_fit(
 # ---------------------------------------------------------------------------
 
 
-def map_laplace_mixture_fit(
+def numpyro_map_laplace_mixture_fit(
     Ms: float,
     dist_pc: float,
     *,

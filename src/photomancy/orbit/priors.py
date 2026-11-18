@@ -44,7 +44,7 @@ from photomancy.priors import (
     ECC_ALPHA,
     ECC_BETA,
     RAYLEIGH_SCALES,
-    _rayleigh_cdf,
+    _rayleigh_icdf,
     _rayleigh_log_area,
 )
 
@@ -68,10 +68,6 @@ class _TruncatedRayleigh(dist.Distribution):
         self.sigma = jnp.asarray(sigma)
         super().__init__(batch_shape=self.sigma.shape, validate_args=validate_args)
 
-    @property
-    def _normalizer(self):
-        return _rayleigh_cdf(1.0, self.sigma)
-
     def sample(self, key, sample_shape=()):
         """Draw from the conditional CDF, avoiding the excluded upper endpoint."""
         u = jax.random.uniform(key, shape=sample_shape + self.batch_shape)
@@ -79,8 +75,7 @@ class _TruncatedRayleigh(dist.Distribution):
 
     def icdf(self, q):
         """Map the nested sampler's unit cube through the conditional CDF."""
-        e = self.sigma * jnp.sqrt(-2.0 * jnp.log1p(-q * self._normalizer))
-        return jnp.minimum(e, jnp.nextafter(jnp.ones_like(e), 0.0))
+        return _rayleigh_icdf(q, self.sigma, 1.0)
 
     def log_prob(self, value):
         """Return the normalized density, with zero probability outside [0, 1)."""

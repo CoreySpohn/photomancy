@@ -11,7 +11,7 @@ from scipy.stats import kstest
 
 from photomancy.orbit.data import NullData, OrbitData, RelativeAstromData
 from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
-from photomancy.orbit.inference import build_orbit_logdensity, to_unconstrained
+from photomancy.orbit.inference import build_numpyro_logdensity, to_unconstrained
 from photomancy.orbit.likelihoods import loglike_null, loglike_relative_astrom
 from photomancy.orbit.model import build_model
 from photomancy.posterior import SamplePosterior
@@ -24,7 +24,7 @@ def test_physical_scale_samples_round_trip_through_unconstrained():
 
     The mass round-trip test does not cover retained radius and albedo samples.
     """
-    problem = build_orbit_logdensity(
+    problem = build_numpyro_logdensity(
         Msun2kg, 10.0, sample_planet_scale=True, ecc_prior="disk"
     )
     log_radius = jnp.array([-4.02949, -3.82996])
@@ -132,8 +132,8 @@ def test_custom_null_matches_builtin_logdensity():
         dmag0_grid=jnp.full((2, 2), 23.0),
     )
     config = dict(sample_planet_scale=True, ecc_prior="disk")
-    builtin = build_orbit_logdensity(Msun2kg, 10.0, null_data=data, **config)
-    custom = build_orbit_logdensity(
+    builtin = build_numpyro_logdensity(Msun2kg, 10.0, null_data=data, **config)
+    custom = build_numpyro_logdensity(
         Msun2kg, 10.0, custom_loglike=_custom_null, custom_data=data, **config
     )
     assert builtin.param_names == custom.param_names
@@ -179,8 +179,8 @@ def test_custom_astrometry_is_prior_plus_custom_and_data_are_isolated():
     )
     bound_data = (data, jnp.array([-10.0, 0.0, 10.0]))
     config = dict(ecc_prior="disk", sample_planet_scale=True)
-    prior = build_orbit_logdensity(Msun2kg, 10.0, **config)
-    custom = build_orbit_logdensity(
+    prior = build_numpyro_logdensity(Msun2kg, 10.0, **config)
+    custom = build_numpyro_logdensity(
         Msun2kg,
         10.0,
         relative_astrom_data=None,
@@ -199,10 +199,10 @@ def test_custom_astrometry_is_prior_plus_custom_and_data_are_isolated():
         atol=1e-12,
     )
     with pytest.raises(ValueError, match="allow_overlap=True"):
-        build_orbit_logdensity(
+        build_numpyro_logdensity(
             Msun2kg, 10.0, relative_astrom_data=data, custom_loglike=_custom_astrom
         )
-    overlap = build_orbit_logdensity(
+    overlap = build_numpyro_logdensity(
         Msun2kg,
         10.0,
         relative_astrom_data=data,
@@ -211,7 +211,9 @@ def test_custom_astrometry_is_prior_plus_custom_and_data_are_isolated():
         allow_overlap=True,
         **config,
     )
-    builtin = build_orbit_logdensity(Msun2kg, 10.0, relative_astrom_data=data, **config)
+    builtin = build_numpyro_logdensity(
+        Msun2kg, 10.0, relative_astrom_data=data, **config
+    )
     np.testing.assert_allclose(
         overlap.logdensity(z),
         builtin.logdensity(z) + _custom_astrom(params),
@@ -219,7 +221,7 @@ def test_custom_astrometry_is_prior_plus_custom_and_data_are_isolated():
         atol=1e-12,
     )
     shifted_data = (data, bound_data[1] + 50.0)
-    other = build_orbit_logdensity(
+    other = build_numpyro_logdensity(
         Msun2kg,
         10.0,
         custom_loglike=_custom_astrom,
