@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from hwoutils.epoch import Epoch
-from hwoutils.spectral import Band, Quadrature
+from optixstuff.spectral import Band, Quadrature
 
 from photomancy.orbit.data import PhotometryData, RelativeAstromData
 from photomancy.system_terms import PhotometryTerm, RelativeAstrometryTerm, _identity

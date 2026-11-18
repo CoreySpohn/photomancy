@@ -4,7 +4,7 @@ import ineedvalidation as vv
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
-from hwoutils.spectral import Band, Transmission
+from optixstuff.spectral import Band, Transmission
 from test_terms import _ELEMENTS, _system
 
 from photomancy import TermLogDensity, load_target

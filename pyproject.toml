@@ -21,7 +21,7 @@ dependencies = [
     # not accept the keyword, so the two cannot be supported by one call.
     "blackjax>=1.6",
     "equinox>=0.13.2",
-    "hwoutils>=1.15.0",
+    "hwoutils[jax]>=1.15.0",
     "jax>=0.8.1",
     "jaxlib>=0.8.1",
     # jaxctx supplies the prior interface the jaxns 3 adapter subclasses.
@@ -32,6 +32,7 @@ dependencies = [
     # >=0.2.5: the L-BFGS state keeps one dtype under x64, which blackjax's
     # pathfinder needs (0.2.4 fails with "cond branches must have equal output types").
     "optax>=0.2.5",
+    "optixstuff>=5.0.0",
     # >=3.0.0: raw positions and velocities use (east, north, away).
     "orbix>=4.1.0",
     # >=2.1.0: scene states and the disk chart use the same (east, north) sky

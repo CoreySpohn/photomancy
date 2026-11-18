@@ -10,13 +10,13 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
-from hwoutils.spectral import Band, Quadrature, Transmission
 from kinematics import (
     predict_pm_anomaly,
     predict_relative_astrometry,
     predict_rv,
     predict_stellar_astrometry,
 )
+from optixstuff.spectral import Band, Quadrature, Transmission
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet

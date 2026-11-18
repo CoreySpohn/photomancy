@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
-from hwoutils.spectral import Band, Quadrature, Transmission
+from optixstuff.spectral import Band, Quadrature, Transmission
 from scipy.special import ndtr
 from scipy.stats import norm
 

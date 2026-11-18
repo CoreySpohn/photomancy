@@ -19,8 +19,8 @@ from typing import Self
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.spectral import Quadrature, Transmission
 from jax.scipy.stats import norm
+from optixstuff.spectral import Quadrature, Transmission
 from orbix.system import System
 
 from photomancy.orbit._photometry import system_separation_dmag

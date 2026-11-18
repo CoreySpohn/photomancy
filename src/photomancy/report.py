@@ -14,9 +14,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.epoch import Epoch
-from hwoutils.spectral import Quadrature, Transmission
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
+from optixstuff.spectral import Quadrature, Transmission
 
 from photomancy.terms import AbstractTerm
 

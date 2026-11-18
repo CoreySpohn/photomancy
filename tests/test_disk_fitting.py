@@ -8,7 +8,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from hwoutils.epoch import Epoch  # noqa: E402
-from hwoutils.grids import PixelGrid, SkyOrientation  # noqa: E402
+from optixstuff.grids import PixelGrid, SkyOrientation  # noqa: E402
 
 from photomancy.backends import LaplaceBackend  # noqa: E402
 from photomancy.disk import (  # noqa: E402
