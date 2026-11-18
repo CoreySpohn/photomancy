@@ -19,6 +19,7 @@ from kinematics import (  # noqa: E402
 )
 from orbix.equations import period_to_sma  # noqa: E402
 
+from photomancy.infer.posterior import MixturePosterior  # noqa: E402
 from photomancy.orbit.data import (  # noqa: E402
     MAX_CC_PTS,
     MAX_IMG,
@@ -30,7 +31,6 @@ from photomancy.orbit.likelihoods import (  # noqa: E402
     loglike_imaging,
     loglike_null,
 )
-from photomancy.posterior import MixturePosterior  # noqa: E402
 
 MSUN_KG = 1.989e30
 

@@ -14,7 +14,7 @@ from photomancy.atmosphere import (
     contrast_forward,
     default_abundance_prior,
 )
-from photomancy.backends import LaplaceBackend
+from photomancy.infer.backends import LaplaceBackend
 from photomancy.priors import Uniform
 
 _WL = jnp.linspace(0.0, 1.0, 24)

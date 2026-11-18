@@ -7,8 +7,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from photomancy.core import build_scene_logdensity
-from photomancy.core.model import AbstractLogDensity, SceneLogDensity
+from photomancy.infer.model import (
+    AbstractLogDensity,
+    SceneLogDensity,
+    build_scene_logdensity,
+)
 
 
 class _ToyScene(eqx.Module):
@@ -84,7 +87,7 @@ def test_forward_module_arrays_are_traced_not_baked():
 
 def test_build_gaussian_fit_selects_leaves_and_bakes_gaussian_likelihood():
     """build_gaussian_fit masks fit_leaves + bakes a Gaussian data likelihood."""
-    from photomancy.core import build_gaussian_fit
+    from photomancy.infer.model import build_gaussian_fit
     from photomancy.priors import Normal
 
     obs = jnp.array([1.0, 2.0, 3.0])

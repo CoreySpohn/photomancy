@@ -110,12 +110,16 @@ from orbix.system import (
     disk_to_plane,
 )
 
+from photomancy.infer.particles import (
+    kish_ess,
+    normalize_log_weights,
+    systematic_indices,
+)
+from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
 from photomancy.orbit.inference import orbit_chart_log_volume
 from photomancy.orbit.likelihoods import loglike_relative_astrom
-from photomancy.particles import kish_ess, normalize_log_weights, systematic_indices
-from photomancy.posterior import SamplePosterior
 from photomancy.priors import ECC_ALPHA, ECC_BETA, orbit_log_prior
 
 _EV_CHART = EccentricityVectorChart()

@@ -16,8 +16,8 @@ import jax
 import jax.numpy as jnp
 from blackjax.util import run_inference_algorithm
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.posterior import SamplePosterior
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.posterior import SamplePosterior
 
 
 class NUTSBackend(AbstractBackend):

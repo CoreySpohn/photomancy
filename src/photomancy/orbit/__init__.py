@@ -62,7 +62,9 @@ from photomancy.orbit.likelihoods import (
 from photomancy.orbit.migration import migrate_sky_convention
 from photomancy.orbit.nested import (
     OrbitPriorTransform,
+    build_chart_nested_model,
     orbit_nested_sampling,
+    orbit_tempered_smc,
 )
 from photomancy.orbit.ofti import AbstractConditioner, ScaleAndRotate, ofti
 from photomancy.orbit.projected import astrometric_loss, make_astrometric_evaluator
@@ -121,6 +123,7 @@ __all__ = [
     "alias_breaking_eig_from_covariances",
     "astrometric_loss",
     "build_chart_logdensity",
+    "build_chart_nested_model",
     "evaluate_orbit_candidates",
     "find_init",
     "geometric_eig",
@@ -143,6 +146,7 @@ __all__ = [
     "ofti",
     # Nested sampling (jaxns) -> evidence / model comparison
     "orbit_nested_sampling",
+    "orbit_tempered_smc",
     "orbits_from_samples",
     "sample_physical",
     "thiele_innes_fit",

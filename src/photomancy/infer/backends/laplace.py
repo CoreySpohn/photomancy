@@ -14,8 +14,8 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
 
 
 def _map_optimize(neg_logdensity, init, n_steps):

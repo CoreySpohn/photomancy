@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from photomancy.core import build_gaussian_fit
+from photomancy.infer.model import build_gaussian_fit
 from photomancy.priors import IndependentPrior, LogNormal, Normal
 
 

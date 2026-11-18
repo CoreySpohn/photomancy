@@ -18,7 +18,7 @@ from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Transmission
 
-from photomancy.terms import AbstractTerm
+from photomancy.infer.terms import AbstractTerm
 
 __all__ = [
     "AbstractReportPredictor",

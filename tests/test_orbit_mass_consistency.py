@@ -9,10 +9,10 @@ from kinematics import predict_photometry, predict_relative_astrometry
 from orbit_fit import classical_coordinates, mass_problem
 from orbix.equations import period_to_sma
 
+from photomancy.infer.posterior import MixturePosterior
 from photomancy.orbit.diagnostics import orbits_from_samples
 from photomancy.orbit.eig import evaluate_orbit_candidates
 from photomancy.orbit.nested import orbit_nested_sampling
-from photomancy.posterior import MixturePosterior
 
 jax.config.update("jax_enable_x64", True)
 

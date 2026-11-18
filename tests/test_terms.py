@@ -32,7 +32,7 @@ from photomancy import (
     TermLogDensity,
 )
 from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
-from photomancy.likelihoods import gaussian_loglike
+from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.orbit.data import (
     PhotometryData,
     PMAnomalyData,

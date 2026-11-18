@@ -70,7 +70,7 @@ Static and dynamic
 
 z-space
    $z$. The flat vector the samplers actually see.
-   {py:obj}`~photomancy.core.model.build_scene_logdensity` ravels the fitted leaves, that
+   {py:obj}`~photomancy.infer.model.build_scene_logdensity` ravels the fitted leaves, that
    is, it flattens and concatenates them into a single one-dimensional array $z$, and
    returns an `unravel` function that reshapes a $z$ back into the scene. Posterior samples
    come out in this flat space, and `unravel` recovers the named parameters.
@@ -100,9 +100,9 @@ Prior
 logdensity
    $\ell(z) = \log p(D \mid z) + \log p(z)$. The unnormalized log-posterior the samplers
    explore, the sum of the {term}`prior` and {term}`likelihood` terms.
-   {py:obj}`~photomancy.core.model.build_scene_logdensity` assembles it from the forward
+   {py:obj}`~photomancy.infer.model.build_scene_logdensity` assembles it from the forward
    model, the likelihood, and the prior and returns it as a
-   {py:obj}`~photomancy.core.model.SceneLogDensity` module, so the arrays it depends on
+   {py:obj}`~photomancy.infer.model.SceneLogDensity` module, so the arrays it depends on
    remain live inputs that JAX differentiates through, rather than constants frozen into the
    function.
 
@@ -149,7 +149,7 @@ Mode
 
 Mixture
    $\sum_k w_k \mathcal{N}(z_k, \Sigma_k)$. The
-   {py:obj}`~photomancy.posterior.MixturePosterior`, which holds several modes
+   {py:obj}`~photomancy.infer.posterior.MixturePosterior`, which holds several modes
    at once, each weighted by its evidence, $w_k \propto e^{\log Z_k}$. It is what lets
    photomancy represent ambiguity honestly instead of collapsing prematurely onto one
    answer, and it reports `n_modes` and a `best_mode`.
@@ -177,7 +177,7 @@ Expected information gain
 
 Candidate
    $Y$. A possible next observation, an epoch, a sensor placement, a wavelength, that the
-   {term}`expected information gain` ranks. {py:obj}`~photomancy.eig.evaluate_candidates`
+   {term}`expected information gain` ranks. {py:obj}`~photomancy.infer.eig.evaluate_candidates`
    takes a posterior and a
    forward model for the candidates and returns their scores.
 

@@ -25,8 +25,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.posterior import PointPosterior
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.posterior import PointPosterior
 
 __all__ = [
     "UNLABELED",
@@ -365,7 +365,7 @@ def map_fit(
     Args:
         logdensity: A callable ``params -> scalar``, or an object with
             ``value_and_aux(params) -> (scalar, aux)`` (an
-            :class:`~photomancy.core.model.AbstractLogDensity`).
+            :class:`~photomancy.infer.model.AbstractLogDensity`).
         init: The initial parameter PyTree.
         labels: Group label PyTree from :func:`group_labels` (same structure as
             ``init``).

@@ -11,8 +11,7 @@ import pytest
 from jax.test_util import check_grads
 from scipy import integrate, stats
 
-from photomancy.core import build_gaussian_fit
-from photomancy.likelihoods import (
+from photomancy.infer.likelihoods import (
     LowRankGaussianLogLikelihood,
     gaussian_loglike,
     huber_loglike,
@@ -21,6 +20,7 @@ from photomancy.likelihoods import (
     residual_basis,
     student_t_loglike,
 )
+from photomancy.infer.model import build_gaussian_fit
 
 BUILDERS = {
     "gaussian": gaussian_loglike,

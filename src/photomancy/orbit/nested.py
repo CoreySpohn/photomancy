@@ -1,7 +1,7 @@
-"""Chart-coordinate nested sampling.
+"""Chart-coordinate nested sampling and tempered SMC.
 
-The chart sampler integrates likelihood terms over independent physical priors
-and returns draws in the flat coordinates of the supplied orbit problem.
+Both integrate likelihood terms over independent physical priors and return
+draws in the flat coordinates of the supplied orbit problem.
 """
 
 import math
@@ -14,13 +14,15 @@ from jax.scipy.special import ndtr, ndtri
 from orbix.equations import period_to_sma
 from orbix.system import FrameChart, FrameOrbit
 
-from photomancy.backends.nested import build_chart_nested_model
+from photomancy.infer.backends.nested import jaxns_prior
+from photomancy.infer.backends.smc import SMCBackend
+from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.inference import ChartOrbitProblem
-from photomancy.posterior import SamplePosterior
 from photomancy.priors import (
     FactorizedOrbitPrior,
     HalfNormalPrior,
     LogUniformPrior,
+    Uniform,
 )
 
 
@@ -127,6 +129,54 @@ class OrbitPriorTransform(eqx.Module):
         """Draw n independent flat chart positions for prior initialization."""
         unit = jax.random.uniform(key, (n, self.ndim))
         return jax.vmap(self.forward)(unit)
+
+
+def build_chart_nested_model(problem):
+    """Build a jaxns model with the fit's chart columns and a terms-only likelihood."""
+    from jaxctx.context import set_state
+    from jaxns.model import Model
+
+    transform = OrbitPriorTransform(problem)
+    unit_prior = jaxns_prior(
+        Uniform(jnp.zeros(transform.ndim), jnp.ones(transform.ndim)), name="unit"
+    )
+
+    def prior_model():
+        unit = unit_prior.realise(X_collection="cube")
+        z = transform.forward(unit)
+        set_state(name="z", collection="X", value=z)
+        return problem.loglikelihood(z)
+
+    return Model(prior_model=prior_model)
+
+
+def orbit_tempered_smc(
+    problem: ChartOrbitProblem, backend: SMCBackend, *, n_particles, key
+):
+    """Temper normalized chart-prior particles onto the data terms.
+
+    Args:
+        problem: Chart problem whose density carries a cube transform.
+        backend: The tempered SMC configuration to run.
+        n_particles: Number of particles drawn from the prior, at least two.
+        key: PRNG key.
+
+    Returns:
+        A ``SamplePosterior`` in the problem's chart with the log evidence.
+    """
+    if n_particles < 2:
+        raise ValueError("Chart SMC requires at least two particles")
+    draw_key, run_key = jax.random.split(key)
+    init = OrbitPriorTransform(problem).sample(draw_key, n_particles)
+    posterior = backend.run(problem.logprior, problem.loglikelihood, init, run_key)
+    return problem.declare(
+        SamplePosterior(
+            posterior.samples,
+            posterior.log_weights,
+            posterior.evidence,
+            param_names=problem.param_names,
+        )
+    )
 
 
 def orbit_nested_sampling(

@@ -9,10 +9,10 @@ from orbit_fit import blind_fit, chart_problem
 from orbix.equations import period_to_sma
 from sky_reference import sky_position
 
+from photomancy.infer.posterior import GaussianPosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.diagnostics import sample_physical
 from photomancy.orbit.laplace import map_laplace_fit, map_laplace_mixture_fit
-from photomancy.posterior import GaussianPosterior
 
 # ---------------------------------------------------------------------------
 # Fixtures

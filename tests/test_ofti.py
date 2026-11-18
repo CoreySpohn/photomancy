@@ -16,6 +16,7 @@ from kinematics import predict_relative_astrometry
 from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_anomaly_tp, mean_motion
 
+from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.inference import ORBIT_ROWS_CHART
 from photomancy.orbit.ofti import (
@@ -27,7 +28,6 @@ from photomancy.orbit.ofti import (
     ofti,
     scored_orbit,
 )
-from photomancy.posterior import SamplePosterior
 from photomancy.priors import ECC_PRIOR_NAMES, eccentricity_draws
 
 MSUN = 1.98892e30
@@ -594,7 +594,7 @@ def test_ofti_matches_nuts():
     from orbit_fit import chart_problem
     from orbix.system import ClassicalChart
 
-    from photomancy.backends import NUTSBackend
+    from photomancy.infer.backends import NUTSBackend
     from photomancy.orbit.init import find_init
 
     log_P_range = (1.5, 4.0)

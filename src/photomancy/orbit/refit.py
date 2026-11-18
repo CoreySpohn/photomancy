@@ -50,6 +50,11 @@ from orbix.system import FrameOrbit, ThieleInnesChart, sky_block_to_frame
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 from orbix.system.rotation import rotate
 
+from photomancy.infer.particles import (
+    kish_ess,
+    normalize_log_weights,
+    systematic_indices,
+)
 from photomancy.orbit._contrast import interpolate_contrast_curve
 from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel
@@ -60,7 +65,6 @@ from photomancy.orbit.updater import (
     _linear_gaussian,
     _rest_log_prior,
 )
-from photomancy.particles import kish_ess, normalize_log_weights, systematic_indices
 from photomancy.priors import ECC_ALPHA, ECC_BETA, orbit_log_prior
 from photomancy.report import ReportLaw, ReportPrediction
 

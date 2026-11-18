@@ -10,12 +10,12 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from photomancy.backends import (
+from photomancy.infer.backends import (
     JaxnsBackend,
     LaplaceBackend,
     build_scene_nested_model,
 )
-from photomancy.core import build_scene_logdensity
+from photomancy.infer.model import build_scene_logdensity
 from photomancy.priors import IndependentPrior, Normal
 
 jax.config.update("jax_enable_x64", True)
@@ -95,7 +95,7 @@ def test_sequential_updating_tightens_posterior():
 
 def test_mixture_prior_from_samples_drives_a_scene_fit():
     """A bimodal SamplePosterior -> to_prior() -> MixturePrior drives a scene fit."""
-    from photomancy.posterior import SamplePosterior, cluster_to_mixture
+    from photomancy.infer.posterior import SamplePosterior, cluster_to_mixture
 
     k0, k1 = jax.random.split(jax.random.key(7))
     a = jax.random.normal(k0, (300, 1)) * 0.3 - 3.0

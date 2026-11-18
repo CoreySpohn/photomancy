@@ -6,7 +6,7 @@ leaves), so the retrieval target (which leaves + which prior) and the forward st
 (which skyscapes model) are the only atmosphere-specific choices the caller makes.
 """
 
-from photomancy.core import build_gaussian_fit
+from photomancy.infer.model import build_gaussian_fit
 
 
 def build_retrieval_logdensity(
@@ -27,7 +27,8 @@ def build_retrieval_logdensity(
             callable; ``None`` is flat (improper).
 
     Returns:
-        ``(logdensity, z0, unravel)`` from :func:`~photomancy.core.build_gaussian_fit`.
+        ``(logdensity, z0, unravel)`` from
+        :func:`~photomancy.infer.model.build_gaussian_fit`.
     """
     return build_gaussian_fit(
         pm,

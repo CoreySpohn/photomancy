@@ -2,10 +2,10 @@
 
 Some fits cannot free every parameter at once. A coronagraph model, for example, is fitted
 by first locating the star, then adjusting the optics, then holding the optics while the
-science exposure is fitted. {class}`~photomancy.backends.staged.MAPBackend` runs that kind
+science exposure is fitted. {class}`~photomancy.infer.backends.staged.MAPBackend` runs that kind
 of fit: a sequence of stages, each of which frees some named groups of parameters, over a
 parameter PyTree that keeps its structure. The result is a point estimate, a
-{class}`~photomancy.posterior.PointPosterior`, with no covariance and no evidence.
+{class}`~photomancy.infer.posterior.PointPosterior`, with no covariance and no evidence.
 
 ## Name the groups
 
@@ -18,7 +18,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import optax
 
-from photomancy.backends.staged import FitStage, MAPBackend, group_labels
+from photomancy.infer.backends.staged import FitStage, MAPBackend, group_labels
 
 
 class Model(eqx.Module):
@@ -80,8 +80,8 @@ assert abs(float(posterior.params.offset) - 2.0) < 0.05
 - `early_stopping` ends the stage once the objective stops improving.
 
 A log-density that also returns auxiliary output derives from
-{class}`~photomancy.core.model.AbstractLogDensity` and overrides `value_and_aux`.
-{func}`~photomancy.backends.staged.rescaled_transform` runs a transform on `params / scale`
+{class}`~photomancy.infer.model.AbstractLogDensity` and overrides `value_and_aux`.
+{func}`~photomancy.infer.backends.staged.rescaled_transform` runs a transform on `params / scale`
 so that a leaf kept in nanometers takes the steps of a fit in meters.
 
 ## Freezing policies

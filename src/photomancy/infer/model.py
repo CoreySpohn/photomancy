@@ -150,8 +150,8 @@ def build_gaussian_fit(
             ``None`` is flat (improper).
         likelihood: Optional likelihood builder ``(data, sigma, mask=None) ->
             (predicted -> scalar)``, for example
-            :func:`photomancy.likelihoods.huber_loglike` (``functools.partial`` sets
-            its ``delta`` or ``nu``). It is called with
+            :func:`photomancy.infer.likelihoods.huber_loglike` (``functools.partial``
+            sets its ``delta`` or ``nu``). It is called with
             ``data``, ``noise_sigma`` and ``mask``. ``None`` keeps the unnormalized
             Gaussian above, which is unchanged.
         mask: Optional boolean array (True uses the element), forwarded to

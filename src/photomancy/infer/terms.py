@@ -12,7 +12,7 @@ from typing import Any, Self
 import equinox as eqx
 import jax
 
-from photomancy.core.model import AbstractLogDensity
+from photomancy.infer.model import AbstractLogDensity
 
 __all__ = ["AbstractTerm", "TermLogDensity"]
 

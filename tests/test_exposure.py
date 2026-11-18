@@ -8,14 +8,14 @@ import optax
 import pytest
 import toy_coronagraph as toy
 
-from photomancy.backends.staged import (
+from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
+from photomancy.infer.backends.staged import (
     FitStage,
     group_labels,
     map_fit,
     rescaled_transform,
 )
-from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
-from photomancy.likelihoods import huber_loglike, laplace_loglike
+from photomancy.infer.likelihoods import huber_loglike, laplace_loglike
 
 
 def _affine_render(instrument, exposure, scene):

@@ -4,13 +4,13 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.special import logsumexp
 
-from photomancy.backends import (
+from photomancy.infer.backends import (
     LaplaceBackend,
     LaplaceMixtureBackend,
     PathfinderBackend,
     PathfinderMixtureBackend,
 )
-from photomancy.posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
 
 
 def test_laplace_backend_recovers_gaussian_map_and_covariance():

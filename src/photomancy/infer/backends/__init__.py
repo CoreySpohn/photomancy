@@ -6,18 +6,20 @@ normalizing-flow VI backend to come) behind a uniform
 ``run(logdensity, init, key)`` that returns a Posterior.
 """
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.backends.laplace import LaplaceBackend, LaplaceMixtureBackend
-from photomancy.backends.mclmc import MCLMCBackend
-from photomancy.backends.nested import (
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.backends.laplace import LaplaceBackend, LaplaceMixtureBackend
+from photomancy.infer.backends.mclmc import MCLMCBackend
+from photomancy.infer.backends.nested import (
     JaxnsBackend,
-    build_chart_nested_model,
     build_scene_nested_model,
 )
-from photomancy.backends.nuts import NUTSBackend
-from photomancy.backends.pathfinder import PathfinderBackend, PathfinderMixtureBackend
-from photomancy.backends.smc import SMCBackend
-from photomancy.backends.staged import MAPBackend, map_fit
+from photomancy.infer.backends.nuts import NUTSBackend
+from photomancy.infer.backends.pathfinder import (
+    PathfinderBackend,
+    PathfinderMixtureBackend,
+)
+from photomancy.infer.backends.smc import SMCBackend
+from photomancy.infer.backends.staged import MAPBackend, map_fit
 
 __all__ = [
     "AbstractBackend",
@@ -30,7 +32,6 @@ __all__ = [
     "PathfinderBackend",
     "PathfinderMixtureBackend",
     "SMCBackend",
-    "build_chart_nested_model",
     "build_scene_nested_model",
     "map_fit",
 ]

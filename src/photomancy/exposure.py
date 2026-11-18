@@ -21,7 +21,7 @@ from typing import Any, Self
 
 import equinox as eqx
 
-from photomancy.terms import AbstractTerm, TermLogDensity
+from photomancy.infer.terms import AbstractTerm, TermLogDensity
 
 __all__ = ["ExposureLogDensity", "ExposureModel", "ExposureTerm"]
 
@@ -51,8 +51,8 @@ class ExposureTerm(AbstractTerm):
             model. An ``eqx.Module`` keeps its arrays (masks, grids) as traced
             leaves rather than compiled constants.
         likelihood: ``image -> scalar log-likelihood``, normally a builder from
-            :mod:`photomancy.likelihoods` holding the data, the per-pixel scale and
-            the boolean mask. ``laplace_loglike`` with scale 1 is an L1 loss,
+            :mod:`photomancy.infer.likelihoods` holding the data, the per-pixel scale
+            and the boolean mask. ``laplace_loglike`` with scale 1 is an L1 loss,
             ``huber_loglike`` with scale 1 and ``delta=1`` is a smooth-L1 loss, and a
             noise array as the scale gives the noise-weighted kinds.
         exposure_index: Which entry of ``ExposureModel.exposures`` this term reads.

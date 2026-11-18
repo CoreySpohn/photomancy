@@ -16,7 +16,7 @@ from nmc_reference import (  # noqa: E402
     reported_mixture_mode_mi_mc,
 )
 
-from photomancy.eig import (  # noqa: E402
+from photomancy.infer.eig import (  # noqa: E402
     alias_breaking_eig,
     alias_breaking_eig_from_covariances,
     class_eig,
@@ -29,7 +29,7 @@ from photomancy.eig import (  # noqa: E402
     null_update,
     probit_gaussian_mass,
 )
-from photomancy.posterior import MixturePosterior  # noqa: E402
+from photomancy.infer.posterior import MixturePosterior  # noqa: E402
 
 
 def _two_mode_posterior():

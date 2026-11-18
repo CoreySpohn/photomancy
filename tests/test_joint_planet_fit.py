@@ -8,15 +8,15 @@ import optax
 import pytest
 import toy_coronagraph as toy
 
-from photomancy.backends.staged import (
+from photomancy.detection import likelihood_ratio_map
+from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
+from photomancy.infer.backends.staged import (
     FitStage,
     group_labels,
     map_fit,
     rescaled_transform,
 )
-from photomancy.detection import likelihood_ratio_map
-from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
-from photomancy.likelihoods import gaussian_loglike, huber_loglike
+from photomancy.infer.likelihoods import gaussian_loglike, huber_loglike
 
 _N_LONG, _N_TILT, _N_PLANET, _N_FINAL = 600, 150, 300, 2500
 _SEAM_NM, _TILT_PX = 1e-3, 2e-2

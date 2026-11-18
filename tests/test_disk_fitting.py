@@ -10,11 +10,11 @@ import numpy as np  # noqa: E402
 from hwoutils.epoch import Epoch  # noqa: E402
 from optixstuff.grids import PixelGrid, SkyOrientation  # noqa: E402
 
-from photomancy.backends import LaplaceBackend  # noqa: E402
 from photomancy.disk import (  # noqa: E402
     build_disk_logdensity,
     radiance_forward,
 )
+from photomancy.infer.backends import LaplaceBackend  # noqa: E402
 
 WL, TIME = 500.0, 0.0
 GRID = PixelGrid.regular((51, 51), 0.2, "arcsec", orientation=SkyOrientation(0.0))

@@ -23,6 +23,7 @@ from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Transmission
 from orbix.system import System
 
+from photomancy.infer.terms import AbstractTerm
 from photomancy.orbit._photometry import system_separation_dmag
 from photomancy.orbit.data import (
     ImagingData,
@@ -41,7 +42,6 @@ from photomancy.orbit.likelihoods import (
     loglike_rv_marginalized,
     loglike_stellar_astrom,
 )
-from photomancy.terms import AbstractTerm
 
 __all__ = [
     "ImagingTerm",

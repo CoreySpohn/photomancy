@@ -3,8 +3,8 @@
 import jax
 import jax.numpy as jnp
 
-from photomancy.posterior import MixturePosterior
-from photomancy.posterior_utils import project_samples, sample_capped
+from photomancy.infer.posterior import MixturePosterior
+from photomancy.infer.posterior_utils import project_samples, sample_capped
 
 
 def test_sample_capped_limits_variance():

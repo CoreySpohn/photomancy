@@ -5,7 +5,7 @@ from collections.abc import Callable
 import equinox as eqx
 import jax.numpy as jnp
 
-from photomancy.core.model import AbstractLogDensity
+from photomancy.infer.model import AbstractLogDensity
 
 __all__ = ["ScalarCoordinate", "SystemLogDensity"]
 

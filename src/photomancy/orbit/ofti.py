@@ -23,9 +23,9 @@ import jax.numpy as jnp
 from hwoutils.constants import G
 from orbix.system import ClassicalChart
 
+from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.inference import ORBIT_ROWS_CHART
 from photomancy.orbit.likelihoods import loglike_relative_astrom
-from photomancy.posterior import SamplePosterior
 from photomancy.priors import eccentricity_draws
 
 # Output rows match grid_search column order for cross-tier compatibility.

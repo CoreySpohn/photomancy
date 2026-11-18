@@ -20,7 +20,7 @@ model that maps a structured scene to predicted data, a likelihood that scores t
 prediction against the observation, and a prior over the fitted parameters.
 
 The scene is an Equinox module, for example a skyscapes `Scene` or an orbit parameter
-set, and the parameters being fit are a subset of its array leaves. {py:obj}`~photomancy.core.model.build_scene_logdensity`
+set, and the parameters being fit are a subset of its array leaves. {py:obj}`~photomancy.infer.model.build_scene_logdensity`
 partitions the scene into the fitted leaves and a static remainder, ravels the fitted
 leaves into the flat vector `z` that a sampler manipulates, and wraps a `logdensity`
 that recombines `z` with the static remainder before calling the plug-ins on the full
@@ -28,7 +28,7 @@ structured scene. The forward model and likelihood therefore operate on the phys
 meaningful scene, while the backend sees only a flat vector. This partition is the
 central hinge of the library.
 
-Holding the plug-ins as fields of a {py:obj}`~photomancy.core.model.SceneLogDensity` module, rather than closing over
+Holding the plug-ins as fields of a {py:obj}`~photomancy.infer.model.SceneLogDensity` module, rather than closing over
 them in a bare function, keeps any arrays they carry as leaves of the PyTree. When a
 forward model is itself a module that holds a large array, such as a coronagraph
 point-spread-function datacube, that array threads through the compiled kernel as a
@@ -60,11 +60,12 @@ flowchart TB
     posterior --> eig
 ```
 
-The engine layer knows no astrophysics. {py:mod}`~photomancy.core` assembles the
+The engine layer is the {py:mod}`photomancy.infer` subpackage and knows no astrophysics.
+{py:mod}`~photomancy.infer.model` assembles the
 logdensity, {py:mod}`~photomancy.priors` provides an owned family of distributions over
-the flat parameter vector, {py:mod}`~photomancy.backends` run inference,
-{py:mod}`~photomancy.posterior` and {py:mod}`~photomancy.posterior_utils` carry and
-manipulate the result behind one interface, and {py:mod}`~photomancy.eig` scores candidate
+the flat parameter vector, {py:mod}`~photomancy.infer.backends` run inference,
+{py:mod}`~photomancy.infer.posterior` and {py:mod}`~photomancy.infer.posterior_utils` carry and
+manipulate the result behind one interface, and {py:mod}`~photomancy.infer.eig` scores candidate
 observations as expected information gain about a declared quantity of interest, from
 per-mode Gaussian gains through the exact discrete terms for mode discrimination,
 detection, and classification. The domain layer supplies the physics-specific pieces,
@@ -76,7 +77,7 @@ engine, never the reverse.
 A domain is a set of plug-ins on the generic engine rather than a parallel stack. To add
 a domain, provide a forward model with signature `scene -> predicted`, a likelihood with
 signature `predicted -> scalar`, and a prior over the fitted leaves, then hand them to
-{py:obj}`~photomancy.core.model.build_scene_logdensity`. The engine handles the partition, the flat-vector boundary, and
+{py:obj}`~photomancy.infer.model.build_scene_logdensity`. The engine handles the partition, the flat-vector boundary, and
 the backend dispatch.
 
 The disk fit is the clearest example. photomancy reimplements no disk physics, so the
@@ -88,7 +89,7 @@ render later without modification.
 
 ### Robust likelihoods
 
-{py:obj}`photomancy.likelihoods` builds the likelihood plug-in from data, a per-element
+{py:obj}`photomancy.infer.likelihoods` builds the likelihood plug-in from data, a per-element
 `sigma` and an optional boolean `mask` (True uses the element): `gaussian_loglike`,
 `laplace_loglike`, `huber_loglike` (Gaussian core, Laplace tails beyond `delta` sigma) and
 `student_t_loglike` (heavy tails for unmodeled outliers such as cosmic rays and hot
@@ -97,16 +98,16 @@ four `sigma` is the scale of the standardized residual, as in `scipy.stats`, whi
 Laplace and Student-t is not the standard deviation. Masked elements contribute exactly
 zero to the value and the gradient, even where the data or `sigma` are NaN there.
 
-For correlated residuals, {py:func}`~photomancy.likelihoods.low_rank_gaussian_loglike`
-builds a {py:class}`~photomancy.likelihoods.LowRankGaussianLogLikelihood` with covariance
+For correlated residuals, {py:func}`~photomancy.infer.likelihoods.low_rank_gaussian_loglike`
+builds a {py:class}`~photomancy.infer.likelihoods.LowRankGaussianLogLikelihood` with covariance
 `diag(sigma**2) + basis @ basis.T`. The basis is shared between images; unit Gaussian
 coefficients are marginalized independently for each image. Its `solve` method applies
 the masked inverse covariance, and `posterior_term` returns the conditional mean of
-the low-rank residual. {py:func}`~photomancy.likelihoods.residual_basis` constructs an
+the low-rank residual. {py:func}`~photomancy.infer.likelihoods.residual_basis` constructs an
 uncentered basis from a stack of already-normalized residual images. Both preparation
 steps run outside JAX tracing; the resulting likelihood supports JIT and derivatives.
 
-{py:obj}`~photomancy.core.model.build_gaussian_fit` takes a builder through `likelihood=`
+{py:obj}`~photomancy.infer.model.build_gaussian_fit` takes a builder through `likelihood=`
 and the mask through `mask=`; `functools.partial` sets a shape parameter. Without them it
 keeps its Gaussian.
 
@@ -116,8 +117,8 @@ import functools
 import equinox as eqx
 import jax.numpy as jnp
 
-from photomancy.core import build_gaussian_fit
-from photomancy.likelihoods import huber_loglike
+from photomancy.infer.model import build_gaussian_fit
+from photomancy.infer.likelihoods import huber_loglike
 
 
 class Scene(eqx.Module):
@@ -145,39 +146,39 @@ init, key) -> Posterior`. The backend sees only the flat logdensity, never the s
 the forward model, which keeps a new sampler useful to every domain at once. Nine
 backends exist today:
 
-- {py:obj}`~photomancy.backends.laplace.LaplaceBackend`: a MAP optimization followed by the eigenvalue-clamped inverse
+- {py:obj}`~photomancy.infer.backends.laplace.LaplaceBackend`: a MAP optimization followed by the eigenvalue-clamped inverse
   Hessian, giving a Gaussian posterior. It is fast and serves as the substrate for the
   analytic value-of-information calculation.
-- {py:obj}`~photomancy.backends.laplace.LaplaceMixtureBackend`: a multi-start Laplace fit assembled into an evidence-weighted
+- {py:obj}`~photomancy.infer.backends.laplace.LaplaceMixtureBackend`: a multi-start Laplace fit assembled into an evidence-weighted
   mixture of Gaussians, which covers period aliases and other multimodality.
-- {py:obj}`~photomancy.backends.pathfinder.PathfinderBackend`: quasi-Newton variational inference, a Gaussian fit from the
+- {py:obj}`~photomancy.infer.backends.pathfinder.PathfinderBackend`: quasi-Newton variational inference, a Gaussian fit from the
   L-BFGS trajectory toward the mode. It is more robust than a single-Hessian Laplace fit and
   a fast initializer for the samplers; its evidence is the ELBO, a lower bound on the log
   marginal likelihood.
-- {py:obj}`~photomancy.backends.pathfinder.PathfinderMixtureBackend`: a multi-start Pathfinder assembled into an
+- {py:obj}`~photomancy.infer.backends.pathfinder.PathfinderMixtureBackend`: a multi-start Pathfinder assembled into an
   ELBO-weighted mixture, an EIG substrate like the Laplace mixture but steadier when a mode
   is poorly conditioned.
-- {py:obj}`~photomancy.backends.nuts.NUTSBackend`: the No-U-Turn sampler with window adaptation, returning equally weighted
+- {py:obj}`~photomancy.infer.backends.nuts.NUTSBackend`: the No-U-Turn sampler with window adaptation, returning equally weighted
   samples.
-- {py:obj}`~photomancy.backends.mclmc.MCLMCBackend`: microcanonical Langevin Monte Carlo, a
+- {py:obj}`~photomancy.infer.backends.mclmc.MCLMCBackend`: microcanonical Langevin Monte Carlo, a
   gradient-based sampler often cheaper per effective sample than NUTS in high dimension,
   returning equally weighted samples.
-- {py:obj}`~photomancy.backends.smc.SMCBackend`: adaptive-tempered sequential Monte Carlo, which returns a posterior and
+- {py:obj}`~photomancy.infer.backends.smc.SMCBackend`: adaptive-tempered sequential Monte Carlo, which returns a posterior and
   the Bayesian evidence in one run.
-- {py:obj}`~photomancy.backends.nested.JaxnsBackend`: nested sampling, which returns a posterior and the evidence for model
+- {py:obj}`~photomancy.infer.backends.nested.JaxnsBackend`: nested sampling, which returns a posterior and the evidence for model
   comparison and detection significance, the Bayes factor that answers a question such as
   whether a given molecule is present.
-- {py:obj}`~photomancy.backends.staged.MAPBackend`: a staged gradient fit over a parameter
+- {py:obj}`~photomancy.infer.backends.staged.MAPBackend`: a staged gradient fit over a parameter
   PyTree, the exception to the flat-logdensity rule. Each stage frees named groups of
   parameters, optimizer states carry across stages, and the result is a point estimate with
   no covariance or evidence. {py:obj}`~photomancy.exposure.ExposureLogDensity` is the
   logdensity it was built for, a sum of exposure terms over one shared instrument.
 
 Every backend returns one of four `Posterior` types,
-{py:obj}`~photomancy.posterior.GaussianPosterior`,
-{py:obj}`~photomancy.posterior.MixturePosterior`,
-{py:obj}`~photomancy.posterior.SamplePosterior`, or
-{py:obj}`~photomancy.posterior.PointPosterior` (which has no density or evidence), behind a uniform interface: `sample` draws
+{py:obj}`~photomancy.infer.posterior.GaussianPosterior`,
+{py:obj}`~photomancy.infer.posterior.MixturePosterior`,
+{py:obj}`~photomancy.infer.posterior.SamplePosterior`, or
+{py:obj}`~photomancy.infer.posterior.PointPosterior` (which has no density or evidence), behind a uniform interface: `sample` draws
 positions, `log_prob` scores a position where a closed form exists, and `evidence`
 reports the log marginal likelihood. Consumers such as the value-of-information layer read
 this interface and stay agnostic to which backend produced the result. A posterior also
@@ -185,7 +186,7 @@ converts into a prior through `to_prior`, so a fit on one batch of data becomes 
 for the next, and information accumulates across observations.
 
 The two backends that integrate over the prior, nested sampling and SMC, consume a
-sampleable prior rather than a bare logdensity. {py:obj}`~photomancy.backends.nested.build_scene_nested_model` adapts a scene
+sampleable prior rather than a bare logdensity. {py:obj}`~photomancy.infer.backends.nested.build_scene_nested_model` adapts a scene
 fit and photomancy's own prior layer into the form nested sampling expects, with no
 tensorflow-probability dependency. Orbit fitting runs through the same chart
 density, and returns the same unified `Posterior` types as every other fit.

@@ -10,6 +10,7 @@ from kinematics import predict_relative_astrometry
 from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart
 
+from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.grid_search import (
     AdaptiveImportanceSampler,
@@ -23,7 +24,6 @@ from photomancy.orbit.grid_search import (
 from photomancy.orbit.inference import ORBIT_ROWS_CHART, orbit_chart_log_volume
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.quasi_random import roberts_sequence
-from photomancy.posterior import SamplePosterior
 
 TWO_PI = 2.0 * jnp.pi
 MSUN = 1.98892e30

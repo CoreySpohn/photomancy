@@ -13,7 +13,11 @@ from photomancy.detection import (
     likelihood_ratio_map,
     profile_amplitude,
 )
-from photomancy.likelihoods import gaussian_loglike, huber_loglike, laplace_loglike
+from photomancy.infer.likelihoods import (
+    gaussian_loglike,
+    huber_loglike,
+    laplace_loglike,
+)
 
 
 def _problem(seed=1, n=200, shift=0.7):

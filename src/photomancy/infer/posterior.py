@@ -112,7 +112,7 @@ class GaussianPosterior(AbstractPosterior):
 class PointPosterior(AbstractPosterior):
     """A point estimate: the parameter PyTree a MAP fit ended at.
 
-    Produced by :class:`~photomancy.backends.staged.MAPBackend`. It carries no
+    Produced by :class:`~photomancy.infer.backends.staged.MAPBackend`. It carries no
     uncertainty, so it has no density and no evidence: ``evidence`` is NaN, and
     ``sample`` and ``log_prob`` raise. The parameters keep the structure of the
     fitted PyTree (they are not flattened).

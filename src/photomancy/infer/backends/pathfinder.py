@@ -20,8 +20,8 @@ import equinox as eqx
 import jax
 from blackjax.optimizers.lbfgs import lbfgs_inverse_hessian_formula_1
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
 
 
 @eqx.filter_jit

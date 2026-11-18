@@ -211,7 +211,7 @@ def test_proposals_above_the_density_block_must_divide_into_blocks():
 @pytest.mark.parametrize("n", [3, 5, 19])
 def test_systematic_resampling_uses_one_grid_for_any_output_size(n):
     """Every source gets its rounded expected count, including late sources."""
-    from photomancy.particles import systematic_indices
+    from photomancy.infer.particles import systematic_indices
 
     weights = np.array([0.07, 0.13, 0.0, 0.50, 0.30])
     log_weights = jnp.log(weights)
@@ -227,7 +227,7 @@ def test_systematic_resampling_uses_one_grid_for_any_output_size(n):
 
 def test_systematic_resampling_excludes_zero_mass_at_float32_endpoint():
     """The final grid point can round to one with float32 arithmetic."""
-    from photomancy.particles import systematic_indices
+    from photomancy.infer.particles import systematic_indices
 
     with jax.enable_x64(False):
         key = jax.random.key(27762, impl="threefry2x32")

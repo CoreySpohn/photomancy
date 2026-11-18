@@ -107,7 +107,7 @@ def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 4):
 
     Args:
         loglike_of_prediction: ``prediction -> scalar log-likelihood``, normally a
-            builder from :mod:`photomancy.likelihoods`.
+            builder from :mod:`photomancy.infer.likelihoods`.
         base: Prediction of the model without the source.
         template: Image of the source at unit amplitude, broadcastable with ``base``.
         n_newton: Number of Newton steps.
@@ -208,9 +208,9 @@ def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:
 
     The group is chosen with a selector ``where(params) -> leaf | sequence of leaves``,
     the form ``equinox.tree_at`` takes (and that
-    :func:`photomancy.backends.staged.group_labels` uses). Every other leaf is held at
-    its value in ``params``. The Hessian is taken over the flattened group, in the
-    order the leaves are selected, and returned as a dense symmetric matrix.
+    :func:`photomancy.infer.backends.staged.group_labels` uses). Every other leaf is
+    held at its value in ``params``. The Hessian is taken over the flattened group, in
+    the order the leaves are selected, and returned as a dense symmetric matrix.
 
     The block is the observed information of the group at ``params``. Its eigenvalues
     show whether the group is identifiable before it is freed (a near-zero eigenvalue

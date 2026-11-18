@@ -8,30 +8,34 @@ next-best observation.
 
 The engine is forward-model agnostic. A fit is a ``logdensity`` over a partitioned
 scene PyTree, assembled from a forward model, a likelihood, and a prior, and run
-through a uniform ``Backend`` that returns one ``Posterior``.
+through a uniform ``Backend`` that returns one ``Posterior``. That machinery is
+``photomancy.infer``, which holds no astronomy; the orbit, disk, atmosphere and
+measurement-term modules build on it.
 """
 
-from photomancy.backends import (
+from photomancy.infer import (
     AbstractBackend,
+    AbstractLogDensity,
+    AbstractPosterior,
+    AbstractTerm,
+    GaussianPosterior,
     LaplaceBackend,
     LaplaceMixtureBackend,
     MAPBackend,
     MCLMCBackend,
+    MixturePosterior,
     NUTSBackend,
     PathfinderBackend,
     PathfinderMixtureBackend,
-    SMCBackend,
-)
-from photomancy.core import AbstractLogDensity, build_scene_logdensity
-from photomancy.evidence import sigma_from_log_bayes_factor
-from photomancy.posterior import (
-    AbstractPosterior,
-    GaussianPosterior,
-    MixturePosterior,
     PointPosterior,
     SamplePosterior,
+    SMCBackend,
+    TermLogDensity,
+    build_scene_logdensity,
+    project_samples,
+    sample_capped,
+    sigma_from_log_bayes_factor,
 )
-from photomancy.posterior_utils import project_samples, sample_capped
 from photomancy.report import (
     AbstractReportPredictor,
     ReportLaw,
@@ -52,7 +56,6 @@ from photomancy.system_terms import (
     StellarAstrometryTerm,
 )
 from photomancy.targets import TargetData, load_target
-from photomancy.terms import AbstractTerm, TermLogDensity
 
 try:
     from photomancy._version import __version__

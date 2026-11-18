@@ -23,7 +23,7 @@ at every position.
 
 {func}`~photomancy.detection.profile_amplitude` maximizes over the amplitude at one
 position with a fixed number of Newton steps. It takes any likelihood builder from
-{mod}`photomancy.likelihoods` that is curved in the prediction.
+{mod}`photomancy.infer.likelihoods` that is curved in the prediction.
 
 ```python
 import equinox as eqx
@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from photomancy.detection import likelihood_ratio_map, profile_amplitude
-from photomancy.likelihoods import gaussian_loglike, huber_loglike
+from photomancy.infer.likelihoods import gaussian_loglike, huber_loglike
 
 rng = np.random.default_rng(0)
 x = np.linspace(-1.0, 1.0, 64)
@@ -98,7 +98,7 @@ Before a stage frees a new group, the curvature of the log-density over that gro
 whether the data constrain it.
 {func}`~photomancy.detection.curvature_block` returns the negative Hessian over the
 leaves a selector names, with everything else held fixed. It is the same selector form as
-{func}`~photomancy.backends.staged.group_labels`.
+{func}`~photomancy.infer.backends.staged.group_labels`.
 
 ```python continuation
 from photomancy.detection import curvature_block

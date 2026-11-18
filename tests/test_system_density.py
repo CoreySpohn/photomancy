@@ -22,6 +22,7 @@ from skyscapes.scene.star import FlatStar
 
 from photomancy import RelativeAstrometryTerm, SystemLogDensity
 from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.nested import orbit_tempered_smc
 from photomancy.priors import orbit_log_prior
 
 # Frozen from the retired NumPyro joint (prior plus relative-astrometry likelihood)
@@ -447,7 +448,7 @@ def test_chart_backend_step(sampling_problem, engine):
     """
     import optax
 
-    from photomancy.backends import (
+    from photomancy.infer.backends import (
         MAPBackend,
         MCLMCBackend,
         NUTSBackend,
@@ -455,14 +456,15 @@ def test_chart_backend_step(sampling_problem, engine):
         PathfinderMixtureBackend,
         SMCBackend,
     )
-    from photomancy.backends.staged import FitStage
+    from photomancy.infer.backends.staged import FitStage
 
     problem = sampling_problem
     z = problem.flatten(problem.position_template)
     key = jax.random.key(14)
     if engine == "smc":
-        posterior = SMCBackend(step_size=0.05, n_mcmc_steps=1).run_chart(
+        posterior = orbit_tempered_smc(
             problem,
+            SMCBackend(step_size=0.05, n_mcmc_steps=1),
             n_particles=8,
             key=key,
         )
@@ -518,9 +520,9 @@ def test_declared_nuts_draws_reach_the_eig_and_diagnostics(sampling_problem):
     epoch each raise ``ValueError`` before any scoring. Fails if the stamp is lost
     on the way or a mismatch is read silently.
     """
-    from photomancy.backends import NUTSBackend
+    from photomancy.infer.backends import NUTSBackend
+    from photomancy.infer.posterior import MixturePosterior, cluster_to_mixture
     from photomancy.orbit import evaluate_orbit_candidates, sample_physical
-    from photomancy.posterior import MixturePosterior, cluster_to_mixture
 
     problem = sampling_problem
     z = problem.flatten(problem.position_template)

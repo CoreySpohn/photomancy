@@ -14,8 +14,8 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.posterior import SamplePosterior
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.posterior import SamplePosterior
 
 # jaxns is imported lazily inside the functions below: importing it enables JAX x64
 # globally as a side effect and pulls in tensorflow-probability transitively, so we keep
@@ -23,7 +23,7 @@ from photomancy.posterior import SamplePosterior
 # adapter below uses only the jaxctx ``AbstractPrior`` interface -- no tfp of our own.
 
 
-def _to_jaxns_prior(prior, *, name):
+def jaxns_prior(prior, *, name):
     """Wrap a photomancy ``AbstractPrior`` as a jaxns-realizable prior named ``name``.
 
     jaxns 3 realizes priors through the jaxctx ``AbstractPrior`` interface, which asks
@@ -66,28 +66,6 @@ def _to_jaxns_prior(prior, *, name):
     return _JaxnsPrior(prior, name=name)
 
 
-def build_chart_nested_model(problem):
-    """Build a jaxns model with the fit's chart columns and a terms-only likelihood."""
-    from jaxctx.context import set_state
-    from jaxns.model import Model
-
-    from photomancy.orbit.nested import OrbitPriorTransform
-    from photomancy.priors import Uniform
-
-    transform = OrbitPriorTransform(problem)
-    unit_prior = _to_jaxns_prior(
-        Uniform(jnp.zeros(transform.ndim), jnp.ones(transform.ndim)), name="unit"
-    )
-
-    def prior_model():
-        unit = unit_prior.realise(X_collection="cube")
-        z = transform.forward(unit)
-        set_state(name="z", collection="X", value=z)
-        return problem.loglikelihood(z)
-
-    return Model(prior_model=prior_model)
-
-
 def build_scene_nested_model(scene, forward, likelihood, *, fit_leaves, prior):
     """Build a jaxns ``Model`` for a scene fit from a photomancy ``AbstractPrior``.
 
@@ -120,7 +98,7 @@ def build_scene_nested_model(scene, forward, likelihood, *, fit_leaves, prior):
     params0, static = eqx.partition(scene, mask)
     _z0, unravel = ravel_pytree(params0)
 
-    z_prior = _to_jaxns_prior(prior, name="z")
+    z_prior = jaxns_prior(prior, name="z")
 
     def prior_model():
         z = z_prior.realise()

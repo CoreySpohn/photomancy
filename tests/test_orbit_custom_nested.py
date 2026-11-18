@@ -13,10 +13,10 @@ from test_nested import _scene_orbit
 from test_system_priors import BOUNDS, _scene
 
 from photomancy import ScalarCoordinate
-from photomancy.backends import NUTSBackend
+from photomancy.infer.backends import NUTSBackend
+from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 from photomancy.orbit.nested import OrbitPriorTransform, orbit_nested_sampling
-from photomancy.posterior import SamplePosterior
 from photomancy.priors import FactorizedOrbitPrior, LogUniformPrior
 
 jax.config.update("jax_enable_x64", True)

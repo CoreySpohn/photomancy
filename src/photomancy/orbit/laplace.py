@@ -2,9 +2,9 @@
 
 import jax
 
-from photomancy.backends.laplace import LaplaceBackend, LaplaceMixtureBackend
+from photomancy.infer.backends.laplace import LaplaceBackend, LaplaceMixtureBackend
+from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
 from photomancy.orbit.inference import ChartOrbitProblem
-from photomancy.posterior import GaussianPosterior, MixturePosterior
 
 
 def map_laplace_fit(

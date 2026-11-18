@@ -11,9 +11,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from photomancy.backends import LaplaceBackend
-from photomancy.core import build_scene_logdensity
-from photomancy.posterior import GaussianPosterior
+from photomancy.infer.backends import LaplaceBackend
+from photomancy.infer.model import build_scene_logdensity
+from photomancy.infer.posterior import GaussianPosterior
 
 
 class _ToyScene(eqx.Module):

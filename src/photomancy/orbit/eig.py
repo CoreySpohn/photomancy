@@ -2,19 +2,19 @@
 
 Chart-space mixtures use the system terms' sky positions and Lambertian dMag
 predictions. Candidate scoring applies the contrast
-curve and delegates the analytic EIG to :mod:`photomancy.eig`.
+curve and delegates the analytic EIG to :mod:`photomancy.infer.eig`.
 """
 
 import jax
 import jax.numpy as jnp
 
-from photomancy.eig import (
+from photomancy.infer.eig import (
     alias_breaking_eig,
     alias_breaking_eig_from_covariances,
     detectability_eig,
     geometric_eig,
 )
-from photomancy.eig import evaluate_candidates as _eval_candidates
+from photomancy.infer.eig import evaluate_candidates as _eval_candidates
 from photomancy.orbit._contrast import interpolate_contrast_curve
 from photomancy.orbit._photometry import system_separation_dmag
 
@@ -44,7 +44,7 @@ def _photometry(system, t, area_AU2):
 
 
 # ---------------------------------------------------------------------------
-# High-level batch evaluation (delegates to photomancy.eig)
+# High-level batch evaluation (delegates to photomancy.infer.eig)
 # ---------------------------------------------------------------------------
 
 

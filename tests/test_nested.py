@@ -15,10 +15,13 @@ from test_system_priors import BOUNDS, _scene
 from test_terms import _new_term
 
 from photomancy import RadialVelocityTerm, ScalarCoordinate
-from photomancy.backends import JaxnsBackend, build_scene_nested_model
-from photomancy.backends.nested import build_chart_nested_model
+from photomancy.infer.backends import JaxnsBackend, build_scene_nested_model
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
-from photomancy.orbit.nested import OrbitPriorTransform, orbit_nested_sampling
+from photomancy.orbit.nested import (
+    OrbitPriorTransform,
+    build_chart_nested_model,
+    orbit_nested_sampling,
+)
 from photomancy.priors import FactorizedOrbitPrior, HalfNormalPrior, LogUniformPrior
 
 # jaxns requires x64; make the standalone file independent of other tests.

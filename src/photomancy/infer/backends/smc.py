@@ -25,8 +25,8 @@ import jax
 import jax.numpy as jnp
 from blackjax.smc import extend_params
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.posterior import SamplePosterior
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.posterior import SamplePosterior
 
 
 class SMCBackend(AbstractBackend):
@@ -41,24 +41,6 @@ class SMCBackend(AbstractBackend):
     step_size: float = 0.5
     n_mcmc_steps: int = 10
     target_ess: float = 0.5
-
-    def run_chart(self, problem, *, n_particles, key):
-        """Draw normalized chart-prior particles and temper the data terms."""
-        from photomancy.orbit.nested import OrbitPriorTransform
-
-        if n_particles < 2:
-            raise ValueError("Chart SMC requires at least two particles")
-        draw_key, run_key = jax.random.split(key)
-        init = OrbitPriorTransform(problem).sample(draw_key, n_particles)
-        posterior = self.run(problem.logprior, problem.loglikelihood, init, run_key)
-        return problem.declare(
-            SamplePosterior(
-                posterior.samples,
-                posterior.log_weights,
-                posterior.evidence,
-                param_names=problem.param_names,
-            )
-        )
 
     @eqx.filter_jit
     def run(self, logprior, loglikelihood, init, key=None):

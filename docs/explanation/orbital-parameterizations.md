@@ -59,7 +59,7 @@ and give each independent scalar coordinate a
 {py:class}`~photomancy.priors.LogUniformPrior` or
 {py:class}`~photomancy.priors.HalfNormalPrior`. The sampled companion mass enters
 the two-body orbit in both the prior transform and likelihood.
-`SMCBackend().run_chart(problem, n_particles=128, key=key)` draws initial
+`orbit_tempered_smc(problem, SMCBackend(), n_particles=128, key=key)` draws initial
 particles from this prior and tempers the data terms.
 `orbit_nested_sampling(problem, key=key)` integrates those terms over the same
 prior. Both return chart rows. Use `problem.to_physical(posterior.samples[i])`

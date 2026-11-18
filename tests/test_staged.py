@@ -8,8 +8,8 @@ import numpy as np
 import optax
 import pytest
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.backends.staged import (
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.backends.staged import (
     UNLABELED,
     EarlyStopping,
     FitStage,
@@ -18,7 +18,7 @@ from photomancy.backends.staged import (
     map_fit,
     rescaled_transform,
 )
-from photomancy.posterior import PointPosterior
+from photomancy.infer.posterior import PointPosterior
 
 
 class _Tree(eqx.Module):

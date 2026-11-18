@@ -26,8 +26,8 @@ from blackjax.mcmc.mclmc import build_kernel
 from blackjax.mcmc.mclmc import init as mclmc_init
 from blackjax.util import run_inference_algorithm
 
-from photomancy.backends.base import AbstractBackend
-from photomancy.posterior import SamplePosterior
+from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.posterior import SamplePosterior
 
 
 class MCLMCBackend(AbstractBackend):
