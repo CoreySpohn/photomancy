@@ -45,17 +45,15 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
 from jax.scipy.special import betainc, logsumexp, ndtr
-from jax.scipy.stats import beta as beta_dist
 from orbix.equations.orbit import mean_motion, thiele_innes_to_elements
-from orbix.system import sky_block_geometry, sky_block_to_frame
+from orbix.system import ThieleInnesChart, sky_block_to_frame
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 from orbix.system.rotation import rotate
 
 from photomancy.orbit._contrast import interpolate_contrast_curve
-from photomancy.orbit._frame import plane_from_phase
-from photomancy.orbit._photometry import lambertian_from_area
+from photomancy.orbit._frame import frame_from_tp, plane_from_phase
+from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel
-from photomancy.orbit.forward import predict_photometry
 from photomancy.orbit.ofti import _scale_rotate_score
 from photomancy.orbit.updater import (
     ThieleInnesTarget,
@@ -64,7 +62,7 @@ from photomancy.orbit.updater import (
     _rest_log_prior,
 )
 from photomancy.particles import kish_ess, normalize_log_weights, systematic_indices
-from photomancy.priors import ECC_ALPHA, ECC_BETA
+from photomancy.priors import ECC_ALPHA, ECC_BETA, orbit_log_prior
 from photomancy.report import ReportLaw, ReportPrediction
 
 ELEMENT_NAMES = (
@@ -107,14 +105,16 @@ class PhysicalPriorTarget(ThieleInnesTarget):
     period and ``model.e_max`` the eccentricity. ``model.s_ti`` is only the scale
     of the Gaussian the collapsed draw uses as its reference for the constants.
 
-    :meth:`log_prior` is the physical density in the chart, not the Gaussian
-    product of the parent: it is ``Beta(0.867, 3.03)`` on ``e`` truncated to
-    ``e_max`` minus ``log(a^2 gap)``, with the squared-singular-value gap
-    floored, and ``-inf`` outside the model's support. The density's constant
-    factor is given by :meth:`log_prior_constant`.
+    :meth:`log_prior` is the normalized physical density in the chart, not the
+    Gaussian product of the parent. It is built from the same pieces as every
+    chart density: the orbit the point builds in orbix's ``ThieleInnesChart``,
+    the shared physical prior of that orbit with the mass window, and the chart
+    volume. Up to its normalization it is ``Beta(0.867, 3.03)`` on ``e``
+    truncated to ``e_max`` minus ``log(a^2 gap)``, and ``-inf`` outside the
+    model's support.
 
     The photometric scale ``ln(Ag Rp^2)`` (AU^2, the ``Lambda`` of
-    :func:`~photomancy.orbit.forward.predict_photometry`) is uniform in its
+    :func:`~photomancy.orbit._photometry.lambertian_from_area`) is uniform in its
     logarithm over ``[ln_lam_lo, ln_lam_hi]`` and is integrated out of the report
     likelihood in closed form (:func:`report_log_weights`). The default range is
     an Earth twin (albedo 0.3, one Earth radius) plus or minus one in the log.
@@ -149,43 +149,42 @@ class PhysicalPriorTarget(ThieleInnesTarget):
         return 0.5 * (self.ln_lam_hi - self.ln_lam_lo)
 
     def log_prior(self, theta):
-        """Log physical density of the chart point, up to a constant.
+        """Normalized log physical density of the chart point.
+
+        The shared one-planet density :func:`~photomancy.priors.orbit_log_prior`
+        of the orbit the point builds (period range and eccentricity law of the
+        model), the log-uniform mass window, the volume of orbix's
+        ``ThieleInnesChart`` and the log Jacobian from this target's chart to it.
+        The chart point stands for two mirror orbits with equal prior weight that
+        share the sky track and differ in the sign of the line-of-sight offset,
+        so the density of the ``+1`` sheet is doubled.
 
         Args:
             theta: Chart point. Shape ``(7,)``.
 
         Returns:
-            Scalar; ``-inf`` outside ``model.in_support``.
-        """
-        east_x, east_y, north_x, north_y = theta[3:]
-        a, gap = sky_block_geometry(north_x, east_x, north_y, east_y)
-        gap_floor = jnp.sqrt(jnp.asarray(_TINY, dtype=gap.dtype))
-        # The floored gap enters both the Jacobian and a^2 = (u + gap) / 2,
-        # where u is the sum of squared sky constants.
-        log_a2 = jnp.log(a**2 + 0.5 * jnp.maximum(gap_floor - gap, 0.0))
-        log_gap = jnp.log(jnp.maximum(gap, gap_floor))
-        e = jnp.clip(theta[0], _TINY, 1.0 - 1e-12)
-        log_e = beta_dist.logpdf(e, ECC_ALPHA, ECC_BETA) - jnp.log(
-            betainc(ECC_ALPHA, ECC_BETA, self.model.e_max)
-        )
-        return jnp.where(
-            self.model.in_support(theta), log_e - log_a2 - log_gap, -jnp.inf
-        )
-
-    def log_prior_constant(self):
-        """Log of the density factor :meth:`log_prior` leaves out.
-
-        The period density ``1 / (lnP_hi - lnP_lo)``, the density of ``ln a``
-        at a given period ``3 / ln(mu_hi / mu_lo)``, the angle densities
-        ``1 / (2 pi)^2`` and the factor 1/2 of ``cos i`` against the two-to-one
-        factor 2 of the map. With it the evidence is the marginal likelihood.
+            Scalar; ``-inf`` outside ``model.in_support`` and at non-finite
+            values. At an exactly face-on block the volume diverges (an
+            integrable singularity) and the result is ``+inf``.
         """
         m = self.model
-        return (
-            -jnp.log(m.lnP_hi - m.lnP_lo)
-            - jnp.log(jnp.log(m.mu_hi / m.mu_lo) / 3.0)
-            - 2.0 * jnp.log(two_pi)
+        x, log_jacobian = self.chart_coordinates(theta)
+        orbit = self.chart_orbit(theta)
+        density = orbit_log_prior(
+            orbit,
+            period_range_d=(jnp.exp(m.lnP_lo), jnp.exp(m.lnP_hi)),
+            e_max=m.e_max,
         )
+        in_window = (orbit.mu_AU3_per_d2 >= m.mu_lo) & (orbit.mu_AU3_per_d2 <= m.mu_hi)
+        log_mass = jnp.where(in_window, -jnp.log(jnp.log(m.mu_hi / m.mu_lo)), -jnp.inf)
+        total = (
+            density
+            + log_mass
+            + ThieleInnesChart().log_volume(x)
+            + log_jacobian
+            + jnp.log(2.0)
+        )
+        return jnp.where(m.in_support(theta) & ~jnp.isnan(total), total, -jnp.inf)
 
     def log_report(self, theta, report):
         """Log of the report likelihood of a chart point, scale and mirrors summed.
@@ -573,8 +572,7 @@ def _element_geometry(target, el, data):
     period = jnp.exp(el[0])
     mass = jnp.exp(el[6]) * Msun2kg
     a = (G * mass / (two_pi / period) ** 2) ** (1.0 / 3.0)
-    alpha, d_mag = predict_photometry(
-        data.epochs,
+    orbit = frame_from_tp(
         a,
         el[1],
         el[2],
@@ -582,9 +580,13 @@ def _element_geometry(target, el, data):
         jnp.cos(el[4]),
         jnp.sin(el[4]),
         target.model.t_ref + el[5] * period,
-        mass,
-        jnp.exp(target.ln_lam_ref),
-        target.dist_pc,
+        G * mass,
+    )
+    position, _ = orbit.at(data.epochs)
+    alpha = separation_arcsec(position, target.dist_pc)
+    model, radius_Rearth = lambertian_from_area(jnp.exp(target.ln_lam_ref))
+    d_mag = lambertian_dmag(
+        phase_angle_rad(position), distance_AU(position), model, radius_Rearth
     )
     dmag0, limit = interpolate_contrast_curve(
         alpha, data.sep_grid, data.dmag0_grid, data.limit_grid
@@ -861,11 +863,7 @@ def _evidence_constant(target, records):
     """
     theta0 = jnp.array([0.1, 0.5 * (target.model.lnP_lo + target.model.lnP_hi), 0.5])
     theta0 = jnp.concatenate([theta0, jnp.zeros(4)])
-    return (
-        target.log_likelihood(theta0, records)
-        + 2.0 * jnp.log(two_pi)
-        + target.log_prior_constant()
-    )
+    return target.log_likelihood(theta0, records) + 2.0 * jnp.log(two_pi)
 
 
 def _score_terms(target, records, report, u, key, n_constants):

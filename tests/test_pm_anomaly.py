@@ -22,6 +22,8 @@ from photomancy.orbit import (  # noqa: E402
     PMAnomalyData,
     build_numpyro_logdensity,
     loglike_pm_anomaly,
+)
+from photomancy.orbit.forward import (  # noqa: E402
     predict_pm_anomaly,
     predict_relative_astrometry,
 )

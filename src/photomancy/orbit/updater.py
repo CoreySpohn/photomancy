@@ -101,19 +101,26 @@ import jax
 import jax.numpy as jnp
 from equinox import AbstractClassVar
 from hwoutils.constants import G, Msun2kg, two_pi
-from jax.scipy.special import betainc, logsumexp
-from jax.scipy.stats import beta as beta_dist
+from jax.scipy.special import logsumexp
 from orbix.equations import period_to_sma
-from orbix.equations.orbit import mean_motion
+from orbix.system import (
+    EccentricityVectorChart,
+    FrameOrbit,
+    ThieleInnesChart,
+    disk_to_plane,
+)
 
-from photomancy.orbit._frame import plane_from_phase
+from photomancy.orbit._frame import plane_from_phase, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
-from photomancy.orbit.forward import predict_relative_astrometry
+from photomancy.orbit.inference import orbit_chart_log_volume
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.particles import kish_ess, normalize_log_weights, systematic_indices
 from photomancy.posterior import SamplePosterior
-from photomancy.priors import ECC_ALPHA, ECC_BETA
+from photomancy.priors import ECC_ALPHA, ECC_BETA, orbit_log_prior
+
+_EV_CHART = EccentricityVectorChart()
+_TI_CHART = ThieleInnesChart()
 
 
 def _as_float(x):
@@ -272,6 +279,7 @@ class AbstractUpdateTarget(eqx.Module):
 
     - ``param_names`` and ``periods`` (class constants): the chart's coordinate
       names and, per coordinate, its period (0 for a non-periodic coordinate);
+      a periodic coordinate lives in ``[period_origin, period_origin + period)``;
     - :meth:`sample_prior`: draws from a law ``q`` with ``q = Z p`` on the
       support of the prior density ``p`` (``exp(log_prior)``); draws outside
       the support are allowed and receive zero weight, so a truncated prior is
@@ -303,6 +311,7 @@ class AbstractUpdateTarget(eqx.Module):
 
     param_names: AbstractClassVar[tuple[str, ...]]
     periods: AbstractClassVar[tuple[float, ...]]
+    period_origin: ClassVar[float] = 0.0
     linear_index: ClassVar[tuple[int, ...]] = ()
     default_proposal_scale: ClassVar[float] = 0.3
     has_alias_move: ClassVar[bool] = False
@@ -407,10 +416,11 @@ class AbstractUpdateTarget(eqx.Module):
         raise NotImplementedError(f"{type(self).__name__} has no alias move.")
 
     def wrap(self, theta):
-        """Map the periodic coordinates of ``theta`` into ``[0, period)``."""
+        """Map the periodic coordinates of ``theta`` into their fundamental cell."""
         periods = jnp.asarray(self.periods, dtype=float)
         periodic = periods > 0.0
-        wrapped = jnp.mod(theta, jnp.where(periodic, periods, 1.0))
+        origin = self.period_origin
+        wrapped = origin + jnp.mod(theta - origin, jnp.where(periodic, periods, 1.0))
         return jnp.where(periodic, wrapped, theta)
 
 
@@ -528,6 +538,42 @@ class ThieleInnesTarget(AbstractUpdateTarget):
         east_au, north_au = self.model.forward_au(theta, times)
         return east_au / self.dist_pc, north_au / self.dist_pc
 
+    def chart_coordinates(self, theta):
+        """The chart point as a ``ThieleInnesChart`` point, with the map's log Jacobian.
+
+        The chart point ``(e, lnP, tau, east_X, east_Y, north_X, north_Y)`` has its
+        constants on the periapsis axes; orbix's chart has them on the mean
+        longitude axes at ``model.t_ref``, rotated from the periapsis axes by
+        ``2 pi tau``. The coordinates ``(ln n, ux, uy, A, B, F, G)`` are on the
+        ``+1`` line-of-sight sheet; the second sheet is the mirror orbit that
+        shares the sky track.
+
+        Args:
+            theta: Chart point. Shape ``(7,)``.
+
+        Returns:
+            Tuple ``(x, log_jacobian)`` with ``x`` of shape ``(7,)`` and the log
+            absolute determinant of ``dx / dtheta``,
+            ``log(2 pi e) - 2 log(1 - e^2)``: the constants rotate (unit
+            determinant), ``lnP -> -ln n`` has unit slope and
+            ``(e, 2 pi tau)`` are polar coordinates of the eccentricity vector.
+        """
+        e, ln_period, tau = theta[0], theta[1], theta[2]
+        angle = two_pi * tau
+        c, s = jnp.cos(angle), jnp.sin(angle)
+        block = jnp.array([[theta[3], theta[4]], [theta[5], theta[6]]])
+        (b, g), (a, f) = block @ jnp.array([[c, s], [-s, c]])
+        u = disk_to_plane(e * jnp.stack([c, s]))
+        x = jnp.concatenate(
+            [jnp.stack([jnp.log(two_pi) - ln_period]), u, jnp.stack([a, b, f, g])]
+        )
+        return x, jnp.log(two_pi * e) - 2.0 * jnp.log1p(-(e**2))
+
+    def chart_orbit(self, theta):
+        """The orbit of a chart point, on the ``+1`` line-of-sight sheet."""
+        x, _ = self.chart_coordinates(theta)
+        return _TI_CHART.to_orbit(x, mu_AU3_per_d2=1.0, epoch_d=self.model.t_ref)
+
     def linear_design(self, theta, times):
         """Design matrices from one Kepler solve.
 
@@ -586,23 +632,22 @@ class ThieleInnesTarget(AbstractUpdateTarget):
 
 
 class FixedMassTarget(AbstractUpdateTarget):
-    """Physical elements at a fixed stellar mass, with OFTI's priors.
+    """Physical elements at a fixed stellar mass, with OFTI's priors, on a chart.
 
-    Prior on the physical elements ``(a, e, cos_i, W, omega, M_ref)``:
-    ``ln a`` uniform between the semimajor axes of ``period_lo_day`` and
-    ``period_hi_day`` (equivalently ``ln P`` uniform), ``e ~ Beta(ecc_alpha,
-    ecc_beta)`` restricted to ``e < e_max``, ``cos_i ~ U(-1, 1)`` and ``W``,
-    ``omega``, ``M_ref`` uniform on ``[0, 2 pi)``, where ``M_ref`` is the mean
-    anomaly at ``t_ref_day``. The defaults are the arguments of
-    :func:`~photomancy.orbit.ofti.ofti` with ``ecc_prior="kipping13"``.
+    The chart is orbix's :class:`~orbix.system.EccentricityVectorChart` with
+    coordinates ``(ln a, ux, uy, atanh(cos i), W, lambda_ref)``: ``u`` maps to the
+    eccentricity vector ``u / sqrt(1 + |u|^2)``, ``W`` is the node and
+    ``lambda_ref = omega + M_ref`` the mean longitude at ``t_ref_day``. It stays
+    regular as ``e -> 0`` and has no bounds on ``ln a``, ``u`` or the inclination
+    coordinate. ``W`` and ``lambda_ref`` are periodic on ``[-pi, pi)``.
 
-    The chart is ``(ln_a, sqrt(e) cos(omega), sqrt(e) sin(omega), cos_i, W,
-    lambda_ref)`` with ``lambda_ref = omega + M_ref``, which stays regular as
-    ``e -> 0``. The map ``(sqrt(e) cos(omega), sqrt(e) sin(omega)) -> (e,
-    omega)`` has Jacobian determinant 2 and the shear to ``lambda_ref`` has 1,
-    so :meth:`log_prior` is the physical prior density plus ``log 2``. ``W``
-    and ``lambda_ref`` are periodic. The density is normalized, truncation
-    included.
+    The prior is the shared one-planet physical density of
+    :func:`~photomancy.priors.orbit_log_prior` (``ln P`` uniform between the
+    periods at the fixed mass, ``e ~ Beta(0.867, 3.03)`` restricted to
+    ``e < e_max``, ``cos i ~ U(-1, 1)`` and uniform angles, the ``kipping13``
+    law of :func:`~photomancy.orbit.ofti.ofti`) plus the chart's log volume. The
+    density is normalized, truncation included, and ``-inf`` off its support
+    (``e = 0`` included: the Beta density diverges there).
 
     Args:
         Ms_kg: Stellar mass (kg). Default one solar mass.
@@ -610,9 +655,7 @@ class FixedMassTarget(AbstractUpdateTarget):
         period_lo_day: Lower period bound (days). Default 50.
         period_hi_day: Upper period bound (days). Default 5000.
         e_max: Eccentricity truncation. Default 0.9.
-        ecc_alpha: First Beta shape of the eccentricity prior. Default 0.867.
-        ecc_beta: Second Beta shape of the eccentricity prior. Default 3.03.
-        t_ref_day: Epoch of ``M_ref`` (days). Default 0.
+        t_ref_day: Epoch (days) of the chart's mean longitude. Default 0.
     """
 
     Ms_kg: jax.Array = eqx.field(converter=_as_float, default=Msun2kg)
@@ -620,20 +663,24 @@ class FixedMassTarget(AbstractUpdateTarget):
     period_lo_day: jax.Array = eqx.field(converter=_as_float, default=50.0)
     period_hi_day: jax.Array = eqx.field(converter=_as_float, default=5000.0)
     e_max: jax.Array = eqx.field(converter=_as_float, default=0.9)
-    # Kipping (2013) Beta shapes, the "kipping13" prior of photomancy.orbit.priors.
-    ecc_alpha: jax.Array = eqx.field(converter=_as_float, default=ECC_ALPHA)
-    ecc_beta: jax.Array = eqx.field(converter=_as_float, default=ECC_BETA)
     t_ref_day: jax.Array = eqx.field(converter=_as_float, default=0.0)
 
     param_names: ClassVar[tuple[str, ...]] = (
         "ln_a",
-        "sqrt_e_cos_w",
-        "sqrt_e_sin_w",
-        "cos_i",
+        "ux",
+        "uy",
+        "atanh_cos_i",
         "W",
         "lambda_ref",
     )
     periods: ClassVar[tuple[float, ...]] = (0.0, 0.0, 0.0, 0.0, two_pi, two_pi)
+    period_origin: ClassVar[float] = -math.pi
+
+    def orbit(self, theta):
+        """The orbit of a chart point at the target's fixed mass and epoch."""
+        return _EV_CHART.to_orbit(
+            theta, mu_AU3_per_d2=G * self.Ms_kg, epoch_d=self.t_ref_day
+        )
 
     def ln_a_bounds(self):
         """Bounds of ``ln a`` (AU) implied by the period range at fixed mass."""
@@ -643,33 +690,38 @@ class FixedMassTarget(AbstractUpdateTarget):
         )
 
     def to_physical(self, theta):
-        """Chart point to ``(a, e, cos_i, W, omega, M_ref)``. Shape ``(6,)``."""
-        ln_a, h, k, cos_i, W, lam = theta
-        omega = jnp.mod(jnp.arctan2(k, h), two_pi)
+        """Chart point to ``(a, e, cos_i, W, omega, M_ref)``. Shape ``(6,)``.
+
+        ``W`` and ``omega`` lie in ``[0, 2 pi)`` and ``M_ref`` is the mean anomaly
+        at ``t_ref_day``.
+        """
+        orbit = self.orbit(theta)
+        elements = orbit.to_classical()
         return jnp.array(
             [
-                jnp.exp(ln_a),
-                h**2 + k**2,
-                cos_i,
-                jnp.mod(W, two_pi),
-                omega,
-                jnp.mod(lam - omega, two_pi),
+                orbit.a_AU,
+                orbit.e,
+                jnp.cos(elements["i_rad"]),
+                jnp.mod(elements["W_rad"], two_pi),
+                jnp.mod(elements["w_rad"], two_pi),
+                jnp.mod(elements["M0_rad"], two_pi),
             ]
         )
 
     def from_physical(self, elements):
         """``(a, e, cos_i, W, omega, M_ref)`` to a chart point. Shape ``(6,)``."""
         a, e, cos_i, W, omega, m_ref = elements
-        root_e = jnp.sqrt(e)
-        return jnp.array(
-            [
-                jnp.log(a),
-                root_e * jnp.cos(omega),
-                root_e * jnp.sin(omega),
-                cos_i,
-                jnp.mod(W, two_pi),
-                jnp.mod(omega + m_ref, two_pi),
-            ]
+        return _EV_CHART.from_orbit(
+            FrameOrbit.from_classical(
+                a,
+                e,
+                jnp.arccos(cos_i),
+                W,
+                omega,
+                m_ref,
+                mu_AU3_per_d2=G * self.Ms_kg,
+                epoch_d=self.t_ref_day,
+            )
         )
 
     def sample_prior(self, key, n):
@@ -677,67 +729,41 @@ class FixedMassTarget(AbstractUpdateTarget):
         ln_a_lo, ln_a_hi = self.ln_a_bounds()
         k = jax.random.split(key, 6)
         ln_a = jax.random.uniform(k[0], (n,), minval=ln_a_lo, maxval=ln_a_hi)
-        e = jax.random.beta(k[1], self.ecc_alpha, self.ecc_beta, (n,))
+        e = jax.random.beta(k[1], ECC_ALPHA, ECC_BETA, (n,))
         cos_i = jax.random.uniform(k[2], (n,), minval=-1.0, maxval=1.0)
-        W = jax.random.uniform(k[3], (n,), maxval=two_pi)
-        omega = jax.random.uniform(k[4], (n,), maxval=two_pi)
-        m_ref = jax.random.uniform(k[5], (n,), maxval=two_pi)
-        root_e = jnp.sqrt(e)
-        return jnp.column_stack(
-            [
-                ln_a,
-                root_e * jnp.cos(omega),
-                root_e * jnp.sin(omega),
-                cos_i,
-                W,
-                jnp.mod(omega + m_ref, two_pi),
-            ]
+        W, omega, m_ref = (
+            jax.random.uniform(k[i], (n,), maxval=two_pi) for i in (3, 4, 5)
         )
+        orbits = FrameOrbit.from_classical(
+            jnp.exp(ln_a),
+            e,
+            jnp.arccos(cos_i),
+            W,
+            omega,
+            m_ref,
+            mu_AU3_per_d2=G * self.Ms_kg,
+            epoch_d=self.t_ref_day,
+        )
+        return _EV_CHART.from_orbit(orbits)
 
     def log_prior(self, theta):
         """Normalized prior density in the chart, ``-inf`` off support."""
-        ln_a_lo, ln_a_hi = self.ln_a_bounds()
-        ln_a, h, k, cos_i = theta[0], theta[1], theta[2], theta[3]
-        e = h**2 + k**2
-        in_support = (
-            jnp.all(jnp.isfinite(theta))
-            & (ln_a >= ln_a_lo)
-            & (ln_a <= ln_a_hi)
-            & (e < self.e_max)
-            & (jnp.abs(cos_i) <= 1.0)
+        orbit = self.orbit(theta)
+        density = orbit_log_prior(
+            orbit,
+            period_range_d=(self.period_lo_day, self.period_hi_day),
+            e_max=self.e_max,
         )
-        # The Beta density diverges at e = 0 for ecc_alpha < 1; a floor keeps
-        # the log finite at the single point h = k = 0.
-        e_safe = jnp.clip(e, jnp.finfo(float).tiny, self.e_max)
-        log_e = beta_dist.logpdf(e_safe, self.ecc_alpha, self.ecc_beta) - jnp.log(
-            betainc(self.ecc_alpha, self.ecc_beta, self.e_max)
+        volume = orbit_chart_log_volume(_EV_CHART, theta)
+        return jnp.where(
+            jnp.all(jnp.isfinite(theta)) & jnp.isfinite(density),
+            density + volume,
+            -jnp.inf,
         )
-        log_density = (
-            -jnp.log(ln_a_hi - ln_a_lo)
-            + log_e
-            + math.log(2.0)  # Jacobian of (h, k) -> (e, omega)
-            - 3.0 * math.log(two_pi)  # omega, W and M_ref
-            - math.log(2.0)  # cos_i
-        )
-        return jnp.where(in_support, log_density, -jnp.inf)
 
     def predict(self, theta, times):
         """Relative astrometry of the chart point (arcsec)."""
-        a, e, cos_i, W, omega, m_ref = self.to_physical(theta)
-        mu = G * self.Ms_kg
-        tp = self.t_ref_day - m_ref / mean_motion(a, mu)
-        return predict_relative_astrometry(
-            times,
-            a,
-            e,
-            cos_i,
-            W,
-            jnp.cos(omega),
-            jnp.sin(omega),
-            tp,
-            self.Ms_kg,
-            self.dist_pc,
-        )
+        return sky_offsets_arcsec(self.orbit(theta), times, self.dist_pc)
 
 
 class UpdaterBelief(eqx.Module):
@@ -772,6 +798,7 @@ class UpdaterBelief(eqx.Module):
             log_weights=self.log_weights,
             evidence=jnp.asarray(jnp.nan),
             param_names=self.target.param_names,
+            chart=type(self.target).__name__,
         )
 
 

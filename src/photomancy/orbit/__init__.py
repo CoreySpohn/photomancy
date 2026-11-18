@@ -38,13 +38,6 @@ from photomancy.orbit.few_epoch import (
     lambert_depth_fit,
     state_to_theta,
 )
-from photomancy.orbit.forward import (
-    predict_photometry,
-    predict_pm_anomaly,
-    predict_relative_astrometry,
-    predict_rv,
-    predict_stellar_astrometry,
-)
 from photomancy.orbit.grid_search import (
     AbstractGridStrategy,
     AbstractShapeParam,
@@ -180,12 +173,6 @@ __all__ = [
     # Nested sampling (jaxns) -> evidence / model comparison
     "orbit_nested_sampling",
     "orbits_from_samples",
-    "predict_photometry",
-    "predict_pm_anomaly",
-    "predict_relative_astrometry",
-    # Forward models
-    "predict_rv",
-    "predict_stellar_astrometry",
     "sample_ecc_prior",
     "sample_physical",
     "state_to_theta",

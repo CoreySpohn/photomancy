@@ -30,10 +30,17 @@ import jax.numpy as jnp
 from hwoutils.constants import G, two_pi
 from hwoutils.conversions import arcsec_to_au
 from orbix.equations import period_to_sma, thiele_innes_to_elements
-from orbix.system import EccentricityVectorChart, FrameOrbit, ThieleInnesChart
+from orbix.system import (
+    EccentricityVectorChart,
+    FrameOrbit,
+    ThieleInnesChart,
+    disk_to_plane,
+    line_of_sight_branch,
+    periapsis_chart_shape,
+)
 from orbix.system.linear import fit_linear_map
 
-from photomancy.orbit._frame import frame_from_tp, line_of_sight_branch
+from photomancy.orbit._frame import frame_from_tp
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -240,17 +247,6 @@ class TIChartFit(eqx.Module):
     log_likelihood: jnp.ndarray
 
 
-def periapsis_chart_shape(T_d, e, tp_d, epoch_d=0.0):
-    """Chart shape ``(ln n, ex, ey)`` from period, eccentricity and periapsis time.
-
-    ``(ex, ey) = e (cos M, -sin M)`` on the epoch mean-longitude axes, with
-    ``M = n (epoch_d - tp_d)`` the epoch mean anomaly.
-    """
-    n = two_pi / T_d
-    phase = n * (epoch_d - tp_d)
-    return jnp.log(n), e * jnp.cos(phase), -e * jnp.sin(phase)
-
-
 def chart_thiele_innes_fit(data, dist_pc, ln_n, ex, ey, epoch_d=0.0):
     """Fit the Thiele-Innes constants at fixed shape, in chart coordinates.
 
@@ -288,8 +284,7 @@ def chart_thiele_innes_fit(data, dist_pc, ln_n, ex, ey, epoch_d=0.0):
         mask=mask,
     )
     (B, G_ti), (A, F) = block
-    evec = jnp.stack([ex, ey])
-    u = evec / jnp.sqrt(1.0 - jnp.sum(evec**2))
+    u = disk_to_plane(jnp.stack([ex, ey]))
     x = jnp.concatenate([jnp.stack([ln_n]), u, jnp.stack([A, B, F, G_ti])])
     sheets = [
         ThieleInnesChart(branch=branch).to_orbit(x, mu_AU3_per_d2=1.0, epoch_d=epoch_d)

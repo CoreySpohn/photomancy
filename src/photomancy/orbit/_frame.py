@@ -1,6 +1,7 @@
 """Construct frame orbits from the fitting parameterizations."""
 
 import jax.numpy as jnp
+from hwoutils.constants import G
 from orbix.system import FrameOrbit
 
 
@@ -51,6 +52,15 @@ def sky_offsets_arcsec(orbit, time_d, dist_pc):
     return position[..., 0] / dist_pc, position[..., 1] / dist_pc
 
 
+def relative_offsets_arcsec(times, a, e, cos_i, W, cos_w, sin_w, tp, Ms_kg, dist_pc):
+    """East and north offsets (arcsec) of a test planet around a star of ``Ms_kg``.
+
+    Classical elements with the periapsis time ``tp`` (days); ``a`` in AU.
+    """
+    orbit = frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, G * Ms_kg)
+    return sky_offsets_arcsec(orbit, times, dist_pc)
+
+
 def orbit_rows(orbit):
     """Rows ``(a, e, cos_i, W, cos_w, sin_w, tp)`` of chart orbits, shape ``B + (7,)``.
 
@@ -72,16 +82,3 @@ def orbit_rows(orbit):
         ],
         axis=-1,
     )
-
-
-def line_of_sight_branch(orbit):
-    """Line-of-sight sheet (+1 or -1) of chart orbits, as ThieleInnesChart defines it.
-
-    The sign of the largest-magnitude away-row entry of the orbit's plane basis;
-    the first entry wins ties. Orbits reflected through the sky plane share their
-    sky block and differ only in this sign.
-    """
-    away = orbit.plane_basis()[..., 2, :]
-    pivot = jnp.where(jnp.abs(away[..., 0]) >= jnp.abs(away[..., 1]), 0, 1)
-    sign = jnp.sign(jnp.take_along_axis(away, pivot[..., None], axis=-1)[..., 0])
-    return jnp.where(sign == 0, 1, sign).astype(int)

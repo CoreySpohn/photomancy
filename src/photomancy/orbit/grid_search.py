@@ -14,9 +14,12 @@ from hwoutils.constants import G
 from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart, FrameOrbit
 
-from photomancy.orbit._frame import orbit_rows, sky_offsets_arcsec
+from photomancy.orbit._frame import (
+    orbit_rows,
+    relative_offsets_arcsec,
+    sky_offsets_arcsec,
+)
 from photomancy.orbit.data import RelativeAstromData
-from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.inference import orbit_chart_log_volume
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.quasi_random import roberts_sequence
@@ -231,7 +234,7 @@ def build_evaluator(data, Ms, dist_pc, shape):
     def single_eval(phys):
         ll = 0.0
         if astrom is not None:
-            ra, dec = predict_relative_astrometry(
+            ra, dec = relative_offsets_arcsec(
                 astrom.times,
                 phys["a"],
                 phys["e"],

@@ -170,25 +170,35 @@ def test_independent_nuisance_inputs():
 
 
 def test_fixed_mass_reference_across_charts():
-    """Remove both charts' Jacobians at identical orbits, including truncation."""
+    """Remove each chart's Jacobian at identical orbits, including truncation.
+
+    The reference is the closed-form fixed-mass element density against
+    e de d(cos i) dW dw dM d(ln a): the truncated Beta law of e over e, 1/2 for
+    cos i, 1/(2 pi) per angle and 1/ln(a_hi/a_lo), written with SciPy and no
+    photomancy code. The updater's fixed-mass target is one more chart of it.
+    """
     target = FixedMassTarget(e_max=0.7)
     orbits = _orbits()
-    classical = orbits.to_classical()
-    old = jax.vmap(target.from_physical)(
-        jnp.stack(
-            [
-                orbits.a_AU,
-                orbits.e,
-                jnp.cos(classical["i_rad"]),
-                classical["W_rad"],
-                classical["w_rad"],
-                classical["M0_rad"],
-            ],
-            axis=-1,
-        )
+    e = np.asarray(orbits.e)
+    ln_a_range = 2.0 / 3.0 * np.log(5000.0 / 50.0)
+    reference = (
+        stats.beta.logpdf(e, 0.867, 3.03)
+        - stats.beta.logcdf(0.7, 0.867, 3.03)
+        - np.log(e)
+        - np.log(2.0)
+        - 3.0 * np.log(two_pi)
+        - np.log(ln_a_range)
     )
-    reference = jax.vmap(target.log_prior)(old) - jnp.log(2 * orbits.e)
+    reference = np.where(e < 0.7, reference, -np.inf)
     assert np.isneginf(reference[-1])
+    point = EccentricityVectorChart().from_orbit(orbits)
+    fixed = jax.vmap(target.log_prior)(point)
+    assert np.isneginf(fixed[-1])
+    _check(
+        "FixedMassTarget",
+        fixed[:-1] - jax.vmap(EccentricityVectorChart().log_volume)(point)[:-1],
+        reference[:-1],
+    )
     for chart in (
         ClassicalChart(),
         EccentricityVectorChart(),

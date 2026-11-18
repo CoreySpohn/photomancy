@@ -12,6 +12,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from equinox import AbstractVar
+from hwoutils.epoch import Epoch
 from jax.scipy.special import logsumexp
 from jax.scipy.stats import multivariate_normal
 
@@ -202,12 +203,29 @@ class SamplePosterior(AbstractPosterior):
         log_weights: Per-particle log weights, normalized or not. Shape ``(n,)``.
         evidence: Scalar log marginal likelihood ``log Z`` (or ``NaN``).
         param_names: Names of the ``d`` columns. Default ``()``.
+        chart: Name of the coordinate chart the columns are in (for example the
+            target or model that produced them), or ``None`` when undeclared.
+        epoch: The :class:`~hwoutils.epoch.Epoch` the sample times are measured
+            from, or ``None`` when the samples carry no epoch-dependent phase.
     """
 
     samples: jnp.ndarray
     log_weights: jnp.ndarray
     evidence: jnp.ndarray
     param_names: tuple[str, ...] = eqx.field(static=True, default=())
+    chart: str | None = eqx.field(static=True, default=None)
+    epoch: Epoch | None = eqx.field(static=True, default=None)
+
+    def require(self, *, chart=None, epoch=None):
+        """Raise ``ValueError`` if a declared chart or epoch differs from the request.
+
+        An undeclared (``None``) field on the posterior never matches a requested
+        value: a consumer that needs a chart or epoch refuses undeclared samples.
+        """
+        if chart is not None and self.chart != chart:
+            raise ValueError(f"samples are in chart {self.chart!r}, not {chart!r}")
+        if epoch is not None and self.epoch != epoch:
+            raise ValueError(f"samples have epoch {self.epoch}, not {epoch}")
 
     def _resample_idx(self, key, n):
         cdf = jnp.cumsum(jax.nn.softmax(self.log_weights))

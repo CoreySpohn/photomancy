@@ -201,3 +201,19 @@ def test_mixture_n_modes_and_best_mode():
     assert jnp.allclose(best.mean, means[1])
     assert jnp.allclose(best.cov, covs[1])
     assert jnp.allclose(best.evidence, log_ev[1])
+
+
+def test_sample_posterior_require_refuses_a_different_or_undeclared_chart_and_epoch():
+    """Fails if a consumer can read samples whose chart or epoch it did not declare."""
+    from hwoutils.epoch import Epoch
+
+    samples = jnp.zeros((3, 2))
+    kwargs = {"log_weights": jnp.zeros(3), "evidence": jnp.asarray(jnp.nan)}
+    declared = SamplePosterior(samples, chart="ti", epoch=Epoch(2460000.0), **kwargs)
+    declared.require(chart="ti", epoch=Epoch(2460000.0))
+    with pytest.raises(ValueError, match="chart"):
+        declared.require(chart="classical")
+    with pytest.raises(ValueError, match="epoch"):
+        declared.require(epoch=Epoch(2460001.0))
+    with pytest.raises(ValueError, match="chart"):
+        SamplePosterior(samples, **kwargs).require(chart="ti")

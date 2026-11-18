@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from orbix.equations import period_to_sma
+from orbix.system import periapsis_chart_shape
 
 from photomancy.orbit._frame import orbit_rows, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
@@ -26,7 +27,6 @@ from photomancy.orbit.init import (
 from photomancy.orbit.thiele_innes import (
     chart_thiele_innes_fit,
     fixed_mass_coordinates,
-    periapsis_chart_shape,
     thiele_innes_fit,
 )
 

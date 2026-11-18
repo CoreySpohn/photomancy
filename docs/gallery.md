@@ -49,7 +49,8 @@ import numpy as np
 
 from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, Rearth2AU, d2s
 from photomancy import viz
-from photomancy.orbit import ImagingData, RVData, predict_photometry, predict_rv
+from photomancy.orbit import ImagingData, RVData
+from photomancy.orbit.forward import predict_photometry, predict_rv
 
 hwostyle.use("dark")
 jax.config.update("jax_enable_x64", True)

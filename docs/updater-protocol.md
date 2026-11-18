@@ -355,8 +355,9 @@ lanes) from orbit geometry.
 
 - **Parameterization.** $(a, e, \cos i, \Omega, \omega, M_\mathrm{ref})$ with
   the stellar mass fixed at $1\,M_\odot$ (`hwoutils.constants.Msun2kg`), the
-  forward model `photomancy.orbit.forward.predict_relative_astrometry`, and the
-  period tied to $a$ by Kepler's third law. $M_\mathrm{ref}$ is the mean
+  forward model the orbix frame orbit of the chart point (the same
+  `EccentricityVectorChart` build, shared prior and chart volume that the
+  Thiele-Innes target uses), and the period tied to $a$ by Kepler's third law. $M_\mathrm{ref}$ is the mean
   anomaly at the anchor epoch; a uniform phase at one epoch is a uniform phase
   at every epoch, so the anchor choice does not change the prior.
 - **Prior.** $\ln a$ uniform between the semimajor axes of $P_\mathrm{lo}$ and

@@ -16,6 +16,7 @@ import pytest  # noqa: E402
 from hwoutils.constants import G, Msun2kg  # noqa: E402
 from scipy import stats  # noqa: E402
 
+from photomancy.orbit._frame import sky_offsets_arcsec  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import TIBasisModel  # noqa: E402
 from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
@@ -348,11 +349,12 @@ def test_fixed_mass_prior_is_normalized_density(e_max, mass_msun, period_day):
 
     The expectation is built independently: SciPy's Beta density over its CDF
     at e_max, uniform ln a between Kepler semimajor axes, 1/2 for cos_i and
-    1/(2 pi) for each of W, omega and M_ref, times the autodiff Jacobian of the
-    chart-to-elements map. Fails if the chart Jacobian constant (log 2), an
-    angle or inclination constant or the truncation normalizer is dropped, if
-    the mass or period bounds are ignored, or if a non-finite angle is
-    accepted as on support.
+    1/(2 pi) for each of W, omega and M_ref, times the autodiff Jacobian of a
+    hand-written chart-to-elements map (this is the old fixed-mass density in
+    elements, which the chart density reproduces at the floor). Fails if the
+    chart volume, an angle or inclination constant or the truncation
+    normalizer is dropped, if the mass or period bounds are ignored, or if a
+    non-finite angle is accepted as on support.
     """
     ms_kg = mass_msun * Msun2kg
     target = FixedMassTarget(
@@ -366,9 +368,12 @@ def test_fixed_mass_prior_is_normalized_density(e_max, mass_msun, period_day):
     )
 
     def chart_to_elements(theta):
-        _, h, k, cos_i, W, lam = theta
+        ln_a, ux, uy, z, W, lam = theta
+        h, k = jnp.array([ux, uy]) / jnp.sqrt(1.0 + ux**2 + uy**2)
         omega = jnp.arctan2(k, h)
-        return jnp.array([jnp.exp(theta[0]), h**2 + k**2, cos_i, W, omega, lam - omega])
+        return jnp.array(
+            [jnp.exp(ln_a), jnp.hypot(h, k), jnp.tanh(z), W, omega, lam - omega]
+        )
 
     for row, frac in zip(ELEMENTS, (0.2, 0.5, 0.9), strict=True):
         a = a_lo * (a_hi / a_lo) ** frac
@@ -392,7 +397,7 @@ def test_fixed_mass_prior_is_normalized_density(e_max, mass_msun, period_day):
 
 
 def test_wrap_maps_periodic_coordinates_only():
-    """Periodic coordinates wrap into [0, period); predictions are invariant.
+    """Periodic coordinates wrap into their cell; predictions are invariant.
 
     Fails if a period is wrong (the physical angles at pi instead of 2 pi, TI
     tau at anything but 1), if a non-periodic coordinate is wrapped, or if
@@ -421,6 +426,7 @@ def test_wrap_maps_periodic_coordinates_only():
     phys = FixedMassTarget()
     theta = phys.from_physical(jnp.array([1.3, 0.21, -0.4, 2.0, 0.7, 4.1]))
     theta = theta.at[1].set(-0.3)  # negative non-periodic coordinates stay put
+    assert phys.period_origin == -np.pi
     for shift in (-two_pi, 3.0 * two_pi):
         moved = theta.at[4].add(shift).at[5].add(-shift)
         np.testing.assert_allclose(phys.wrap(moved), theta, rtol=0, atol=1e-12)
@@ -431,8 +437,8 @@ def test_wrap_maps_periodic_coordinates_only():
             atol=1e-12,
         )
     np.testing.assert_allclose(
-        phys.wrap(theta.at[4].set(-1.0).at[5].set(-7.0)),
-        theta.at[4].set(two_pi - 1.0).at[5].set(2.0 * two_pi - 7.0),
+        phys.wrap(theta.at[4].set(4.0).at[5].set(-7.0)),
+        theta.at[4].set(4.0 - two_pi).at[5].set(two_pi - 7.0),
         rtol=0,
         atol=1e-12,
     )
@@ -529,4 +535,27 @@ def test_orbit_targets_initialize_with_status(target):
         ti.log_likelihood(theta, data),
         loglike_relative_astrom(east_au / 20.0, north_au / 20.0, data),
         rtol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("ecc", [0.05, 0.4, 0.8])
+@pytest.mark.parametrize("ln_period", [4.0, 6.5])
+@pytest.mark.parametrize("tau", [0.1, 0.65])
+def test_thiele_innes_chart_orbit_matches_the_basis_forward_model(ecc, ln_period, tau):
+    """The chart orbit reproduces ``predict`` and the Jacobian is the polar one.
+
+    Fails if the rotation of the constants by ``2 pi tau`` has the wrong sign,
+    the epoch of the chart is not ``t_ref``, or the log Jacobian drifts from
+    ``log(2 pi e) - 2 log(1 - e^2)``.
+    """
+    target = ThieleInnesTarget(TIBasisModel(t_ref=15.0), dist_pc=12.0)
+    theta = jnp.array([ecc, ln_period, tau, 0.7, -0.3, 0.2, 0.9])
+    times = jnp.array([0.0, 40.0, 300.0, 1500.0])
+    ra, dec = target.predict(theta, times)
+    east, north = sky_offsets_arcsec(target.chart_orbit(theta), times, 12.0)
+    np.testing.assert_allclose(east, ra, rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(north, dec, rtol=1e-9, atol=1e-12)
+    _, log_jac = target.chart_coordinates(theta)
+    assert float(log_jac) == pytest.approx(
+        np.log(2 * np.pi * ecc) - 2 * np.log1p(-(ecc**2)), abs=1e-13
     )

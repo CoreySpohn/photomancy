@@ -23,10 +23,12 @@ from photomancy.orbit import (  # noqa: E402
     build_numpyro_logdensity,
     loglike_relative_astrom,
     loglike_stellar_astrom,
+)
+from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.orbit.forward import (  # noqa: E402
     predict_relative_astrometry,
     predict_stellar_astrometry,
 )
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.priors import Uniform  # noqa: E402
 
 MSUN_KG = 1.989e30

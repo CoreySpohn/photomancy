@@ -22,8 +22,7 @@ import jax
 import jax.numpy as jnp
 from orbix.equations import period_to_sma
 
-from photomancy.orbit._frame import sky_offsets_arcsec
-from photomancy.orbit.forward import predict_relative_astrometry
+from photomancy.orbit._frame import relative_offsets_arcsec, sky_offsets_arcsec
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import (
     chart_thiele_innes_grid,
@@ -143,7 +142,7 @@ def _kepler_consistent_loglike(results, relative_astrom_data, Ms, dist_pc):
     a_kepler = period_to_sma(results.T, Ms)
 
     def _ll(a, e, cos_i, W, cos_w, sin_w, tp):
-        ra, dec = predict_relative_astrometry(
+        ra, dec = relative_offsets_arcsec(
             relative_astrom_data.times, a, e, cos_i, W, cos_w, sin_w, tp, Ms, dist_pc
         )
         return loglike_relative_astrom(ra, dec, relative_astrom_data)

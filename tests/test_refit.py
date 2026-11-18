@@ -36,6 +36,24 @@ from photomancy.priors import ECC_ALPHA, ECC_BETA  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "data" / "refit_golden.json"
 DIST_PC = 10.0
+
+
+def _density_constant(target):
+    """Normalization of the prior beyond ``Beta(e) / (a^2 gap)``, written out here.
+
+    The period density ``1 / (lnP_hi - lnP_lo)``, the density of ``ln a`` at a
+    given period ``3 / ln(mu_hi / mu_lo)`` and ``1 / (2 pi)^2`` for the angles,
+    with the factor 1/2 of ``cos i`` against the two-to-one map: the closed-form
+    constant of the physical prior in this chart.
+    """
+    m = target.model
+    return (
+        -np.log(m.lnP_hi - m.lnP_lo)
+        - np.log(np.log(m.mu_hi / m.mu_lo) / 3.0)
+        - 2.0 * np.log(two_pi)
+    )
+
+
 CHART = jnp.array([0.2, np.log(400.0), 0.3, 0.5, -0.7, 0.9, 0.4])
 
 
@@ -44,7 +62,8 @@ def test_prior_density_carries_the_constants_jacobian():
 
     Fails if the Jacobian ``a^4 (1 - cos^2 i)`` of ``(ln a, cos i, omega, W)`` to the
     four Thiele-Innes constants is missing or wrong, checked against autodiff of
-    the inverse map.
+    the inverse map; the chart density built from the shared prior and the orbix
+    chart volume agrees with it to the closed-form normalization.
     """
     target = physical_prior_target(1.0, DIST_PC)
     ln_p = CHART[1]
@@ -62,7 +81,7 @@ def test_prior_density_carries_the_constants_jacobian():
         betainc(ECC_ALPHA, ECC_BETA, target.model.e_max)
     )
     assert float(target.log_prior(CHART) - log_e) == pytest.approx(
-        float(log_det), abs=1e-9
+        float(log_det) + _density_constant(target), abs=1e-9
     )
 
 
@@ -87,7 +106,9 @@ def test_prior_matches_the_discriminant_formula_and_support():
     log_e = beta_dist.logpdf(e, ECC_ALPHA, ECC_BETA) - jnp.log(
         betainc(ECC_ALPHA, ECC_BETA, target.model.e_max)
     )
-    expected = log_e - jnp.log((u + disc) / 2) - jnp.log(disc)
+    expected = (
+        log_e - jnp.log((u + disc) / 2) - jnp.log(disc) + _density_constant(target)
+    )
     valid = (mu >= target.model.mu_lo) & (mu <= target.model.mu_hi)
     actual = jax.jit(jax.vmap(target.log_prior))(theta)
     np.testing.assert_array_equal(jnp.isneginf(actual), ~valid)
@@ -97,19 +118,19 @@ def test_prior_matches_the_discriminant_formula_and_support():
 
 
 @pytest.mark.parametrize("direction", [-1.0, 1.0])
-def test_prior_at_exact_face_on_keeps_its_floor_and_gradient(direction):
-    """Fails if the gap floor or its finite face-on gradient is lost."""
+def test_prior_at_exact_face_on_is_a_singularity_the_refit_drops(direction):
+    """Fails if the face-on volume singularity is not positive infinity or is NaN.
+
+    Exactly face-on the chart volume diverges (an integrable singularity of the
+    chart), so the density is ``+inf`` rather than NaN, and the refit removes
+    non-finite prior factors from its draws. Points off the singularity and
+    invalid points keep their values.
+    """
     target = physical_prior_target(1.0, DIST_PC)
     theta = jnp.array([0.2, np.log(130.0), 0.3, 0.5, 0.0, 0.0, direction * 0.5])
-    log_e = beta_dist.logpdf(theta[0], ECC_ALPHA, ECC_BETA) - jnp.log(
-        betainc(ECC_ALPHA, ECC_BETA, target.model.e_max)
-    )
-    disc_floor = 1e-150
-    prior, grad = jax.jit(jax.value_and_grad(target.log_prior))(theta)
-    expected = log_e - jnp.log((0.5 + disc_floor) / 2) - jnp.log(disc_floor)
-    np.testing.assert_allclose(prior, expected, rtol=1e-14)
-    # The floor is constant in a neighborhood, so only log(a^2) contributes.
-    np.testing.assert_allclose(grad[3:], -2 * theta[3:] / 0.5, atol=1e-14, rtol=0)
+    assert float(target.log_prior(theta)) == np.inf
+    near = theta.at[4].set(1e-3)
+    assert np.isfinite(float(target.log_prior(near)))
     for invalid in (
         theta.at[0].set(0.0),
         theta.at[0].set(target.model.e_max),

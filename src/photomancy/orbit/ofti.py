@@ -24,8 +24,11 @@ from hwoutils.constants import G
 from orbix.equations.orbit import mean_motion
 from orbix.system import ClassicalChart
 
-from photomancy.orbit._frame import orbit_rows, sky_offsets_arcsec
-from photomancy.orbit.forward import predict_relative_astrometry
+from photomancy.orbit._frame import (
+    orbit_rows,
+    relative_offsets_arcsec,
+    sky_offsets_arcsec,
+)
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.priors import ecc_distribution
 from photomancy.posterior import SamplePosterior
@@ -95,7 +98,7 @@ def _scale_rotate_score(
     # equals m_ref, the eccentric anomaly there is independent of a.
     n1 = mean_motion(1.0, mu)
     tp1 = t_ref - m_ref / n1
-    x0, y0 = predict_relative_astrometry(
+    x0, y0 = relative_offsets_arcsec(
         jnp.atleast_1d(t_ref), 1.0, e, cos_i, 0.0, cos_w, sin_w, tp1, Ms, dist_pc
     )
     x0 = x0[0]
@@ -113,7 +116,7 @@ def _scale_rotate_score(
     log_P = jnp.log10(_TWO_PI / n_new)
 
     # The caller masks the reference epoch, already sampled in the proposal.
-    ra_p, dec_p = predict_relative_astrometry(
+    ra_p, dec_p = relative_offsets_arcsec(
         data.times, a_new, e, cos_i, W_new, cos_w, sin_w, tp_new, Ms, dist_pc
     )
     ll = loglike_relative_astrom(ra_p, dec_p, data)
