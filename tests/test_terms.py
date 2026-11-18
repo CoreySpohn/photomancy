@@ -606,9 +606,13 @@ def test_photometry_band_planet_epoch_routing():
     """
 
     class ColoredLambertian(LambertianPhysicalModel):
-        def contrast(self, phase_angle_rad, dist_AU, wavelength_nm, Rp_Rearth):
+        def contrast(
+            self, phase_angle_rad, star_planet_distance_AU, wavelength_nm, Rp_Rearth
+        ):
             return (
-                super().contrast(phase_angle_rad, dist_AU, wavelength_nm, Rp_Rearth)
+                super().contrast(
+                    phase_angle_rad, star_planet_distance_AU, wavelength_nm, Rp_Rearth
+                )
                 * wavelength_nm
                 / 600.0
             )

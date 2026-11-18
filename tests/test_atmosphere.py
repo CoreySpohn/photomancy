@@ -97,8 +97,10 @@ def test_contrast_forward_extracts_single_planet_spectrum():
     class _CubeAtmo(eqx.Module):
         spec: jnp.ndarray
 
-        def contrast_cube(self, *, phase_angle_rad, dist_AU, wavelengths_nm, Rp_Rearth):
-            np.testing.assert_array_equal(dist_AU, [[2.5]])
+        def contrast_cube(
+            self, *, phase_angle_rad, star_planet_distance_AU, wavelengths_nm, Rp_Rearth
+        ):
+            np.testing.assert_array_equal(star_planet_distance_AU, [[2.5]])
             return self.spec[:, None, None]  # (n_wl, 1 planet, 1 column)
 
     fwd = contrast_forward(

@@ -28,7 +28,7 @@ def contrast_forward(*, phase_angle_rad, dist_AU, wavelengths_nm, Rp_Rearth):
     def forward(pm):
         return pm.contrast_cube(
             phase_angle_rad=phase_angle_rad,
-            dist_AU=dist_AU,
+            star_planet_distance_AU=dist_AU,
             wavelengths_nm=wavelengths_nm,
             Rp_Rearth=Rp_Rearth,
         )[:, 0, 0]
