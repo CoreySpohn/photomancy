@@ -137,7 +137,7 @@ def test_report_likelihood_carries_the_planet_shot_noise():
         11000.0, n_pred, s
     )
     got = float(loglike_report(alpha, jnp.full(2, d_mag), rep))
-    assert got == pytest.approx(want, abs=1e-9)
+    assert got == pytest.approx(want, abs=1e-10)
     no_shot = stats.norm.logcdf((THRESH * limit - n_pred) / limit) + stats.norm.logpdf(
         11000.0, n_pred, limit
     )

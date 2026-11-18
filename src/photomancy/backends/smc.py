@@ -51,11 +51,13 @@ class SMCBackend(AbstractBackend):
         draw_key, run_key = jax.random.split(key)
         init = OrbitPriorTransform(problem).sample(draw_key, n_particles)
         posterior = self.run(problem.logprior, problem.loglikelihood, init, run_key)
-        return SamplePosterior(
-            posterior.samples,
-            posterior.log_weights,
-            posterior.evidence,
-            param_names=problem.param_names,
+        return problem.declare(
+            SamplePosterior(
+                posterior.samples,
+                posterior.log_weights,
+                posterior.evidence,
+                param_names=problem.param_names,
+            )
         )
 
     @eqx.filter_jit

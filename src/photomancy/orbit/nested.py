@@ -171,7 +171,9 @@ def orbit_nested_sampling(
         evidence_tolerance,
     )
     samples = results.resample(num_samples, key=sample_key).X_samples["z"]
-    return _nested_posterior(samples, problem.param_names, results, state, converged)
+    return problem.declare(
+        _nested_posterior(samples, problem.param_names, results, state, converged)
+    )
 
 
 class _UnitCubeReparam(Reparam):

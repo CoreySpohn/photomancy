@@ -25,6 +25,7 @@ from orbix.equations.orbit import mean_motion
 from orbix.system import ClassicalChart
 
 from photomancy.orbit._frame import (
+    ORBIT_ROWS_CHART,
     orbit_rows,
     relative_offsets_arcsec,
     sky_offsets_arcsec,
@@ -357,6 +358,7 @@ def ofti(
     max_batches=1000,
     loglike_ref=None,
     conditioner=None,
+    epoch=None,
 ):
     """Sample the orbit posterior for short-arc astrometry via OFTI.
 
@@ -394,10 +396,13 @@ def ofti(
             and 0.0 accept every in-support proposal. In general 0.0 is not a
             strict bound because Gaussian log normalization can be positive.
         conditioner: An AbstractConditioner; None uses ScaleAndRotate().
+        epoch: The :class:`~hwoutils.epoch.Epoch` that the data times (and the
+            returned ``tp``) are measured from; declared on the posterior.
 
     Returns:
         A SamplePosterior with ``n_accept`` particles, uniform log_weights, and
-        param_names ``("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")``.
+        param_names ``("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")``. It
+        declares the chart ``ORBIT_ROWS_CHART`` and ``epoch``.
 
     Raises:
         RuntimeError: If ``max_batches`` is reached before ``n_accept`` orbits are
@@ -446,4 +451,6 @@ def ofti(
         log_weights=log_weights,
         evidence=jnp.asarray(jnp.nan),
         param_names=PARAM_NAMES,
+        chart=ORBIT_ROWS_CHART,
+        epoch=epoch,
     )

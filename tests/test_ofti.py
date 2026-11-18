@@ -12,9 +12,11 @@ import numpy as np
 import numpyro.distributions as dist
 import pytest
 from hwoutils.constants import G
+from hwoutils.epoch import Epoch
 from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_anomaly_tp, mean_motion
 
+from photomancy.orbit._frame import ORBIT_ROWS_CHART
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.ofti import (
@@ -308,7 +310,9 @@ def test_single_epoch_reference_scatter(loglike_ref):
         batch=4096,
         max_batches=1,
         loglike_ref=loglike_ref,
+        epoch=Epoch(2460000.0),
     )
+    assert (pp.chart, pp.epoch) == (ORBIT_ROWS_CHART, Epoch(2460000.0))
     ra, dec = _predict_rows(data.times, *pp.samples.T, MSUN, DIST_PC)
     residuals = np.column_stack(
         (

@@ -1,5 +1,6 @@
 """One-planet chart densities and the NumPyro orbit inference route."""
 
+import dataclasses
 import math
 from collections.abc import Callable
 
@@ -7,6 +8,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.constants import G, Mearth2kg, two_pi
+from hwoutils.epoch import Epoch
 from jax.flatten_util import ravel_pytree
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import initialize_model
@@ -115,14 +117,21 @@ class ChartOrbitProblem(eqx.Module):
     the shape of each coordinate. The flat vector follows JAX's sorted dict
     order. Use ``logdensity`` for gradient backends, and ``logprior`` and
     ``loglikelihood`` for tempered SMC with particles drawn from the prior.
+
+    The orbits are built at day zero of the optional ``epoch`` (an
+    :class:`~hwoutils.epoch.Epoch`): every time handed to the density, and every
+    time a posterior of this problem refers to, is days from it. :meth:`run`
+    and :meth:`declare` stamp the chart and epoch on a posterior, and
+    :meth:`require` checks them before a consumer reads one.
     """
 
     density: SystemLogDensity
     position_template: dict
     unflatten: Callable
     param_names: tuple[str, ...]
+    epoch: Epoch | None = eqx.field(static=True)
 
-    def __init__(self, density, position_template):
+    def __init__(self, density, position_template, epoch=None):
         """Bind the coordinate layout used for all flat backend positions."""
         if not isinstance(density.build, _ChartSystemBuilder):
             raise ValueError("Construct the density with build_chart_logdensity")
@@ -134,6 +143,7 @@ class ChartOrbitProblem(eqx.Module):
         if any(not jnp.issubdtype(v.dtype, jnp.floating) for v in position.values()):
             raise ValueError("Sampler coordinates must have floating-point dtype")
         self.density = density
+        self.epoch = epoch
         self.position_template = position
         _, self.unflatten = ravel_pytree(position)
         self.param_names = tuple(
@@ -152,9 +162,37 @@ class ChartOrbitProblem(eqx.Module):
         return self.density.build.chart
 
     @property
+    def chart_name(self):
+        """Name of the chart class, as a posterior of this problem declares it."""
+        return type(self.chart).__name__
+
+    @property
     def star_mass_kg(self):
         """Stellar mass used in the two-body orbit."""
         return self.density.build.star_mass_kg
+
+    def declare(self, posterior):
+        """Return ``posterior`` with this problem's chart and epoch declared."""
+        return dataclasses.replace(posterior, chart=self.chart_name, epoch=self.epoch)
+
+    def run(self, backend, init, key=None):
+        """Run ``backend`` on :meth:`logdensity` and declare the chart and epoch."""
+        return self.declare(backend.run(self.logdensity, init, key))
+
+    def require(self, posterior):
+        """Raise ``ValueError`` unless ``posterior`` matches this chart and epoch.
+
+        A posterior from a bare backend call (``backend.run(problem.logdensity,
+        ...)``) is undeclared and refused: pass it through :meth:`declare`, or run
+        the backend with :meth:`run`. The epoch is checked only when the problem
+        has one.
+        """
+        if posterior.chart is None:
+            raise ValueError(
+                "posterior declares no chart: run the backend with problem.run(...) "
+                "or pass the posterior through problem.declare(...)"
+            )
+        posterior.require(chart=self.chart_name, epoch=self.epoch)
 
     def flatten(self, params):
         """Pack one position with the same coordinate shapes as the template."""

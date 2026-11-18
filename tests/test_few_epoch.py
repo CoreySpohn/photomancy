@@ -7,6 +7,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from hwoutils.epoch import Epoch  # noqa: E402
 from orbix.system import (  # noqa: E402
     ThieleInnesChart,
     sky_block_geometry,
@@ -406,7 +407,8 @@ def test_chart_lambert_matches_lambert_weights_and_sky():
         return_parts=True,
     )
     _, legacy = lambert_depth_fit(data, **kwargs)
-    post, chart = chart_lambert_depth_fit(data, **kwargs)
+    post, chart = chart_lambert_depth_fit(data, epoch=Epoch(2460000.0), **kwargs)
+    assert (post.chart, post.epoch) == ("ThieleInnesChart", Epoch(2460000.0))
     keep, spread, floor = _parity_parts(legacy, chart)
     assert spread <= floor
     branch = np.asarray(chart["branch"])[keep]
@@ -438,7 +440,10 @@ def test_chart_admissible_region_matches_admissible_region():
         return_parts=True,
     )
     _, legacy = admissible_region_fit(data, **kwargs)
-    _, chart = chart_admissible_region_fit(data, **kwargs)
+    declared, chart = chart_admissible_region_fit(
+        data, epoch=Epoch(2460000.0), **kwargs
+    )
+    assert (declared.chart, declared.epoch) == ("ThieleInnesChart", Epoch(2460000.0))
     keep, spread, floor = _parity_parts(legacy, chart)
     assert spread <= floor
     assert set(np.unique(np.asarray(chart["branch"])[keep])) == {-1, 1}

@@ -15,6 +15,7 @@ from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart, FrameOrbit
 
 from photomancy.orbit._frame import (
+    ORBIT_ROWS_CHART,
     orbit_rows,
     relative_offsets_arcsec,
     sky_offsets_arcsec,
@@ -423,6 +424,7 @@ def chart_grid_search(
     n_survivors=5000,
     disk_support=False,
     key,
+    epoch=None,
 ):
     """Two-stage importance-sampling grid search weighted in chart coordinates.
 
@@ -451,10 +453,13 @@ def chart_grid_search(
         n_survivors: Stage-1 particles passed to Stage 2.
         disk_support: Restrict the eccentricity support to the disk ``e < e_max``.
         key: JAX PRNG key.
+        epoch: The :class:`~hwoutils.epoch.Epoch` that the data times (and the
+            returned ``tp``) are measured from; declared on the posterior.
 
     Returns:
         ``SamplePosterior`` over ``(a, e, cos_i, W, cos_w, sin_w, tp)`` with
-        normalized log weights and the importance-sampling log evidence.
+        normalized log weights and the importance-sampling log evidence. It
+        declares the chart ``ORBIT_ROWS_CHART`` and ``epoch``.
     """
     k1, k2 = jax.random.split(key)
     bounds = chart_box_bounds(log_T_range=log_T_range, e_max=e_max)
@@ -516,4 +521,6 @@ def chart_grid_search(
         log_weights=log_w,
         evidence=log_total - jnp.log(n_particles),
         param_names=("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp"),
+        chart=ORBIT_ROWS_CHART,
+        epoch=epoch,
     )

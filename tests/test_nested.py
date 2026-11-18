@@ -275,4 +275,6 @@ def test_prior_only_chart_evidence():
     print(f"prior only: logZ={float(post.evidence):.7g} +/- {error:.7g}")
     assert abs(float(post.evidence)) <= 4 * error + 1e-10
     assert post.param_names == problem.param_names
+    problem.require(post)
+    assert post.chart == "EccentricityVectorChart"
     assert np.isfinite(jax.vmap(problem.logprior)(post.samples)).all()

@@ -4,6 +4,9 @@ import jax.numpy as jnp
 from hwoutils.constants import G
 from orbix.system import FrameOrbit
 
+# Chart name that posteriors over ``orbit_rows`` columns declare.
+ORBIT_ROWS_CHART = "OrbitRows"
+
 
 def frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, mu):
     """Build an AU/day orbit with periapsis at tp (days)."""

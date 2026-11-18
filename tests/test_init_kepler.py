@@ -12,8 +12,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import G
 from orbix.equations import period_to_sma
-from orbix.system import periapsis_chart_shape
+from orbix.system import ClassicalChart, EccentricityVectorChart, periapsis_chart_shape
 
 from photomancy.orbit._frame import orbit_rows, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
@@ -24,6 +25,7 @@ from photomancy.orbit.init import (
     chart_find_init,
     find_init,
 )
+from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import (
     chart_thiele_innes_fit,
     fixed_mass_coordinates,
@@ -264,3 +266,39 @@ def test_chart_find_init_matches_find_init_ranking_and_cell():
     # The sheets share ln a and cos i; the reflection flips the eccentricity vector.
     np.testing.assert_allclose(both[0, [0, 3]], both[1, [0, 3]], rtol=1e-9)
     np.testing.assert_allclose(both[0, 1:3], -both[1, 1:3], rtol=1e-9, atol=1e-12)
+
+
+# Medium: two cold chart grids.
+@pytest.mark.medium
+def test_chart_find_init_writes_starts_in_the_declared_chart_and_epoch():
+    """Starts in any chart rebuild the ranked orbits at the chart epoch.
+
+    On the three-epoch case, the ``ClassicalChart`` starts at chart epochs 0 and
+    250 d, rebuilt with ``to_orbit`` at the stated mass and epoch, reproduce the
+    reported log likelihood at the 64 eps floor, so the epoch is honored and the
+    chart is the one asked for; the coordinates differ between the epochs (the
+    mean anomaly moves) and the default chart is the eccentricity-vector chart.
+    Fails if the chart or epoch argument is ignored.
+    """
+    data, _ = _seed3001_three_epoch()
+    kwargs = dict(log_T_range=(2.0, 3.0), n_log_T=12, n_tp=6, k=2)
+    default, _ = chart_find_init(data, MSUN, DIST_PC, **kwargs)
+    assert default.shape == (2, EccentricityVectorChart().n_coords)
+    starts = {}
+    for epoch_d in (0.0, 250.0):
+        coords, ll = chart_find_init(
+            data, MSUN, DIST_PC, chart=ClassicalChart(), epoch_d=epoch_d, **kwargs
+        )
+        assert coords.shape == (2, ClassicalChart().n_coords)
+        orbits = ClassicalChart().to_orbit(
+            coords, mu_AU3_per_d2=G * MSUN, epoch_d=epoch_d
+        )
+        for i in range(2):
+            ra, dec = sky_offsets_arcsec(
+                jax.tree.map(lambda leaf, i=i: leaf[i], orbits), data.times, DIST_PC
+            )
+            got = float(loglike_relative_astrom(ra, dec, data))
+            floor = max(1e-10, 64 * np.finfo(float).eps * (1.0 + abs(float(ll[i]))))
+            assert abs(got - float(ll[i])) <= floor * max(1.0, abs(got))
+        starts[epoch_d] = np.asarray(coords)
+    assert np.max(np.abs(starts[0.0][:, 5] - starts[250.0][:, 5])) > 1e-3

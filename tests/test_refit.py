@@ -81,7 +81,7 @@ def test_prior_density_carries_the_constants_jacobian():
         betainc(ECC_ALPHA, ECC_BETA, target.model.e_max)
     )
     assert float(target.log_prior(CHART) - log_e) == pytest.approx(
-        float(log_det) + _density_constant(target), abs=1e-9
+        float(log_det) + _density_constant(target), abs=1e-10
     )
 
 

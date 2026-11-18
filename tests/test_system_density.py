@@ -370,7 +370,7 @@ def sampling_problem():
         terms=(measurement,),
         star_mass_kg=Msun2kg,
     )
-    return ChartOrbitProblem(density, position)
+    return ChartOrbitProblem(density, position, epoch=Epoch(2460000.0))
 
 
 @pytest.mark.medium(reason="Exercises a compiled backend transition on one orbit.")
@@ -378,7 +378,10 @@ def sampling_problem():
     "engine", ["map", "nuts", "mclmc", "pathfinder", "pathfinder_mixture", "smc"]
 )
 def test_chart_backend_step(sampling_problem, engine):
-    """A fit or transition must move from its start to a finite chart density."""
+    """A fit or transition must move from its start to a finite chart density.
+
+    The posterior of every chart route declares the problem's chart and epoch.
+    """
     import optax
 
     from photomancy.backends import (
@@ -402,6 +405,7 @@ def test_chart_backend_step(sampling_problem, engine):
         )
         rows = posterior.samples
         assert np.isfinite(posterior.evidence)
+        declared = posterior
     elif engine == "map":
         backend = MAPBackend(
             "orbit", {"orbit": optax.adam(0.01)}, (FitStage(1, ("orbit",)),)
@@ -409,17 +413,18 @@ def test_chart_backend_step(sampling_problem, engine):
         post = backend.run(problem.logdensity, z)
         rows = post.params[None, :]
         assert post.log_density > problem.logdensity(z)
+        declared = None
     elif engine == "pathfinder_mixture":
         starts = jnp.stack((z, z.at[0].add(0.1)))
-        post = PathfinderMixtureBackend(maxiter=6, maxcor=3).run(
-            problem.logdensity, starts, key
-        )
+        post = problem.run(PathfinderMixtureBackend(maxiter=6, maxcor=3), starts, key)
+        declared = post
         rows = post.means
         # An ELBO draw outside the chart cell scores -inf, so a short path can
         # give -inf; NaN would mean a broken fit.
         assert not np.any(np.isnan(post.log_evidences))
     elif engine == "pathfinder":
-        post = PathfinderBackend(maxiter=6, maxcor=3).run(problem.logdensity, z, key)
+        post = problem.run(PathfinderBackend(maxiter=6, maxcor=3), z, key)
+        declared = post
         rows = post.mean[None, :]
         assert np.all(np.linalg.eigvalsh(post.cov) > 0)
     else:
@@ -428,8 +433,60 @@ def test_chart_backend_step(sampling_problem, engine):
             if engine == "nuts"
             else MCLMCBackend(n_tune=100, n_samples=2)
         )
-        rows = backend.run(problem.logdensity, z, key).samples
+        declared = problem.run(backend, z, key)
+        rows = declared.samples
         assert not np.array_equal(rows[0], rows[1])
+    if declared is not None:
+        problem.require(declared)
+        assert declared.chart == "ClassicalChart"
+        assert declared.epoch == Epoch(2460000.0)
     assert rows.shape[-1] == len(problem.param_names)
     assert np.any(np.asarray(rows) != z)
     assert np.all(np.isfinite(jax.vmap(problem.logdensity)(rows)))
+
+
+@pytest.mark.medium(reason="Runs NUTS, clusters it and scores two candidate epochs.")
+def test_declared_nuts_draws_reach_the_eig_and_diagnostics(sampling_problem):
+    """Raw draws declared by the problem feed the EIG; other metadata is refused.
+
+    ``problem.declare`` stamps NUTS draws, ``cluster_to_mixture`` carries the
+    stamp, and ``evaluate_orbit_candidates`` and the diagnostics accept the
+    mixture. An undeclared posterior, one in another chart and one with another
+    epoch each raise ``ValueError`` before any scoring. Fails if the stamp is lost
+    on the way or a mismatch is read silently.
+    """
+    from photomancy.backends import NUTSBackend
+    from photomancy.orbit import evaluate_orbit_candidates, sample_physical
+    from photomancy.posterior import MixturePosterior, cluster_to_mixture
+
+    problem = sampling_problem
+    z = problem.flatten(problem.position_template)
+    key = jax.random.key(3)
+    raw = NUTSBackend(n_warmup=10, n_samples=16).run(problem.logdensity, z, key)
+    assert raw.chart is None
+    declared = problem.declare(raw)
+    mixture = cluster_to_mixture(declared, 2, key=key)
+    assert (mixture.chart, mixture.epoch) == (declared.chart, declared.epoch)
+    scores = evaluate_orbit_candidates(mixture, problem, jnp.array([10.0, 90.0]), 1e-4)
+    assert np.all(np.isfinite(np.asarray(scores["total_eig"])))
+    sample_physical(mixture, problem, key, 4)
+    sample_physical(mixture.best_mode(), problem, key, 4)
+
+    with pytest.raises(ValueError, match="declares no chart"):
+        evaluate_orbit_candidates(
+            cluster_to_mixture(raw, 2, key=key), problem, jnp.array([10.0]), 1e-4
+        )
+    wrong_chart = MixturePosterior(
+        mixture.means, mixture.covs, mixture.log_evidences, chart="FrameChart"
+    )
+    with pytest.raises(ValueError, match="chart"):
+        evaluate_orbit_candidates(wrong_chart, problem, jnp.array([10.0]), 1e-4)
+    wrong_epoch = MixturePosterior(
+        mixture.means,
+        mixture.covs,
+        mixture.log_evidences,
+        chart=mixture.chart,
+        epoch=Epoch(2460001.0),
+    )
+    with pytest.raises(ValueError, match="epoch"):
+        sample_physical(wrong_epoch, problem, key, 2)

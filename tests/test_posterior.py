@@ -217,3 +217,43 @@ def test_sample_posterior_require_refuses_a_different_or_undeclared_chart_and_ep
         declared.require(epoch=Epoch(2460001.0))
     with pytest.raises(ValueError, match="chart"):
         SamplePosterior(samples, **kwargs).require(chart="ti")
+
+
+def test_declared_chart_and_epoch_survive_best_mode_and_clustering():
+    """Fails if a derived posterior drops the chart and epoch its source declared.
+
+    Every posterior kind carries the declaration (``require`` lives on the base
+    class), ``best_mode`` keeps it and ``cluster_to_mixture`` hands it to the
+    mixture, so a consumer that checks the chart reads clustered draws safely.
+    """
+    from hwoutils.epoch import Epoch
+
+    epoch = Epoch(2460000.0)
+    mixture = MixturePosterior(
+        means=jnp.zeros((2, 2)),
+        covs=jnp.tile(jnp.eye(2), (2, 1, 1)),
+        log_evidences=jnp.zeros(2),
+        chart="ti",
+        epoch=epoch,
+    )
+    mixture.require(chart="ti", epoch=epoch)
+    mixture.best_mode().require(chart="ti", epoch=epoch)
+    with pytest.raises(ValueError, match="epoch"):
+        mixture.best_mode().require(epoch=Epoch(2460001.0))
+    samples = SamplePosterior(
+        jax.random.normal(jax.random.key(0), (50, 2)),
+        jnp.zeros(50),
+        jnp.asarray(jnp.nan),
+        chart="ti",
+        epoch=epoch,
+    )
+    clustered = cluster_to_mixture(samples, 2, key=jax.random.key(1))
+    clustered.require(chart="ti", epoch=epoch)
+    undeclared = cluster_to_mixture(
+        SamplePosterior(samples.samples, samples.log_weights, samples.evidence),
+        2,
+        key=jax.random.key(1),
+    )
+    with pytest.raises(ValueError, match="chart"):
+        undeclared.require(chart="ti")
+    GaussianPosterior(jnp.zeros(2), jnp.eye(2), jnp.asarray(0.0)).require()

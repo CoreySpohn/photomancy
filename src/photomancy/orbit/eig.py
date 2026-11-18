@@ -223,7 +223,12 @@ def evaluate_orbit_candidates(
     detection for a single planet above the inner working angle.
     The Lambert scale defaults to the scene's albedo times squared radius.
     Supply ``area_AU2`` to use a fixed scale, including with a bare orbix system.
+
+    The posterior must declare the problem's chart and epoch (``problem.run`` and
+    ``problem.declare`` stamp them); ``time_d`` is days from that epoch. A posterior
+    in another chart, or an undeclared one, raises ``ValueError``.
     """
+    problem.require(posterior)
 
     def forward(z, t):
         return _astrometry(

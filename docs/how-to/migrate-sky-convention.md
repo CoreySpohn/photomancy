@@ -74,7 +74,7 @@ system.
 
 ## Check the result
 
-Evaluate `predict_relative_astrometry` at the migrated elements: the track agrees
+Evaluate `photomancy.orbit.forward.predict_relative_astrometry` at the migrated elements: the track agrees
 with the earlier model's output with its two columns exchanged. The test suite
 checks this against an independent NumPy implementation of the Thiele-Innes
 relations and against a refit of the Kervella et al. (2016) alpha Cen AB data.

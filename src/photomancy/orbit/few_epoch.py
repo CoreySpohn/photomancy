@@ -622,7 +622,7 @@ def _chart_ar_batch(
     return jax.vmap(one)(jax.random.split(key, n_particles))
 
 
-def _assemble_chart(x, lp, lj, ll, branch, return_parts):
+def _assemble_chart(x, lp, lj, ll, branch, return_parts, epoch):
     """Flatten family axes and build the chart-coordinate SamplePosterior (+ parts)."""
     x = x.reshape(-1, 7)
     lp, lj, ll, branch = (v.reshape(-1) for v in (lp, lj, ll, branch))
@@ -631,6 +631,8 @@ def _assemble_chart(x, lp, lj, ll, branch, return_parts):
         log_weights=lp + lj + ll,
         evidence=jnp.nan,
         param_names=TI_CHART_PARAM_NAMES,
+        chart=type(_TI_CHART).__name__,
+        epoch=epoch,
     )
     if not return_parts:
         return post
@@ -648,6 +650,7 @@ def chart_lambert_depth_fit(
     n_max_rev=6,
     z_max_au=8.0,
     return_parts=False,
+    epoch=None,
 ):
     """``lambert_depth_fit`` weighted in ``ThieleInnesChart`` coordinates.
 
@@ -658,10 +661,12 @@ def chart_lambert_depth_fit(
     ``chart_log_prior + chart log volume + |det dx/du| + likelihood``. At identical
     latents this equals the ``lambert_depth_fit`` weight plus one constant.
 
-    Args: as ``lambert_depth_fit``.
+    Args: as ``lambert_depth_fit``, plus ``epoch``, the
+        :class:`~hwoutils.epoch.Epoch` that the data times are measured from.
 
     Returns:
-        A ``SamplePosterior`` over the chart coordinates; with ``return_parts``, a
+        A ``SamplePosterior`` over the chart coordinates, declaring the chart
+        ``ThieleInnesChart`` and ``epoch``; with ``return_parts``, a
         ``(posterior, parts)`` tuple whose parts hold ``ln_prior`` (density against
         the chart differential), ``ln_jac``, ``ln_like`` and each particle's
         line-of-sight ``branch`` (+1 or -1).
@@ -690,7 +695,7 @@ def chart_lambert_depth_fit(
         fam_high,
         n_per_family,
     )
-    return _assemble_chart(*parts, return_parts)
+    return _assemble_chart(*parts, return_parts, epoch)
 
 
 def chart_admissible_region_fit(
@@ -703,10 +708,12 @@ def chart_admissible_region_fit(
     n_particles=100_000,
     z_max_au=8.0,
     return_parts=False,
+    epoch=None,
 ):
     """``admissible_region_fit`` weighted in ``ThieleInnesChart`` coordinates.
 
-    Args: as ``admissible_region_fit``; returns as ``chart_lambert_depth_fit``.
+    Args: as ``admissible_region_fit``, plus ``epoch`` as
+    ``chart_lambert_depth_fit``; returns as ``chart_lambert_depth_fit``.
     """
     valid = np.flatnonzero(np.asarray(data.is_valid, dtype=bool))
     i1 = int(valid[0]) if idx is None else int(idx)
@@ -731,4 +738,4 @@ def chart_admissible_region_fit(
         v_max,
         n_particles,
     )
-    return _assemble_chart(*parts, return_parts)
+    return _assemble_chart(*parts, return_parts, epoch)

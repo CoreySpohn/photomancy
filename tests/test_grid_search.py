@@ -5,9 +5,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import G
+from hwoutils.epoch import Epoch
 from orbix.system import EccentricityVectorChart
 
-from photomancy.orbit._frame import sky_offsets_arcsec
+from photomancy.orbit._frame import ORBIT_ROWS_CHART, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.grid_search import (
@@ -422,7 +423,10 @@ def test_chart_grid_search_matches_grid_search():
         key=jax.random.PRNGKey(7),
     )
     old = grid_search((data,), Ms=MSUN, shape=EccVectorShape(), **common)
-    new = chart_grid_search((data,), star_mass_kg=MSUN, **common)
+    new = chart_grid_search(
+        (data,), star_mass_kg=MSUN, epoch=Epoch(2460000.0), **common
+    )
+    assert (new.chart, new.epoch) == (ORBIT_ROWS_CHART, Epoch(2460000.0))
     assert new.param_names == old.param_names
     assert np.isfinite(old.log_weights).all()
     ok = np.isfinite(new.log_weights)

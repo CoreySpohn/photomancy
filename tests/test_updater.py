@@ -553,8 +553,8 @@ def test_thiele_innes_chart_orbit_matches_the_basis_forward_model(ecc, ln_period
     times = jnp.array([0.0, 40.0, 300.0, 1500.0])
     ra, dec = target.predict(theta, times)
     east, north = sky_offsets_arcsec(target.chart_orbit(theta), times, 12.0)
-    np.testing.assert_allclose(east, ra, rtol=1e-9, atol=1e-12)
-    np.testing.assert_allclose(north, dec, rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(east, ra, rtol=1e-12, atol=1e-13)
+    np.testing.assert_allclose(north, dec, rtol=1e-12, atol=1e-13)
     _, log_jac = target.chart_coordinates(theta)
     assert float(log_jac) == pytest.approx(
         np.log(2 * np.pi * ecc) - 2 * np.log1p(-(ecc**2)), abs=1e-13

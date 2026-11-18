@@ -37,6 +37,22 @@ class AbstractPosterior(eqx.Module):
     """
 
     evidence: AbstractVar[jnp.ndarray]
+    chart: str | None = eqx.field(static=True, default=None, kw_only=True)
+    epoch: Epoch | None = eqx.field(static=True, default=None, kw_only=True)
+
+    def require(self, *, chart=None, epoch=None):
+        """Raise ``ValueError`` if a declared chart or epoch differs from the request.
+
+        ``chart`` names the coordinate chart the posterior's columns are in and
+        ``epoch`` is the :class:`~hwoutils.epoch.Epoch` its times are measured from.
+        An undeclared (``None``) field on the posterior never matches a requested
+        value: a consumer that needs a chart or epoch refuses undeclared posteriors.
+        A requested ``None`` is not checked.
+        """
+        if chart is not None and self.chart != chart:
+            raise ValueError(f"posterior is in chart {self.chart!r}, not {chart!r}")
+        if epoch is not None and self.epoch != epoch:
+            raise ValueError(f"posterior has epoch {self.epoch}, not {epoch}")
 
     @abstractmethod
     def sample(self, key, n):
@@ -163,7 +179,11 @@ class MixturePosterior(AbstractPosterior):
         """The highest-evidence mode as a :class:`GaussianPosterior`."""
         idx = jnp.argmax(self.log_evidences)
         return GaussianPosterior(
-            mean=self.means[idx], cov=self.covs[idx], evidence=self.log_evidences[idx]
+            mean=self.means[idx],
+            cov=self.covs[idx],
+            evidence=self.log_evidences[idx],
+            chart=self.chart,
+            epoch=self.epoch,
         )
 
     def log_prob(self, z):
@@ -203,29 +223,12 @@ class SamplePosterior(AbstractPosterior):
         log_weights: Per-particle log weights, normalized or not. Shape ``(n,)``.
         evidence: Scalar log marginal likelihood ``log Z`` (or ``NaN``).
         param_names: Names of the ``d`` columns. Default ``()``.
-        chart: Name of the coordinate chart the columns are in (for example the
-            target or model that produced them), or ``None`` when undeclared.
-        epoch: The :class:`~hwoutils.epoch.Epoch` the sample times are measured
-            from, or ``None`` when the samples carry no epoch-dependent phase.
     """
 
     samples: jnp.ndarray
     log_weights: jnp.ndarray
     evidence: jnp.ndarray
     param_names: tuple[str, ...] = eqx.field(static=True, default=())
-    chart: str | None = eqx.field(static=True, default=None)
-    epoch: Epoch | None = eqx.field(static=True, default=None)
-
-    def require(self, *, chart=None, epoch=None):
-        """Raise ``ValueError`` if a declared chart or epoch differs from the request.
-
-        An undeclared (``None``) field on the posterior never matches a requested
-        value: a consumer that needs a chart or epoch refuses undeclared samples.
-        """
-        if chart is not None and self.chart != chart:
-            raise ValueError(f"samples are in chart {self.chart!r}, not {chart!r}")
-        if epoch is not None and self.epoch != epoch:
-            raise ValueError(f"samples have epoch {self.epoch}, not {epoch}")
 
     def _resample_idx(self, key, n):
         cdf = jnp.cumsum(jax.nn.softmax(self.log_weights))
@@ -268,7 +271,7 @@ def cluster_to_mixture(posterior, k, *, key, iters=25, cov_floor=1e-6):
 
     Returns:
         A :class:`MixturePosterior` with ``means (k, d)``, ``covs (k, d, d)``,
-        ``log_evidences (k,)``.
+        ``log_evidences (k,)``, and the chart and epoch of ``posterior``.
     """
     x = posterior.samples
     w = jax.nn.softmax(posterior.log_weights)
@@ -297,4 +300,10 @@ def cluster_to_mixture(posterior, k, *, key, iters=25, cov_floor=1e-6):
 
     covs = jax.vmap(_cov)(means, wmass.T) + cov_floor * jnp.eye(d)[None]
     log_evidences = jnp.log(jnp.maximum(mass, 1e-30))
-    return MixturePosterior(means=means, covs=covs, log_evidences=log_evidences)
+    return MixturePosterior(
+        means=means,
+        covs=covs,
+        log_evidences=log_evidences,
+        chart=posterior.chart,
+        epoch=posterior.epoch,
+    )

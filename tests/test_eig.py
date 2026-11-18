@@ -177,10 +177,12 @@ def test_chart_eig_and_mode_predictions():
         dict(params, albedo=jnp.log(0.08), radius_AU=jnp.log(0.5 * Rearth2AU))
     )
     means = jnp.stack((bright, faint))
-    posterior = MixturePosterior(
-        means=means,
-        covs=jnp.tile(0.01 * jnp.eye(bright.size), (2, 1, 1)),
-        log_evidences=jnp.zeros(2),
+    posterior = problem.declare(
+        MixturePosterior(
+            means=means,
+            covs=jnp.tile(0.01 * jnp.eye(bright.size), (2, 1, 1)),
+            log_evidences=jnp.zeros(2),
+        )
     )
     times = term.data.times
     summary = mode_summary(posterior, problem)
