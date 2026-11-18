@@ -51,7 +51,11 @@ from photomancy.orbit.grid_search import (
     ParamBounds,
     grid_search,
 )
-from photomancy.orbit.inference import OrbitProblem, build_orbit_logdensity
+from photomancy.orbit.inference import (
+    OrbitProblem,
+    build_chart_logdensity,
+    build_orbit_logdensity,
+)
 from photomancy.orbit.init import find_init, find_init_top_k, ti_to_init
 from photomancy.orbit.laplace import map_laplace_fit, map_laplace_mixture_fit
 from photomancy.orbit.likelihoods import (
@@ -129,6 +133,7 @@ __all__ = [
     "alias_breaking_eig",
     "alias_breaking_eig_from_covariances",
     "astrometric_loss",
+    "build_chart_logdensity",
     "build_orbit_logdensity",
     # Orbital-mechanics primitives (re-exported from orbix)
     "ecc_distribution",

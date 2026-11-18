@@ -14,12 +14,14 @@ each and keeps the core free of a heavy distribution dependency.
 """
 
 from abc import abstractmethod
+from typing import Protocol
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from hwoutils.constants import two_pi
 from jax.scipy.linalg import solve_triangular
-from jax.scipy.special import erf, erfinv, logsumexp
+from jax.scipy.special import betainc, erf, erfinv, logsumexp
 from jax.scipy.stats import beta
 
 ECC_ALPHA = 0.867
@@ -33,38 +35,115 @@ _MIXTURE_NO_CUBE = (
 )
 
 
-def orbit_log_prior(orbit, *, period_range_d=(1.0, 100000.0)):
-    """Default one-planet log prior against the charts' reference measure.
+RAYLEIGH_SCALES = {"rayleigh": 0.3, "vaneylen19": 0.049}
 
-    ``orbit`` is a scalar FrameOrbit; period bounds are positive and increasing.
-    The eccentricity law is Beta(0.867, 3.03), with isotropic orientation and
-    uniform phase. Angles are interpreted on one 2*pi fundamental cell.
 
-    Write l=ln(a/AU), c=cos(i), and dnu=e de dc dW dw dM dl.
-    At fixed mass dln(P)=3/2 dl; uniform ln(P), c, W, w, M gives
-    p_nu = 3 Beta(e;0.867,3.03) / [4 ln(Pmax/Pmin) (2*pi)^3 e].
+def _rayleigh_cdf(e, sigma):
+    return -jnp.expm1(-0.5 * (e / sigma) ** 2)
 
-    Thus the 1/e factor divides out the polar eccentricity area in dnu.
-    The density diverges as e approaches zero but is integrable against dnu.
-    We assign -inf at the measure-zero circular boundary, at e>=1, and
-    outside the inclusive period interval. No clipping changes the interior
-    law. Invalid eccentricities are sanitized before logarithms.
+
+def _rayleigh_log_area(e, sigma, e_max):
+    """Truncated Rayleigh log density against e de, including its limit at zero."""
+    return (
+        -0.5 * (e / sigma) ** 2
+        - 2 * jnp.log(sigma)
+        - jnp.log(_rayleigh_cdf(e_max, sigma))
+    )
+
+
+def orbit_log_prior(
+    orbit, *, period_range_d=(1.0, 100000.0), ecc_prior="kipping13", e_max=1.0
+):
+    """One-planet density against e de d(cos i) dW dw dM dln(a/AU).
+
+    The period is log-uniform on its inclusive physical bounds at the orbit's
+    actual total mass. Angles occupy one fundamental cell. Condition the named
+    eccentricity law on e < e_max. At e=0 the Rayleigh laws have a finite
+    area density; assign zero density at the singular point for the other laws.
     """
     e = orbit.e
-    period_d = orbit.period_d
-    low_d, high_d = period_range_d
-    valid_e = (e > 0) & (e < 1)
-    safe_e = jnp.where(valid_e, e, 0.5)
-    log_density = (
-        beta.logpdf(safe_e, ECC_ALPHA, ECC_BETA)
-        - jnp.log(safe_e)
-        + jnp.log(1.5)
-        - jnp.log(jnp.log(high_d / low_d))
-        - jnp.log(2.0)
-        - 3 * jnp.log(2 * jnp.pi)
+    valid = (e >= 0) & (e < e_max) & (e_max <= 1)
+    safe_e = jnp.where(valid & (e > 0), e, 0.5)
+    if ecc_prior in RAYLEIGH_SCALES:
+        area = _rayleigh_log_area(
+            jnp.where(valid, e, 0.0), RAYLEIGH_SCALES[ecc_prior], e_max
+        )
+    elif ecc_prior == "disk":
+        valid = valid & (e > 0)
+        area = -jnp.log(safe_e) - jnp.log(e_max)
+    elif ecc_prior == "kipping13":
+        valid = valid & (e > 0)
+        area = (
+            beta.logpdf(safe_e, ECC_ALPHA, ECC_BETA)
+            - jnp.log(safe_e)
+            - jnp.log(betainc(ECC_ALPHA, ECC_BETA, jnp.asarray(e_max, dtype=e.dtype)))
+        )
+    else:
+        raise ValueError(f"Unknown ecc_prior={ecc_prior!r}")
+    low_d, high_d = map(jnp.asarray, period_range_d)
+    valid &= (
+        (low_d > 0)
+        & (high_d > low_d)
+        & jnp.isfinite(high_d)
+        & (orbit.period_d >= low_d)
+        & (orbit.period_d <= high_d)
     )
-    valid = valid_e & (period_d >= low_d) & (period_d <= high_d)
-    return jnp.where(valid, log_density, -jnp.inf)
+    return jnp.where(
+        valid, area + jnp.log(1.5 / (2 * two_pi**3 * jnp.log(high_d / low_d))), -jnp.inf
+    )
+
+
+def log_uniform_prior(value, *, bounds):
+    """Elementwise log density against d(value), on finite positive physical bounds."""
+    low, high = map(jnp.asarray, bounds)
+    valid = (
+        (value >= low) & (value <= high) & (low > 0) & (high > low) & jnp.isfinite(high)
+    )
+    safe = jnp.where(valid, value, 1.0)
+    return jnp.where(valid, -jnp.log(safe) - jnp.log(jnp.log(high / low)), -jnp.inf)
+
+
+def half_normal_log_prior(value, *, scale):
+    """Elementwise log density against d(value), e.g. RV jitter in m/s."""
+    return jnp.where(
+        (value >= 0) & (scale > 0) & jnp.isfinite(scale),
+        0.5 * jnp.log(2 / jnp.pi) - jnp.log(scale) - 0.5 * (value / scale) ** 2,
+        -jnp.inf,
+    )
+
+
+class PopulationIntensity(Protocol):
+    """Per-slot intensity against dnu d(mass/Mearth) and discrete type counting."""
+
+    def log_intensity(self, system, stars):
+        """Return per-slot log occurrence intensity in the stated measure."""
+
+    def log_rate(self, stars):
+        """Return log integrated occurrence rates per host."""
+
+
+class PopulationPrior(eqx.Module):
+    """One host and one valid planet, possibly padded, against dnu d(mass/Mearth).
+
+    Subtract the host log occurrence rate once to condition on one planet.
+    A sampler using ln(mass/Mearth) must add ln(mass/Mearth) to its log volume.
+    The population supplies both the mass and orbit law.
+    """
+
+    population: PopulationIntensity
+    stars: object
+
+    def __call__(self, system):
+        """Return the normalized one-planet mark density, or -inf off support."""
+        (rate,) = self.population.log_rate(self.stars)
+        values = self.population.log_intensity(system, self.stars)
+        if values.ndim != 1:
+            raise ValueError("PopulationPrior requires an unbatched system")
+        return jnp.where(
+            (system.valid.sum() == 1) & jnp.isfinite(rate),
+            jnp.where(system.valid, values, 0.0).sum() - rate,
+            -jnp.inf,
+        )
 
 
 def _std_normal_quantile(u):

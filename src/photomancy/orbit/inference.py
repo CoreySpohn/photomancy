@@ -1,4 +1,4 @@
-"""Bridge the NumPyro orbit model onto the generic photomancy backends.
+"""Sampler densities for chart-based and NumPyro orbit models.
 
 ``build_orbit_logdensity`` turns an orbit fitting problem (data + priors) into a
 flat ``logdensity(z)`` over the unconstrained NumPyro position, plus the maps a
@@ -13,15 +13,22 @@ high-throughput path (static-arg JIT reuses one compilation across many fits); t
 bridge is the engine-agnostic path that closure-captures the (small, padded) data.
 """
 
+import math
 from collections.abc import Callable
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.constants import G, Mearth2kg
+from hwoutils.constants import G, Mearth2kg, two_pi
 from jax.flatten_util import ravel_pytree
 from numpyro.distributions.transforms import biject_to
 from numpyro.infer.util import initialize_model
+from orbix.system import (
+    CartesianChart,
+    ClassicalChart,
+    EccentricityVectorChart,
+    FrameChart,
+)
 
 from photomancy.orbit._numpyro_bridge import (
     _build_orbit_model,
@@ -30,6 +37,83 @@ from photomancy.orbit._numpyro_bridge import (
 )
 from photomancy.orbit.init import elements_to_sites
 from photomancy.posterior import SamplePosterior
+from photomancy.system_density import SystemLogDensity
+
+
+def orbit_chart_log_volume(chart, coords):
+    """Normalized chart pullback of e de d(cos i) dW dw dM dln(a/AU).
+
+    Use one angular cell for the classical and eccentricity-vector charts.
+    Both Frame lifts integrate to the unnormalized Haar volume 8*pi^2.
+    The Cartesian determinant restores the constant omitted by orbix.
+    """
+    volume = chart.log_volume(coords)
+    if isinstance(chart, CartesianChart):
+        nonradial = jnp.any(jnp.cross(coords[..., :3], coords[..., 3:]) != 0, axis=-1)
+        return jnp.where(nonradial, volume + math.log(16), -jnp.inf)
+    if isinstance(chart, FrameChart):
+        sd = chart.gauge_sd
+        if sd is not None:
+            if sd <= 0 or not math.isfinite(sd):
+                raise ValueError("Frame gauge_sd must be positive and finite")
+            # Integral over S^3 and the positive truncated Gaussian radius.
+            positive_fraction = 0.5 * math.erfc(-1 / (math.sqrt(2) * sd))
+            radial_integral = sd * math.sqrt(two_pi) * positive_fraction
+            return volume + math.log(4 / radial_integral)
+        return volume + math.log(8 * math.pi**2)
+    if isinstance(chart, ClassicalChart):
+        angles, low = coords[..., 3:], 0.0
+    elif isinstance(chart, EccentricityVectorChart):
+        # from_orbit recovers node and longitude with atan2.
+        angles, low = coords[..., 4:], -math.pi
+    else:
+        raise ValueError(f"Unsupported fixed-mass orbit chart {type(chart).__name__}")
+    in_cell = jnp.all((angles >= low) & (angles < low + two_pi), axis=-1)
+    return jnp.where(in_cell, volume, -jnp.inf)
+
+
+def _build_chart_system(chart, build, star_mass_kg, params, **body):
+    mass_kg = star_mass_kg + Mearth2kg * body.get("mass_Mearth", 0.0)
+    orbit = chart.to_orbit(params["orbit"], mu_AU3_per_d2=G * mass_kg)
+    return build(orbit, **body)
+
+
+def _orbit_volume(chart, params):
+    return orbit_chart_log_volume(chart, params["orbit"])
+
+
+def build_chart_logdensity(
+    chart,
+    build,
+    prior,
+    *,
+    star_mass_kg,
+    terms=(),
+    scalars=None,
+    body_inputs=(),
+    term_inputs=None,
+):
+    """Construct a one-planet density with a chart and named scalar coordinates.
+
+    Supply a position dict with an ``orbit`` vector and a leaf per scalar.
+    ``build(orbit, **body)`` constructs the system scored by ``prior(system)``.
+    A sampled ``mass_Mearth`` goes into both the two-body orbit and the builder.
+    List other physical properties (e.g. radius_AU and albedo) in body_inputs.
+    Bind instrument coordinates to likelihood keywords with term_inputs, e.g.
+    ``{0: ("jitter_m_per_s",)}``. An empty terms tuple gives a prior-only fit.
+    """
+    scalars = {} if scalars is None else scalars
+    if "mass_Mearth" in scalars and "mass_Mearth" not in body_inputs:
+        body_inputs = (*body_inputs, "mass_Mearth")
+    return SystemLogDensity(
+        eqx.Partial(_build_chart_system, chart, build, star_mass_kg),
+        tuple(terms),
+        prior,
+        eqx.Partial(_orbit_volume, chart),
+        scalars,
+        body_inputs,
+        {} if term_inputs is None else term_inputs,
+    )
 
 
 class OrbitProblem(eqx.Module):

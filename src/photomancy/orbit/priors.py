@@ -40,7 +40,13 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.distributions import constraints
 
-from photomancy.priors import ECC_ALPHA, ECC_BETA
+from photomancy.priors import (
+    ECC_ALPHA,
+    ECC_BETA,
+    RAYLEIGH_SCALES,
+    _rayleigh_cdf,
+    _rayleigh_log_area,
+)
 
 # ---------------------------------------------------------------------------
 # Eccentricity distributions (sampler-context-free)
@@ -64,7 +70,7 @@ class _TruncatedRayleigh(dist.Distribution):
 
     @property
     def _normalizer(self):
-        return -jnp.expm1(-1.0 / (2.0 * self.sigma**2))
+        return _rayleigh_cdf(1.0, self.sigma)
 
     def sample(self, key, sample_shape=()):
         """Draw from the conditional CDF, avoiding the excluded upper endpoint."""
@@ -80,8 +86,7 @@ class _TruncatedRayleigh(dist.Distribution):
         """Return the normalized density, with zero probability outside [0, 1)."""
         valid = (value >= 0.0) & (value < 1.0)
         safe_value = jnp.where(valid, value, 0.5)
-        base = dist.Weibull(self.sigma * jnp.sqrt(2.0), 2.0)
-        log_prob = base.log_prob(safe_value) - jnp.log(self._normalizer)
+        log_prob = _rayleigh_log_area(safe_value, self.sigma, 1.0) + jnp.log(safe_value)
         return jnp.where(valid, log_prob, -jnp.inf)
 
 
@@ -91,8 +96,8 @@ class _TruncatedRayleigh(dist.Distribution):
 # via ``.sample(key, shape)`` outside any model context.
 _ECC_DISTRIBUTIONS = {
     "disk": lambda: dist.Uniform(0.0, 1.0),
-    "rayleigh": lambda: _TruncatedRayleigh(0.3),
-    "vaneylen19": lambda: _TruncatedRayleigh(0.049),
+    "rayleigh": lambda: _TruncatedRayleigh(RAYLEIGH_SCALES["rayleigh"]),
+    "vaneylen19": lambda: _TruncatedRayleigh(RAYLEIGH_SCALES["vaneylen19"]),
     "kipping13": lambda: dist.Beta(ECC_ALPHA, ECC_BETA),
 }
 

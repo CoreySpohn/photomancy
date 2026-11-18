@@ -184,8 +184,18 @@ class RadialVelocityTerm(AbstractTerm):
         if self.jitters is not None and jnp.shape(self.jitters) != (self.data.n_inst,):
             raise ValueError("jitters must have shape (data.n_inst,)")
 
-    def __call__(self, model):
-        """Return the marginalized log-likelihood and stellar RVs, ``(T,)``."""
+    def _jitters(self, jitter_m_per_s):
+        jitters = self.jitters if jitter_m_per_s is None else jitter_m_per_s
+        if jitter_m_per_s is not None and self.jitters is not None:
+            raise ValueError("Choose fixed or sampled RV jitter")
+        if jitters is None:
+            jitters = jnp.zeros(self.data.n_inst)
+        if jnp.shape(jitters) != (self.data.n_inst,):
+            raise ValueError("jitters must have shape (data.n_inst,)")
+        return jitters
+
+    def __call__(self, model, *, jitter_m_per_s=None):
+        """Score RVs with fixed or sampled per-instrument jitter (m/s)."""
         valid = self.data.is_valid
         data = RVData(
             times=jnp.where(valid, self.data.times, 0.0),
@@ -197,19 +207,18 @@ class RadialVelocityTerm(AbstractTerm):
         )
         prediction = self.select(model).star_radial_velocity(time_d=data.times)
         prediction = jnp.where(valid, prediction, 0.0)
-        jitters = jnp.zeros(data.n_inst) if self.jitters is None else self.jitters
         value = loglike_rv_marginalized(
             data.rv,
             prediction,
             data.rv_err,
             data.inst_ids,
             data.n_inst,
-            jitters,
+            self._jitters(jitter_m_per_s),
             valid,
         )
         return value, prediction
 
-    def sample(self, key, model) -> Self:
+    def sample(self, key, model, *, jitter_m_per_s=None) -> Self:
         """Draw Gaussian RV noise with zero instrument offsets.
 
         The score marginalizes offsets against a flat measure and is therefore
@@ -220,7 +229,7 @@ class RadialVelocityTerm(AbstractTerm):
         data = self.data
         valid = data.is_valid
         ids = jnp.where(valid, data.inst_ids, 0)
-        jitter = jnp.zeros(data.n_inst) if self.jitters is None else self.jitters
+        jitter = self._jitters(jitter_m_per_s)
         sigma = jnp.sqrt(jnp.where(valid, data.rv_err, 1.0) ** 2 + jitter[ids] ** 2)
         draw = self(model)[1] + sigma * jax.random.normal(
             key, data.rv.shape, dtype=jnp.float64

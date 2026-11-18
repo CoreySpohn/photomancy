@@ -268,7 +268,12 @@ def test_aux_jit_gradient_and_prior_only(fits):
     )
     np.testing.assert_array_equal(aux["term_values"], (term_value, second_value))
     np.testing.assert_array_equal(aux["predictions"], (prediction, second_prediction))
-    for part in (counted.build, *counted.terms, counted.prior, counted.log_volume):
+    for part in (
+        counted.build,
+        *counted.terms,
+        counted.prior,
+        counted.orbit_log_volume,
+    ):
         assert part.call_count == 1
 
 
