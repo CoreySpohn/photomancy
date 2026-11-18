@@ -14,12 +14,12 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from hwoutils.constants import G, Msun2kg  # noqa: E402
+from kinematics import predict_relative_astrometry  # noqa: E402
 from scipy import stats  # noqa: E402
 
 from photomancy.orbit._frame import sky_offsets_arcsec  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import TIBasisModel  # noqa: E402
-from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.likelihoods import loglike_relative_astrom  # noqa: E402
 from photomancy.orbit.updater import (  # noqa: E402
     ConjugateGaussianTarget,

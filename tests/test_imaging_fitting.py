@@ -13,23 +13,19 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+from kinematics import (  # noqa: E402
+    predict_photometry,
+    predict_relative_astrometry,
+)
 from orbix.equations import period_to_sma  # noqa: E402
 
-from photomancy.backends import LaplaceMixtureBackend  # noqa: E402
 from photomancy.orbit.data import (  # noqa: E402
     MAX_CC_PTS,
     MAX_IMG,
     ImagingData,
     NullData,
-    OrbitData,
     RelativeAstromData,
 )
-from photomancy.orbit.forward import (  # noqa: E402
-    predict_photometry,
-    predict_relative_astrometry,
-)
-from photomancy.orbit.inference import build_numpyro_logdensity  # noqa: E402
-from photomancy.orbit.init import find_init_top_k  # noqa: E402
 from photomancy.orbit.likelihoods import (  # noqa: E402
     loglike_imaging,
     loglike_null,
@@ -111,19 +107,6 @@ def test_imagingdata_pad_produces_max_sized_valid_container():
     assert bool(padded.is_detected[0]) and not bool(padded.is_detected[1])
 
 
-def test_orbit_data_padded_handles_non_max_null_container():
-    """OrbitData.padded() pads a non-MAX null container instead of crashing."""
-    small = NullData(
-        epochs=jnp.array([100.0, 500.0]),
-        sep_grid=jnp.broadcast_to(jnp.linspace(0.05, 0.5, 40), (2, 40)),
-        dmag0_grid=jnp.full((2, 40), 25.0),
-        is_valid=jnp.ones(2, dtype=bool),
-    )
-    padded_null = OrbitData(null=small).padded().null
-    assert padded_null.epochs.shape[0] == MAX_IMG
-    assert int(padded_null.is_valid.sum()) == 2
-
-
 @pytest.mark.slow
 def test_joint_astrom_imaging_fit_recovers_period():
     """A joint astrometry + imaging fit runs end-to-end and recovers the period.
@@ -173,19 +156,38 @@ def test_joint_astrom_imaging_fit_recovers_period():
         null_dmag0_grid=jnp.zeros((0, npts)),
     )
 
-    problem = build_numpyro_logdensity(
-        msun,
-        dist,
-        relative_astrom_data=astrom,
-        imaging_data=img,
-        log_P_range=log_p_range,
-    )
-    init_dicts = find_init_top_k(astrom, msun, dist, k=5, log_T_range=log_p_range)
-    inits = jnp.stack([problem.init_to_z(d) for d in init_dicts])
+    from orbix.system import ClassicalChart
+    from test_system_priors import BOUNDS, _scene
 
-    post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=300).run(
-        problem.logdensity, inits
+    from photomancy import ImagingTerm, RelativeAstrometryTerm
+    from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
+    from photomancy.orbit.init import find_init
+    from photomancy.orbit.laplace import map_laplace_mixture_fit
+    from photomancy.priors import FactorizedOrbitPrior, LogUniformPrior
+    from photomancy.system_density import ScalarCoordinate
+
+    chart = ClassicalChart()
+    density = build_chart_logdensity(
+        chart,
+        _scene,
+        FactorizedOrbitPrior(
+            lambda scene: jax.tree.map(lambda x: x[0], scene.dynamics.orbits),
+            (10.0 ** log_p_range[0], 10.0 ** log_p_range[1]),
+        ),
+        star_mass_kg=msun,
+        terms=(RelativeAstrometryTerm(astrom), ImagingTerm(img)),
+        scalars={
+            name: ScalarCoordinate(LogUniformPrior(bounds))
+            for name, bounds in BOUNDS.items()
+        },
+        body_inputs=("radius_AU", "albedo"),
     )
+    scalars = dict(mass_Mearth=1.0, radius_AU=1e-4, albedo=0.3)
+    starts, _ = find_init(astrom, msun, dist, k=5, log_T_range=log_p_range, chart=chart)
+    template = {"orbit": starts[0], **{k: jnp.log(v) for k, v in scalars.items()}}
+    problem = ChartOrbitProblem(density, template)
+    inits = jnp.stack([problem.flatten(dict(template, orbit=s)) for s in starts])
+    post = map_laplace_mixture_fit(problem, inits, n_steps=300)
 
     assert isinstance(post, MixturePosterior)
     best = post.means[jnp.argmax(post.log_evidences)]

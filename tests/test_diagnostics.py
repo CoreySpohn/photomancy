@@ -9,9 +9,12 @@ from sky_reference import position_au
 
 
 class _Problem:
-    """A minimal OrbitProblem stand-in with a traceable to_physical."""
+    """A minimal problem stand-in with a traceable to_physical."""
 
     param_names = ("z0", "z1")
+
+    def require(self, posterior):
+        """Accept any posterior; chart checks are covered elsewhere."""
 
     def to_physical(self, z):
         """Map a flat z to a physical dict."""

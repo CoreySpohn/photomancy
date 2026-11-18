@@ -1,171 +1,126 @@
-"""Custom orbit likelihoods and independent planet-scale priors."""
+"""Custom orbit likelihood terms and independent planet-scale coordinates."""
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import Msun2kg
-from numpyro.handlers import seed, trace
-from numpyro.infer import Predictive
-from scipy.stats import kstest
+from kinematics import predict_photometry, predict_relative_astrometry
+from orbit_fit import classical_coordinates, scale_problem
 
-from photomancy.orbit.data import NullData, OrbitData, RelativeAstromData
-from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
-from photomancy.orbit.inference import build_numpyro_logdensity, to_unconstrained
+from photomancy import NullTerm
+from photomancy.orbit._frame import orbit_rows
+from photomancy.orbit.data import NullData, RelativeAstromData
 from photomancy.orbit.likelihoods import loglike_null, loglike_relative_astrom
-from photomancy.orbit.model import build_model
-from photomancy.posterior import SamplePosterior
 
 jax.config.update("jax_enable_x64", True)
 
+DIST_PC = 10.0
+PERIOD_D = 900.0
+ORBIT = classical_coordinates(1.6, 0.2, 0.3, 0.8, 0.5, 40.0, PERIOD_D)
 
-def test_physical_scale_samples_round_trip_through_unconstrained():
-    """Fails for the dropped-log_Rp/log_Ag mutant in to_unconstrained.
 
-    The mass round-trip test does not cover retained radius and albedo samples.
+def _rows(scene):
+    """One planet's ``(a, e, cos_i, W, cos_w, sin_w, tp)`` from a scene."""
+    return orbit_rows(jax.tree.map(lambda leaf: leaf[0], scene.dynamics.orbits))
+
+
+def test_physical_scale_coordinates_decode_to_radius_albedo_and_area():
+    """Fails for a dropped radius or albedo decode in ``to_physical``.
+
+    The sampled log radius and log albedo of three points decode to
+    ``Rp``, ``Ag`` and ``Lambda = Ag Rp**2`` to 1e-12 relative, and the flat chart
+    vector round-trips (the mass round-trip test does not cover these scalars).
     """
-    problem = build_numpyro_logdensity(
-        Msun2kg, 10.0, sample_planet_scale=True, ecc_prior="disk"
+    problem = scale_problem(
+        (), ORBIT, star_mass_kg=Msun2kg, dist_pc=DIST_PC, period_range_d=(600, 1600)
     )
-    log_radius = jnp.array([-4.02949, -3.82996])
-    log_albedo = jnp.array([-1.2, -0.4])
+    log_radius = jnp.array([-9.5, -7.9, -6.8])
+    log_albedo = jnp.array([-1.2, -0.4, -2.3])
     z = jax.vmap(
-        lambda rp, ag: problem.init_to_z({"log_Rp": rp[None], "log_Ag": ag[None]})
+        lambda r, a: problem.flatten({"orbit": ORBIT, "radius_AU": r, "albedo": a})
     )(log_radius, log_albedo)
     physical = jax.vmap(problem.to_physical)(z)
-    names = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp", "Mp", "Rp", "Ag")
-    post = SamplePosterior(
-        samples=jnp.stack([physical[name] for name in names], axis=1),
-        log_weights=jnp.log(jnp.array([0.3, 0.7])),
-        evidence=jnp.array(-2.0),
-        param_names=names,
+    np.testing.assert_allclose(jnp.log(physical["Rp"]), log_radius, rtol=1e-12)
+    np.testing.assert_allclose(jnp.log(physical["Ag"]), log_albedo, rtol=1e-12)
+    np.testing.assert_allclose(
+        physical["Lambda"], physical["Ag"] * physical["Rp"] ** 2, rtol=1e-12
     )
-    converted = to_unconstrained(post, problem, Msun2kg)
-    recovered = jax.vmap(problem.to_physical)(converted.samples)
-    np.testing.assert_allclose(jnp.log10(recovered["Rp"]), log_radius, atol=1e-14)
-    np.testing.assert_allclose(jnp.log10(recovered["Ag"]), log_albedo, atol=1e-14)
-    np.testing.assert_allclose(recovered["Lambda"], physical["Lambda"], rtol=1e-12)
-    np.testing.assert_allclose(converted.samples, z, rtol=0.0, atol=1e-12)
-    np.testing.assert_array_equal(converted.log_weights, post.log_weights)
-    assert converted.evidence == post.evidence
+    back = jax.vmap(problem.unflatten)(z)
+    np.testing.assert_allclose(back["radius_AU"], log_radius, rtol=1e-12)
+    np.testing.assert_allclose(back["albedo"], log_albedo, rtol=1e-12)
 
 
-def test_planet_scale_prior_only_is_log_uniform():
-    """Fails if data-free scales are rejected or their logarithms are not uniform.
+def _custom_null(data):
+    """Null term from the independent kinematics and the flux-space null law."""
 
-    With 1024 draws, the KS 1% cutoff detects a CDF error of about 0.051.
-    No existing test covers prior-only orbit models.
-    """
-    ranges = {"log_Rp": (-4.8, -3.1), "log_Ag": (-1.7, -0.2)}
-    model = build_model(
-        sample_planet_scale=True,
-        log_Rp_range=ranges["log_Rp"],
-        log_Ag_range=ranges["log_Ag"],
-    )
-    draws = Predictive(model, num_samples=1024)(
-        jax.random.key(0), Msun2kg, 10.0, OrbitData()
-    )
-    for name, (low, high) in ranges.items():
-        uniform = (np.asarray(draws[name]).ravel() - low) / (high - low)
-        assert kstest(uniform, "uniform").pvalue > 0.01
-    np.testing.assert_allclose(draws["Lambda"], draws["Ag"] * draws["Rp"] ** 2)
-    assert np.all(draws["Mp"] > 0)
-    np.testing.assert_array_equal(draws["ll_total"], 0.0)
+    def term(scene, *, radius_AU, albedo):
+        rows = _rows(scene)
+        alpha, dmag = predict_photometry(
+            data.epochs, *rows, Msun2kg, albedo * radius_AU**2, DIST_PC
+        )
+        return loglike_null(alpha, dmag, data), None
+
+    return term
 
 
-@pytest.mark.parametrize(
-    "channel",
-    ["rv", "relative_astrom", "stellar_astrom", "pm_anomaly", "null", "imaging"],
-)
-def test_custom_overlap_requires_explicit_opt_in(channel):
-    """Fails if any built-in channel can silently double count custom data.
-
-    Six distinct channels share this construction guard; no previous guard exists.
-    """
-    config = {f"has_{channel}": True, "custom_loglike": lambda p: 0.0}
-    with pytest.raises(ValueError, match="allow_overlap=True"):
-        build_model(**config)
-    build_model(**config, allow_overlap=True)
-
-
-def test_custom_multiplanet_callback_runs_once_and_requires_scalar():
-    """Fails if the whole-data factor is repeated per planet or accepts a vector.
-
-    Existing multi-planet tests only exercise built-in forward models.
-    """
-    model = build_model(
-        n_planets=2,
-        custom_data={"scale": jnp.array([2.0, 3.0])},
-        custom_loglike=lambda p: -jnp.sum(p["Ag"] * p["custom_data"]["scale"]),
-    )
-    sites = trace(seed(model, rng_seed=0)).get_trace(Msun2kg, 10.0, OrbitData())
-    expected = -jnp.sum(sites["Ag"]["value"] * jnp.array([2.0, 3.0]))
-    np.testing.assert_allclose(sites["ll_custom"]["fn"].log_factor, expected)
-    bad_model = build_model(custom_loglike=lambda p: jnp.ones(1))
-    with pytest.raises(ValueError, match="scalar"):
-        trace(seed(bad_model, rng_seed=0)).get_trace(Msun2kg, 10.0, OrbitData())
-
-
-def _custom_null(params):
-    """Use the same forward predictions and flux-space null law as the model."""
-    data = params["custom_data"]
-    alpha, dmag = predict_photometry(
-        data.epochs,
-        *(params[k] for k in ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")),
-        params["Ms"],
-        params["Lambda"],
-        params["dist_pc"],
-        Mp=params["Mp"],
-    )
-    return loglike_null(alpha, dmag, data)
-
-
-@pytest.mark.medium
+@pytest.mark.medium(reason="two chart densities with a null curve, 9 s cold")
 def test_custom_null_matches_builtin_logdensity():
-    """Fails if custom physical parameters, prior factors or null terms differ.
+    """Fails if a caller-defined term, its scalar bindings or the prior differ.
 
-    No existing test compares a caller-defined likelihood with a built-in law.
+    The built-in null term reads the scene's own albedo and radius; the custom
+    term reads the same coordinates through ``term_inputs`` and predicts with the
+    independent perifocal kinematics. At eight random points the two joint
+    densities agree to 1e-10 (floating-point floor of the sums).
     """
     data = NullData.pad(
         epochs=jnp.array([0.0, 100.0]),
         sep_grid=jnp.array([[0.0, 1.0], [0.0, 1.0]]),
         dmag0_grid=jnp.full((2, 2), 23.0),
     )
-    config = dict(sample_planet_scale=True, ecc_prior="disk")
-    builtin = build_numpyro_logdensity(Msun2kg, 10.0, null_data=data, **config)
-    custom = build_numpyro_logdensity(
-        Msun2kg, 10.0, custom_loglike=_custom_null, custom_data=data, **config
+    kwargs = dict(star_mass_kg=Msun2kg, dist_pc=DIST_PC)
+    builtin = scale_problem((NullTerm(data),), ORBIT, **kwargs)
+    custom = scale_problem(
+        (_custom_null(data),),
+        ORBIT,
+        term_inputs={0: ("radius_AU", "albedo")},
+        **kwargs,
     )
-    assert builtin.param_names == custom.param_names
-    positions = jax.random.normal(jax.random.key(0), (8, len(custom.param_names)))
+    assert builtin.position_template.keys() == custom.position_template.keys()
+    z = builtin.flatten(builtin.position_template)
+    points = z + 0.3 * jax.random.normal(jax.random.key(0), (8, z.size))
     np.testing.assert_allclose(
-        jax.jit(jax.vmap(custom.logdensity))(positions),
-        jax.jit(jax.vmap(builtin.logdensity))(positions),
+        jax.jit(jax.vmap(custom.logdensity))(points),
+        jax.jit(jax.vmap(builtin.logdensity))(points),
         rtol=0.0,
         atol=1e-10,
     )
 
 
-def _custom_astrom(params):
+def _custom_astrom(data, offsets):
     """Average sky positions at three exposure nodes before evaluating the law."""
-    data, offsets = params["custom_data"]
-    ra, dec = predict_relative_astrometry(
-        (data.times[:, None] + offsets).ravel(),
-        *(params[k] for k in ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")),
-        params["Ms"],
-        params["dist_pc"],
-        Mp=params["Mp"],
-    )
-    return loglike_relative_astrom(
-        ra.reshape(-1, 3).mean(axis=1), dec.reshape(-1, 3).mean(axis=1), data
-    )
+
+    def term(scene):
+        ra, dec = predict_relative_astrometry(
+            (data.times[:, None] + offsets).ravel(),
+            *_rows(scene),
+            Msun2kg,
+            DIST_PC,
+        )
+        return loglike_relative_astrom(
+            ra.reshape(-1, 3).mean(axis=1), dec.reshape(-1, 3).mean(axis=1), data
+        ), None
+
+    return term
 
 
-@pytest.mark.medium
-def test_custom_astrometry_is_prior_plus_custom_and_data_are_isolated():
-    """Fails if absent astrometry adds a term or custom closures share stale data.
+@pytest.mark.medium(reason="three chart densities with an exposure-averaged law")
+def test_custom_term_is_prior_plus_custom_and_closures_are_isolated():
+    """Fails if a custom term adds a hidden factor or closures share stale data.
 
-    Existing bridge tests only cover instantaneous built-in astrometry.
+    The joint with one custom term equals the data-free joint plus the term's own
+    value to 1e-12; a second term over shifted exposure nodes gives the density
+    for its own nodes and differs from the first by more than 1e-6.
     """
     data = RelativeAstromData(
         times=jnp.array([100.0]),
@@ -177,67 +132,19 @@ def test_custom_astrometry_is_prior_plus_custom_and_data_are_isolated():
         planet_id=jnp.zeros(1, dtype=int),
         is_valid=jnp.ones(1, dtype=bool),
     )
-    bound_data = (data, jnp.array([-10.0, 0.0, 10.0]))
-    config = dict(ecc_prior="disk", sample_planet_scale=True)
-    prior = build_numpyro_logdensity(Msun2kg, 10.0, **config)
-    custom = build_numpyro_logdensity(
-        Msun2kg,
-        10.0,
-        relative_astrom_data=None,
-        custom_loglike=_custom_astrom,
-        custom_data=bound_data,
-        **config,
-    )
-    z = jax.random.normal(jax.random.key(0), (len(custom.param_names),))
-    params = dict(
-        custom.to_physical(z), Ms=Msun2kg, dist_pc=10.0, custom_data=bound_data
-    )
+    nodes = jnp.array([-10.0, 0.0, 10.0])
+    kwargs = dict(star_mass_kg=Msun2kg, dist_pc=DIST_PC)
+    prior = scale_problem((), ORBIT, **kwargs)
+    first = scale_problem((_custom_astrom(data, nodes),), ORBIT, **kwargs)
+    second = scale_problem((_custom_astrom(data, nodes + 50.0),), ORBIT, **kwargs)
+    z = prior.flatten(prior.position_template)
+    z = z + 0.1 * jax.random.normal(jax.random.key(0), z.shape)
+    value, aux = first.density.value_and_aux(first.unflatten(z))
     np.testing.assert_allclose(
-        custom.logdensity(z),
-        prior.logdensity(z) + _custom_astrom(params),
-        rtol=0.0,
-        atol=1e-12,
+        first.logdensity(z), prior.logdensity(z) + aux["term_values"][0], atol=1e-12
     )
-    with pytest.raises(ValueError, match="allow_overlap=True"):
-        build_numpyro_logdensity(
-            Msun2kg, 10.0, relative_astrom_data=data, custom_loglike=_custom_astrom
-        )
-    overlap = build_numpyro_logdensity(
-        Msun2kg,
-        10.0,
-        relative_astrom_data=data,
-        custom_loglike=_custom_astrom,
-        custom_data=bound_data,
-        allow_overlap=True,
-        **config,
-    )
-    builtin = build_numpyro_logdensity(
-        Msun2kg, 10.0, relative_astrom_data=data, **config
-    )
+    value_second, aux_second = second.density.value_and_aux(second.unflatten(z))
     np.testing.assert_allclose(
-        overlap.logdensity(z),
-        builtin.logdensity(z) + _custom_astrom(params),
-        rtol=0.0,
-        atol=1e-12,
+        value_second, prior.logdensity(z) + aux_second["term_values"][0], atol=1e-12
     )
-    shifted_data = (data, bound_data[1] + 50.0)
-    other = build_numpyro_logdensity(
-        Msun2kg,
-        10.0,
-        custom_loglike=_custom_astrom,
-        custom_data=shifted_data,
-        **config,
-    )
-    np.testing.assert_allclose(
-        other.logdensity(z),
-        prior.logdensity(z) + _custom_astrom(dict(params, custom_data=shifted_data)),
-        rtol=0.0,
-        atol=1e-12,
-    )
-    assert abs(float(other.logdensity(z) - custom.logdensity(z))) > 1e-6
-    np.testing.assert_allclose(
-        custom.logdensity(z),
-        prior.logdensity(z) + _custom_astrom(params),
-        rtol=0.0,
-        atol=1e-12,
-    )
+    assert abs(float(value_second - value)) > 1e-6

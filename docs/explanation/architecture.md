@@ -187,9 +187,8 @@ for the next, and information accumulates across observations.
 The two backends that integrate over the prior, nested sampling and SMC, consume a
 sampleable prior rather than a bare logdensity. {py:obj}`~photomancy.backends.nested.build_scene_nested_model` adapts a scene
 fit and photomancy's own prior layer into the form nested sampling expects, with no
-tensorflow-probability dependency. Orbit fitting additionally keeps a specialized
-high-throughput path built on a cached NumPyro model, which returns the same unified
-`Posterior` types as every other fit.
+tensorflow-probability dependency. Orbit fitting runs through the same chart
+density, and returns the same unified `Posterior` types as every other fit.
 
 ## Design principles
 

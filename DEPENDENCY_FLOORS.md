@@ -35,7 +35,6 @@ self-version constraint on shallow VCS checkouts.
 | matplotlib | >=3.11 | 3.11.0 | docs, test, viz |
 | myst-nb | >=1.1 | 1.1.0 | docs |
 | numpy | >=2.1.2 | 2.1.2 | runtime |
-| numpyro | >=0.21.0 | 0.21.0 | runtime |
 | optax | >=0.2.4 | 0.2.4 | runtime |
 | orbix | >=3.0.0 | 2.0.1.dev17+g2f9f366a6 | runtime |
 | packaging | >=24.2 | 24.2 | test |
@@ -55,9 +54,7 @@ self-version constraint on shallow VCS checkouts.
 | sphinxcontrib-mermaid | >=0.9.2 | 0.9.2 | docs |
 | tfp-nightly | >=0.26.0.dev20260621 | 0.26.0.dev20260621 | test |
 
-NumPyro 0.15 cannot import the resolved JAX because `host_callback` was removed.
-NumPyro 0.19 imports the deprecated `jax.interpreters.pxla.xla_pmap_p`; 0.21
-avoids both problems. NumPy, Matplotlib, and the markdown pytest plugin floors
+NumPy, Matplotlib, and the markdown pytest plugin floors
 match the versions selected by the complete lowest-direct resolution.
 
 ## Optimizer floor bisect

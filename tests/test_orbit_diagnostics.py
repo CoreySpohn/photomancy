@@ -8,7 +8,7 @@ import jax.numpy as jnp  # noqa: E402
 import pytest  # noqa: E402
 
 from photomancy.orbit.diagnostics import mode_summary, sample_physical  # noqa: E402
-from photomancy.orbit.eig import evaluate_numpyro_candidates  # noqa: E402
+from photomancy.orbit.eig import evaluate_orbit_candidates  # noqa: E402
 
 # Keep all consumers of the fitted mixture in one xdist loadfile group.
 MSUN_KG = 1.989e30
@@ -18,15 +18,13 @@ TRUE_T = 1096.0
 
 # Medium: fitting and differentiating an orbit mixture includes a cold compile.
 @pytest.mark.medium
-def test_evaluate_numpyro_candidates_returns_finite_nonnegative_eig(
+def test_evaluate_orbit_candidates_returns_finite_nonnegative_eig(
     fitted_orbit_mixture,
 ):
     """Fails if scoring a fitted orbit mixture loses finite, nonnegative EIG."""
     post, problem = fitted_orbit_mixture
     candidates = jnp.linspace(0.0, 3.0 * TRUE_T, 3)
-    result = evaluate_numpyro_candidates(
-        post, problem, candidates, (5.0e-3) ** 2, MSUN_KG, DIST_PC
-    )
+    result = evaluate_orbit_candidates(post, problem, candidates, (5.0e-3) ** 2)
 
     assert result["total_eig"].shape == (3,)
     assert jnp.all(jnp.isfinite(result["total_eig"]))

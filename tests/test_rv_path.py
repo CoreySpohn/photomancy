@@ -4,14 +4,31 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, d2s
-from numpyro import handlers
+from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, d2s
+from hwoutils.epoch import Epoch
+from kinematics import predict_rv
+from orbix.equations import period_to_sma
+from orbix.system import Body, FrameOrbit, SkyFrame, System
 
-from photomancy.orbit.data import OrbitData, RVData
-from photomancy.orbit.forward import predict_rv
-from photomancy.orbit.model import build_model
+from photomancy import RadialVelocityTerm
+from photomancy.orbit.data import RVData
 
 jax.config.update("jax_enable_x64", True)
+
+
+def _circular_system(periods, masses_kg, cos_i=0.0):
+    """Planets on circular orbits at their own two-body semi-major axes."""
+    mu = G * (Msun2kg + masses_kg)
+    orbits = FrameOrbit.from_classical(
+        period_to_sma(periods, Msun2kg + masses_kg),
+        0.2 if cos_i == 0.0 else 0.0,
+        jnp.arccos(cos_i),
+        0.0,
+        0.0,
+        0.0,
+        mu_AU3_per_d2=mu,
+    )
+    return System(Body(1.0), Body(masses_kg / Msun2kg), orbits, SkyFrame(10.0, Epoch()))
 
 
 @pytest.mark.parametrize("n_planets", [1, 2])
@@ -33,76 +50,37 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
         is_valid=jnp.ones(times.shape, dtype=bool),
         n_inst=1,
     )
-    model = build_model(has_rv=True, n_planets=n_planets, ecc_prior="disk")
+    term = RadialVelocityTerm(rv, jitters=jnp.array([0.01]))
 
     def likelihood(scale):
-        params = {
-            "log_P": jnp.log10(periods),
-            "log_Mp": jnp.log10(masses * scale),
-            "e_raw": jnp.full(n_planets, 0.2),
-            "w_raw": jnp.zeros(n_planets),
-            "cos_i": jnp.zeros(n_planets),
-            "W": jnp.zeros(n_planets),
-            "M0": jnp.zeros(n_planets),
-            "jitter": jnp.array([0.01]),
-        }
-        trace = handlers.trace(
-            handlers.substitute(handlers.seed(model, 0), data=params)
-        ).get_trace(Msun2kg, 10.0, OrbitData(rv=rv))
-        return float(trace["ll_rv"]["fn"].log_factor)
+        return float(term(_circular_system(periods, masses * scale * Mearth2kg))[0])
 
     assert likelihood(1.0) > likelihood(0.5)
     assert likelihood(1.0) > likelihood(2.0)
 
 
-def test_cached_rv_jitter_matches_instrument_count():
-    """Cached templates retain a separate jitter for each instrument."""
-    from photomancy.orbit.inference import build_numpyro_logdensity
+@pytest.mark.parametrize("n_inst", [1, 2])
+def test_sampled_rv_jitter_matches_instrument_count(n_inst):
+    """The sampled jitter coordinate has one entry per instrument.
 
-    for n_inst in (1, 2, 1):
-        data = RVData(
-            times=jnp.array([0.0, 10.0]),
-            rv=jnp.array([3.0, -2.0]),
-            rv_err=jnp.ones(2),
-            inst_ids=jnp.array([0, n_inst - 1]),
-            is_valid=jnp.ones(2, dtype=bool),
-            n_inst=n_inst,
-        )
-        problem = build_numpyro_logdensity(Msun2kg, 10.0, rv_data=data)
-        physical = problem.to_physical(problem.init_to_z({}))
-        assert jnp.atleast_1d(physical["jitter"]).shape == (n_inst,)
+    Fails if the chart problem decodes a single jitter for a multi-instrument
+    dataset or loses a column when the instrument count changes.
+    """
+    from test_nested import _nested_problem
 
-
-@pytest.mark.parametrize(
-    "channel", ["rv", "relative_astrom", "stellar_astrom", "null", "imaging"]
-)
-def test_repadding_preserves_channel_validity_mask(channel):
-    """Growing any observation channel preserves invalid rows and static shape."""
-    import equinox as eqx
-
-    from photomancy.orbit.data import (
-        ImagingData,
-        NullData,
-        RelativeAstromData,
-        StellarAstromData,
+    data = RVData(
+        times=jnp.array([0.0, 10.0]),
+        rv=jnp.array([3.0, -2.0]),
+        rv_err=jnp.ones(2),
+        inst_ids=jnp.array([0, n_inst - 1]),
+        is_valid=jnp.ones(2, dtype=bool),
+        n_inst=n_inst,
     )
+    from orbix.system import EccentricityVectorChart
 
-    classes = {
-        "rv": RVData,
-        "relative_astrom": RelativeAstromData,
-        "stellar_astrom": StellarAstromData,
-        "null": NullData,
-        "imaging": ImagingData,
-    }
-    data = classes[channel].zeros(max_n=2)
-    data = eqx.tree_at(lambda d: d.is_valid, data, jnp.array([True, False]))
-    padded = OrbitData(**{channel: data}).padded()
-    result = getattr(padded, channel)
-    assert result.is_valid.shape[0] > 2
-    assert int(result.is_valid.sum()) == 1
-    assert bool(result.is_valid[0])
-    assert not bool(result.is_valid[1])
-    assert getattr(padded.padded(), channel) is result
+    problem = _nested_problem(EccentricityVectorChart(), "disk", data)
+    physical = problem.to_physical(problem.flatten(problem.position_template))
+    assert jnp.atleast_1d(physical["jitter_m_per_s"]).shape == (n_inst,)
 
 
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
@@ -144,31 +122,6 @@ def test_invalid_rv_rows_have_finite_likelihood_and_gradient(invalid_value):
     for gradient in gradients:
         assert jnp.all(jnp.isfinite(gradient))
         assert float(gradient[1]) == 0.0
-
-
-@pytest.mark.parametrize("name", ["rayleigh", "vaneylen19"])
-def test_eccentricity_prior_draws_and_density_stay_below_one(name):
-    """Both direct draws and log densities exclude unbound eccentricities."""
-    from photomancy.orbit.priors import ecc_distribution
-
-    prior = ecc_distribution(name)
-    draws = prior.sample(jax.random.key(47), (100_000,))
-    assert bool(jnp.all((draws >= 0.0) & (draws < 1.0)))
-    assert float(prior.log_prob(1.01)) == -jnp.inf
-    assert float(prior.log_prob(1.0)) == -jnp.inf
-    assert float(prior.log_prob(-0.01)) == -jnp.inf
-
-
-def test_rayleigh_prior_has_truncation_normalization():
-    """The interior Rayleigh density includes the probability removed above 1."""
-    import numpyro.distributions as dist
-
-    from photomancy.orbit.priors import ecc_distribution
-
-    e = jnp.array([0.1, 0.3, 0.8])
-    base = dist.Weibull(scale=0.3 * jnp.sqrt(2.0), concentration=2.0)
-    expected = base.log_prob(e) - jnp.log1p(-jnp.exp(-1.0 / (2 * 0.3**2)))
-    assert jnp.allclose(ecc_distribution("rayleigh").log_prob(e), expected, rtol=1e-12)
 
 
 def test_single_rv_observation_integrates_to_one():
@@ -293,19 +246,22 @@ def test_predict_rv_matches_orbit_radial_velocity():
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-10)
 
 
-@pytest.mark.parametrize("n_planets", [1, 2])
-def test_joint_model_uses_total_mass(n_planets):
-    """Joint RV/reflex fits use each planet's true mass in both a and K."""
-    from hwoutils.constants import G, two_pi
-    from orbix.equations import period_to_sma
+def test_rv_term_uses_total_mass():
+    """The RV term uses the planet's true mass in both a and K.
 
-    from photomancy.orbit.data import StellarAstromData
+    Fails if the semi-major axis or the semi-amplitude drops the planet mass: a
+    0.1 Msun planet on a 400 d circular, inclined orbit reproduces the exact
+    two-body velocity curve, so the marginalized log likelihood of data equal to
+    that curve is the zero-residual value to 1e-10.
+    """
+    from hwoutils.constants import two_pi
+
     from photomancy.orbit.likelihoods import loglike_rv_marginalized
 
     times = jnp.array([0.0, 100.0, 200.0, 350.0])
-    periods = jnp.array([400.0, 700.0])[:n_planets]
-    masses = jnp.array([0.1, 0.05])[:n_planets] * Msun2kg
-    cos_i = jnp.full(n_planets, 0.4)
+    periods = jnp.array([400.0])
+    masses = jnp.array([0.1]) * Msun2kg
+    cos_i = 0.4
     K = (two_pi * G / periods) ** (1.0 / 3.0) * masses * jnp.sqrt(1 - cos_i**2)
     K /= (Msun2kg + masses) ** (2.0 / 3.0)
     velocities = -jnp.sum(
@@ -319,52 +275,25 @@ def test_joint_model_uses_total_mass(n_planets):
         is_valid=jnp.ones(4, dtype=bool),
         n_inst=1,
     )
-    params = {
-        "log_P": jnp.log10(periods),
-        "log_Mp": jnp.log10(masses / Mearth2kg),
-        "e_raw": jnp.zeros(n_planets),
-        "w_raw": jnp.zeros(n_planets),
-        "cos_i": cos_i,
-        "W": jnp.zeros(n_planets),
-        "M0": jnp.zeros(n_planets),
-        "jitter": jnp.array([0.01]),
-    }
-    model = build_model(
-        has_rv=True,
-        has_stellar_astrom=True,
-        n_planets=n_planets,
-        ecc_prior="disk",
-        log_Mp_range=(-2.0, 5.0),
-    )
-    trace = handlers.trace(
-        handlers.substitute(handlers.seed(model, 0), data=params)
-    ).get_trace(
-        Msun2kg,
-        10.0,
-        OrbitData(rv=data, stellar_astrom=StellarAstromData.zeros(max_n=2)),
-    )
-    assert jnp.allclose(
-        trace["a"]["value"], period_to_sma(periods, Msun2kg + masses), rtol=1e-12
-    )
+    term = RadialVelocityTerm(data, jitters=jnp.array([0.01]))
+    value, prediction = term(_circular_system(periods, masses, cos_i))
+    np.testing.assert_allclose(prediction, data.rv, rtol=1e-9, atol=1e-9)
     expected = loglike_rv_marginalized(
         data.rv,
         data.rv,
         data.rv_err,
         data.inst_ids,
         1,
-        params["jitter"],
+        jnp.array([0.01]),
         data.is_valid,
     )
-    assert float(trace["ll_rv"]["fn"].log_factor) == pytest.approx(
-        float(expected), abs=1e-10
-    )
+    assert float(value) == pytest.approx(float(expected), abs=1e-10)
 
 
 def test_reflex_orbit_closes_at_total_mass_period():
     """Stellar propagation uses the same two-body mass as Kepler's third law."""
+    from kinematics import predict_stellar_astrometry
     from orbix.equations import period_to_sma
-
-    from photomancy.orbit.forward import predict_stellar_astrometry
 
     period, mass, tp = 400.0, 0.1 * Msun2kg, 21.0
     a = period_to_sma(period, Msun2kg + mass)

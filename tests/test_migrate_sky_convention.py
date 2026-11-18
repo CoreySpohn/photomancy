@@ -19,16 +19,19 @@ jax.config.update("jax_enable_x64", True)
 
 
 def _elements(result):
-    """Physical-element dict of a Thiele-Innes fit result."""
+    """Physical-element dict of the first line-of-sight sheet of a fit result."""
+    orbit = jax.tree.map(lambda leaf: leaf[0], result.orbits)
+    c = orbit.to_classical()
+    period = 2 * jnp.pi / orbit.n_rad_per_d
     return dict(
-        T=result.T,
-        e=result.e,
-        a=result.a,
-        cos_i=result.cos_i,
-        W=result.W,
-        cos_w=result.cos_w,
-        sin_w=result.sin_w,
-        tp=result.tp,
+        T=period,
+        e=c["e"],
+        a=c["a_AU"],
+        cos_i=jnp.cos(c["i_rad"]),
+        W=c["W_rad"],
+        cos_w=jnp.cos(c["w_rad"]),
+        sin_w=jnp.sin(c["w_rad"]),
+        tp=-c["M0_rad"] * period / (2 * jnp.pi),
     )
 
 
@@ -147,7 +150,7 @@ def test_k16_old_fit_migrates_to_the_new_fit(k16):  # noqa: F811
     # Fit uncertainty: scatter of the direct fit over repeated noise draws.
     draws = np.array(
         [
-            [float(r.cos_i), float(r.W)]
+            [float(_elements(r)["cos_i"]), float(_elements(r)["W"])]
             for r in (
                 fit(astrometry(times, noisy(), sigma[0], sigma[1]), k16)
                 for _ in range(40)
@@ -156,14 +159,21 @@ def test_k16_old_fit_migrates_to_the_new_fit(k16):  # noqa: F811
     )
     std_cos_i, std_W = draws.std(axis=0)
 
-    d_cos_i = abs(float(migrated["cos_i"]) - float(new.cos_i))
+    d_cos_i = abs(float(migrated["cos_i"]) - float(_elements(new)["cos_i"]))
     d_W = min(
-        abs((float(migrated["W"]) - float(new.W) + shift + np.pi) % (2 * np.pi) - np.pi)
+        abs(
+            (float(migrated["W"]) - float(_elements(new)["W"]) + shift + np.pi)
+            % (2 * np.pi)
+            - np.pi
+        )
         for shift in (0.0, np.pi)
     )
     assert d_cos_i < std_cos_i, (d_cos_i, std_cos_i)
     assert d_W < std_W, (d_W, std_W)
     # Without the migration the old elements are the mirror image of the new ones.
-    assert abs(float(old.cos_i) - float(new.cos_i)) > 5 * std_cos_i
+    assert (
+        abs(float(_elements(old)["cos_i"]) - float(_elements(new)["cos_i"]))
+        > 5 * std_cos_i
+    )
     # Both recover the published K16 inclination, not its mirror image.
     assert abs(float(migrated["cos_i"]) - k16["cos_i"]) < 5 * std_cos_i

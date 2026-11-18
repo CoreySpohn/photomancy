@@ -9,8 +9,6 @@ import tensorflow_probability.substrates.jax as tfp
 from hwoutils.constants import Msun2kg
 from jaxctx import ScopedDict
 from jaxctx import transform as transform_model
-from numpyro.handlers import reparam
-from numpyro.infer.util import log_density
 from orbix.system import EccentricityVectorChart, FrameChart
 from test_system_density import _floor
 from test_system_priors import BOUNDS, _scene
@@ -19,14 +17,8 @@ from test_terms import _new_term
 from photomancy import RadialVelocityTerm, ScalarCoordinate
 from photomancy.backends import JaxnsBackend, build_scene_nested_model
 from photomancy.backends.nested import build_chart_nested_model
-from photomancy.orbit.data import OrbitData
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
-from photomancy.orbit.model import build_model
-from photomancy.orbit.nested import (
-    OrbitPriorTransform,
-    _UnitCubeReparam,
-    orbit_nested_sampling,
-)
+from photomancy.orbit.nested import OrbitPriorTransform, orbit_nested_sampling
 from photomancy.priors import FactorizedOrbitPrior, HalfNormalPrior, LogUniformPrior
 
 # jaxns requires x64; make the standalone file independent of other tests.
@@ -163,9 +155,313 @@ def _nested_problem(chart, ecc_prior, rv=None, e_max=1.0):
     return ChartOrbitProblem(density, dict(orbit=jnp.zeros(chart.n_coords), **template))
 
 
+# Frozen from the retired unit-cube joint at the four cube points of
+# test_chart_nested_cube_matches_frozen_reference: the physical values (T, a, e, cos i,
+# W, cos w, sin w, tp, Ag, Mp, Rp and three jitters) and the log joint, per
+# eccentricity law.
+_FROZEN_CUBE = {
+    "kipping13": (
+        [
+            [
+                19.952623149688797,
+                0.1439695303888295,
+                0.033308432799780935,
+                -0.5780000000000001,
+                1.5582299561805373,
+                0.4595798606214879,
+                0.8881364488135445,
+                -5.686497597661308,
+                0.04405548635065534,
+                3.945772180651261e25,
+                0.0001851398894205272,
+                0.37304087050120843,
+                0.4149255456643127,
+                0.4579802574804078,
+            ],
+            [
+                112.20184543019641,
+                0.4553638281032702,
+                0.12171237530049483,
+                -0.07799999999999996,
+                3.129026282975434,
+                -0.8881364488135447,
+                0.4595798606214876,
+                -60.02798730515508,
+                0.13931568029453034,
+                1.2477627218987342e27,
+                0.000780728440137907,
+                0.6862442149345948,
+                0.7414868102528348,
+                0.8005134630099596,
+            ],
+            [
+                446.6835921509635,
+                1.1473617294931335,
+                0.22003514924308704,
+                0.32200000000000006,
+                4.385663344411352,
+                -0.7115356772092855,
+                -0.7026499697988491,
+                -328.3124402309582,
+                0.3499451670283573,
+                1.9775706437440563e28,
+                0.002468880104906209,
+                1.0461012567862369,
+                1.1404352296643614,
+                1.2539926913067518,
+            ],
+            [
+                2041.7379446695295,
+                3.1496898019426016,
+                0.38499817517421236,
+                0.762,
+                5.76796411199086,
+                0.5568756164881876,
+                -0.8305958991958129,
+                -1949.859737159401,
+                0.012705741052085419,
+                9.465248197897579e23,
+                3.912911271268532e-05,
+                0.0894218265678464,
+                0.12686378380307492,
+                0.16458586711453094,
+            ],
+        ],
+        [
+            -13.029116522725396,
+            -75.34873243348285,
+            -13932.502965778825,
+            -10.096336755588077,
+        ],
+    ),
+    "rayleigh": (
+        [
+            [
+                19.952623149688797,
+                0.1439695303888295,
+                0.1625142210557195,
+                -0.5780000000000001,
+                1.5582299561805373,
+                0.4595798606214879,
+                0.8881364488135445,
+                -5.686497597661308,
+                0.04405548635065534,
+                3.945772180651261e25,
+                0.0001851398894205272,
+                0.37304087050120843,
+                0.4149255456643127,
+                0.4579802574804078,
+            ],
+            [
+                112.20184543019641,
+                0.4553638281032702,
+                0.29605992998347913,
+                -0.07799999999999996,
+                3.129026282975434,
+                -0.8881364488135447,
+                0.4595798606214876,
+                -60.02798730515508,
+                0.13931568029453034,
+                1.2477627218987342e27,
+                0.000780728440137907,
+                0.6862442149345948,
+                0.7414868102528348,
+                0.8005134630099596,
+            ],
+            [
+                446.6835921509635,
+                1.1473617294931335,
+                0.39772987284371303,
+                0.32200000000000006,
+                4.385663344411352,
+                -0.7115356772092855,
+                -0.7026499697988491,
+                -328.3124402309582,
+                0.3499451670283573,
+                1.9775706437440563e28,
+                0.002468880104906209,
+                1.0461012567862369,
+                1.1404352296643614,
+                1.2539926913067518,
+            ],
+            [
+                2041.7379446695295,
+                3.1496898019426016,
+                0.5415028411774943,
+                0.762,
+                5.76796411199086,
+                0.5568756164881876,
+                -0.8305958991958129,
+                -1949.859737159401,
+                0.012705741052085419,
+                9.465248197897579e23,
+                3.912911271268532e-05,
+                0.0894218265678464,
+                0.12686378380307492,
+                0.16458586711453094,
+            ],
+        ],
+        [
+            -12.980714078999998,
+            -101.67107140486027,
+            -10553.886405356985,
+            -10.094966537888713,
+        ],
+    ),
+    "vaneylen19": (
+        [
+            [
+                19.952623149688797,
+                0.1439695303888295,
+                0.02659942674362741,
+                -0.5780000000000001,
+                1.5582299561805373,
+                0.4595798606214879,
+                0.8881364488135445,
+                -5.686497597661308,
+                0.04405548635065534,
+                3.945772180651261e25,
+                0.0001851398894205272,
+                0.37304087050120843,
+                0.4149255456643127,
+                0.4579802574804078,
+            ],
+            [
+                112.20184543019641,
+                0.4553638281032702,
+                0.04847733931752582,
+                -0.07799999999999996,
+                3.129026282975434,
+                -0.8881364488135447,
+                0.4595798606214876,
+                -60.02798730515508,
+                0.13931568029453034,
+                1.2477627218987342e27,
+                0.000780728440137907,
+                0.6862442149345948,
+                0.7414868102528348,
+                0.8005134630099596,
+            ],
+            [
+                446.6835921509635,
+                1.1473617294931335,
+                0.06516475664247773,
+                0.32200000000000006,
+                4.385663344411352,
+                -0.7115356772092855,
+                -0.7026499697988491,
+                -328.3124402309582,
+                0.3499451670283573,
+                1.9775706437440563e28,
+                0.002468880104906209,
+                1.0461012567862369,
+                1.1404352296643614,
+                1.2539926913067518,
+            ],
+            [
+                2041.7379446695295,
+                3.1496898019426016,
+                0.0888797083847093,
+                0.762,
+                5.76796411199086,
+                0.5568756164881876,
+                -0.8305958991958129,
+                -1949.859737159401,
+                0.012705741052085419,
+                9.465248197897579e23,
+                3.912911271268532e-05,
+                0.0894218265678464,
+                0.12686378380307492,
+                0.16458586711453094,
+            ],
+        ],
+        [
+            -13.027060372066533,
+            -62.712349500332174,
+            -17515.238952347838,
+            -10.097087012049194,
+        ],
+    ),
+    "disk": (
+        [
+            [
+                19.952623149688797,
+                0.1439695303888295,
+                0.13699999999999998,
+                -0.5780000000000001,
+                1.5582299561805373,
+                0.4595798606214879,
+                0.8881364488135445,
+                -5.686497597661308,
+                0.04405548635065534,
+                3.945772180651261e25,
+                0.0001851398894205272,
+                0.37304087050120843,
+                0.4149255456643127,
+                0.4579802574804078,
+            ],
+            [
+                112.20184543019641,
+                0.4553638281032702,
+                0.387,
+                -0.07799999999999996,
+                3.129026282975434,
+                -0.8881364488135447,
+                0.4595798606214876,
+                -60.02798730515508,
+                0.13931568029453034,
+                1.2477627218987342e27,
+                0.000780728440137907,
+                0.6862442149345948,
+                0.7414868102528348,
+                0.8005134630099596,
+            ],
+            [
+                446.6835921509635,
+                1.1473617294931335,
+                0.5870000000000001,
+                0.32200000000000006,
+                4.385663344411352,
+                -0.7115356772092855,
+                -0.7026499697988491,
+                -328.3124402309582,
+                0.3499451670283573,
+                1.9775706437440563e28,
+                0.002468880104906209,
+                1.0461012567862369,
+                1.1404352296643614,
+                1.2539926913067518,
+            ],
+            [
+                2041.7379446695295,
+                3.1496898019426016,
+                0.807,
+                0.762,
+                5.76796411199086,
+                0.5568756164881876,
+                -0.8305958991958129,
+                -1949.859737159401,
+                0.012705741052085419,
+                9.465248197897579e23,
+                3.912911271268532e-05,
+                0.0894218265678464,
+                0.12686378380307492,
+                0.16458586711453094,
+            ],
+        ],
+        [
+            -13.003439483915155,
+            -105.17278871012685,
+            -9583.69260121713,
+            -10.09242120192119,
+        ],
+    ),
+}
+
+
 @pytest.mark.medium(reason="Differentiates both chart and normalized priors on a cube.")
 @pytest.mark.parametrize("name", ["kipping13", "rayleigh", "vaneylen19", "disk"])
-def test_chart_nested_cube_matches_numpyro(name):
+def test_chart_nested_cube_matches_frozen_reference(name):
     """Compare physical systems, likelihoods and normalized cube pullbacks separately.
 
     Four regular phases, inclinations, periods, eccentricities and body scales;
@@ -179,51 +475,23 @@ def test_chart_nested_cube_matches_numpyro(name):
     nested_model = transform_model(
         build_chart_nested_model(problem).prior_model, base_dtype=jnp.float64
     )
-    old = build_model(
-        has_rv=True,
-        sample_planet_scale=True,
-        jitter_scale=0.8,
-        ecc_prior=name,
-        log_P_range=(1.0, 4.0),
-    )
-    names = (
-        "log_P",
-        "e_raw",
-        "w_raw",
-        "cos_i",
-        "W",
-        "M0",
-        "log_Ag",
-        "jitter",
-        "log_Mp",
-        "log_Rp",
-    )
-    old = reparam(old, config=dict.fromkeys(names, _UnitCubeReparam()))
     physical = ("T", "a", "e", "cos_i", "W", "cos_w", "sin_w", "tp", "Ag", "Mp", "Rp")
 
     def compare(unit):
-        parts = [*unit[:7], unit[7:10], *unit[10:]]
-        cube = {
-            f"{k}_base": jnp.atleast_1d(v) for k, v in zip(names, parts, strict=True)
-        }
-        reference, trace = log_density(old, (Msun2kg, 10.0, OrbitData(rv=rv)), {}, cube)
         realized = nested_model.apply(None, {"U": ScopedDict({"unit": unit})})
         z = realized.collections["X"]["z"]
         decoded = problem.to_physical(z)
         actual = jnp.stack([decoded[k] for k in physical])
-        expected = jnp.stack([trace[k]["value"].squeeze() for k in physical])
         actual = jnp.concatenate((actual, decoded["jitter_m_per_s"]))
-        expected = jnp.concatenate((expected, trace["jitter"]["value"]))
         likelihood = realized.fn_val
         logdet = jnp.linalg.slogdet(jax.jacfwd(transform.forward)(unit))[1]
-        return actual, expected, likelihood, reference, problem.logdensity(z), logdet
+        return actual, likelihood, problem.logdensity(z), logdet
 
     points = (
         jnp.arange(12) * 0.037 + jnp.array([0.08, 0.33, 0.53, 0.75])[:, None]
     ) % 0.94 + 0.02
-    actual, expected, likelihood, reference, joint, logdet = eqx.filter_jit(
-        jax.vmap(compare)
-    )(points)
+    actual, likelihood, joint, logdet = eqx.filter_jit(jax.vmap(compare))(points)
+    expected, reference = (jnp.asarray(x) for x in _FROZEN_CUBE[name])
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
     tolerances = np.array(
         [_floor(*row) for row in zip(reference, likelihood, joint, logdet, strict=True)]

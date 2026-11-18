@@ -49,8 +49,8 @@ Pass the dict that `sample_physical` returned in the earlier release (or the
 
 `migrate_sky_convention` raises `ValueError` for:
 
-- posteriors stored in transformed sampling coordinates: the unconstrained NumPyro
-  sites (`log_P`, `M0`, `e_raw`, `w_raw`), unit-cube `*_base` draws, and the
+- posteriors stored in transformed sampling coordinates: the unconstrained sites
+  of the earlier releases (`log_P`, `M0`, `e_raw`, `w_raw`), unit-cube `*_base` draws, and the
   Thiele-Innes coordinates of the few-epoch fitters (`lnP`, `tau`, `A`, `F`, `B`,
   `G`, now `east_X`, `east_Y`, `north_X`, `north_Y`);
 - values outside the physical range (`|cos_i| > 1` or `W` outside $[0, 2\pi]$),
@@ -74,7 +74,7 @@ system.
 
 ## Check the result
 
-Evaluate `photomancy.orbit.forward.predict_relative_astrometry` at the migrated elements: the track agrees
+Evaluate the sky track of the migrated orbit with `orbix` (`FrameOrbit.at` and the separation and offset observables): the track agrees
 with the earlier model's output with its two columns exchanged. The test suite
 checks this against an independent NumPy implementation of the Thiele-Innes
 relations and against a refit of the Kervella et al. (2016) alpha Cen AB data.

@@ -148,51 +148,6 @@ class TIBasisModel(eqx.Module):
         return jnp.asarray(np.concatenate(out)[:n])
 
 
-def state_to_theta(r, v, mu, t, t_ref):
-    """Convert a bound (east, north, away) state to TI-basis parameters.
-
-    The perifocal unit vectors come from the Laplace (eccentricity) vector
-    and the angular momentum, so no node/periapsis angle conventions enter;
-    ``r[0]`` is east and ``r[1]`` north, matching ``TIBasisModel.forward_au``.
-    Positions and velocities use the right-handed (east, north, away) frame;
-    dz/dt is positive when receding. Unbound or circular states produce
-    non-finite outputs, to be masked by the caller.
-
-    Args:
-        r: Position (AU), shape (3,).
-        v: Velocity (AU/day), shape (3,).
-        mu: Gravitational parameter (AU^3/day^2).
-        t: Epoch of the state (days).
-        t_ref: Reference epoch for the periastron phase.
-
-    Returns:
-        theta = (e, lnP, tau, east_X, east_Y, north_X, north_Y), shape (7,).
-    """
-    orbit = FrameOrbit.from_cartesian(r, v, mu_AU3_per_d2=mu, epoch_d=t)
-    e, P = orbit.e, orbit.period_d
-    basis = orbit.plane_basis()
-    c, s = orbit.ex / e, orbit.ey / e
-    p = basis[:, 0] * c + basis[:, 1] * s
-    q = -basis[:, 0] * s + basis[:, 1] * c
-    xy, _ = orbit.perifocal_coordinates(t)
-    cosE = xy[0] + e
-    sinE = xy[1] / jnp.sqrt(1.0 - e**2)
-    E = jnp.arctan2(sinE, cosE)
-    M = E - e * sinE
-    tau = jnp.mod((t - t_ref) / P - M / two_pi, 1.0)
-    return jnp.array(
-        [
-            e,
-            jnp.log(P),
-            tau,
-            p[0],
-            q[0],
-            p[1],
-            q[1],
-        ]
-    )
-
-
 def lambert_families(n_max_rev):
     """(N, long_way, high_branch) triples covering every elliptic family."""
     fams = [(0, False, False), (0, True, False)]
@@ -206,106 +161,6 @@ def lambert_families(n_max_rev):
         jnp.asarray(arr[:, 1], dtype=bool),
         jnp.asarray(arr[:, 2], dtype=bool),
     )
-
-
-def _finalize_parts(theta, ok, ln_prior, ln_jac, ln_like):
-    """Mask invalid lanes: prior -inf carries the mask, other parts zeroed."""
-    neg = -jnp.inf
-    return (
-        theta,
-        jnp.where(ok, ln_prior, neg),
-        jnp.where(ok, ln_jac, 0.0),
-        jnp.where(ok, ln_like, 0.0),
-    )
-
-
-@partial(jax.jit, static_argnames=("n_particles",))
-def _lambert_batch(
-    key,
-    obs4,
-    sig4,
-    t1,
-    t2,
-    data_other,
-    dist_pc,
-    model,
-    z_max,
-    fam_N,
-    fam_way,
-    fam_high,
-    n_particles,
-):
-    """Weighted particles for all Lambert families, shape (F, n, ...)."""
-    tof = t2 - t1
-
-    def theta_of_u(u, N, way, high):
-        r1 = u[0:3]
-        r2 = u[3:6]
-        mu = jnp.exp(u[6])
-        v1, _, _ = lambert_solve(r1, r2, tof, mu, N, way, high)
-        return state_to_theta(r1, v1, mu, t1, model.t_ref)
-
-    def one(k, N, way, high):
-        kz, km, kx = jax.random.split(k, 3)
-        z12 = jax.random.uniform(kz, (2,), minval=-z_max, maxval=z_max)
-        lnmu = jax.random.uniform(
-            km, (), minval=jnp.log(model.mu_lo), maxval=jnp.log(model.mu_hi)
-        )
-        xy = obs4 + sig4 * jax.random.normal(kx, (4,))
-        u = jnp.array([xy[0], xy[1], z12[0], xy[2], xy[3], z12[1], lnmu])
-
-        def fn(uu):
-            return theta_of_u(uu, N, way, high)
-
-        theta = fn(u)
-        _, ln_jac = jnp.linalg.slogdet(jax.jacfwd(fn)(u))
-        _, _, ok_lam = lambert_solve(u[0:3], u[3:6], tof, jnp.exp(u[6]), N, way, high)
-        x_au, y_au = model.forward_au(theta, data_other.times)
-        ln_like = loglike_relative_astrom(x_au / dist_pc, y_au / dist_pc, data_other)
-        ok = (
-            ok_lam
-            & model.in_support(theta)
-            & jnp.isfinite(ln_jac)
-            & jnp.isfinite(ln_like)
-        )
-        return _finalize_parts(theta, ok, model.log_prior_ti(theta), ln_jac, ln_like)
-
-    keys = jax.random.split(key, fam_N.shape[0] * n_particles)
-    keys = keys.reshape((fam_N.shape[0], n_particles, *keys.shape[1:]))
-    per_family = jax.vmap(
-        lambda ks, N, way, high: jax.vmap(lambda k: one(k, N, way, high))(ks)
-    )
-    return per_family(keys, fam_N, fam_way, fam_high)
-
-
-@partial(jax.jit, static_argnames=("n_particles",))
-def _ar_batch(
-    key, obs2, sig2, t1, data_other, dist_pc, model, z_max, v_max, n_particles
-):
-    """Weighted particles for the conditioned-single-epoch (AR) reduction."""
-
-    def theta_of_u(u):
-        r = u[0:3]
-        v = u[3:6]
-        return state_to_theta(r, v, jnp.exp(u[6]), t1, model.t_ref)
-
-    def one(k):
-        kz, kv, km, kx = jax.random.split(k, 4)
-        z = jax.random.uniform(kz, (), minval=-z_max, maxval=z_max)
-        vel = jax.random.uniform(kv, (3,), minval=-v_max, maxval=v_max)
-        lnmu = jax.random.uniform(
-            km, (), minval=jnp.log(model.mu_lo), maxval=jnp.log(model.mu_hi)
-        )
-        xy = obs2 + sig2 * jax.random.normal(kx, (2,))
-        u = jnp.array([xy[0], xy[1], z, vel[0], vel[1], vel[2], lnmu])
-        theta = theta_of_u(u)
-        _, ln_jac = jnp.linalg.slogdet(jax.jacfwd(theta_of_u)(u))
-        x_au, y_au = model.forward_au(theta, data_other.times)
-        ln_like = loglike_relative_astrom(x_au / dist_pc, y_au / dist_pc, data_other)
-        ok = model.in_support(theta) & jnp.isfinite(ln_jac) & jnp.isfinite(ln_like)
-        return _finalize_parts(theta, ok, model.log_prior_ti(theta), ln_jac, ln_like)
-
-    return jax.vmap(one)(jax.random.split(key, n_particles))
 
 
 def _mask_epochs(data, drop_idx):
@@ -332,145 +187,6 @@ def _conditioned_pair(data, idx):
             )
     return i1, i2
 
-
-def _assemble(theta, lp, lj, ll, return_parts):
-    """Flatten family axes and build the SamplePosterior (+ parts)."""
-    theta = theta.reshape(-1, 7)
-    lp, lj, ll = (x.reshape(-1) for x in (lp, lj, ll))
-    post = SamplePosterior(
-        samples=theta,
-        log_weights=lp + lj + ll,
-        evidence=jnp.nan,
-        param_names=TI_PARAM_NAMES,
-    )
-    if not return_parts:
-        return post
-    return post, {"ln_prior": lp, "ln_jac": lj, "ln_like": ll}
-
-
-def lambert_depth_fit(
-    data,
-    *,
-    dist_pc,
-    model,
-    key,
-    idx=None,
-    n_per_family=8000,
-    n_max_rev=6,
-    z_max_au=8.0,
-    return_parts=False,
-):
-    """Exact two-epoch-conditioned fit via Lambert depth search.
-
-    Conditions on two epochs' sky positions, samples their line-of-sight
-    depths and the implied gravitational parameter, solves the Lambert
-    boundary-value problem per (revolutions, way, branch) family, and weights
-    by prior x ``|det J|`` x likelihood of the remaining epochs. Exact for the
-    ``TIBasisModel`` posterior up to Monte Carlo error.
-
-    Args:
-        data: ``RelativeAstromData`` (arcsec); conditioned epochs need
-            ``corr = 0``.
-        dist_pc: Distance (pc) converting arcsec to AU.
-        model: The declared ``TIBasisModel``.
-        key: PRNG key.
-        idx: The two conditioned epoch indices (default: first and last
-            valid).
-        n_per_family: Particles per Lambert family.
-        n_max_rev: Highest revolution count enumerated; families above the
-            per-family minimum TOF are flagged invalid internally, so this
-            only needs to be at least ``baseline / P_min``.
-        z_max_au: Half width of the uniform depth proposal (AU).
-        return_parts: Also return the ``{ln_prior, ln_jac, ln_like}`` weight
-            components (e.g. for calibration ablations).
-
-    Returns:
-        A ``SamplePosterior`` over ``(e, lnP, tau, east_X, east_Y, north_X, north_Y)``;
-        with ``return_parts``, a ``(posterior, parts)`` tuple.
-    """
-    i1, i2 = _conditioned_pair(data, idx)
-    obs4 = jnp.array([data.ra[i1], data.dec[i1], data.ra[i2], data.dec[i2]]) * dist_pc
-    sig4 = (
-        jnp.array(
-            [data.ra_err[i1], data.dec_err[i1], data.ra_err[i2], data.dec_err[i2]]
-        )
-        * dist_pc
-    )
-    fam_N, fam_way, fam_high = lambert_families(n_max_rev)
-    theta, lp, lj, ll = _lambert_batch(
-        key,
-        obs4,
-        sig4,
-        data.times[i1],
-        data.times[i2],
-        _mask_epochs(data, (i1, i2)),
-        dist_pc,
-        model,
-        z_max_au,
-        fam_N,
-        fam_way,
-        fam_high,
-        n_per_family,
-    )
-    return _assemble(theta, lp, lj, ll, return_parts)
-
-
-def admissible_region_fit(
-    data,
-    *,
-    dist_pc,
-    model,
-    key,
-    idx=None,
-    n_particles=100_000,
-    z_max_au=8.0,
-    return_parts=False,
-):
-    """Exact single-epoch-conditioned fit (admissible-region reduction).
-
-    Conditions on one epoch's sky position and samples the remaining state
-    coordinates (depth, velocity, implied gravitational parameter); the
-    velocity proposal box covers every mass-window-bound orbit through the
-    conditioned point. Remaining epochs enter through the likelihood, so this
-    also serves as a generic n-epoch fitter (at reduced efficiency compared
-    to conditioning on two epochs).
-
-    Args: as :func:`lambert_depth_fit`, with ``idx`` a single epoch index
-        (default: first valid) and ``n_particles`` the total particle count.
-
-    Returns:
-        A ``SamplePosterior`` over ``(e, lnP, tau, east_X, east_Y, north_X, north_Y)``;
-        with ``return_parts``, a ``(posterior, parts)`` tuple.
-    """
-    valid = np.flatnonzero(np.asarray(data.is_valid, dtype=bool))
-    i1 = int(valid[0]) if idx is None else int(idx)
-    if i1 not in valid:
-        raise ValueError(f"epoch {i1} is not valid")
-    if abs(float(data.corr[i1])) > 1e-12:
-        raise ValueError("conditioned epoch must have zero RA/DEC correlation")
-    obs2 = jnp.array([data.ra[i1], data.dec[i1]]) * dist_pc
-    sig2 = jnp.array([data.ra_err[i1], data.dec_err[i1]]) * dist_pc
-    rho = float(jnp.linalg.norm(obs2))
-    r_floor = max(rho - 5.0 * float(sig2.max()), 1e-3)
-    v_max = float(jnp.sqrt(2.0 * model.mu_hi / r_floor))
-    theta, lp, lj, ll = _ar_batch(
-        key,
-        obs2,
-        sig2,
-        data.times[i1],
-        _mask_epochs(data, (i1,)),
-        dist_pc,
-        model,
-        z_max_au,
-        v_max,
-        n_particles,
-    )
-    return _assemble(theta, lp, lj, ll, return_parts)
-
-
-# ---------------------------------------------------------------------------
-# Chart route: ThieleInnesChart coordinates, extended by d ln mu
-# ---------------------------------------------------------------------------
 
 _TI_CHART = ThieleInnesChart()
 
@@ -519,7 +235,7 @@ def chart_log_prior(model, x):
 
 
 def _chart_parts(model, x, orbit, ok, ln_jac, ln_like):
-    """Mask invalid lanes as ``_finalize_parts`` does, and report the sheet."""
+    """Mask invalid lanes to a zero contribution and report the sheet."""
     ln_prior = chart_log_prior(model, x) + _TI_CHART.log_volume(x)
     return (
         x,
@@ -639,7 +355,7 @@ def _assemble_chart(x, lp, lj, ll, branch, return_parts, epoch):
     return post, {"ln_prior": lp, "ln_jac": lj, "ln_like": ll, "branch": branch}
 
 
-def chart_lambert_depth_fit(
+def lambert_depth_fit(
     data,
     *,
     dist_pc,
@@ -652,17 +368,26 @@ def chart_lambert_depth_fit(
     return_parts=False,
     epoch=None,
 ):
-    """``lambert_depth_fit`` weighted in ``ThieleInnesChart`` coordinates.
+    """Exact two-epoch Lambert fit weighted in ``ThieleInnesChart`` coordinates.
 
-    The latents, families and likelihood are those of ``lambert_depth_fit``; the
-    state is mapped through ``FrameOrbit.from_cartesian`` to chart coordinates
-    ``(ln n, ux, uy, A, B, F, G)`` (``TI_CHART_PARAM_NAMES``), the constants on the
-    conditioned epoch's mean-longitude axes. Weights are
-    ``chart_log_prior + chart log volume + |det dx/du| + likelihood``. At identical
-    latents this equals the ``lambert_depth_fit`` weight plus one constant.
+    Latents (a depth along the line of sight at each conditioned epoch, over the
+    Lambert families) are mapped through ``FrameOrbit.from_cartesian`` to chart
+    coordinates ``(ln n, ux, uy, A, B, F, G)`` (``TI_CHART_PARAM_NAMES``), the
+    constants on the conditioned epoch's mean-longitude axes. Weights are
+    ``chart_log_prior + chart log volume + |det dx/du| + likelihood``.
 
-    Args: as ``lambert_depth_fit``, plus ``epoch``, the
-        :class:`~hwoutils.epoch.Epoch` that the data times are measured from.
+    Args:
+        data: ``RelativeAstromData`` with at least two valid epochs.
+        dist_pc: Distance (parsec).
+        model: A ``TIBasisModel`` carrying the prior bounds.
+        key: JAX PRNG key.
+        idx: The two conditioned epoch indices (default: the first two valid).
+        n_per_family: Latent draws per Lambert family.
+        n_max_rev: Maximum number of revolutions covered.
+        z_max_au: Depth bound (AU) of the line-of-sight proposal.
+        return_parts: Also return the weight parts.
+        epoch: The :class:`~hwoutils.epoch.Epoch` that the data times are measured
+            from.
 
     Returns:
         A ``SamplePosterior`` over the chart coordinates, declaring the chart
@@ -698,7 +423,7 @@ def chart_lambert_depth_fit(
     return _assemble_chart(*parts, return_parts, epoch)
 
 
-def chart_admissible_region_fit(
+def admissible_region_fit(
     data,
     *,
     dist_pc,
@@ -710,10 +435,11 @@ def chart_admissible_region_fit(
     return_parts=False,
     epoch=None,
 ):
-    """``admissible_region_fit`` weighted in ``ThieleInnesChart`` coordinates.
+    """Exact one-epoch admissible-region fit in ``ThieleInnesChart`` coordinates.
 
-    Args: as ``admissible_region_fit``, plus ``epoch`` as
-    ``chart_lambert_depth_fit``; returns as ``chart_lambert_depth_fit``.
+    Args as ``lambert_depth_fit`` with one conditioned epoch ``idx`` (an int) and
+    ``n_particles`` latent draws (velocity bound from the model's mass window);
+    returns as ``lambert_depth_fit``.
     """
     valid = np.flatnonzero(np.asarray(data.is_valid, dtype=bool))
     i1 = int(valid[0]) if idx is None else int(idx)

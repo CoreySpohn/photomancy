@@ -1,17 +1,12 @@
 """Orbit-domain Expected Information Gain (a thin wrapper over the generic layer).
 
-Both chart-space mixtures and NumPyro orbit problems use the system terms' sky
-positions and Lambertian dMag predictions. Candidate scoring applies the contrast
+Chart-space mixtures use the system terms' sky positions and Lambertian dMag
+predictions. Candidate scoring applies the contrast
 curve and delegates the analytic EIG to :mod:`photomancy.eig`.
 """
 
-from collections.abc import Callable
-
 import jax
 import jax.numpy as jnp
-from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
-from hwoutils.epoch import Epoch
-from orbix.system import Body, SkyFrame, System
 
 from photomancy.eig import (
     alias_breaking_eig,
@@ -22,45 +17,14 @@ from photomancy.eig import (
 from photomancy.eig import evaluate_candidates as _eval_candidates
 from photomancy.orbit._contrast import interpolate_contrast_curve
 from photomancy.orbit._photometry import system_separation_dmag
-from photomancy.orbit.diagnostics import orbits_from_samples
 
 __all__ = [
     "alias_breaking_eig",
     "alias_breaking_eig_from_covariances",
     "detectability_eig",
-    "evaluate_numpyro_candidates",
     "evaluate_orbit_candidates",
     "geometric_eig",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Pure-JAX prediction from unconstrained z -- the orbit forward model
-# ---------------------------------------------------------------------------
-
-
-def _system_from_sites(z_flat, unflatten, constrain, Ms, dist_pc):
-    """Build a single star/companion pair in the sample sites' day coordinate."""
-    phys = constrain(unflatten(z_flat))
-    period_d = 10.0 ** phys["log_P"]
-    mass_kg = 10.0 ** phys["log_Mp"] * Mearth2kg if "log_Mp" in phys else 0.0
-    samples = {
-        "T": period_d,
-        "Mp": mass_kg,
-        "e": phys["e_raw"],
-        "cos_i": phys["cos_i"],
-        "W": phys["W"],
-        "cos_w": jnp.cos(phys["w_raw"]),
-        "sin_w": jnp.sin(phys["w_raw"]),
-        "tp": -phys["M0"] * period_d / two_pi,
-    }
-    orbit = orbits_from_samples(samples, Ms, reference_day=0.0)
-    return System(
-        Body(Ms / Msun2kg),
-        Body(jnp.atleast_1d(mass_kg / Msun2kg)),
-        jax.tree.map(lambda x: x[None], orbit),
-        SkyFrame(dist_pc, Epoch()),
-    )
 
 
 def _astrometry(system, t, planet):
@@ -79,24 +43,6 @@ def _photometry(system, t, area_AU2):
     return jnp.stack((sep[0], dmag[0]))
 
 
-def _predict_astrom_pure(
-    z_flat, t, unflatten: Callable, constrain: Callable, Ms, dist_pc
-):
-    """Predict the first planet's east/north offsets (arcsec) from a site vector."""
-    return _astrometry(
-        _system_from_sites(z_flat, unflatten, constrain, Ms, dist_pc), t, 0
-    )
-
-
-def _predict_sep_dmag_pure(
-    z_flat, t, unflatten: Callable, constrain: Callable, Ms, dist_pc, Lambda
-):
-    """Predict angular separation and dMag with the fitted orbit and fixed area."""
-    return _photometry(
-        _system_from_sites(z_flat, unflatten, constrain, Ms, dist_pc), t, Lambda
-    )
-
-
 # ---------------------------------------------------------------------------
 # High-level batch evaluation (delegates to photomancy.eig)
 # ---------------------------------------------------------------------------
@@ -110,8 +56,6 @@ def _orbit_evaluate(
     photometry,
     contrast_curve,
     iwa_arcsec,
-    *,
-    cache_key=None,
 ):
     """Score east/north measurements with optional dMag selection at each mode."""
     detectable = None
@@ -134,7 +78,6 @@ def _orbit_evaluate(
         obs_variance,
         detectable=detectable,
         detectable_args=detectable_args,
-        cache_key=cache_key,
     )
 
     if contrast_curve is not None:
@@ -147,56 +90,6 @@ def _orbit_evaluate(
         res["separation"] = jnp.zeros_like(res["detectability"])
         res["dMag"] = jnp.zeros_like(res["detectability"])
     return res
-
-
-def evaluate_numpyro_candidates(
-    posterior,
-    problem,
-    candidate_epochs,
-    obs_variance,
-    Ms,
-    dist_pc,
-    *,
-    Lambda=None,
-    contrast_curve=None,
-    iwa=0.0,
-):
-    """EIG over candidate epochs for a generic z-space MixturePosterior + OrbitProblem.
-
-    Lets OFTI / grid_search (via ``to_unconstrained`` -> ``cluster_to_mixture``) drive
-    the same analytic EIG as the Laplace mixture. ``problem`` supplies the model
-    ``unflatten`` and ``constrain``. Returns the per-candidate EIG dict of
-    :func:`photomancy.eig.evaluate_candidates`, an approximate score.
-
-    Without ``Lambda`` and ``contrast_curve`` every epoch is assumed to yield
-    reported relative astrometry with fixed measurement noise. With both, each mode
-    is reported according to its mean orbit (outside ``iwa``, within the curve's
-    separation range and brighter than its limit). This gives the per-mode reporting
-    probability in :func:`photomancy.eig.evaluate_candidates`. The
-    threshold is not applied within a mode, so selection that cuts through a mode's
-    predicted position or brightness is not represented.
-    """
-    unflatten, constrain = problem.unflatten, problem.constrain
-
-    def forward(z, t):
-        return _predict_astrom_pure(z, t, unflatten, constrain, Ms, dist_pc)
-
-    def photometry(z, t):
-        return _predict_sep_dmag_pure(z, t, unflatten, constrain, Ms, dist_pc, Lambda)
-
-    curve = contrast_curve if Lambda is not None else None
-    # The model cache retains one unflatten per config (including prior bounds).
-    cache_key = (id(unflatten), Ms, dist_pc, curve is not None, Lambda, iwa)
-    return _orbit_evaluate(
-        posterior,
-        candidate_epochs,
-        obs_variance,
-        forward,
-        photometry,
-        curve,
-        iwa,
-        cache_key=cache_key,
-    )
 
 
 def evaluate_orbit_candidates(

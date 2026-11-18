@@ -410,9 +410,6 @@ def detection_channel_eig(weights, means, covs, a, b, n_nodes=32):
     return h_marginal - jnp.sum(weights * h_cond) / jnp.sqrt(jnp.pi)
 
 
-_EIG_JIT_CACHE: dict = {}
-
-
 def _build_eig_batch_fn(forward, detectable=None):
     """JIT-compile the batched EIG once for a given forward / detectable pair."""
 
@@ -471,7 +468,6 @@ def evaluate_candidates(
     *,
     detectable=None,
     detectable_args=(),
-    cache_key=None,
 ):
     """Approximate EIG of a batch of candidate observations for a mixture posterior.
 
@@ -514,10 +510,7 @@ def evaluate_candidates(
             a reporting probability in ``[0, 1]`` at each mode mean. When omitted,
             every observation is reported.
         detectable_args: Optional tuple of JAX inputs to ``detectable``, shared
-            across candidates and modes. Values are supplied to the cached evaluator
-            at call time.
-        cache_key: Optional hashable key; when given, the compiled batch function is
-            cached and reused (so the warm path stays fast).
+            across candidates and modes.
 
     Returns:
         Dict with ``total_eig (N,)``, ``geometric_eig (N,)``, ``alias_eig (N,)``,
@@ -531,13 +524,7 @@ def evaluate_candidates(
         :func:`alias_breaking_eig_from_covariances`); rank with ``jnp.nanargmax``.
     """
     obs_var = jnp.atleast_1d(jnp.asarray(obs_variance))
-    batch_fn = None
-    if cache_key is not None:
-        batch_fn = _EIG_JIT_CACHE.get(cache_key)
-    if batch_fn is None:
-        batch_fn = _build_eig_batch_fn(forward, detectable)
-        if cache_key is not None:
-            _EIG_JIT_CACHE[cache_key] = batch_fn
+    batch_fn = _build_eig_batch_fn(forward, detectable)
 
     weights = jnp.exp(posterior.log_weights)
     total, geom, alias, preds, det_w = batch_fn(

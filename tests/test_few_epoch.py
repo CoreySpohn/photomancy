@@ -22,10 +22,7 @@ from photomancy.orbit.few_epoch import (  # noqa: E402
     TI_PARAM_NAMES,
     TIBasisModel,
     admissible_region_fit,
-    chart_admissible_region_fit,
-    chart_lambert_depth_fit,
     lambert_depth_fit,
-    state_to_theta,
 )
 
 DIST_PC = 10.0
@@ -173,10 +170,19 @@ def _grid_reference(data, n_e=24, n_lnP=48, n_tau=32, n_mc=64):
     return out
 
 
-def _weighted_stats(post, col):
-    """Weighted mean/std of one posterior column, plus the Kish ESS."""
+def _chart_quantity(samples, name):
+    """Eccentricity or ln period (days) of ThieleInnesChart coordinates."""
+    x = np.asarray(samples)
+    if name == "e":
+        usq = x[:, 1] ** 2 + x[:, 2] ** 2
+        return np.sqrt(usq / (1.0 + usq))
+    return np.log(2.0 * np.pi) - x[:, 0]
+
+
+def _weighted_stats(post, name):
+    """Weighted mean/std of ``e`` or ``lnP`` for a chart posterior, plus Kish ESS."""
     lw = np.asarray(post.log_weights)
-    th = np.asarray(post.samples)[:, col]
+    th = _chart_quantity(post.samples, name)
     finite = np.isfinite(lw)
     w = np.exp(lw[finite] - lw[finite].max())
     w /= w.sum()
@@ -233,13 +239,6 @@ def test_ti_sky_block_mapping(cos_i):
     )
 
 
-def test_state_to_theta_convention_lock():
-    """state_to_theta inverts the rotation-built truth exactly."""
-    r, v, theta_true = _truth_state(0.0)
-    theta = state_to_theta(r, v, TRUTH["mu"], 0.0, MODEL.t_ref)
-    assert np.allclose(np.asarray(theta), np.asarray(theta_true), atol=1e-8)
-
-
 def test_forward_au_matches_independent_propagation():
     """The model forward reproduces independently propagated positions."""
     _, _, theta = _truth_state(0.0)
@@ -265,8 +264,8 @@ def test_lambert_depth_fit_matches_grid_reference():
         n_max_rev=5,
         return_parts=True,
     )
-    mean_e, _, ess = _weighted_stats(post, 0)
-    mean_lnP, _, _ = _weighted_stats(post, 1)
+    mean_e, _, ess = _weighted_stats(post, "e")
+    mean_lnP, _, _ = _weighted_stats(post, "lnP")
     assert ess > 100.0
     assert abs(mean_e - ref["e"][0]) < 0.06
     assert abs(mean_lnP - ref["lnP"][0]) < 0.15
@@ -295,7 +294,7 @@ def test_third_epoch_tightens_period():
         z_max_au=3.0,
     )
     data3 = _make_data(3, sigma_au=sigma)
-    post3 = lambert_depth_fit(
+    post3, parts3 = lambert_depth_fit(
         data3,
         dist_pc=DIST_PC,
         model=model,
@@ -304,18 +303,20 @@ def test_third_epoch_tightens_period():
         n_max_rev=1,
         idx=(0, 2),
         z_max_au=3.0,
+        return_parts=True,
     )
-    _, std2, _ = _weighted_stats(post2, 1)
-    _mean3, std3, ess3 = _weighted_stats(post3, 1)
+    _, std2, _ = _weighted_stats(post2, "lnP")
+    _mean3, std3, ess3 = _weighted_stats(post3, "lnP")
     assert ess3 > 15.0
     assert std3 < 0.7 * std2
     # The posterior is multi-modal, so check the top-weight particle (a real
     # orbit) rather than the weighted-mean theta (which is not an orbit).
-    top = np.asarray(post3.samples)[int(np.argmax(np.asarray(post3.log_weights)))]
-    x_au, y_au = MODEL.forward_au(jnp.asarray(top), data3.times)
-    resid = np.hypot(
-        np.asarray(x_au / DIST_PC - data3.ra), np.asarray(y_au / DIST_PC - data3.dec)
+    best = int(np.argmax(np.asarray(post3.log_weights)))
+    orbit = ThieleInnesChart(branch=int(parts3["branch"][best])).to_orbit(
+        post3.samples[best], mu_AU3_per_d2=MU_SUN, epoch_d=float(data3.times[0])
     )
+    east, north = sky_offsets_arcsec(orbit, data3.times, DIST_PC)
+    resid = np.hypot(np.asarray(east - data3.ra), np.asarray(north - data3.dec))
     assert float(resid[1]) < 4.0 * sigma / DIST_PC
 
 
@@ -330,8 +331,8 @@ def test_admissible_region_fit_matches_grid_reference_n1():
         key=jax.random.PRNGKey(4),
         n_particles=120_000,
     )
-    mean_e, _, ess = _weighted_stats(post, 0)
-    mean_lnP, _, _ = _weighted_stats(post, 1)
+    mean_e, _, ess = _weighted_stats(post, "e")
+    mean_lnP, _, _ = _weighted_stats(post, "lnP")
     assert ess > 150.0
     assert abs(mean_e - ref["e"][0]) < 0.06
     assert abs(mean_lnP - ref["lnP"][0]) < 0.15
@@ -369,49 +370,77 @@ def test_conditioned_pair_validation():
         )
 
 
-def _parity_parts(legacy, chart):
-    """Common-coordinate comparison of two parts dicts at identical latents."""
-    keep = np.isfinite(np.asarray(legacy["ln_prior"]))
-    np.testing.assert_array_equal(keep, np.isfinite(np.asarray(chart["ln_prior"])))
-    assert keep.sum() > 50
-    like_old = np.asarray(legacy["ln_like"])[keep]
-    like_new = np.asarray(chart["ln_like"])[keep]
-    floor = max(1e-10, 64 * np.finfo(float).eps * np.sum(1.0 + np.abs(like_old)))
-    assert np.max(np.abs(like_new - like_old)) <= floor
-    old = (np.asarray(legacy["ln_prior"]) + np.asarray(legacy["ln_jac"]))[keep]
-    new = (np.asarray(chart["ln_prior"]) + np.asarray(chart["ln_jac"]))[keep]
-    offset = new - old
-    floor = max(1e-10, 64 * np.finfo(float).eps * np.sum(1.0 + np.abs(old)))
+# Log prior plus Jacobian of the removed legacy-coordinate route at the first ten
+# supported lanes (same key and latents), frozen; the chart route adds one
+# constant (its normalization) to every lane. The legacy likelihood of the
+# conditioned epochs is exactly zero on those lanes.
+_LAMBERT_LANES = [3, 4, 5, 7, 8, 22, 30, 39, 62, 100]
+_LAMBERT_PRIOR_JAC = [
+    -6.804181758151423,
+    -5.612351109305287,
+    -6.325890413619634,
+    -7.0364961284045435,
+    -5.36835367147743,
+    -5.283868722262439,
+    -6.214819366500243,
+    -6.552099077780917,
+    -6.034183551840848,
+    -4.6851922259480965,
+]
+_AR_LANES = [83, 93, 157, 209, 404, 405, 504, 665, 705, 734]
+_AR_PRIOR_JAC = [
+    9.304910167063504,
+    12.182284981269216,
+    10.803445293706877,
+    8.531824104091855,
+    10.757084743357762,
+    4.433385868329909,
+    7.903904804455858,
+    7.62809963210831,
+    10.882896957657781,
+    10.002604805952583,
+]
+
+
+def _frozen_parity(parts, lanes, frozen_prior_jac, n_supported):
+    """Chart parts against the frozen legacy values on the same latents."""
+    keep = np.isfinite(np.asarray(parts["ln_prior"]))
+    assert keep.sum() == n_supported
+    assert keep[lanes].all()
+    like = np.asarray(parts["ln_like"])[lanes]
+    assert np.max(np.abs(like)) <= 1e-10
+    new = (np.asarray(parts["ln_prior"]) + np.asarray(parts["ln_jac"]))[lanes]
+    offset = new - np.asarray(frozen_prior_jac)
+    floor = max(1e-10, 64 * np.finfo(float).eps * np.sum(1.0 + np.abs(new)))
     return keep, float(offset.max() - offset.min()), floor
 
 
-def test_chart_lambert_matches_lambert_weights_and_sky():
-    """Fails if the chart route's weights or orbits differ from the legacy fit.
+def test_lambert_weights_and_sky_match_frozen_legacy_fit():
+    """Fails if the Lambert fit's weights or orbits differ from the legacy fit.
 
-    Two epochs, one key (hence the same 2 x 1 x 600 latents and families): the
-    support masks agree exactly, the log likelihood matches at the 64 eps floor,
-    log prior + Jacobian differs by one constant over every lane (the chart
-    normalization, not a per-lane term), the chart orbit of each top lane on its
-    reported sheet passes within 6 sigma of both observed sky positions (the
-    latents draw the positions about the data), and both line-of-sight branches
-    occur.
+    Two epochs, one key (the same 2 x 1 x 600 latents and families as the removed
+    legacy route, 195 supported lanes): the likelihood is zero on the conditioned
+    epochs, log prior + Jacobian differs from the frozen legacy values by one
+    constant over the ten frozen lanes (the chart normalization, not a per-lane
+    term; 64 eps floor), the chart orbit of each top lane on its reported sheet
+    passes within 6 sigma of both observed sky positions (the latents draw the
+    positions about the data), and both line-of-sight branches occur.
     """
     data = _make_data(2)
-    key = jax.random.PRNGKey(0)
-    kwargs = dict(
+    post, parts = lambert_depth_fit(
+        data,
         dist_pc=DIST_PC,
         model=MODEL,
-        key=key,
+        key=jax.random.PRNGKey(0),
         n_per_family=600,
         n_max_rev=1,
         return_parts=True,
+        epoch=Epoch(2460000.0),
     )
-    _, legacy = lambert_depth_fit(data, **kwargs)
-    post, chart = chart_lambert_depth_fit(data, epoch=Epoch(2460000.0), **kwargs)
     assert (post.chart, post.epoch) == ("ThieleInnesChart", Epoch(2460000.0))
-    keep, spread, floor = _parity_parts(legacy, chart)
+    keep, spread, floor = _frozen_parity(parts, _LAMBERT_LANES, _LAMBERT_PRIOR_JAC, 195)
     assert spread <= floor
-    branch = np.asarray(chart["branch"])[keep]
+    branch = np.asarray(parts["branch"])[keep]
     assert set(np.unique(branch)) == {-1, 1}
     x = np.asarray(post.samples)[keep]
     top = np.argsort(np.asarray(post.log_weights)[keep])[-8:]
@@ -422,28 +451,28 @@ def test_chart_lambert_matches_lambert_weights_and_sky():
         east, north = sky_offsets_arcsec(orbit, data.times, DIST_PC)
         np.testing.assert_allclose(east, data.ra, atol=6.0 * SIGMA_AU / DIST_PC)
         np.testing.assert_allclose(north, data.dec, atol=6.0 * SIGMA_AU / DIST_PC)
-    print("lambert chart parity: like floor", floor, "prior+jac spread", spread)
+    print("lambert parity: like floor", floor, "prior+jac spread", spread)
 
 
-def test_chart_admissible_region_matches_admissible_region():
-    """Fails if the one-epoch chart route drifts from the legacy fit at equal latents.
+def test_admissible_region_matches_frozen_legacy_fit():
+    """Fails if the one-epoch fit drifts from the legacy fit at equal latents.
 
-    One epoch, 10000 particles, one key: masks and likelihood equal, prior plus
-    Jacobian offset by one constant, and the reported sheets take both signs.
+    One epoch, 10000 particles, one key (174 supported lanes): the likelihood is
+    zero, prior plus Jacobian is offset from the frozen legacy values by one
+    constant (64 eps floor), and the reported sheets take both signs.
     """
     data = _make_data(1)
-    kwargs = dict(
+    declared, parts = admissible_region_fit(
+        data,
         dist_pc=DIST_PC,
         model=MODEL,
         key=jax.random.PRNGKey(4),
         n_particles=10000,
         return_parts=True,
-    )
-    _, legacy = admissible_region_fit(data, **kwargs)
-    declared, chart = chart_admissible_region_fit(
-        data, epoch=Epoch(2460000.0), **kwargs
+        epoch=Epoch(2460000.0),
     )
     assert (declared.chart, declared.epoch) == ("ThieleInnesChart", Epoch(2460000.0))
-    keep, spread, floor = _parity_parts(legacy, chart)
+    keep, spread, floor = _frozen_parity(parts, _AR_LANES, _AR_PRIOR_JAC, 174)
     assert spread <= floor
-    assert set(np.unique(np.asarray(chart["branch"])[keep])) == {-1, 1}
+    assert set(np.unique(np.asarray(parts["branch"])[keep])) == {-1, 1}
+    print("ar parity: prior+jac spread", spread, "floor", floor)

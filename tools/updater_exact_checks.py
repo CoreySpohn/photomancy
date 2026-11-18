@@ -552,7 +552,7 @@ def physical_nodes(setup, counts, chunk=4096):
     from hwoutils.constants import G
     from orbix.equations.orbit import mean_motion
 
-    from photomancy.orbit.forward import predict_relative_astrometry
+    from photomancy.orbit._frame import relative_offsets_arcsec
 
     target = setup["target"]
     ms = float(target.Ms_kg)
@@ -578,7 +578,7 @@ def physical_nodes(setup, counts, chunk=4096):
 
     def position(a, e, cos_i, cos_w, sin_w, m_ref, t):
         tp = -m_ref / mean_motion(a, mu)
-        x, y = predict_relative_astrometry(
+        x, y = relative_offsets_arcsec(
             jnp.reshape(t, (1,)), a, e, cos_i, 0.0, cos_w, sin_w, tp, ms, dist
         )
         return x[0], y[0]
@@ -839,8 +839,7 @@ def reference_sample(protocol, setup, key, n_prop, chunk=2**16):
             rows, ll = score(jax.random.fold_in(key, j))
             take = min(batch, n_prop - j * batch)
             e, ln_p, east, north = rows_fn(rows[:take], times, ms, dist)
-            rho = jnp.hypot(east[:, 0], north[:, 0])
-            lw = np.asarray(ll[:take] - 2.0 * jnp.log(rho))
+            lw = np.asarray(ll[:take])
             fin = np.isfinite(lw)
             for name, v in zip(
                 panel.QUANTITIES, (e, ln_p, east[:, 1], north[:, 1]), strict=True

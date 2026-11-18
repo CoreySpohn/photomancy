@@ -8,23 +8,28 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, d2s  # noqa: E402
-from orbix.equations import period_to_sma  # noqa: E402
-
-from photomancy.backends import LaplaceBackend, LaplaceMixtureBackend  # noqa: E402
-from photomancy.orbit.data import RelativeAstromData, RVData  # noqa: E402
-from photomancy.orbit.forward import (  # noqa: E402
+from kinematics import (  # noqa: E402
     predict_relative_astrometry,
     predict_rv,
 )
-from photomancy.orbit.inference import build_numpyro_logdensity  # noqa: E402
-from photomancy.orbit.init import find_init_top_k  # noqa: E402
+from orbit_fit import classical_coordinates, mass_problem  # noqa: E402
+from orbix.equations import period_to_sma  # noqa: E402
+
+from photomancy import RadialVelocityTerm, RelativeAstrometryTerm  # noqa: E402
+from photomancy.orbit.data import RelativeAstromData, RVData  # noqa: E402
+from photomancy.orbit.init import find_init  # noqa: E402
+from photomancy.orbit.laplace import (  # noqa: E402
+    map_laplace_fit,
+    map_laplace_mixture_fit,
+)
 from photomancy.posterior import MixturePosterior  # noqa: E402
 
 MSUN_KG = Msun2kg
 MEARTH_KG = Mearth2kg
 DIST_PC = 10.0
 TRUE_T = 800.0
-LOG_P_RANGE = (float(np.log10(500.0)), float(np.log10(1200.0)))
+PERIOD_RANGE_D = (500.0, 1200.0)
+LOG_P_RANGE = tuple(float(np.log10(x)) for x in PERIOD_RANGE_D)
 
 E, COS_I, BIG_OMEGA, LITTLE_OMEGA = 0.1, 0.5, 2.0, 0.5
 TP = -1.2 / (2.0 * jnp.pi / TRUE_T)
@@ -76,15 +81,24 @@ def test_rv_only_fit_recovers_period_from_seed():
     """An RV-only fit recovers the period when seeded near the true period.
 
     RV alone has no Thiele-Innes blind initializer (that is astrometry-only), so the
-    fit is seeded from a period guess; it then recovers the true period.
+    fit is seeded at the true semi-major axis (period) with the other elements off;
+    it then recovers the true period.
     """
     rv = _make_rv()
-    problem = build_numpyro_logdensity(
-        MSUN_KG, DIST_PC, rv_data=rv, log_P_range=LOG_P_RANGE
+    seed = classical_coordinates(
+        float(period_to_sma(TRUE_T, MSUN_KG)), 0.3, 0.2, 1.0, 1.0, 0.0, TRUE_T
     )
-    z0 = problem.init_to_z({"log_P": jnp.array([float(np.log10(TRUE_T))])})
-
-    post = LaplaceBackend(min_eigenvalue=1.0, n_steps=400).run(problem.logdensity, z0)
+    problem = mass_problem(
+        (RadialVelocityTerm(rv),),
+        seed,
+        100.0,
+        star_mass_kg=MSUN_KG,
+        dist_pc=DIST_PC,
+        period_range_d=PERIOD_RANGE_D,
+    )
+    post = map_laplace_fit(
+        problem, problem.flatten(problem.position_template), n_steps=400
+    )
     t_fit = float(problem.to_physical(post.mean)["T"])
     assert abs(t_fit - TRUE_T) / TRUE_T < 0.10
 
@@ -95,19 +109,22 @@ def test_joint_rv_astrometry_recovers_period_and_mass():
     """A joint RV + astrometry fit recovers the period (astrometry) and mass (RV)."""
     rv = _make_rv()
     astrom = _make_astrom()
-    problem = build_numpyro_logdensity(
-        MSUN_KG,
-        DIST_PC,
-        rv_data=rv,
-        relative_astrom_data=astrom,
-        log_P_range=LOG_P_RANGE,
+    starts, _ = find_init(astrom, MSUN_KG, DIST_PC, k=2, log_T_range=LOG_P_RANGE)
+    problem = mass_problem(
+        (RadialVelocityTerm(rv), RelativeAstrometryTerm(astrom)),
+        starts[0],
+        100.0,
+        star_mass_kg=MSUN_KG,
+        dist_pc=DIST_PC,
+        period_range_d=PERIOD_RANGE_D,
     )
-    init_dicts = find_init_top_k(astrom, MSUN_KG, DIST_PC, k=2, log_T_range=LOG_P_RANGE)
-    inits = jnp.stack([problem.init_to_z(d) for d in init_dicts])
-
-    post = LaplaceMixtureBackend(min_eigenvalue=1.0, n_steps=100).run(
-        problem.logdensity, inits
+    inits = jnp.stack(
+        [
+            problem.flatten({"orbit": start, "mass_Mearth": jnp.log(100.0)})
+            for start in starts
+        ]
     )
+    post = map_laplace_mixture_fit(problem, inits, n_steps=100)
     assert isinstance(post, MixturePosterior)
 
     phys = problem.to_physical(post.means[jnp.argmax(post.log_evidences)])

@@ -1328,13 +1328,13 @@ def _physical_rows_fn():
     from hwoutils.constants import G, two_pi
     from orbix.equations.orbit import mean_motion
 
-    from photomancy.orbit.forward import predict_relative_astrometry
+    from photomancy.orbit._frame import relative_offsets_arcsec
 
     @jax.jit
     def fn(rows, times, ms_kg, dist_pc):
         def one(row):
             a, e, cos_i, w_node, cos_w, sin_w, tp = row
-            return predict_relative_astrometry(
+            return relative_offsets_arcsec(
                 times, a, e, cos_i, w_node, cos_w, sin_w, tp, ms_kg, dist_pc
             )
 
@@ -1860,7 +1860,6 @@ RECORD_MODULES = (
     "photomancy.particles",
     "photomancy.orbit.few_epoch",
     "photomancy.orbit.ofti",
-    "photomancy.orbit.forward",
     "photomancy.orbit.data",
     "photomancy.orbit.likelihoods",
     "photomancy.orbit.thiele_innes",
@@ -2220,9 +2219,9 @@ class UnitExecutor:
         """Physical reference: scale-and-rotate proposal with exact weights.
 
         The weight is the likelihood of every epoch but the anchor times
-        ``rho^-2`` (``rho`` the anchor-position separation), with the support
-        indicator; the anchor is the highest signal-to-noise epoch, or the
-        lowest for the independent-proposal check.
+        ``rho^-2`` (``rho`` the anchor-position separation, applied inside the
+        proposal's score), with the support indicator; the anchor is the highest
+        signal-to-noise epoch, or the lowest for the independent-proposal check.
         """
         import equinox as eqx
         import jax
@@ -2261,8 +2260,7 @@ class UnitExecutor:
             rows, ll = score(jax.random.fold_in(key, j))
             take = min(batch, n_prop - j * batch)
             e, ln_p, east, north = self._physical_rows(rows[:take], times, ms, dist)
-            rho = jnp.hypot(east[:, 0], north[:, 0])
-            lw = np.asarray(ll[:take] - 2.0 * jnp.log(rho))
+            lw = np.asarray(ll[:take])
             fin = np.isfinite(lw)
             for name, v in zip(
                 QUANTITIES, (e, ln_p, east[:, 1], north[:, 1]), strict=True

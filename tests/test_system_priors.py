@@ -32,10 +32,8 @@ from photomancy import RadialVelocityTerm, SystemLogDensity
 from photomancy.orbit.data import RVData
 from photomancy.orbit.inference import (
     build_chart_logdensity,
-    build_numpyro_logdensity,
     orbit_chart_log_volume,
 )
-from photomancy.orbit.priors import ecc_distribution
 from photomancy.orbit.updater import FixedMassTarget
 from photomancy.priors import (
     PopulationPrior,
@@ -76,6 +74,52 @@ def _orbits(mass_Mearth=0.0):
     return ClassicalChart().to_orbit(x, mu_AU3_per_d2=G * mass_kg)
 
 
+# Frozen eccentricity-site log densities of the retired NumPyro laws at _orbits().e.
+_ECC_LOG_PROB = {
+    "disk": [0.0, 0.0, 0.0, 0.0],
+    "rayleigh": [
+        -0.7425684773214338,
+        0.4711525969262529,
+        0.4878499848627348,
+        -1.3835927839369297,
+    ],
+    "vaneylen19": [
+        2.500834850831562,
+        -1.6282954465785795,
+        -36.967316382786876,
+        -128.19500123055093,
+    ],
+    "kipping13": [
+        1.1792472661367226,
+        0.7144769078510184,
+        -0.2575328219006827,
+        -2.409595213299103,
+    ],
+}
+# Frozen log density and its gradient at the second point of the sampled-jitter test:
+# the retired unconstrained NumPyro joint plus the log determinant of the map from the
+# chart point to its unconstrained sites.
+_OLD_JOINT = [
+    -11.983164735105953,
+    -15.124466212443133,
+    -18.04801104334017,
+    -21.734194578606996,
+]
+_OLD_GRAD = [
+    -4.540111035731708,
+    -1.400878134936334,
+    9.818543780126888,
+    2.424568770699403,
+    -1.5065999591547925,
+    5.900001510120951,
+    -0.027998079921538157,
+    4.6066979547215587e-17,
+    5.94982916365241e-17,
+    0.8227612236659537,
+    -0.23563430122799972,
+]
+
+
 def test_eccentricity_sites_and_conditional_cdfs():
     """The polar area factor and truncation constant affect different integrals."""
     orbits = _orbits()
@@ -92,7 +136,7 @@ def test_eccentricity_sites_and_conditional_cdfs():
         _check(
             name,
             law(orbits),
-            ecc_distribution(name).log_prob(orbits.e) - jnp.log(orbits.e) + constant,
+            jnp.asarray(_ECC_LOG_PROB[name]) - jnp.log(orbits.e) + constant,
         )
 
         def density(e, law=law):
@@ -261,19 +305,6 @@ def _scene(orbit, *, mass_Mearth, radius_AU, albedo):
     )
 
 
-def _orbit_sites(orbit):
-    """Constrained orbit sites at the same period, phase and orientation."""
-    elem = orbit.to_classical()
-    return dict(
-        log_P=jnp.log10(orbit.period_d),
-        e_raw=orbit.e,
-        cos_i=jnp.cos(elem["i_rad"]),
-        W=elem["W_rad"],
-        w_raw=elem["w_rad"],
-        M0=elem["M0_rad"],
-    )
-
-
 def _scale_coordinates(jitter_scale):
     """Physical measures for the three body scales and instrument jitters."""
     scalars = {
@@ -288,7 +319,7 @@ def _scale_coordinates(jitter_scale):
 
 @pytest.mark.medium
 def test_old_unconstrained_joint_with_sampled_jitter():
-    """Differentiate the full map to the actual unconstrained NumPyro sites."""
+    """Fails if the pulled-back joint or gradient departs from the frozen reference."""
     chart = CartesianChart(scale_AU=1.6)
     data = RVData(
         times=jnp.array([0.0, 31.0, 77.0, 103.0, 0.0]),
@@ -297,14 +328,6 @@ def test_old_unconstrained_joint_with_sampled_jitter():
         inst_ids=jnp.array([0, 1, 0, 1, 0]),
         n_inst=2,
         is_valid=jnp.array([True, True, True, True, False]),
-    )
-    old = build_numpyro_logdensity(
-        Msun2kg,
-        10.0,
-        rv_data=data,
-        sample_planet_scale=True,
-        ecc_prior="disk",
-        jitter_scale=0.8,
     )
     scalars = _scale_coordinates(0.8)
     poisoned = eqx.tree_at(
@@ -339,19 +362,6 @@ def test_old_unconstrained_joint_with_sampled_jitter():
             jitter_m_per_s=x[9:],
         )
 
-    def old_coords(x):
-        orbit = chart.to_orbit(
-            x[:6], mu_AU3_per_d2=G * (Msun2kg + Mearth2kg * jnp.exp(x[6]))
-        )
-        sites = dict(
-            **_orbit_sites(orbit),
-            log_Mp=x[6] / jnp.log(10),
-            log_Rp=x[7] / jnp.log(10),
-            log_Ag=x[8] / jnp.log(10),
-            jitter=jnp.exp(x[9:]),
-        )
-        return old.init_to_z(jax.tree.map(jnp.atleast_1d, sites))
-
     mass = jnp.array([0.5, 2.0, 8.0, 13.0])
     points = jnp.column_stack(
         (
@@ -364,22 +374,17 @@ def test_old_unconstrained_joint_with_sampled_jitter():
         )
     )
 
-    def reference(x):
-        return (
-            old.logdensity(old_coords(x))
-            + jnp.linalg.slogdet(jax.jacfwd(old_coords)(x))[1]
-        )
-
     def compare(x):
         value, aux = density.value_and_aux(unpack(x))
-        return value, reference(x), aux["predictions"][0][-1]
+        return value, aux["predictions"][0][-1]
 
-    value, old_value, masked = eqx.filter_jit(jax.vmap(compare))(points)
+    value, masked = eqx.filter_jit(jax.vmap(compare))(points)
+    old_value = jnp.asarray(_OLD_JOINT)
     np.testing.assert_array_equal(masked, 0.0)
     _check("full old z pullback", value, old_value)
     x = points[1]
     new_grad = jax.jit(jax.grad(lambda x: density(unpack(x))))(x)
-    old_grad = jax.jit(jax.grad(reference))(x)
+    old_grad = jnp.asarray(_OLD_GRAD)
     np.testing.assert_allclose(new_grad, old_grad, rtol=1e-9, atol=ATOL)
     print(f"pulled-back gradient: max_error={np.max(np.abs(new_grad - old_grad)):.4g}")
     assert np.isneginf(eqx.filter_jit(density)(unpack(x.at[:6].set(0.0))))

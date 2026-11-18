@@ -29,9 +29,12 @@ def _samples(n=200, seed=3):
 
 
 class _Problem:
-    """A minimal OrbitProblem stand-in with a traceable to_physical."""
+    """A minimal problem stand-in with a traceable to_physical."""
 
     param_names = ("z0", "z1")
+
+    def require(self, posterior):
+        """Accept any posterior; chart checks are covered elsewhere."""
 
     def to_physical(self, z):
         """Map a flat z to a physical dict, leaking ll_total like the real one."""

@@ -1,7 +1,7 @@
 """Axis-label vocabulary for the physical orbital parameters.
 
 Plain data, importable without the plotting stack: the ASCII label for
-every key ``OrbitProblem.to_physical`` emits, plus the curated default
+every key ``ChartOrbitProblem.to_physical`` emits, plus the curated default
 ordering corner plots use when the caller does not choose one.
 """
 

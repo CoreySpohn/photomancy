@@ -58,17 +58,18 @@ def fitted_orbit_mixture():
     """One small, fitted three-component posterior for EIG and diagnostic checks.
 
     These checks consume a fitted posterior; blind initialization and period
-    recovery have dedicated tests. Three perturbed starts exercise the mixture
-    path without repeating a period/eccentricity/phase search in each consumer.
+    recovery have dedicated tests. Three blind starts exercise the mixture path.
     """
     import jax.numpy as jnp
     import numpy as np
+    from orbit_fit import chart_problem
     from orbix.equations import period_to_sma
+    from orbix.system import ClassicalChart
     from sky_reference import sky_position
 
     from photomancy.orbit.data import RelativeAstromData
-    from photomancy.orbit.inference import build_numpyro_logdensity
-    from photomancy.orbit.laplace import numpyro_map_laplace_mixture_fit
+    from photomancy.orbit.init import find_init
+    from photomancy.orbit.laplace import map_laplace_mixture_fit
 
     mass, distance, period, error = 1.989e30, 10.0, 1096.0, 5e-3
     log_range = (float(np.log10(600.0)), float(np.log10(1600.0)))
@@ -96,45 +97,16 @@ def fitted_orbit_mixture():
         planet_id=jnp.zeros(5, dtype=int),
         is_valid=jnp.ones(5, dtype=bool),
     )
-    starts = [
-        {name: jnp.array([value]) for name, value in values.items()}
-        for values in (
-            dict(
-                log_P=np.log10(period) - 0.02,
-                e_raw=0.2,
-                cos_i=0.4,
-                W=2.2,
-                w_raw=0.7,
-                M0=1.4,
-            ),
-            dict(
-                log_P=np.log10(period) + 0.02,
-                e_raw=0.1,
-                cos_i=0.6,
-                W=2.4,
-                w_raw=0.9,
-                M0=1.6,
-            ),
-            dict(
-                log_P=np.log10(period),
-                e_raw=0.25,
-                cos_i=0.3,
-                W=2.1,
-                w_raw=1.0,
-                M0=1.7,
-            ),
-        )
-    ]
-    post = numpyro_map_laplace_mixture_fit(
-        mass,
-        distance,
-        relative_astrom_data=data,
-        log_P_range=log_range,
-        k=3,
-        init_list=starts,
-        n_steps=100,
+    chart = ClassicalChart()
+    starts, _ = find_init(data, mass, distance, k=3, log_T_range=log_range, chart=chart)
+    problem = chart_problem(
+        data,
+        {"orbit": starts[0]},
+        star_mass_kg=mass,
+        dist_pc=distance,
+        chart=chart,
+        period_range_d=(600.0, 1600.0),
     )
-    problem = build_numpyro_logdensity(
-        mass, distance, relative_astrom_data=data, log_P_range=log_range
-    )
+    init = jnp.stack([problem.flatten({"orbit": start}) for start in starts])
+    post = map_laplace_mixture_fit(problem, init, n_steps=100)
     return post, problem

@@ -19,11 +19,11 @@ import pytest  # noqa: E402
 from hwoutils.constants import G, Msun2kg, two_pi  # noqa: E402
 from jax.scipy.special import betainc  # noqa: E402
 from jax.scipy.stats import beta as beta_dist  # noqa: E402
+from kinematics import predict_relative_astrometry  # noqa: E402
 from orbix.equations.orbit import thiele_innes_constants  # noqa: E402
 
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import MU_SUN  # noqa: E402
-from photomancy.orbit.forward import predict_relative_astrometry  # noqa: E402
 from photomancy.orbit.refit import (  # noqa: E402
     ReportData,
     collapsed_refit,
@@ -272,7 +272,7 @@ def _replicate_ess(runs, cap):
 
 
 def _positions(elements, future_d):
-    from photomancy.orbit.forward import predict_relative_astrometry as predict
+    from kinematics import predict_relative_astrometry as predict
 
     def one(el):
         period, mass = jnp.exp(el[0]), jnp.exp(el[6]) * Msun2kg

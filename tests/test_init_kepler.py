@@ -13,24 +13,15 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import G
+from kinematics import predict_relative_astrometry
 from orbix.equations import period_to_sma
 from orbix.system import ClassicalChart, EccentricityVectorChart, periapsis_chart_shape
 
 from photomancy.orbit._frame import orbit_rows, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
-from photomancy.orbit.forward import predict_relative_astrometry
-from photomancy.orbit.init import (
-    _grid_results,
-    _kepler_consistent_loglike,
-    chart_find_init,
-    find_init,
-)
+from photomancy.orbit.init import find_init
 from photomancy.orbit.likelihoods import loglike_relative_astrom
-from photomancy.orbit.thiele_innes import (
-    chart_thiele_innes_fit,
-    fixed_mass_coordinates,
-    thiele_innes_fit,
-)
+from photomancy.orbit.thiele_innes import fixed_mass_coordinates, thiele_innes_fit
 
 MSUN = 1.98892e30
 DIST_PC = 10.0
@@ -63,84 +54,163 @@ def _seed3001_three_epoch():
     return data, float(a_true)
 
 
+def _best_start(data):
+    """Best Kepler-consistent start as a chart orbit and its log likelihood."""
+    coords, ll = find_init(data, MSUN, DIST_PC, log_T_range=(2.0, 3.0))
+    orbit = jax.tree.map(
+        lambda leaf: leaf[0],
+        EccentricityVectorChart().to_orbit(coords, mu_AU3_per_d2=G * MSUN),
+    )
+    return orbit, float(ll[0])
+
+
 def test_find_init_period_is_kepler_consistent():
     """find_init's period must imply (via Kepler III) the true orbit size."""
     data, a_true = _seed3001_three_epoch()
-    iv = find_init(data, MSUN, DIST_PC, log_T_range=(2.0, 3.0))
-    T = 10.0 ** float(iv["log_P"][0])
-    a_kepler = float(period_to_sma(T, MSUN))
+    orbit, _ = _best_start(data)
+    a_kepler = float(orbit_rows(orbit)[0])
     # the Kepler-implied semimajor axis must match the true orbit, not an a-free alias
     assert abs(a_kepler - a_true) / a_true < 0.15, (
-        f"got T={T:.0f}d -> a={a_kepler:.3f}, truth {a_true:.3f}"
+        f"got T={float(orbit.period_d):.0f}d -> a={a_kepler:.3f}, truth {a_true:.3f}"
+    )
+    assert float(period_to_sma(float(orbit.period_d), MSUN)) == pytest.approx(
+        a_kepler, rel=1e-9
     )
 
 
 def test_find_init_kepler_residual_is_small():
     """The Kepler-implied orbit from find_init should thread the data to ~noise."""
     data, _ = _seed3001_three_epoch()
-    iv = find_init(data, MSUN, DIST_PC, log_T_range=(2.0, 3.0))
-    T = 10.0 ** float(iv["log_P"][0])
-    a = period_to_sma(T, MSUN)
-    e = float(iv["e_raw"][0])
-    w = float(iv["w_raw"][0])
-    ra, dec = predict_relative_astrometry(
-        data.times,
-        a,
-        e,
-        float(iv["cos_i"][0]),
-        float(iv["W"][0]),
-        jnp.cos(w),
-        jnp.sin(w),
-        -float(iv["M0"][0]) * T / (2.0 * jnp.pi),
-        MSUN,
-        DIST_PC,
-    )
+    orbit, _ = _best_start(data)
+    ra, dec = sky_offsets_arcsec(orbit, data.times, DIST_PC)
     sq = (ra - data.ra) ** 2 + (dec - data.dec) ** 2
     rms_mas = float(jnp.sqrt(jnp.mean(sq)) * 1000.0)
     assert rms_mas < 5.0, f"find_init Kepler orbit rms = {rms_mas:.1f} mas"
 
 
-_legacy_fit = eqx.filter_jit(thiele_innes_fit)
-_chart_fit = eqx.filter_jit(chart_thiele_innes_fit)
+_chart_fit = eqx.filter_jit(thiele_innes_fit)
 
+# (T, e, tp, chi2, log likelihood, a, cos i, W) of the removed free-period
+# perifocal fit on the three-epoch case, frozen. The chart fit reports both
+# line-of-sight sheets; one is the frozen orbit and the other has W shifted by pi.
 TRIALS = [
-    (T, e, tp)
-    for T in (200.0, T_TRUE, 900.0)
-    for e in (0.05, 0.3, 0.7)
-    for tp in (10.0, 150.0, 300.0)
+    (
+        200.0,
+        0.05,
+        10.0,
+        3589.1671455837354,
+        -1758.6506723172029,
+        1.3499663321374284,
+        -0.25816455830168633,
+        0.7350628851937595,
+    ),
+    (
+        200.0,
+        0.3,
+        150.0,
+        7161.858397783388,
+        -3544.9962984170293,
+        1.058564945550391,
+        -0.46515708212039203,
+        0.7739863308252212,
+    ),
+    (
+        200.0,
+        0.7,
+        300.0,
+        19103.52900063236,
+        -9515.831599841515,
+        0.8517895783950797,
+        0.1037082142058199,
+        6.103941703487605,
+    ),
+    (
+        365.25,
+        0.05,
+        150.0,
+        265.11683421638094,
+        -96.62551663352568,
+        1.0866696422113962,
+        0.6246496704645093,
+        1.0492200195884087,
+    ),
+    (
+        365.25,
+        0.3,
+        300.0,
+        3912.404231646431,
+        -1920.2692153485507,
+        1.0566021588875585,
+        0.3860001182175006,
+        0.8160301048392078,
+    ),
+    (
+        365.25,
+        0.7,
+        10.0,
+        1820.8894254828888,
+        -874.5118122667795,
+        1.7734279391879677,
+        0.2442435227110743,
+        0.23575182983282428,
+    ),
+    (
+        900.0,
+        0.05,
+        300.0,
+        3215.838664096258,
+        -1571.9864315734642,
+        1.078843854494397,
+        -0.47262556870129796,
+        0.745658272185356,
+    ),
+    (
+        900.0,
+        0.3,
+        10.0,
+        2513.969679540043,
+        -1221.0519392953568,
+        0.9592975982870734,
+        -0.666354480047446,
+        0.525664822477111,
+    ),
+    (
+        900.0,
+        0.7,
+        150.0,
+        10723.634528134815,
+        -5325.884363592742,
+        1.0697425746209073,
+        0.028658507656540492,
+        1.1484744317427331,
+    ),
 ]
 
 
-def test_chart_fit_matches_thiele_innes_fit_over_trials():
-    """Fails if the chart fit drifts from the legacy fit at equal (T, e, tp).
+def test_chart_fit_matches_frozen_perifocal_fit_over_trials():
+    """Fails if the chart fit drifts from the frozen perifocal fit at equal (T, e, tp).
 
-    27 trials (T 200 to 900 d, e 0.05 to 0.7, tp 10 to 300 d) on the three-epoch
-    case. No ridge exists in the legacy fit, so the comparison is penalty-free.
-    chi2 and log likelihood match at the 64 eps floor (max(1e-10, 64 eps (1 + |x|)));
-    one reported sheet is the legacy orbit (a, cos i, W and w to 1e-8), the other
-    shares a, cos i and the sky positions with W shifted by pi; the sheets carry
-    branches +1 and -1.
+    Nine trials (T 200 to 900 d, e 0.05 to 0.7, tp 10 to 300 d) on the three-epoch
+    case; the legacy values are typed constants (the removed route had no ridge, so
+    the comparison is penalty-free). chi2 and log likelihood match at the 64 eps
+    floor (max(1e-10, 64 eps (1 + |x|))); one reported sheet is the frozen orbit (a,
+    cos i and W to 1e-8), the other shares a, cos i and the sky positions with W
+    shifted by pi; the sheets carry branches +1 and -1.
     """
     data, _ = _seed3001_three_epoch()
     eps = np.finfo(float).eps
     worst = 0.0
-    for T, e, tp in TRIALS:
-        old = _legacy_fit(data, T, e, tp, MSUN, DIST_PC)
+    for T, e, tp, chi2, loglike, a, cos_i, W in TRIALS:
         new = _chart_fit(data, DIST_PC, *periapsis_chart_shape(T, e, tp))
-        for got, want in (
-            (new.chi2, old.chi2),
-            (new.log_likelihood, old.log_likelihood),
-        ):
-            floor = max(1e-10, 64 * eps * (1.0 + abs(float(want))))
-            assert abs(float(got) - float(want)) <= floor * max(1.0, abs(float(want)))
-            worst = max(
-                worst, abs(float(got) - float(want)) / max(1.0, abs(float(want)))
-            )
+        for got, want in ((new.chi2, chi2), (new.log_likelihood, loglike)):
+            floor = max(1e-10, 64 * eps * (1.0 + abs(want)))
+            assert abs(float(got) - want) <= floor * max(1.0, abs(want))
+            worst = max(worst, abs(float(got) - want) / max(1.0, abs(want)))
         rows = np.asarray(orbit_rows(new.orbits))
-        np.testing.assert_allclose(rows[:, 0], float(old.a), rtol=1e-8)
-        np.testing.assert_allclose(rows[:, 2], float(old.cos_i), rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(rows[:, 0], a, rtol=1e-8)
+        np.testing.assert_allclose(rows[:, 2], cos_i, rtol=1e-8, atol=1e-10)
         np.testing.assert_allclose(rows[:, 1], e, rtol=1e-10)
-        offset = np.abs(np.angle(np.exp(1j * (rows[:, 3] - float(old.W)))))
+        offset = np.abs(np.angle(np.exp(1j * (rows[:, 3] - W))))
         np.testing.assert_allclose(np.sort(offset), [0.0, np.pi], atol=1e-8)
         assert sorted(np.asarray(new.branches).tolist()) == [-1, 1]
         sky = [
@@ -231,26 +301,23 @@ def test_chart_fit_is_the_unpenalized_least_squares_optimum():
     assert float(thin.chi2) < 1e-12
 
 
-# Medium: cold compiles of the chart grid and the legacy grid exceed the unit budget.
-@pytest.mark.medium
-def test_chart_find_init_matches_find_init_ranking_and_cell():
-    """Fails if chart_find_init ranks differently from the legacy Kepler grid.
+# Medium: a cold chart grid plus a cold Thiele-Innes fit exceed the unit budget.
+@pytest.mark.medium(reason="a chart grid and a fit, 8 s cold")
+def test_find_init_ranks_like_the_frozen_kepler_grid_and_cell():
+    """Fails if find_init ranks differently from the removed Kepler-consistent grid.
 
-    On the three-epoch case with the legacy default grid sizes: the best chart
-    log likelihood equals the best legacy Kepler-consistent log likelihood at the
-    64 eps floor; coordinates are finite, inside the chart cell (angles in
-    [-pi, pi]), and branch -1 returns the same likelihood.
+    On the three-epoch case with the grid used to freeze the legacy value (20
+    periods, 9 eccentricities, 8 periapsis times): the best log likelihood equals
+    the legacy best (12.500237011495074) at the 64 eps floor; coordinates are
+    finite, inside the chart cell (angles in [-pi, pi]), and branch -1 returns the
+    same likelihood.
     """
     data, _ = _seed3001_three_epoch()
     kwargs = dict(log_T_range=(2.0, 3.0), n_log_T=20, n_tp=8)
-    coords, ll = chart_find_init(data, MSUN, DIST_PC, k=3, **kwargs)
-    _, ll_other = chart_find_init(data, MSUN, DIST_PC, k=3, branch=-1, **kwargs)
+    coords, ll = find_init(data, MSUN, DIST_PC, k=3, **kwargs)
+    _, ll_other = find_init(data, MSUN, DIST_PC, k=3, branch=-1, **kwargs)
     np.testing.assert_allclose(ll, ll_other, rtol=0, atol=1e-9)
-    results = _grid_results(
-        data, MSUN, DIST_PC, (2.0, 3.0), 20, jnp.linspace(0.0, 0.8, 9), 8
-    )
-    legacy = _kepler_consistent_loglike(results, data, MSUN, DIST_PC)
-    best = float(jnp.max(legacy))
+    best = 12.500237011495074
     floor = max(1e-10, 64 * np.finfo(float).eps * (1.0 + abs(best)))
     assert abs(float(ll[0]) - best) <= floor * max(1.0, abs(best))
     assert np.all(np.diff(np.asarray(ll)) <= 0.0)
@@ -258,9 +325,7 @@ def test_chart_find_init_matches_find_init_ranking_and_cell():
     assert coords.shape == (3, 6) and np.all(np.isfinite(coords))
     assert np.all(np.abs(coords[:, 4:]) <= np.pi + 1e-12)
     # The returned start reproduces its reported likelihood through the chart.
-    fit = chart_thiele_innes_fit(
-        data, DIST_PC, *periapsis_chart_shape(T_TRUE, 0.1, 40.0)
-    )
+    fit = thiele_innes_fit(data, DIST_PC, *periapsis_chart_shape(T_TRUE, 0.1, 40.0))
     both = np.asarray(fixed_mass_coordinates(fit, MSUN))
     assert both.shape == (2, 6)
     # The sheets share ln a and cos i; the reflection flips the eccentricity vector.
@@ -270,7 +335,7 @@ def test_chart_find_init_matches_find_init_ranking_and_cell():
 
 # Medium: two cold chart grids.
 @pytest.mark.medium
-def test_chart_find_init_writes_starts_in_the_declared_chart_and_epoch():
+def test_find_init_writes_starts_in_the_declared_chart_and_epoch():
     """Starts in any chart rebuild the ranked orbits at the chart epoch.
 
     On the three-epoch case, the ``ClassicalChart`` starts at chart epochs 0 and
@@ -282,11 +347,11 @@ def test_chart_find_init_writes_starts_in_the_declared_chart_and_epoch():
     """
     data, _ = _seed3001_three_epoch()
     kwargs = dict(log_T_range=(2.0, 3.0), n_log_T=12, n_tp=6, k=2)
-    default, _ = chart_find_init(data, MSUN, DIST_PC, **kwargs)
+    default, _ = find_init(data, MSUN, DIST_PC, **kwargs)
     assert default.shape == (2, EccentricityVectorChart().n_coords)
     starts = {}
     for epoch_d in (0.0, 250.0):
-        coords, ll = chart_find_init(
+        coords, ll = find_init(
             data, MSUN, DIST_PC, chart=ClassicalChart(), epoch_d=epoch_d, **kwargs
         )
         assert coords.shape == (2, ClassicalChart().n_coords)

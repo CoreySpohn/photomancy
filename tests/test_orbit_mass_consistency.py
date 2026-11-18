@@ -5,64 +5,81 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg
+from kinematics import predict_photometry, predict_relative_astrometry
+from orbit_fit import classical_coordinates, mass_problem
+from orbix.equations import period_to_sma
 
-from photomancy.orbit.data import RVData
 from photomancy.orbit.diagnostics import orbits_from_samples
-from photomancy.orbit.eig import _predict_astrom_pure, _predict_sep_dmag_pure
-from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
-from photomancy.orbit.inference import build_numpyro_logdensity, to_unconstrained
-from photomancy.orbit.nested import numpyro_nested_sampling
-from photomancy.posterior import SamplePosterior
+from photomancy.orbit.eig import evaluate_orbit_candidates
+from photomancy.orbit.nested import orbit_nested_sampling
+from photomancy.posterior import MixturePosterior
 
 jax.config.update("jax_enable_x64", True)
 
 ORBIT_NAMES = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
+MASS_RATIO = 0.1
+MASS_MEARTH = MASS_RATIO * Msun2kg / Mearth2kg
+PERIOD_D = 400.0
+
+
+def _problem(mass_bounds=(1e3, 1e6), period_range_d=(10.0, 1e4)):
+    a = period_to_sma(PERIOD_D, Msun2kg * (1.0 + MASS_RATIO))
+    tp = -0.8 * PERIOD_D / (2 * jnp.pi)
+    orbit = classical_coordinates(a, 0.35, 0.4, 1.1, 0.7, tp, PERIOD_D)
+    return mass_problem(
+        (),
+        orbit,
+        MASS_MEARTH,
+        star_mass_kg=Msun2kg,
+        dist_pc=10.0,
+        period_range_d=period_range_d,
+        mass_bounds=mass_bounds,
+        ecc_prior="disk",
+    )
 
 
 @pytest.fixture
 def massive_orbit():
-    """A fitted 400-day orbit with true mass ratio 0.1."""
-    problem = build_numpyro_logdensity(
-        Msun2kg,
-        10.0,
-        rv_data=RVData.zeros(),
-        ecc_prior="disk",
-        log_Mp_range=(3.0, 6.0),
-    )
-    z = problem.init_to_z(
-        {
-            "log_P": jnp.array([jnp.log10(400.0)]),
-            "log_Mp": jnp.array([jnp.log10(0.1 * Msun2kg / Mearth2kg)]),
-            "e_raw": jnp.array([0.35]),
-            "cos_i": jnp.array([0.4]),
-            "W": jnp.array([1.1]),
-            "w_raw": jnp.array([0.7]),
-            "M0": jnp.array([0.8]),
-        }
-    )
+    """A 400-day orbit with true mass ratio 0.1 at chart coordinates."""
+    problem = _problem()
+    z = problem.flatten(problem.position_template)
     return problem, z, problem.to_physical(z)
 
 
 @pytest.mark.parametrize("observable", ["astrometry", "photometry"])
 def test_eig_predictions_match_model_at_known_mass(massive_orbit, observable):
-    """EIG uses the fitted orbit size and dynamics at mass ratio 0.1."""
+    """Fails if EIG drops the planet mass from the orbit size or dynamics.
+
+    The reference is the independent single-orbit kinematics at total mass
+    ``Ms + Mp`` with mass ratio 0.1, to rtol 1e-12.
+    """
     problem, z, phys = massive_orbit
     t, Lambda = 173.0, 1e-9
     args = tuple(phys[k] for k in ORBIT_NAMES)
+    mixture = problem.declare(
+        MixturePosterior(
+            means=z[None], covs=0.01 * jnp.eye(z.size)[None], log_evidences=jnp.zeros(1)
+        )
+    )
+    curve = (jnp.array([0.0, 10.0]), jnp.array([80.0, 80.0]))
+    result = evaluate_orbit_candidates(
+        mixture,
+        problem,
+        jnp.array([t]),
+        1e-6,
+        contrast_curve=curve,
+        area_AU2=Lambda,
+    )
     if observable == "astrometry":
         expected = predict_relative_astrometry(
             jnp.array([t]), *args, Msun2kg, 10.0, Mp=phys["Mp"]
         )
-        actual = _predict_astrom_pure(
-            z, t, problem.unflatten, problem.constrain, Msun2kg, 10.0
-        )
+        actual = result["predictions"][0, 0]
     else:
         expected = predict_photometry(
             jnp.array([t]), *args, Msun2kg, Lambda, 10.0, Mp=phys["Mp"]
         )
-        actual = _predict_sep_dmag_pure(
-            z, t, problem.unflatten, problem.constrain, Msun2kg, 10.0, Lambda
-        )
+        actual = jnp.stack((result["separation"][0, 0], result["dMag"][0, 0]))
     np.testing.assert_allclose(
         actual, jnp.asarray(expected).squeeze(), rtol=1e-12, atol=0
     )
@@ -76,50 +93,32 @@ def test_posterior_orbit_preserves_fitted_semimajor_axis(massive_orbit):
     np.testing.assert_allclose(orbit.a_AU, samples["a"], rtol=1e-12, atol=0)
 
 
-def test_to_unconstrained_round_trips_total_mass_period(massive_orbit):
-    """A 400-day massive orbit retains its period and mass through z-space."""
-    problem, _, phys = massive_orbit
-    names = (*ORBIT_NAMES, "Mp")
-    post = SamplePosterior(
-        samples=jnp.array([[phys[k] for k in names]]),
-        log_weights=jnp.zeros(1),
-        evidence=jnp.array(2.0),
-        param_names=names,
-    )
-    zpost = to_unconstrained(post, problem, Msun2kg)
-    recovered = problem.to_physical(zpost.samples[0])
-    assert float(recovered["T"]) == pytest.approx(400.0, rel=1e-9, abs=0)
-    assert float(recovered["Mp"]) == pytest.approx(float(phys["Mp"]), rel=1e-12, abs=0)
-    np.testing.assert_array_equal(zpost.log_weights, post.log_weights)
-    assert zpost.evidence == post.evidence
+def test_chart_coordinates_round_trip_total_mass_period(massive_orbit):
+    """A 400-day massive orbit retains its period and mass through the chart."""
+    _, _, phys = massive_orbit
+    assert float(phys["T"]) == pytest.approx(PERIOD_D, rel=1e-9, abs=0)
+    assert float(phys["Mp"]) == pytest.approx(MASS_MEARTH * Mearth2kg, rel=1e-12, abs=0)
 
 
 # Medium: The real nested-sampler mass-column regression needs a cold sampler compile.
 @pytest.mark.medium
 def test_nested_posterior_carries_true_mass_for_period_inversion():
     """Nested rows keep the mass needed to invert their derived semimajor axis."""
-    log_mass = float(jnp.log10(0.1 * Msun2kg / Mearth2kg))
-    post = numpyro_nested_sampling(
-        Msun2kg,
-        10.0,
-        rv_data=RVData.zeros(),
-        ecc_prior="disk",
-        log_P_range=(float(jnp.log10(399.0)), float(jnp.log10(401.0))),
-        log_Mp_range=(log_mass - 1e-3, log_mass + 1e-3),
+    problem = _problem(
+        mass_bounds=(MASS_MEARTH * (1 - 1e-3), MASS_MEARTH * (1 + 1e-3)),
+        period_range_d=(399.0, 401.0),
+    )
+    post = orbit_nested_sampling(
+        problem,
         num_live_points=16,
         max_samples=2000,
         num_samples=16,
         key=jax.random.key(12),
     )
-    assert post.param_names == (*ORBIT_NAMES, "Mp")
-    problem = build_numpyro_logdensity(
-        Msun2kg,
-        10.0,
-        rv_data=RVData.zeros(),
-        ecc_prior="disk",
-        log_Mp_range=(log_mass - 1e-3, log_mass + 1e-3),
-    )
-    zpost = to_unconstrained(post, problem, Msun2kg)
-    recovered = jax.vmap(problem.to_physical)(zpost.samples)
+    recovered = jax.vmap(problem.to_physical)(post.samples)
     assert bool(jnp.all((recovered["T"] >= 399.0) & (recovered["T"] <= 401.0)))
-    np.testing.assert_allclose(recovered["a"], post.samples[:, 0], rtol=1e-12, atol=0)
+    assert bool(
+        jnp.all(jnp.abs(recovered["Mp"] / (MASS_MEARTH * Mearth2kg) - 1) < 2e-3)
+    )
+    reference = period_to_sma(recovered["T"], Msun2kg + recovered["Mp"])
+    np.testing.assert_allclose(recovered["a"], reference, rtol=1e-12, atol=0)

@@ -54,7 +54,7 @@ from photomancy.orbit._contrast import interpolate_contrast_curve
 from photomancy.orbit._frame import frame_from_tp, plane_from_phase
 from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel
-from photomancy.orbit.ofti import _scale_rotate_score
+from photomancy.orbit.ofti import scored_orbit
 from photomancy.orbit.updater import (
     ThieleInnesTarget,
     UpdaterStatus,
@@ -1345,18 +1345,16 @@ def scale_rotate_draw(target, records, key, *, n_proposals, report=None):
     log10_lo, log10_hi = m.lnP_lo / jnp.log(10.0), m.lnP_hi / jnp.log(10.0)
 
     def one(ei, ci, wi, mi, mui, txi, tyi):
-        return _scale_rotate_score(
+        return scored_orbit(
             ei,
             ci,
-            jnp.cos(wi),
-            jnp.sin(wi),
+            wi,
             mi,
             txi,
             tyi,
             others,
             t_anchor,
             mui,
-            mui / G,
             target.dist_pc,
             log10_lo,
             log10_hi,

@@ -5,20 +5,27 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg, Rearth2AU
-from orbix.system import FrameOrbit, phase_angle_rad
-from sky_reference import position_au, sky_position
-
-from photomancy.orbit.data import RelativeAstromData
-from photomancy.orbit.diagnostics import orbits_from_samples
-from photomancy.orbit.eig import _predict_astrom_pure, _predict_sep_dmag_pure
-from photomancy.orbit.forward import (
+from hwoutils.epoch import Epoch
+from kinematics import (
     predict_photometry,
     predict_pm_anomaly,
     predict_relative_astrometry,
     predict_stellar_astrometry,
 )
-from photomancy.orbit.init import ti_to_init
-from photomancy.orbit.ofti import _scale_rotate_score
+from orbix.system import (
+    Body,
+    FrameOrbit,
+    SkyFrame,
+    System,
+    periapsis_chart_shape,
+    phase_angle_rad,
+)
+from sky_reference import position_au, sky_position
+
+from photomancy.orbit._frame import frame_from_tp, orbit_rows
+from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.eig import _astrometry, _photometry
+from photomancy.orbit.ofti import chart_scale_rotate
 from photomancy.orbit.thiele_innes import thiele_innes_fit
 from photomancy.system_terms import _path_proper_motion
 
@@ -244,7 +251,32 @@ def astrometry(times, positions, ra_err=1e-4, dec_err=3e-4, corr=0.0):
 
 def fit(data, p):
     """Fit orientation at the independently known nonlinear parameters."""
-    return thiele_innes_fit(data, p["T"], p["e"], p["tp"], p["Ms"], p["dist_pc"])
+    shape = periapsis_chart_shape(p["T"], p["e"], p["tp"])
+    return thiele_innes_fit(data, p["dist_pc"], *shape)
+
+
+def bare_system(a, e, cos_i, W, cos_w, sin_w, tp, mass_kg, dist_pc):
+    """One-planet orbix system for explicit classical elements."""
+    orbit = frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, G * mass_kg)
+    return System(
+        Body(mass_kg / Msun2kg),
+        Body(jnp.zeros(1)),
+        jax.tree.map(lambda leaf: leaf[None], orbit),
+        SkyFrame(dist_pc, Epoch()),
+    )
+
+
+def sheet_angles_deg(result, index):
+    """Inclination, node and periapsis angles (deg) of one line-of-sight sheet."""
+    elements = jax.tree.map(lambda leaf: leaf[index], result.orbits).to_classical()
+    return (
+        np.rad2deg(
+            np.array(
+                [elements["i_rad"], elements["W_rad"] % (2 * np.pi), elements["w_rad"]]
+            )
+        )
+        % 360
+    )
 
 
 def test_k16_fit_recovers_orientation(k16):
@@ -256,34 +288,20 @@ def test_k16_fit_recovers_orientation(k16):
     times = np.linspace(0, k16["T"] * 1.4, 32)
     truth = reference(times, k16)
     result = fit(astrometry(times, truth), k16)
-    angles = np.array(
-        [
-            np.rad2deg(np.arccos(result.cos_i)),
-            np.rad2deg(result.W) % 360,
-            np.rad2deg(np.arctan2(result.sin_w, result.cos_w)) % 360,
-        ]
-    )
     expected = np.array([79.320, 205.064, 232.006])
     branches = np.array([expected, expected + np.array([0, 180, 180])])
-    errors = (angles - branches + 180) % 360 - 180
-    assert np.min(np.max(np.abs(errors), axis=1)) < 1e-7, f"Recovered {angles} deg"
+    for sheet in (0, 1):
+        errors = (sheet_angles_deg(result, sheet) - branches + 180) % 360 - 180
+        match = np.max(np.abs(errors), axis=1)
+        assert np.min(match) < 1e-7, f"Recovered {sheet_angles_deg(result, sheet)} deg"
     assert float(result.chi2) < 1e-12
 
-    # The fitted angles pass unchanged through initialization and diagnostics.
-    sites = ti_to_init(result)
-    samples = dict(
-        T=result.T,
-        e=result.e,
-        cos_i=sites["cos_i"],
-        W=sites["W"],
-        cos_w=jnp.cos(sites["w_raw"]),
-        sin_w=jnp.sin(sites["w_raw"]),
-        tp=result.tp,  # Keep the epoch: initialization clips M0 off its boundary.
-    )
-    orbit = orbits_from_samples(samples, k16["Ms"], reference_day=0.0)
-    positions, _ = orbit.at(jnp.asarray(times))
-    offsets = np.asarray(positions)[0, :, :2].T / k16["dist_pc"]
-    np.testing.assert_allclose(offsets, truth, atol=1e-7, rtol=0)
+    # Both sheets reproduce the truth on the sky.
+    for sheet in (0, 1):
+        orbit = jax.tree.map(lambda leaf, i=sheet: leaf[i], result.orbits)
+        positions, _ = orbit.at(jnp.asarray(times))
+        offsets = np.asarray(positions)[:, :2].T / k16["dist_pc"]
+        np.testing.assert_allclose(offsets, truth, atol=1e-7, rtol=0)
 
 
 def test_ti_fit_ignores_garbage_in_padded_row(k16):
@@ -303,19 +321,7 @@ def test_ti_fit_ignores_garbage_in_padded_row(k16):
     solve = jax.jit(lambda observations: fit(observations, k16))
     expected, actual = solve(data), solve(padded)
     # The extra zero-weight row changes the QR shape, allowing x64 roundoff.
-    for name in (
-        "A",
-        "B",
-        "F",
-        "G_ti",
-        "a",
-        "cos_i",
-        "W",
-        "cos_w",
-        "sin_w",
-        "chi2",
-        "log_likelihood",
-    ):
+    for name in ("x", "sky_block", "chi2", "log_likelihood"):
         np.testing.assert_allclose(
             getattr(actual, name),
             getattr(expected, name),
@@ -407,17 +413,9 @@ def test_ti_axis_uncertainties_and_covariance(k16, correlated):
     coefficients = np.linalg.lstsq(white_design, white_data, rcond=None)[0]
     expected = (design @ coefficients).T
     result = fit(data, k16)
-    fitted_params = dict(
-        k16,
-        a=float(result.a),
-        cos_i=float(result.cos_i),
-        W=float(result.W),
-        cos_w=float(result.cos_w),
-        sin_w=float(result.sin_w),
-    )
-    np.testing.assert_allclose(
-        reference(times, fitted_params), expected, atol=1e-8, rtol=0
-    )
+    orbit = jax.tree.map(lambda leaf: leaf[0], result.orbits)
+    fitted = np.asarray(orbit.at(jnp.asarray(times))[0])[:, :2].T / k16["dist_pc"]
+    np.testing.assert_allclose(fitted, expected, atol=1e-8, rtol=0)
     chi2 = np.sum((white_data - white_design @ coefficients) ** 2)
     ll = (
         -0.5 * chi2
@@ -435,25 +433,19 @@ def test_ofti_hits_independent_target():
     """
     target = np.array([[0.08], [0.03]])
     times = np.array([31.0])
-    data = astrometry(times, target)
-    row, ll = _scale_rotate_score(
-        0.2,
+    mu = G * Msun2kg
+    orbit = chart_scale_rotate(
         0.5,
-        np.cos(1.0),
-        np.sin(1.0),
+        0.2,
+        1.0,
         1.3,
         *target[:, 0],
-        data,
-        times[0],
-        G * Msun2kg,
-        Msun2kg,
-        10.0,
-        -30.0,
-        30.0,
-        0.99,
+        epoch_d=times[0],
+        mu_AU3_per_d2=mu,
+        dist_pc=10.0,
     )
-    a, e, cos_i, W, cos_w, sin_w, tp = np.asarray(row)
-    period = 2 * np.pi * np.sqrt(a**3 / (G * Msun2kg))
+    a, e, cos_i, W, cos_w, sin_w, tp = np.asarray(orbit_rows(orbit))
+    period = 2 * np.pi * np.sqrt(a**3 / mu)
     actual = sky_position(
         times,
         T=period,
@@ -467,22 +459,22 @@ def test_ofti_hits_independent_target():
         dist_pc=10.0,
     )
     np.testing.assert_allclose(actual, target, atol=1e-12, rtol=0)
-    assert np.isfinite(ll)
 
 
 def test_eig_astrometry_east_north(k16):
     """Brandt et al. (2021), Eqs. 6-9: EIG uses (east, north) observables."""
-    phys = dict(
-        log_P=np.log10(k16["T"]),
-        e_raw=k16["e"],
-        cos_i=k16["cos_i"],
-        W=k16["W"],
-        w_raw=np.arctan2(k16["sin_w"], k16["cos_w"]),
-        M0=0.0,
+    system = bare_system(
+        k16["a"],
+        k16["e"],
+        k16["cos_i"],
+        k16["W"],
+        k16["cos_w"],
+        k16["sin_w"],
+        k16["tp"],
+        k16["Ms"],
+        k16["dist_pc"],
     )
-    actual = _predict_astrom_pure(
-        phys, 1234.0, lambda x: x, lambda x: x, k16["Ms"], k16["dist_pc"]
-    )
+    actual = _astrometry(system, 1234.0, 0)
     np.testing.assert_allclose(
         actual, reference([1234.0], k16)[:, 0], atol=1e-9, rtol=0
     )
@@ -507,12 +499,18 @@ def test_standard_lambert_phase(predictor, case):
     Ag, Rp_AU = 0.3, 1.4 * Rearth2AU
     area = Ag * Rp_AU**2
     if predictor == "eig":
-        phys = dict(
-            log_P=np.log10(period), e_raw=e, cos_i=cos_i, W=W, w_raw=omega, M0=M0
+        system = bare_system(
+            a,
+            e,
+            cos_i,
+            W,
+            np.cos(omega),
+            np.sin(omega),
+            -M0 * period / (2 * np.pi),
+            Msun2kg,
+            10.0,
         )
-        sep, dmag = _predict_sep_dmag_pure(
-            phys, 0.0, lambda x: x, lambda x: x, Msun2kg, 10.0, area
-        )
+        sep, dmag = np.asarray(_photometry(system, 0.0, area))
     else:
         sep, dmag = np.asarray(
             predict_photometry(

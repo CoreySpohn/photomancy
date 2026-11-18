@@ -11,6 +11,12 @@ import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from hwoutils.spectral import Band, Quadrature, Transmission
+from kinematics import (
+    predict_pm_anomaly,
+    predict_relative_astrometry,
+    predict_rv,
+    predict_stellar_astrometry,
+)
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
@@ -33,12 +39,6 @@ from photomancy.orbit.data import (
     RelativeAstromData,
     RVData,
     StellarAstromData,
-)
-from photomancy.orbit.forward import (
-    predict_pm_anomaly,
-    predict_relative_astrometry,
-    predict_rv,
-    predict_stellar_astrometry,
 )
 from photomancy.orbit.likelihoods import (
     loglike_pm_anomaly,

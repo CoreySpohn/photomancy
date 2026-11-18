@@ -13,7 +13,6 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg
 from hwoutils.epoch import Epoch
-from numpyro.infer.util import log_density
 from orbix.equations import period_to_sma
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, SkyFrame, System
 from skyscapes.physical_model import LambertianPhysicalModel
@@ -22,9 +21,108 @@ from skyscapes.scene.star import FlatStar
 from skyscapes.scene.system import System as SceneSystem
 
 from photomancy import RelativeAstrometryTerm, SystemLogDensity
-from photomancy.orbit.data import OrbitData, RelativeAstromData
-from photomancy.orbit.model import build_model
+from photomancy.orbit.data import RelativeAstromData
 from photomancy.priors import orbit_log_prior
+
+# Frozen from the retired NumPyro joint (prior plus relative-astrometry likelihood)
+# plus the log determinant of the map from the chart point to the
+# (log10 P, e, cos i, W, w, M0) sites, at the four fixture orbits. The seven columns
+# are the six prior site log densities and the likelihood site; they set the
+# accumulation floors.
+_FROZEN = {
+    "ClassicalChart": (
+        [
+            -1.0698458445081034,
+            -30.918130059838465,
+            -201.91432806153068,
+            -678.763646025009,
+        ],
+        [
+            [
+                -1.6094379124341003,
+                1.0991131690975628,
+                -1.8378770664093453,
+                -0.6931471805599453,
+                -1.8378770664093453,
+                -1.8378770664093453,
+                9.972761983766313,
+            ],
+            [
+                -1.6094379124341003,
+                0.45091915626802603,
+                -1.8378770664093453,
+                -0.6931471805599453,
+                -1.8378770664093453,
+                -1.8378770664093453,
+                -21.409467158652692,
+            ],
+            [
+                -1.6094379124341003,
+                -0.6909216889053831,
+                -1.8378770664093453,
+                -0.6931471805599453,
+                -1.8378770664093453,
+                -1.8378770664093453,
+                -191.40792465914524,
+            ],
+            [
+                -1.6094379124341003,
+                -2.3869442566002377,
+                -1.8378770664093453,
+                -0.6931471805599453,
+                -1.8378770664093453,
+                -1.8378770664093453,
+                -665.0174023295029,
+            ],
+        ],
+    ),
+    "EccentricityVectorChart": (
+        [
+            4.611638001541831,
+            -27.986936307422045,
+            -200.64065189437477,
+            -678.7512235050107,
+        ],
+        [
+            [
+                -1.6094379124341003,
+                1.0991131690975628,
+                -1.8378770664093453,
+                -0.6931471805599453,
+                -1.8378770664093453,
+                -1.8378770664093453,
+                9.972761983766311,
+            ],
+            [
+                -1.6094379124341003,
+                0.4509191562680261,
+                -1.8378770664093453,
+                -0.6931471805599453,
+                -1.8378770664093453,
+                -1.8378770664093453,
+                -21.409467158652692,
+            ],
+            [
+                -1.6094379124341003,
+                -0.6909216889053831,
+                -1.8378770664093453,
+                -0.6931471805599453,
+                -1.8378770664093453,
+                -1.8378770664093453,
+                -191.40792465914512,
+            ],
+            [
+                -1.6094379124341003,
+                -2.386944256600237,
+                -1.8378770664093453,
+                -0.6931471805599453,
+                -1.8378770664093453,
+                -1.8378770664093453,
+                -665.0174023295032,
+            ],
+        ],
+    ),
+}
 
 
 def _floor(*terms):
@@ -66,7 +164,6 @@ def fits():
         axis=-1,
     )
     reference_orbits = ClassicalChart().to_orbit(classical, mu_AU3_per_d2=G * Msun2kg)
-    model = build_model(has_relative_astrom=True)
     records = []
     for chart in (ClassicalChart(), EccentricityVectorChart()):
 
@@ -83,49 +180,15 @@ def fits():
         )
         points = chart.from_orbit(reference_orbits)
 
-        def sites(x, build=build):
-            orbit = jax.tree.map(lambda leaf: leaf[0], build(x).orbits)
-            elements = orbit.to_classical()
-            return jnp.stack(
-                [
-                    jnp.log10(orbit.period_d),
-                    elements["e"],
-                    jnp.cos(elements["i_rad"]),
-                    elements["W_rad"],
-                    elements["w_rad"],
-                    elements["M0_rad"],
-                ]
-            )
-
-        def compare(x, sites=sites, density=density):
-            z = sites(x)
-            params = {
-                name: z[i : i + 1]
-                for i, name in enumerate(
-                    ("log_P", "e_raw", "cos_i", "W", "w_raw", "M0")
-                )
-            }
-            joint, trace = log_density(
-                model, (Msun2kg, 10.0, OrbitData(relative_astrom=data)), {}, params
-            )
-            determinant = jnp.linalg.slogdet(jax.jacfwd(sites)(x))[1]
+        def compare(x, density=density):
             value, aux = density.value_and_aux(x)
-            contributions = jnp.stack(
-                [
-                    site["fn"].log_prob(site["value"]).sum()
-                    for site in trace.values()
-                    if site["type"] == "sample"
-                ]
-            )
-            return (
-                value,
-                joint + determinant,
-                density.log_volume(x),
-                aux["term_values"][0],
-                contributions,
-            )
+            return value, density.log_volume(x), aux["term_values"][0]
 
-        comparison = eqx.filter_jit(jax.vmap(compare))(points)
+        value, volume, likelihood = eqx.filter_jit(jax.vmap(compare))(points)
+        reference, contributions = (
+            jnp.asarray(c) for c in _FROZEN[type(chart).__name__]
+        )
+        comparison = (value, reference, volume, likelihood, contributions)
         jax.block_until_ready(comparison)
         records.append((chart, density, points, comparison))
     return records

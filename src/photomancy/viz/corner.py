@@ -84,7 +84,7 @@ def plot_corner(
             ``sample_physical`` shape; also the door for samples loaded
             from a file), or a fitted posterior, which requires ``problem``
             and ``key``.
-        problem: The ``OrbitProblem`` supplying ``to_physical``. Posterior
+        problem: The ``ChartOrbitProblem`` supplying ``to_physical``. Posterior
             door only.
         key: PRNG key for drawing posterior samples. Posterior door only.
         n: Number of posterior samples to draw on the posterior door.

@@ -20,8 +20,8 @@ from collections.abc import Mapping
 import numpy as np
 
 # Names that only occur in transformed sampling coordinates: the unconstrained
-# NumPyro sites (``log_P``, ``M0``, ``e_raw``, ``w_raw``), unit-cube draws
-# (``*_base``) and the Thiele-Innes coordinates of the few-epoch fitters.
+# sites of the earlier releases (``log_P``, ``M0``, ``e_raw``, ``w_raw``), unit-cube
+# draws (``*_base``) and the Thiele-Innes coordinates of the few-epoch fitters.
 _SAMPLING_NAMES = frozenset(
     {
         "log_P",
@@ -54,8 +54,8 @@ def migrate_sky_convention(samples):
     unchanged. Applying it twice returns the input.
 
     Only physical elements can be converted. Posteriors stored in transformed
-    sampling coordinates (the unconstrained NumPyro sites ``log_P``, ``M0``,
-    ``e_raw``, ``w_raw``, unit-cube ``*_base`` draws, or the Thiele-Innes
+    sampling coordinates (the unconstrained sites of the earlier releases ``log_P``,
+    ``M0``, ``e_raw``, ``w_raw``, unit-cube ``*_base`` draws, or the Thiele-Innes
     coordinates of the few-epoch fitters) raise ``ValueError``: they must be
     refit, or first mapped to physical elements with the ``to_physical`` map of the
     problem that produced them (which needs the old release). Fits that used

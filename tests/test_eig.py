@@ -4,24 +4,24 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import Msun2kg, Rearth2AU, two_pi
-from orbix.equations import period_to_sma
+from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
+from kinematics import predict_relative_astrometry
+from orbit_fit import chart_problem, classical_coordinates, scale_problem
+from orbix.equations import period_a, period_to_sma
 
+from photomancy import RelativeAstrometryTerm
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.eig import (
     alias_breaking_eig,
     detectability_eig,
-    evaluate_numpyro_candidates,
     evaluate_orbit_candidates,
     geometric_eig,
 )
-from photomancy.orbit.forward import predict_relative_astrometry
-from photomancy.orbit.inference import build_numpyro_logdensity
 from photomancy.posterior import MixturePosterior
 
 DIST_PC = 10.0
 TRUE_T = 1096.0
-LOG_P_RANGE = (float(np.log10(600.0)), float(np.log10(1600.0)))
+PERIOD_RANGE_D = (600.0, 1600.0)
 
 
 def test_geometric_eig_matches_analytic_gaussian_update():
@@ -64,38 +64,44 @@ def imaging_problem():
         planet_id=[0, 0],
         max_n=2,
     )
-    problem = build_numpyro_logdensity(
-        Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
-    )
-    sites = dict(
-        log_P=np.log10(TRUE_T), e_raw=0.4, cos_i=0.95, W=2.3, w_raw=0.8, M0=1.0
-    )
-    mean = problem.init_to_z(
-        {name: jnp.array([value]) for name, value in sites.items()}
-    )
-    mix = MixturePosterior(
-        means=mean[None, :],
-        covs=0.01 * jnp.eye(mean.size)[None, :, :],
-        log_evidences=jnp.zeros(1),
-    )
     tp = -TRUE_T / two_pi
+    orbit = classical_coordinates(
+        float(period_to_sma(TRUE_T, Msun2kg)), 0.4, 0.95, 2.3, 0.8, tp, TRUE_T
+    )
+    problem = scale_problem(
+        (RelativeAstrometryTerm(astrom),),
+        orbit,
+        star_mass_kg=Msun2kg,
+        dist_pc=DIST_PC,
+        period_range_d=PERIOD_RANGE_D,
+    )
+    # Radius and albedo whose product gives Lambda = 0.3 Rearth^2.
+    position = dict(
+        problem.position_template,
+        radius_AU=jnp.log(Rearth2AU),
+        albedo=jnp.log(0.3),
+    )
+    mean = problem.flatten(position)
+    mix = problem.declare(
+        MixturePosterior(
+            means=mean[None, :],
+            covs=0.01 * jnp.eye(mean.size)[None, :, :],
+            log_evidences=jnp.zeros(1),
+        )
+    )
     return problem, mix, jnp.array([tp, tp + TRUE_T / 2])
 
 
-# Medium: either test can trigger the cold NumPyro model trace and EIG compile.
-@pytest.mark.medium
+@pytest.mark.medium(reason="cold chart density and EIG compile, 8 s cold")
 def test_orbit_eig_reports_no_detection_outside_contrast_curve(imaging_problem):
     """Periapsis and apoapsis place the same orbit on opposite sides of the grid."""
     problem, mix, epochs = imaging_problem
     sep_grid = jnp.array([0.15, 0.25])
-    result = evaluate_numpyro_candidates(
+    result = evaluate_orbit_candidates(
         mix,
         problem,
         epochs,
         1e-5,
-        Msun2kg,
-        DIST_PC,
-        Lambda=0.3 * Rearth2AU**2,
         contrast_curve=(sep_grid, jnp.array([50.0, 50.0])),
     )
     assert 0 < result["separation"][0, 0] < sep_grid[0]
@@ -105,20 +111,17 @@ def test_orbit_eig_reports_no_detection_outside_contrast_curve(imaging_problem):
     np.testing.assert_array_equal(result["total_eig"], jnp.zeros(2))
 
 
-@pytest.mark.medium
+@pytest.mark.medium(reason="second EIG evaluation on the shared problem")
 def test_orbit_eig_uses_current_contrast_curve_on_repeat_call(imaging_problem):
-    """Changing only the magnitude limits changes the score for a cached evaluator."""
+    """Changing only the magnitude limits changes the score on a repeat call."""
     problem, mix, epochs = imaging_problem
     sep_grid = jnp.array([0.05, 0.4])
     deep, shallow = [
-        evaluate_numpyro_candidates(
+        evaluate_orbit_candidates(
             mix,
             problem,
             epochs,
             1e-5,
-            Msun2kg,
-            DIST_PC,
-            Lambda=0.3 * Rearth2AU**2,
             contrast_curve=(sep_grid, jnp.full(2, depth)),
         )
         for depth in (50.0, 1.0)
@@ -222,13 +225,19 @@ def test_chart_eig_and_mode_predictions():
     )
 
 
-# Medium: OFTI, clustering and the EIG forward each include a cold program.
-@pytest.mark.medium
+@pytest.mark.medium(reason="OFTI, clustering and the EIG forward, 10 s cold")
 def test_ofti_to_eig_end_to_end():
-    """OFTI -> to_unconstrained -> cluster_to_mixture -> EIG runs and is finite."""
-    from photomancy.orbit.inference import to_unconstrained
+    """OFTI -> chart coordinates -> cluster_to_mixture -> EIG runs and is finite.
+
+    Fails if an OFTI orbit row cannot be re-expressed in the fit chart (the bridge
+    that replaced the unconstrained-space conversion) or the declared mixture is
+    refused by the EIG.
+    """
+    from orbix.system import EccentricityVectorChart
+
+    from photomancy.orbit.diagnostics import orbits_from_samples
     from photomancy.orbit.ofti import ofti
-    from photomancy.posterior import cluster_to_mixture
+    from photomancy.posterior import SamplePosterior, cluster_to_mixture
 
     a = float(period_to_sma(TRUE_T, Msun2kg))
     tp = -1.5 / (two_pi / TRUE_T)
@@ -247,8 +256,14 @@ def test_ofti_to_eig_end_to_end():
         planet_id=jnp.zeros(4, dtype=int),
         is_valid=jnp.ones(4, dtype=bool),
     )
-    problem = build_numpyro_logdensity(
-        Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
+    chart = EccentricityVectorChart()
+    problem = chart_problem(
+        astrom,
+        {"orbit": jnp.zeros(chart.n_coords)},
+        star_mass_kg=Msun2kg,
+        dist_pc=DIST_PC,
+        chart=chart,
+        period_range_d=PERIOD_RANGE_D,
     )
     samp = ofti(
         astrom,
@@ -257,15 +272,22 @@ def test_ofti_to_eig_end_to_end():
         key=jax.random.key(0),
         n_accept=1000,
         ecc_prior="disk",
-        log_P_range=LOG_P_RANGE,
+        log_P_range=tuple(float(np.log10(x)) for x in PERIOD_RANGE_D),
         batch=50000,
         max_batches=300,
     )
-    zpost = to_unconstrained(samp, problem, Msun2kg)
-    mix = cluster_to_mixture(zpost, 4, key=jax.random.key(1))
-    epochs = jnp.linspace(0.0, 3.0 * TRUE_T, 12)
-    res = evaluate_numpyro_candidates(
-        mix, problem, epochs, (5.0e-3) ** 2, Msun2kg, DIST_PC
+    rows = dict(zip(samp.param_names, samp.samples.T, strict=True))
+    rows["T"] = period_a(rows["a"], G * Msun2kg)
+    orbits = orbits_from_samples(rows, Msun2kg, reference_day=0.0)
+    coords = jax.vmap(chart.from_orbit)(orbits)
+    zpost = SamplePosterior(
+        samples=coords,
+        log_weights=samp.log_weights,
+        evidence=jnp.asarray(jnp.nan),
+        param_names=problem.param_names,
     )
+    mix = problem.declare(cluster_to_mixture(zpost, 4, key=jax.random.key(1)))
+    epochs = jnp.linspace(0.0, 3.0 * TRUE_T, 12)
+    res = evaluate_orbit_candidates(mix, problem, epochs, (5.0e-3) ** 2)
     assert res["total_eig"].shape == (12,)
     assert jnp.all(jnp.isfinite(res["total_eig"]))

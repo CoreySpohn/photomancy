@@ -4,7 +4,7 @@ Stellar astrometry measures the star's reflex wobble (scaled by the mass ratio),
 so unlike relative astrometry it constrains the planet mass. These tests cover the
 forward (a scaled, sign-flipped relative orbit), the shared bivariate-Gaussian
 likelihood, mass identifiability through the generic engine, and the wiring of the
-stellar channel into the NumPyro orbit model.
+stellar channel into the chart density.
 """
 
 import equinox as eqx
@@ -16,19 +16,18 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from hwoutils.constants import Mearth2kg  # noqa: E402
+from kinematics import (  # noqa: E402
+    predict_relative_astrometry,
+    predict_stellar_astrometry,
+)
 
 from photomancy import LaplaceBackend, build_scene_logdensity  # noqa: E402
 from photomancy.orbit import (  # noqa: E402
     StellarAstromData,
-    build_numpyro_logdensity,
     loglike_relative_astrom,
     loglike_stellar_astrom,
 )
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
-from photomancy.orbit.forward import (  # noqa: E402
-    predict_relative_astrometry,
-    predict_stellar_astrometry,
-)
 from photomancy.priors import Uniform  # noqa: E402
 
 MSUN_KG = 1.989e30
@@ -177,30 +176,3 @@ def test_mass_is_identifiable_from_reflex():
     assert jnp.isfinite(post.evidence)
     assert abs(float(fit.log_Mp) - log_Mp_true) < 0.05  # mass to ~12%
     assert float(sigma[-1]) < 0.1  # log_Mp is well constrained, not degenerate
-
-
-# Medium: Wiring the stellar channel includes the first NumPyro model trace.
-@pytest.mark.medium
-def test_numpyro_model_wires_stellar_channel():
-    """build_numpyro_logdensity wires the stellar channel and fits the mass."""
-    times = jnp.linspace(0.0, 4000.0, 10)
-    Mp = 317.8 * Mearth2kg
-    ra, dec = predict_stellar_astrometry(
-        Ms=MSUN_KG, Mp=Mp, dist_pc=DIST_PC, **_truth_args(times)
-    )
-    sd = StellarAstromData(
-        times=times,
-        ra=ra,
-        dec=dec,
-        ra_err=jnp.full(times.shape, 5e-5),
-        dec_err=jnp.full(times.shape, 5e-5),
-        corr=jnp.zeros(times.shape),
-        is_valid=jnp.ones(times.shape, dtype=bool),
-    )
-    problem = build_numpyro_logdensity(
-        MSUN_KG, DIST_PC, stellar_astrom_data=sd, log_P_range=(3.0, 4.0)
-    )
-    # the planet mass is a fitted parameter once stellar astrometry is present
-    assert "log_Mp" in problem.param_names
-    z0 = jnp.zeros(len(problem.param_names))
-    assert jnp.isfinite(problem.logdensity(z0))

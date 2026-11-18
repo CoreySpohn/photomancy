@@ -37,7 +37,7 @@ rather than the documentation host.
 One warm super-Earth, ten parsecs away, and a posterior over it. The samples
 are drawn from a hand-built distribution around a known truth rather than from
 a real fit, which keeps this page fast and deterministic; the shapes are
-exactly what `OrbitProblem.to_physical` and `sample_physical` produce, so the
+exactly what `ChartOrbitProblem.to_physical` and `sample_physical` produce, so the
 calls below are the calls you would make on a real posterior.
 
 ```{code-cell} ipython3
@@ -48,9 +48,12 @@ import matplotlib
 import numpy as np
 
 from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, Rearth2AU, d2s
+from hwoutils.conversions import contrast_to_delta_mag
+from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
+from skyscapes.physical_model import LambertianPhysicalModel
+
 from photomancy import viz
-from photomancy.orbit import ImagingData, RVData
-from photomancy.orbit.forward import predict_photometry, predict_rv
+from photomancy.orbit import ImagingData, RVData, orbits_from_samples
 
 hwostyle.use("dark")
 jax.config.update("jax_enable_x64", True)
@@ -144,7 +147,7 @@ viz.default_corner_params(samples)
 
 The corner plot over physical orbital parameters. It takes either a
 `{name: (n,)}` sample dict, as here, or a fitted posterior together with the
-`OrbitProblem` and a PRNG key, in which case it draws the samples itself.
+`ChartOrbitProblem` and a PRNG key, in which case it draws the samples itself.
 `truths` marks the generating values and `ranges` pins the axis limits so that
 two figures stay comparable.
 
@@ -189,21 +192,34 @@ t_d = jnp.linspace(0.0, TRUTH["T"], 300)
 n_draws = 80
 draws = {k: jnp.asarray(v[:n_draws]) for k, v in samples.items()}
 
-rv_fan = jax.vmap(
-    lambda T, Mp_sini, e, tp: predict_rv(
-        t_d, T, Msun2kg, Mp_sini, e, COS_W, SIN_W, tp
+def orbits_of(physical):
+    """Batched orbix orbits for a physical-sample dict at the fixed orientation."""
+    full = dict(
+        physical,
+        cos_w=jnp.full_like(physical["T"], COS_W),
+        sin_w=jnp.full_like(physical["T"], SIN_W),
     )
-)(draws["T"], draws["Mp_sini"], draws["e"], draws["tp"])
+    return orbits_from_samples(full, Msun2kg, reference_day=0.0)
+
+
+def stellar_rv_au_per_d(orbit, mass_kg, times):
+    """Line-of-sight stellar velocity (AU/day, receding positive) of one orbit."""
+    _, velocity = orbit.at(times)
+    return -(mass_kg / (Msun2kg + mass_kg)) * velocity[..., 2]
+
+
+rv_fan = jax.vmap(lambda orbit, mass: stellar_rv_au_per_d(orbit, mass, t_d))(
+    orbits_of(draws), draws["Mp"]
+)
 
 # Five epochs of the truth, with noise, entered the way real data would be.
 rng = np.random.default_rng(4)
 t_obs = np.array([15.0, 90.0, 180.0, 275.0, 360.0])
 rv_err_m_s = 0.08
+truth_keys = ("T", "e", "cos_i", "W", "tp", "Mp")
+truth_orbit = orbits_of({k: jnp.asarray(TRUTH[k]) for k in truth_keys})
 rv_truth = np.asarray(
-    predict_rv(
-        jnp.asarray(t_obs), TRUTH["T"], TRUTH["Ms"], TRUTH["Mp_sini"],
-        TRUTH["e"], COS_W, SIN_W, TRUTH["tp"],
-    )
+    stellar_rv_au_per_d(truth_orbit, TRUTH["Mp"], jnp.asarray(t_obs))
 )
 rv_obs = rv_truth + (rv_err_m_s / AU_PER_D_TO_M_PER_S) * rng.standard_normal(
     t_obs.size
@@ -232,14 +248,18 @@ drops below it near conjunction, which is the whole reason scheduling a
 direct-imaging revisit is a decision rather than a routine.
 
 ```{code-cell} ipython3
-sep_arcsec, dmag = jax.vmap(
-    lambda a, e, cos_i, W, tp, Lambda: predict_photometry(
-        t_d, a, e, cos_i, W, COS_W, SIN_W, tp, Msun2kg, Lambda, DIST_PC
-    )
-)(
-    draws["a"], draws["e"], draws["cos_i"], draws["W"], draws["tp"],
-    draws["Lambda"],
-)
+def separation_and_dmag(orbit, area_AU2):
+    """Sky separation (arcsec) and Lambert dMag of one orbit at ``t_d``."""
+    r, _ = orbit.at(t_d)
+    radius_Rearth = jnp.atleast_1d(jnp.sqrt(area_AU2) / Rearth2AU)
+    model = LambertianPhysicalModel(Ag=jnp.ones(1))
+    contrast = model.contrast(
+        phase_angle_rad(r)[None, :], distance_AU(r)[None, :], None, radius_Rearth
+    )[0]
+    return separation_arcsec(r, DIST_PC), contrast_to_delta_mag(contrast)
+
+
+sep_arcsec, dmag = jax.vmap(separation_and_dmag)(orbits_of(draws), draws["Lambda"])
 
 # One instrument contrast curve, reused as the per-epoch limit grid.
 cc_sep = np.linspace(0.045, 0.26, 60)

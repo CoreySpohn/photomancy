@@ -42,10 +42,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import G, Msun2kg, Rearth2AU, mas2arcsec, two_pi
+from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 
+from photomancy.orbit._frame import frame_from_tp, relative_offsets_arcsec
+from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import MU_SUN
-from photomancy.orbit.forward import predict_photometry, predict_relative_astrometry
 from photomancy.orbit.refit import (
     ReportData,
     _counts_at,
@@ -74,6 +76,17 @@ MAX_CHUNKS = 200
 PATH = Path(__file__).parents[1] / "tests" / "data" / "refit_golden.json"
 
 
+def predict_photometry(
+    times, a, e, cos_i, W, cos_w, sin_w, tp, mass_kg, area_AU2, dist_pc
+):
+    """Separation (arcsec) and Lambert dMag of one orbit at total mass ``mass_kg``."""
+    position, _ = frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, G * mass_kg).at(times)
+    model, radius_Rearth = lambertian_from_area(area_AU2)
+    return separation_arcsec(position, dist_pc), lambertian_dmag(
+        phase_angle_rad(position), distance_AU(position), model, radius_Rearth
+    )
+
+
 def positions(elements, times):
     """East and north offsets (arcsec) of elements ``(n, 8)`` at ``times``."""
 
@@ -82,7 +95,7 @@ def positions(elements, times):
         mass = jnp.exp(el[6]) * Msun2kg
         a = (G * mass / (two_pi / period) ** 2) ** (1.0 / 3.0)
         return jnp.stack(
-            predict_relative_astrometry(
+            relative_offsets_arcsec(
                 times,
                 a,
                 el[1],
@@ -106,7 +119,7 @@ def fixture(k):
     period = two_pi / jnp.sqrt(G * mass / a**3)
     tp = -m_ref / two_pi * period
     times = jnp.asarray(EPOCHS_D[:k])
-    ra, dec = predict_relative_astrometry(
+    ra, dec = relative_offsets_arcsec(
         times, a, e, cos_i, node, jnp.cos(omega), jnp.sin(omega), tp, mass, DIST_PC
     )
     sigma = SIGMA_MAS * mas2arcsec

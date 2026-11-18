@@ -6,22 +6,19 @@ import numpy as np
 import pytest
 from hwoutils.constants import G
 from hwoutils.epoch import Epoch
+from kinematics import predict_relative_astrometry
+from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart
 
-from photomancy.orbit._frame import ORBIT_ROWS_CHART, sky_offsets_arcsec
+from photomancy.orbit._frame import ORBIT_ROWS_CHART, orbit_rows, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
-from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.grid_search import (
     AdaptiveImportanceSampler,
-    EccVectorShape,
     ParamBounds,
     _box_log_jacobian,
     _box_to_chart,
-    _ecc_square_disk_area,
     batched_loglike,
-    build_evaluator,
     chart_box_bounds,
-    chart_grid_search,
     grid_search,
 )
 from photomancy.orbit.inference import orbit_chart_log_volume
@@ -63,31 +60,8 @@ def test_parambounds_scale_unit_cube():
     assert jnp.allclose(phys[2], jnp.array([2.0, 0.0]))
 
 
-def test_eccvector_shape_maps_to_physical():
-    """EccVectorShape converts unit-cube midpoint to expected physical values."""
-    from photomancy.orbit.grid_search import EccVectorShape
-
-    shape = EccVectorShape()
-    bounds = shape.default_bounds(log_T_range=(2.0, 3.0), e_max=0.5)
-    u = jnp.full((1, len(bounds.names)), 0.5)
-    phys = shape.to_physical(u, bounds, Ms=MSUN)
-    for kkey in ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp"):
-        assert kkey in phys
-        assert phys[kkey].shape == (1,)
-    # ex=ey=0 at midpoint of symmetric (-e_max, e_max) -> e=0, cos_w=1, sin_w=0
-    assert float(phys["e"][0]) == 0.0
-    assert jnp.allclose(phys["cos_w"][0], 1.0)
-    assert jnp.allclose(phys["sin_w"][0], 0.0)
-    # e <= e_max always
-    u2 = jnp.array([[0.5, 1.0, 1.0, 0.5, 0.5, 0.5]])
-    e2 = float(shape.to_physical(u2, bounds, Ms=MSUN)["e"][0])
-    assert 0.0 <= e2 < 1.0
-
-
 def test_ais_stage1_fills_unit_cube():
     """AdaptiveImportanceSampler.stage1 produces valid unit-cube points."""
-    from photomancy.orbit.grid_search import AdaptiveImportanceSampler
-
     s = AdaptiveImportanceSampler()
     u = s.stage1(jax.random.PRNGKey(0), ndim=6, n=4096)
     assert u.shape == (4096, 6)
@@ -115,64 +89,36 @@ def _toy_astrom():
     )
 
 
-def test_evaluator_matches_direct_loglike():
-    """build_evaluator returns a function matching loglike_relative_astrom."""
-    from photomancy.orbit.grid_search import EccVectorShape, build_evaluator
+def _chart_loglike(data, star):
+    """Score one chart point: orbit, sky offsets, relative-astrometry loglike."""
+    chart = EccentricityVectorChart()
 
-    data = _toy_astrom()
-    shape = EccVectorShape()
-    ev = build_evaluator((data,), Ms=MSUN, dist_pc=10.0, shape=shape)
-    phys = {
-        "a": jnp.array(1.0),
-        "e": jnp.array(0.1),
-        "cos_i": jnp.array(0.7),
-        "W": jnp.array(0.5),
-        "cos_w": jnp.array(1.0),
-        "sin_w": jnp.array(0.0),
-        "tp": jnp.array(30.0),
-    }
-    ra, dec = predict_relative_astrometry(
-        data.times,
-        phys["a"],
-        phys["e"],
-        phys["cos_i"],
-        phys["W"],
-        phys["cos_w"],
-        phys["sin_w"],
-        phys["tp"],
-        MSUN,
-        10.0,
-    )
-    assert jnp.allclose(ev(phys), loglike_relative_astrom(ra, dec, data))
+    def single(phys):
+        orbit = chart.to_orbit(phys["x"], mu_AU3_per_d2=G * star, epoch_d=0.0)
+        ra, dec = sky_offsets_arcsec(orbit, data.times, 10.0)
+        return loglike_relative_astrom(ra, dec, data)
+
+    return single
 
 
-# Medium: comparing two independently compiled orbit evaluators exceeds the unit budget.
-@pytest.mark.medium
 def test_batched_loglike_matches_unfused():
-    """batched_loglike via scan+vmap matches direct vmap over all particles."""
-    from photomancy.orbit.grid_search import (
-        AdaptiveImportanceSampler,
-        EccVectorShape,
-        batched_loglike,
-        build_evaluator,
-    )
+    """batched_loglike via scan+vmap matches direct vmap over all particles.
 
+    Fails if the chunk reshape drops, reorders or repeats particles.
+    """
     data = _toy_astrom()
-    shape = EccVectorShape()
-    ev = build_evaluator((data,), Ms=MSUN, dist_pc=10.0, shape=shape)
-    bounds = shape.default_bounds(log_T_range=(2.0, 3.0), e_max=0.5)
+    bounds = chart_box_bounds((2.0, 3.0), 0.5)
     u = AdaptiveImportanceSampler().stage1(jax.random.PRNGKey(0), 6, 24)
-    phys = shape.to_physical(u, bounds, Ms=MSUN)
-    fused = batched_loglike(ev, phys, n_particles=24, chunk_size=6)
-    ref = jax.vmap(ev)({k: v for k, v in phys.items()})
+    x, _ = _box_to_chart(bounds.scale(u), MSUN)
+    single = _chart_loglike(data, MSUN)
+    fused = batched_loglike(single, {"x": x}, n_particles=24, chunk_size=6)
+    ref = jax.vmap(single)({"x": x})
     assert fused.shape == (24,)
-    assert jnp.allclose(fused, ref, atol=1e-5)
+    np.testing.assert_allclose(fused, ref, rtol=0, atol=1e-10)
 
 
 def test_stage2_returns_samples_and_logq():
     """stage2 returns unit-cube samples and finite log-densities."""
-    from photomancy.orbit.grid_search import AdaptiveImportanceSampler
-
     s = AdaptiveImportanceSampler(n_modes=3)
     survivors = jax.random.uniform(jax.random.PRNGKey(2), (50, 6))
     z, log_q = s.stage2(jax.random.PRNGKey(3), survivors, n=100)
@@ -199,18 +145,11 @@ def test_sample_posterior_sir_sampling():
 
 def test_grid_search_recovers_period():
     """grid_search weighted posterior median of 'a' brackets truth (a=1.0 AU)."""
-    from photomancy.orbit.grid_search import (
-        AdaptiveImportanceSampler,
-        EccVectorShape,
-        grid_search,
-    )
-
     data = _toy_astrom()
     pp = grid_search(
         (data,),
-        Ms=MSUN,
+        star_mass_kg=MSUN,
         dist_pc=10.0,
-        shape=EccVectorShape(),
         sampler=AdaptiveImportanceSampler(n_modes=5),
         log_T_range=(2.0, 3.0),
         e_max=0.5,
@@ -227,18 +166,10 @@ def test_grid_search_recovers_period():
 
 def test_chunking_is_shape_stable():
     """grid_search log_weights are identical regardless of chunk_size."""
-    from photomancy.orbit.grid_search import (
-        AdaptiveImportanceSampler,
-        EccVectorShape,
-        grid_search,
-    )
-
     data = _toy_astrom()
-    shape = EccVectorShape()
     common = dict(
-        Ms=MSUN,
+        star_mass_kg=MSUN,
         dist_pc=10.0,
-        shape=shape,
         sampler=AdaptiveImportanceSampler(n_modes=5),
         log_T_range=(2.0, 3.0),
         e_max=0.5,
@@ -252,15 +183,13 @@ def test_chunking_is_shape_stable():
 
 
 def test_public_api_exports():
-    """All six grid-search names are in photomancy.orbit.__all__ and accessible."""
+    """The grid-search names are in photomancy.orbit.__all__ and accessible."""
     import photomancy.orbit as f
 
     for name in (
         "grid_search",
-        "EccVectorShape",
         "AdaptiveImportanceSampler",
         "AbstractGridStrategy",
-        "AbstractShapeParam",
         "ParamBounds",
     ):
         assert name in f.__all__ and hasattr(f, name)
@@ -269,13 +198,13 @@ def test_public_api_exports():
 def test_batched_loglike_rejects_indivisible_chunk():
     """batched_loglike raises ValueError when n_particles is not divisible by chunk_size."""  # noqa: E501
     data = _toy_astrom()
-    shape = EccVectorShape()
-    ev = build_evaluator((data,), Ms=MSUN, dist_pc=10.0, shape=shape)
-    bounds = shape.default_bounds(log_T_range=(2.0, 3.0), e_max=0.5)
+    bounds = chart_box_bounds((2.0, 3.0), 0.5)
     u = AdaptiveImportanceSampler().stage1(jax.random.PRNGKey(0), 6, 100)
-    phys = shape.to_physical(u, bounds, Ms=MSUN)
+    x, _ = _box_to_chart(bounds.scale(u), MSUN)
     with pytest.raises(ValueError):
-        batched_loglike(ev, phys, n_particles=100, chunk_size=30)
+        batched_loglike(
+            _chart_loglike(data, MSUN), {"x": x}, n_particles=100, chunk_size=30
+        )
 
 
 def test_stage2_rejects_too_few_survivors():
@@ -333,17 +262,55 @@ def _floor(*terms):
     )
 
 
+# Legacy relative-astrometry log likelihoods at the first ten box points of
+# stage1(key 0, 96 points) that have e < 1, frozen from the removed
+# perifocal-formula route (toy data above); keyed by e_max. The e_max = 0.9
+# square has e >= 1 corners, so its indices skip point 8.
+_FROZEN_BOX_LL = {
+    0.5: (
+        list(range(10)),
+        [
+            -22761.800492548977,
+            -29065.021728825628,
+            -35479.042354214405,
+            -37538.08375817465,
+            -15854.986114954183,
+            -18379.51542889183,
+            -7829.6162074490885,
+            -10119.361238806334,
+            -20873.504913462068,
+            -25784.315865950415,
+        ],
+    ),
+    0.9: (
+        [0, 1, 2, 3, 4, 5, 6, 7, 9, 10],
+        [
+            -24869.64970300576,
+            -25407.200129378412,
+            -43821.42649766534,
+            -44804.577303561025,
+            -17201.959414324225,
+            -21055.011165399676,
+            -8280.003216430086,
+            -9048.995536951403,
+            -28590.382016309795,
+            -45948.950857360986,
+        ],
+    ),
+}
+
+
 @pytest.mark.parametrize("e_max", [0.5, 0.9])
 def test_chart_grid_target_in_common_coordinates(e_max):
     """Fails if the chart density, its Jacobian or the orbit map drifts from the box.
 
-    At 96 shared box points (e_max=0.9 has e >= 1 in the square's corners): sky
-    vectors and likelihood match the legacy shape at the 64 eps floor (rtol 1e-12
-    on positions), the analytic cube-to-chart Jacobian equals the autodiff
+    At 96 shared box points (e_max=0.9 has e >= 1 in the square's corners): the
+    sky vectors match the perifocal kinematics (tests/kinematics.py) at rtol
+    1e-12; the likelihood matches frozen values from the removed legacy route at
+    the 64 eps floor; the analytic cube-to-chart Jacobian equals the autodiff
     determinant to 1e-9, and chart log volume plus that Jacobian is the same
     constant at every point, i.e. the flat box is a flat density against the chart
-    measure. The square is intersected with the unit disk exactly as the area
-    formula says; legacy to_physical admits e >= 1 there.
+    measure.
     """
     data = _toy_astrom()
     star = MSUN
@@ -352,24 +319,24 @@ def test_chart_grid_target_in_common_coordinates(e_max):
     u = AdaptiveImportanceSampler().stage1(jax.random.PRNGKey(0), 6, 96)
     p = bounds.scale(u)
     x, bound = _box_to_chart(p, star)
-    old = EccVectorShape().to_physical(u, bounds, Ms=star)
-    assert bool(jnp.all(bound == (old["e"] < 1.0)))
-    assert bool(jnp.all(old["e"][~bound] >= 1.0))
+    assert bool(jnp.all(bound == (jnp.hypot(p[:, 1], p[:, 2]) < 1.0)))
     assert bool(jnp.any(~bound)) == (e_max > 0.8)
     keep = np.asarray(bound)
     assert keep.sum() >= 60
 
-    old_ll = jax.vmap(build_evaluator((data,), Ms=star, dist_pc=10.0, shape=None))(old)
     orbit = chart.to_orbit(x, mu_AU3_per_d2=G * star)
     ra_new, dec_new = jax.vmap(lambda o: sky_offsets_arcsec(o, data.times, 10.0))(orbit)
+    rows = orbit_rows(orbit)
     ra_old, dec_old = jax.vmap(
-        lambda *args: predict_relative_astrometry(data.times, *args, MSUN, 10.0)
-    )(old["a"], old["e"], old["cos_i"], old["W"], old["cos_w"], old["sin_w"], old["tp"])
+        lambda r: predict_relative_astrometry(data.times, *r, MSUN, 10.0)
+    )(rows)
     np.testing.assert_allclose(ra_new[keep], ra_old[keep], rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(dec_new[keep], dec_old[keep], rtol=1e-12, atol=1e-14)
     new_ll = jax.vmap(lambda a, b: loglike_relative_astrom(a, b, data))(ra_new, dec_new)
-    ll_error = np.abs(np.asarray(new_ll - old_ll))[keep]
-    assert ll_error.max() <= _floor(old_ll[keep], new_ll[keep])
+    idx, frozen = _FROZEN_BOX_LL[e_max]
+    frozen = np.asarray(frozen)
+    ll_error = np.abs(np.asarray(new_ll)[idx] - frozen)
+    assert ll_error.max() <= _floor(frozen, np.asarray(new_ll)[idx])
 
     jac = np.asarray(_box_log_jacobian(p, bounds))
     autodiff = jax.vmap(
@@ -383,36 +350,25 @@ def test_chart_grid_target_in_common_coordinates(e_max):
     np.testing.assert_allclose(jac[keep], np.asarray(autodiff)[keep], rtol=0, atol=1e-9)
     total = np.asarray(orbit_chart_log_volume(chart, x) + jac)[keep]
     assert np.ptp(total) <= 64 * np.finfo(float).eps * np.sum(1 + np.abs(total))
-    square = (2 * e_max) ** 2
-    assert _ecc_square_disk_area(e_max) <= square
-    assert (_ecc_square_disk_area(e_max) == square) == (e_max <= 2**-0.5)
     print(f"e_max={e_max}: ll_error={ll_error.max():.3g}, spread={np.ptp(total):.3g}")
 
 
-def test_ecc_square_disk_area_matches_quadrature():
-    """Fails if the support area (the flat prior's normalization) is wrong.
+def test_grid_search_weights_and_rows_in_common_coordinates():
+    """Fails if grid_search weights, rows or evidence drift from the box target.
 
-    Trapezoid quadrature of the square intersected with the unit disk, 4e5 nodes
-    per half-width: agreement to 1e-6, spanning the three geometric regimes.
-    """
-    for half_width in (0.5, 0.8, 0.95, 1.3):
-        x = np.linspace(0.0, min(half_width, 1.0), 400001)
-        height = np.minimum(half_width, np.sqrt(np.maximum(1.0 - x**2, 0.0)))
-        numeric = 4.0 * np.trapezoid(height, x)
-        assert _ecc_square_disk_area(half_width) == pytest.approx(numeric, abs=1e-6)
-
-
-def test_chart_grid_search_matches_grid_search():
-    """Fails if chart_grid_search weights, rows or evidence differ from grid_search.
-
-    With e_max=0.5 the square lies inside the unit disk, so the flat chart prior
-    has the box's normalization and, with identical stage-1 and stage-2 draws, the
-    two weights and log evidences agree (log weights to the 64 eps floor); the
-    sampled orbits predict the same sky positions to rtol 1e-9. Draws clipped onto
-    a face (cos i = +-1, under 2 percent) are weightless on the chart route.
+    The support is the disk e < e_max, so rows keep e < e_max with a inside the
+    period box, only draws inside the cube and disk carry weight (the unclipped
+    proposal puts about 78 percent on the cube and the toy peak is narrow, so
+    more than 15 percent here), the evidence is finite, and the posterior
+    declares its chart and epoch. The removed legacy route's evidence is not kept:
+    its clipped proposal piled atoms on the cube faces, so it was not the
+    sampling law.
     """
     data = _toy_astrom()
-    common = dict(
+    post = grid_search(
+        (data,),
+        star_mass_kg=MSUN,
+        epoch=Epoch(2460000.0),
         dist_pc=10.0,
         sampler=AdaptiveImportanceSampler(n_modes=3),
         log_T_range=(2.0, 3.0),
@@ -422,55 +378,30 @@ def test_chart_grid_search_matches_grid_search():
         n_survivors=200,
         key=jax.random.PRNGKey(7),
     )
-    old = grid_search((data,), Ms=MSUN, shape=EccVectorShape(), **common)
-    new = chart_grid_search(
-        (data,), star_mass_kg=MSUN, epoch=Epoch(2460000.0), **common
-    )
-    assert (new.chart, new.epoch) == (ORBIT_ROWS_CHART, Epoch(2460000.0))
-    assert new.param_names == old.param_names
-    assert np.isfinite(old.log_weights).all()
-    ok = np.isfinite(new.log_weights)
-    # Clipped draws on a cube face (cos i = +-1) sit on the chart's singular set:
-    # the chart route gives them no weight, the legacy route an atom.
-    assert 0.0 < (~ok).mean() < 0.02
-    diff = np.asarray(new.log_weights - old.log_weights)[ok]
-    floor = _floor(old.log_weights[:50], new.log_weights[:50])
-    assert diff.max() - diff.min() <= floor
-    assert float(new.evidence) == pytest.approx(float(old.evidence), abs=0.05)
-    for post in (old, new):
-        assert jnp.all(post.samples[:, 6] >= 0.0)
-    sky = lambda post: jax.vmap(  # noqa: E731
-        lambda *row: predict_relative_astrometry(data.times, *row, MSUN, 10.0)
-    )(*(post.samples[:, i] for i in range(7)))
-    for got, want in zip(sky(new), sky(old), strict=True):
-        np.testing.assert_allclose(got[ok], want[ok], rtol=1e-9, atol=1e-12)
-    np.testing.assert_allclose(new.samples[ok, :3], old.samples[ok, :3], rtol=1e-9)
+    assert (post.chart, post.epoch) == (ORBIT_ROWS_CHART, Epoch(2460000.0))
+    assert post.param_names == ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
+    ok = np.isfinite(np.asarray(post.log_weights))
+    # The unclipped proposal leaves the cube and the disk: 22 percent keep weight.
+    assert ok.mean() > 0.15
+    assert np.isfinite(float(post.evidence))
+    assert bool(jnp.all(post.samples[:, 6] >= 0.0))
+    rows = np.asarray(post.samples)[ok]
+    assert rows[:, 1].max() < 0.5
+    a_lo, a_hi = (float(period_to_sma(10.0**lt, MSUN)) for lt in (2.0, 3.0))
+    assert a_lo <= rows[:, 0].min() and rows[:, 0].max() <= a_hi
 
 
-def test_clipped_stage2_puts_atoms_on_the_cube_faces():
-    """Fails if boundary atoms of the clipped proposal go undetected.
+def test_stage2_draws_follow_the_proposal_density():
+    """Fails if stage2 clips draws onto the cube faces (atoms that log_q omits).
 
-    Survivors hug a corner of the unit cube, so a quarter or more of the Gaussian
-    draws leave it. Clipping piles those onto the faces (more than 20 percent of
-    draws sit exactly on a face) while log_q stays the unclipped density; the
-    sampling law is then not log_q. Unclipped draws carry no atoms and leave the
-    cube with the probability log_q assigns outside (more than 20 percent here).
+    Survivors hug a corner of the unit cube, so more than 20 percent of the
+    Gaussian draws leave it (40000 draws, binomial error under 0.3 percent). No
+    draw sits exactly on a face, so the sampling law is the density log_q.
     """
     survivors = 0.97 + 0.01 * jax.random.uniform(jax.random.PRNGKey(0), (60, 3))
-    n = 40000
-    key = jax.random.PRNGKey(1)
-    z_clip, _ = AdaptiveImportanceSampler(n_modes=3, jitter=0.02).stage2(
-        key, survivors, n
+    z, _ = AdaptiveImportanceSampler(n_modes=3, jitter=0.02).stage2(
+        jax.random.PRNGKey(1), survivors, 40000
     )
-    z_free, _ = AdaptiveImportanceSampler(n_modes=3, jitter=0.02, clip=False).stage2(
-        key, survivors, n
-    )
-    on_face = jnp.any((z_clip == 0.0) | (z_clip == 1.0 - 1e-7), axis=-1)
-    assert float(on_face.mean()) > 0.2
-    assert not bool(jnp.any((z_free == 0.0) | (z_free == 1.0 - 1e-7)))
-    inside = jnp.all((z_free >= 0.0) & (z_free < 1.0), axis=-1)
-    assert float(inside.mean()) < 0.8  # mass log_q puts outside the cube
-
-    # The clipped sampler puts all its mass in the cube while its log_q says the
-    # cube holds only `inside.mean()` of it: the density is not the sampling law.
-    assert bool(jnp.all((z_clip >= 0.0) & (z_clip < 1.0)))
+    assert not bool(jnp.any((z == 0.0) | (z == 1.0 - 1e-7)))
+    inside = jnp.all((z >= 0.0) & (z < 1.0), axis=-1)
+    assert float(inside.mean()) < 0.8

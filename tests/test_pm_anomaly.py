@@ -15,18 +15,14 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from hwoutils.constants import G, Mearth2kg  # noqa: E402
-from orbix.equations.orbit import period_a, period_to_sma  # noqa: E402
-
-from photomancy import LaplaceBackend, build_scene_logdensity  # noqa: E402
-from photomancy.orbit import (  # noqa: E402
-    PMAnomalyData,
-    build_numpyro_logdensity,
-    loglike_pm_anomaly,
-)
-from photomancy.orbit.forward import (  # noqa: E402
+from kinematics import (  # noqa: E402
     predict_pm_anomaly,
     predict_relative_astrometry,
 )
+from orbix.equations.orbit import period_a, period_to_sma  # noqa: E402
+
+from photomancy import LaplaceBackend, build_scene_logdensity  # noqa: E402
+from photomancy.orbit import PMAnomalyData, loglike_pm_anomaly  # noqa: E402
 from photomancy.priors import Uniform  # noqa: E402
 
 MSUN_KG = 1.989e30
@@ -187,22 +183,3 @@ def test_joint_relative_astrom_and_pma_recovers_mass():
     fit = unravel(post.mean)
     assert abs(float(fit.log_Mp) - LOG_MP_TRUE) < 0.1  # mass recovered to ~25%
     assert float(jnp.sqrt(jnp.diag(post.cov))[-1]) < 0.2  # mass is constrained
-
-
-def test_numpyro_model_wires_pm_anomaly_channel():
-    """build_numpyro_logdensity with a PMa fits the mass and gives a finite logp."""
-    anom = _anom(317.8 * Mearth2kg)
-    data = PMAnomalyData(
-        t_hip=jnp.array(T_HIP),
-        t_gaia=jnp.array(T_GAIA),
-        gaia_window=jnp.array(GAIA_WIN),
-        pm_anomaly=anom,
-        pm_anomaly_cov=(0.02e-3 / YR) ** 2 * jnp.eye(2),
-        is_valid=jnp.array(True),
-    )
-    problem = build_numpyro_logdensity(
-        MSUN_KG, DIST_PC, pm_anomaly_data=data, log_P_range=(3.0, 4.0)
-    )
-    assert "log_Mp" in problem.param_names
-    z0 = jnp.zeros(len(problem.param_names))
-    assert jnp.isfinite(problem.logdensity(z0))

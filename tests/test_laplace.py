@@ -5,30 +5,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import Msun2kg, two_pi
-from hwoutils.epoch import Epoch
-from numpyro.infer.util import log_density
+from orbit_fit import blind_fit, chart_problem
 from orbix.equations import period_to_sma
-from orbix.system import Body, ClassicalChart, SkyFrame, System
-from scipy.optimize import minimize
 from sky_reference import sky_position
 
-from photomancy import RelativeAstrometryTerm
-from photomancy.orbit.data import OrbitData, RelativeAstromData
+from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.diagnostics import sample_physical
-from photomancy.orbit.inference import (
-    ChartOrbitProblem,
-    build_chart_logdensity,
-    build_numpyro_logdensity,
-)
-from photomancy.orbit.init import find_init
-from photomancy.orbit.laplace import (
-    map_laplace_fit,
-    map_laplace_mixture_fit,
-    numpyro_map_laplace_fit,
-)
-from photomancy.orbit.model import build_model
+from photomancy.orbit.laplace import map_laplace_fit, map_laplace_mixture_fit
 from photomancy.posterior import GaussianPosterior
-from photomancy.priors import orbit_log_prior
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -82,27 +66,103 @@ def _make_astrom(n_obs, seed=42):
     )
 
 
+# Frozen from an independent BFGS fit (gtol 1e-8) and a direct Hessian of the retired
+# NumPyro pulled-back joint, in the chart coordinates of
+# test_chart_map_and_laplace_match_frozen_reference: mode, minimum of the negative log
+# joint and its Hessian (the posterior precision).
+_FROZEN_MODE = [
+    0.7364271971931536,
+    -1.6847489361378352,
+    0.5307476506246176,
+    2.2929405311264026,
+    0.8010205958648666,
+    1.5516559029038823,
+]
+_FROZEN_MINIMUM = -84.86561635762124
+_FROZEN_PRECISION = [
+    [
+        2126993.1736341156,
+        -263.65525584927445,
+        -1137.554298939685,
+        -115373.53363240453,
+        -128119.12973239647,
+        -137288.89535510924,
+    ],
+    [
+        -263.6552558492766,
+        413.41774650219116,
+        184.73010869841744,
+        -50.44132013218355,
+        -314.13246759683875,
+        -66.54566945219705,
+    ],
+    [
+        -1137.5542989396836,
+        184.73010869841755,
+        4771.597019013412,
+        2640.7747932252955,
+        1283.290825382343,
+        857.491578034646,
+    ],
+    [
+        -115373.53363240453,
+        -50.44132013218354,
+        2640.7747932252973,
+        15766.096043889831,
+        10696.603978007828,
+        10061.719028453179,
+    ],
+    [
+        -128119.12973239645,
+        -314.13246759683875,
+        1283.290825382343,
+        10696.603978007828,
+        11398.742166250886,
+        10481.250427574509,
+    ],
+    [
+        -137288.89535510918,
+        -66.54566945219695,
+        857.4915780346472,
+        10061.719028453179,
+        10481.250427574509,
+        10396.66564009245,
+    ],
+]
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
+def _chart_problem(astrom, params):
+    """One-planet fixed-mass chart problem for the relative astrometry."""
+    return chart_problem(
+        astrom,
+        params,
+        star_mass_kg=Msun2kg,
+        dist_pc=DIST_PC,
+        period_range_d=(600.0, 1600.0),
+    )
+
+
+def _fit_from_blind_start(astrom, n_steps=100):
+    """MAP and Laplace fit from the blind Thiele-Innes initializer."""
+    return blind_fit(
+        astrom,
+        star_mass_kg=Msun2kg,
+        dist_pc=DIST_PC,
+        log_T_range=LOG_P_RANGE,
+        n_steps=n_steps,
+        period_range_d=(600.0, 1600.0),
+    )
+
+
 @pytest.fixture(scope="module")
 def fitted():
     """Fit the five-epoch scenario once for all posterior contract checks."""
-    astrom = _make_astrom(5)
-    init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-    result = numpyro_map_laplace_fit(
-        Msun2kg,
-        DIST_PC,
-        relative_astrom_data=astrom,
-        log_P_range=LOG_P_RANGE,
-        init_vals=init_vals,
-    )
-    problem = build_numpyro_logdensity(
-        Msun2kg, DIST_PC, relative_astrom_data=astrom, log_P_range=LOG_P_RANGE
-    )
-    return result, problem
+    return _fit_from_blind_start(_make_astrom(5))
 
 
 # Medium: this consumer can pay for the shared fit and blind initializer.
@@ -133,16 +193,7 @@ def test_map_converges(fitted):
 def test_covariance_positive_definite():
     """Regularised covariance is positive-definite for n=1,2,3."""
     for n_obs in [1, 2, 3]:
-        astrom = _make_astrom(n_obs)
-        init_vals = find_init(astrom, Msun2kg, DIST_PC, log_T_range=LOG_P_RANGE)
-        result = numpyro_map_laplace_fit(
-            Msun2kg,
-            DIST_PC,
-            relative_astrom_data=astrom,
-            log_P_range=LOG_P_RANGE,
-            init_vals=init_vals,
-            n_steps=100,
-        )
+        result, _ = _fit_from_blind_start(_make_astrom(n_obs))
         eigvals = jnp.linalg.eigvalsh(result.cov)
         assert jnp.all(eigvals > 0), f"n={n_obs}: eigenvalues={eigvals}"
 
@@ -173,67 +224,34 @@ def test_log_prob_finite(fitted):
 
 # Medium: optimize and differentiate both independent orbital likelihoods.
 @pytest.mark.medium
-def test_chart_map_and_laplace_match_numpyro():
-    """Fails if the chart fit shifts the mode or curvature of the pulled-back joint."""
+def test_chart_map_and_laplace_match_frozen_reference():
+    """Fails if the chart fit shifts the mode or curvature of the pulled-back joint.
+
+    The reference mode and Hessian were frozen from the retired joint; the gradient
+    of the chart density at that mode must vanish in posterior sigma.
+    """
     astrom = _make_astrom(12, seed=0)
-    frame = SkyFrame(DIST_PC, Epoch())
-
-    def build(orbit):
-        return System(
-            Body(1.0), Body(jnp.zeros(1)), jax.tree.map(lambda x: x[None], orbit), frame
-        )
-
-    def prior(system):
-        orbit = jax.tree.map(lambda leaf: leaf[0], system.orbits)
-        return orbit_log_prior(orbit, period_range_d=(600.0, 1600.0))
-
-    density = build_chart_logdensity(
-        ClassicalChart(),
-        build,
-        prior,
-        star_mass_kg=Msun2kg,
-        terms=(RelativeAstrometryTerm(astrom),),
-    )
     log_a = jnp.log(period_to_sma(TRUE_T, Msun2kg))
     x0 = jnp.array([log_a, -1.6, 0.55, 2.25, 0.75, 1.55])
     params = {"orbit": x0}
-    problem = ChartOrbitProblem(density, params)
+    problem = _chart_problem(astrom, params)
     fitted = map_laplace_fit(problem, problem.flatten(params), min_eigenvalue=1e-10)
 
-    model = build_model(has_relative_astrom=True, log_P_range=LOG_P_RANGE)
-    model_args = (Msun2kg, DIST_PC, OrbitData(relative_astrom=astrom))
-
-    def negative_joint(x):
-        # Kepler's law gives dlog10(P)/dln(a) = 1.5 / ln(10).
-        e, cos_i = jax.nn.sigmoid(x[1]), jnp.tanh(x[2])
-        log_p = jnp.log10(TRUE_T) + 1.5 * (x[0] - log_a) / jnp.log(10.0)
-        sites = dict(log_P=log_p, e_raw=e, cos_i=cos_i, W=x[3], w_raw=x[4], M0=x[5])
-        joint, _ = log_density(
-            model, model_args, {}, jax.tree.map(jnp.atleast_1d, sites)
-        )
-        jac = 1.5 / jnp.log(10.0) * e * (1 - e) * (1 - cos_i**2)
-        return -joint - jnp.log(jac)
-
-    # Independent optimizer and direct Hessian factorization, without eigenvalue
-    # clipping: these epochs resolve all six coordinates.
-    reference = minimize(
-        jax.jit(jax.value_and_grad(negative_joint)),
-        x0,
-        jac=True,
-        method="BFGS",
-        options={"gtol": 1e-8},
-    )
-    precision = np.asarray(jax.jit(jax.hessian(negative_joint))(reference.x))
+    reference_x = np.asarray(_FROZEN_MODE)
+    precision = np.asarray(_FROZEN_PRECISION)
     root = np.linalg.cholesky(precision)
     # Measure residual gradients and MAP displacements in posterior sigma.
     # A 1e-10 nat objective floor resolves displacements sqrt(2e-10) sigma.
     sigma_floor = np.sqrt(2e-10)
-    assert np.linalg.norm(np.linalg.solve(root, reference.jac)) < sigma_floor
-    mode_delta = np.linalg.norm(root.T @ (fitted.mean - reference.x))
+    gradient = jax.jit(jax.grad(lambda x: problem.logdensity(x)))(
+        jnp.asarray(reference_x)
+    )
+    assert np.linalg.norm(np.linalg.solve(root, np.asarray(gradient))) < sigma_floor
+    mode_delta = np.linalg.norm(root.T @ (fitted.mean - reference_x))
     # Whitening gives a unit covariance. Compare principal variances to
     # 1 ppm, well below the uncertainty of the Gaussian approximation.
     cov_delta = np.linalg.norm(root.T @ fitted.cov @ root - np.eye(6), ord=2)
-    log_z = -reference.fun + 3 * np.log(two_pi) - np.log(np.diag(root)).sum()
+    log_z = -_FROZEN_MINIMUM + 3 * np.log(two_pi) - np.log(np.diag(root)).sum()
     evidence_delta = abs(float(fitted.evidence) - log_z)
     print(
         f"MAP delta {mode_delta:.5g} sigma; whitened covariance delta "
@@ -250,6 +268,6 @@ def test_chart_map_and_laplace_match_numpyro():
     starts = jnp.stack([x0, x0.at[3:5].add(jnp.pi)])
     mixture = map_laplace_mixture_fit(problem, starts, min_eigenvalue=1e-10)
     mirror_free_means = mixture.means.at[1, 3:5].add(-jnp.pi)
-    displacements = (mirror_free_means - reference.x) @ root
+    displacements = (mirror_free_means - reference_x) @ root
     assert np.max(np.linalg.norm(displacements, axis=1)) < sigma_floor
     np.testing.assert_allclose(mixture.log_evidences, log_z, rtol=0, atol=3.1e-6)

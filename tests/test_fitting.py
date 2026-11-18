@@ -3,16 +3,17 @@
 import jax
 import jax.numpy as jnp
 import pytest
-from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, Rearth2AU, d2s
-from orbix.kepler import Halley, kepler
-from sky_reference import sky_position
-
-from photomancy.orbit.data import NullData, OrbitData, RelativeAstromData, RVData
-from photomancy.orbit.forward import (
+from hwoutils.constants import G, Mearth2kg, Msun2kg, Rearth2AU
+from kinematics import (
     predict_photometry,
     predict_relative_astrometry,
     predict_rv,
 )
+from orbix.kepler import Halley, kepler
+from orbix.system import ClassicalChart
+from sky_reference import sky_position
+
+from photomancy.orbit.data import NullData, RelativeAstromData, RVData
 from photomancy.orbit.likelihoods import (
     loglike_null,
     loglike_relative_astrom,
@@ -205,7 +206,7 @@ class TestDataContainers:
 
 
 # ============================================================================
-# Forward models (forward.py)
+# One-orbit kinematics (tests/kinematics.py)
 # ============================================================================
 
 
@@ -645,181 +646,6 @@ class TestPriors:
 
 
 # ============================================================================
-# NumPyro model builder (numpyro_model.py)
-# ============================================================================
-
-
-class TestNumPyroModel:
-    """Tests for the NumPyro model builder."""
-
-    def test_build_model_requires_data(self):
-        """Should raise ValueError if no data is provided."""
-        from photomancy.orbit.model import build_model
-
-        with pytest.raises(ValueError, match="At least one"):
-            build_model()
-
-    def test_build_model_rv_only(self):
-        """Should return a callable model for RV-only fitting."""
-        from photomancy.orbit.model import build_model
-
-        model = build_model(has_rv=True)
-        assert callable(model)
-
-    def test_model_executes_with_seed(self):
-        """Model should execute under numpyro.handlers.seed."""
-        import numpyro.handlers as handlers
-
-        from photomancy.orbit.model import build_model
-
-        rv_data = RVData(
-            times=jnp.linspace(0, 365.25, 10),
-            rv=jnp.ones(10) * 1e-10 * (AU2m / d2s),
-            rv_err=jnp.ones(10) * 1e-11 * (AU2m / d2s),
-            inst_ids=jnp.zeros(10, dtype=jnp.int32),
-            is_valid=jnp.ones(10, dtype=bool),
-            n_inst=1,
-        )
-        model = build_model(has_rv=True)
-
-        # Execute with a seed to get a trace
-        with handlers.seed(rng_seed=42):
-            trace = handlers.trace(model).get_trace(
-                Msun2kg, 10.0, OrbitData(rv=rv_data)
-            )
-
-        # Check essential sites exist (kipping13 default uses e_raw, w_raw)
-        assert "log_P" in trace
-        assert "e_raw" in trace
-        assert "w_raw" in trace
-        assert "cos_i" in trace
-        assert "log_Mp" in trace
-        assert "ll_rv" in trace
-
-    @pytest.mark.parametrize(
-        "ecc_prior", ["kipping13", "rayleigh", "vaneylen19", "disk"]
-    )
-    def test_model_ecc_prior_options(self, ecc_prior):
-        """All eccentricity priors should produce a valid, executable model."""
-        import numpyro.handlers as handlers
-
-        from photomancy.orbit.model import build_model
-
-        rv_data = RVData(
-            times=jnp.linspace(0, 365.25, 10),
-            rv=jnp.ones(10) * 1e-10 * (AU2m / d2s),
-            rv_err=jnp.ones(10) * 1e-11 * (AU2m / d2s),
-            inst_ids=jnp.zeros(10, dtype=jnp.int32),
-            is_valid=jnp.ones(10, dtype=bool),
-            n_inst=1,
-        )
-        model = build_model(
-            has_rv=True,
-            ecc_prior=ecc_prior,
-        )
-
-        with handlers.seed(rng_seed=99):
-            trace = handlers.trace(model).get_trace(
-                Msun2kg, 10.0, OrbitData(rv=rv_data)
-            )
-
-        # All priors must produce deterministic e, cos_w, sin_w
-        assert "e" in trace
-        assert "cos_w" in trace
-        assert "sin_w" in trace
-
-        e_val = trace["e"]["value"].item()
-        assert 0.0 <= e_val < 1.0
-
-    def test_unknown_ecc_prior_raises(self):
-        """Unknown ecc_prior name should raise ValueError."""
-        from photomancy.orbit.model import build_model
-
-        rv_data = RVData(
-            times=jnp.linspace(0, 365.25, 10),
-            rv=jnp.ones(10) * 1e-10 * (AU2m / d2s),
-            rv_err=jnp.ones(10) * 1e-11 * (AU2m / d2s),
-            inst_ids=jnp.zeros(10, dtype=jnp.int32),
-            is_valid=jnp.ones(10, dtype=bool),
-            n_inst=1,
-        )
-        model = build_model(
-            has_rv=True,
-            ecc_prior="nonexistent",
-        )
-        import numpyro.handlers as handlers
-
-        with pytest.raises(ValueError, match="Unknown ecc_prior"):
-            with handlers.seed(rng_seed=0):
-                handlers.trace(model).get_trace(Msun2kg, 10.0, OrbitData(rv=rv_data))
-
-    @pytest.mark.slow
-    def test_mcmc_runs_rv(self):
-        """End-to-end: generate synthetic RV data and run a short NUTS chain.
-
-        This is the acid test: the full pipeline from data -> model -> MCMC
-        must execute without errors or NaN log-probabilities.
-        """
-        from numpyro.infer import MCMC, NUTS
-
-        from photomancy.orbit.model import build_model
-
-        # Generate synthetic RV from a known orbit
-        true_T = 365.25
-        true_e = 0.1
-        true_tp = 50.0
-        true_Mp_sini = 10.0 * Mearth2kg  # 10 Earth masses
-        true_cos_w = 1.0
-        true_sin_w = 0.0
-
-        times = jnp.linspace(0, 2 * 365.25, 30)  # 2 years, 30 points
-        rv_true = predict_rv(
-            times,
-            true_T,
-            Msun2kg,
-            true_Mp_sini,
-            true_e,
-            true_cos_w,
-            true_sin_w,
-            true_tp,
-        )
-
-        rv_true = rv_true * (AU2m / d2s)
-
-        # Add noise
-        key = jax.random.PRNGKey(123)
-        rv_err = jnp.ones_like(rv_true) * jnp.std(rv_true) * 0.1
-        noise = jax.random.normal(key, rv_true.shape) * rv_err
-        rv_obs = rv_true + noise
-
-        rv_data = RVData(
-            times=times,
-            rv=rv_obs,
-            rv_err=rv_err,
-            inst_ids=jnp.zeros(len(times), dtype=jnp.int32),
-            is_valid=jnp.ones(len(times), dtype=bool),
-            n_inst=1,
-        )
-
-        model = build_model(has_rv=True)
-
-        # Run a very short chain (just testing execution, not convergence)
-        kernel = NUTS(model)
-        mcmc = MCMC(kernel, num_warmup=50, num_samples=20, progress_bar=False)
-        mcmc.run(jax.random.PRNGKey(0), Msun2kg, 10.0, OrbitData(rv=rv_data))
-
-        samples = mcmc.get_samples()
-
-        # Basic sanity: all sampled values should be finite
-        for key_name, vals in samples.items():
-            assert jnp.all(jnp.isfinite(vals)), f"NaN/inf in {key_name}"
-
-        # The sampled periods should bracket the true period (loose check)
-        T_samples = samples["T"]
-        assert jnp.min(T_samples) > 0  # all positive
-
-
-# ============================================================================
 # Thiele-Innes linear fitter (thiele_innes.py)
 # ============================================================================
 
@@ -886,62 +712,50 @@ class TestThieleInnes:
             is_valid=jnp.ones(n_pts, dtype=bool),
         )
 
-    def test_recovers_sma_circular(self, circular_orbit):
-        """TI fitter should recover semi-major axis for a circular orbit."""
+    @staticmethod
+    def _fit(data, orbit, period_scale=1.0):
+        """Chart TI fit at the known shape (period, e, tp)."""
+        from orbix.system import periapsis_chart_shape
+
         from photomancy.orbit.thiele_innes import thiele_innes_fit
 
-        data = self._make_astrom_data(circular_orbit)
-        result = thiele_innes_fit(
-            data,
-            T=circular_orbit["T"],
-            e=circular_orbit["e"],
-            tp=circular_orbit["tp"],
-            Ms=circular_orbit["Ms"],
-            dist_pc=circular_orbit["dist_pc"],
+        shape = periapsis_chart_shape(
+            orbit["T"] * period_scale, orbit["e"], orbit["tp"]
         )
+        return thiele_innes_fit(data, orbit["dist_pc"], *shape)
+
+    @staticmethod
+    def _sheet(result, index=0):
+        return jax.tree.map(lambda leaf: leaf[index], result.orbits)
+
+    def test_recovers_sma_circular(self, circular_orbit):
+        """TI fitter should recover semi-major axis for a circular orbit."""
+        data = self._make_astrom_data(circular_orbit)
+        result = self._fit(data, circular_orbit)
 
         assert jnp.isfinite(result.log_likelihood)
-        assert jnp.allclose(result.a, circular_orbit["a"], rtol=1e-3)
+        assert jnp.allclose(self._sheet(result).a_AU, circular_orbit["a"], rtol=1e-3)
 
     def test_recovers_elements_eccentric(self):
         """TI fitter should recover (a, cos_i) for an eccentric orbit."""
-        from photomancy.orbit.thiele_innes import thiele_innes_fit
-
         orbit = self._consistent_orbit()
         data = self._make_astrom_data(orbit)
-        result = thiele_innes_fit(
-            data,
-            T=orbit["T"],
-            e=orbit["e"],
-            tp=orbit["tp"],
-            Ms=orbit["Ms"],
-            dist_pc=orbit["dist_pc"],
-        )
+        result = self._fit(data, orbit)
 
         assert jnp.isfinite(result.log_likelihood)
-        assert jnp.allclose(result.a, orbit["a"], rtol=1e-2)
+        fitted = self._sheet(result)
+        assert jnp.allclose(fitted.a_AU, orbit["a"], rtol=1e-2)
         # Inclination is determined; only the joint node/periapsis branch is ambiguous.
         assert jnp.allclose(
-            result.cos_i,
-            orbit["cos_i"],
-            atol=0.02,
+            jnp.cos(fitted.to_classical()["i_rad"]), orbit["cos_i"], atol=0.02
         )
 
     def test_chi2_near_n_dof(self):
         """With correct params, chi^2 ~= N_datapoints - 4 (4 fitted params)."""
-        from photomancy.orbit.thiele_innes import thiele_innes_fit
-
         orbit = self._consistent_orbit()
         n_pts = 30
         data = self._make_astrom_data(orbit, n_pts=n_pts)
-        result = thiele_innes_fit(
-            data,
-            T=orbit["T"],
-            e=orbit["e"],
-            tp=orbit["tp"],
-            Ms=orbit["Ms"],
-            dist_pc=orbit["dist_pc"],
-        )
+        result = self._fit(data, orbit)
 
         # 2*N_pts observations - 4 fitted params
         n_dof = 2 * n_pts - 4
@@ -950,28 +764,11 @@ class TestThieleInnes:
 
     def test_wrong_period_worse_ll(self):
         """Using the wrong period should give a worse log-likelihood."""
-        from photomancy.orbit.thiele_innes import thiele_innes_fit
-
         orbit = self._consistent_orbit()
         data = self._make_astrom_data(orbit)
 
-        result_true = thiele_innes_fit(
-            data,
-            T=orbit["T"],
-            e=orbit["e"],
-            tp=orbit["tp"],
-            Ms=orbit["Ms"],
-            dist_pc=orbit["dist_pc"],
-        )
-
-        result_wrong = thiele_innes_fit(
-            data,
-            T=orbit["T"] * 1.5,  # 50% wrong
-            e=orbit["e"],
-            tp=orbit["tp"],
-            Ms=orbit["Ms"],
-            dist_pc=orbit["dist_pc"],
-        )
+        result_true = self._fit(data, orbit)
+        result_wrong = self._fit(data, orbit, period_scale=1.5)  # 50% wrong
 
         assert result_true.log_likelihood > result_wrong.log_likelihood
 
@@ -988,19 +785,16 @@ class TestThieleInnes:
         e_grid = jnp.linspace(0.0, 0.6, 10)
 
         best = thiele_innes_grid_search(
-            data,
-            orbit["Ms"],
-            orbit["dist_pc"],
-            log_T_grid,
-            e_grid,
-            n_tp=15,
+            data, orbit["dist_pc"], log_T_grid, e_grid, n_tp=15
         )
 
-        # Best-fit period should be close to truth
-        assert jnp.allclose(best.T, orbit["T"], rtol=0.05)
+        # Best-fit period is 2 pi / n, with ln n the first chart coordinate.
+        assert jnp.allclose(2 * jnp.pi / jnp.exp(best.x[0]), orbit["T"], rtol=0.05)
 
     def test_jit_compatible(self):
         """TI fitter should work under jax.jit."""
+        from orbix.system import periapsis_chart_shape
+
         from photomancy.orbit.thiele_innes import thiele_innes_fit
 
         orbit = self._consistent_orbit()
@@ -1009,12 +803,7 @@ class TestThieleInnes:
         @jax.jit
         def _fit(T, e, tp):
             return thiele_innes_fit(
-                data,
-                T,
-                e,
-                tp,
-                Ms=orbit["Ms"],
-                dist_pc=orbit["dist_pc"],
+                data, orbit["dist_pc"], *periapsis_chart_shape(T, e, tp)
             )
 
         result = _fit(
@@ -1023,7 +812,7 @@ class TestThieleInnes:
             jnp.float64(orbit["tp"]),
         )
         assert jnp.isfinite(result.log_likelihood)
-        assert jnp.allclose(result.a, orbit["a"], rtol=1e-2)
+        assert jnp.allclose(self._sheet(result).a_AU, orbit["a"], rtol=1e-2)
 
 
 # ============================================================================
@@ -1032,7 +821,7 @@ class TestThieleInnes:
 
 
 class TestInit:
-    """Tests for the MCMC initialization helpers."""
+    """Tests for the blind-start initializer."""
 
     @staticmethod
     def _consistent_orbit():
@@ -1086,93 +875,47 @@ class TestInit:
             is_valid=jnp.ones(n_pts, dtype=bool),
         )
 
-    def test_ti_to_init_keys(self):
-        """ti_to_init should produce the correct NumPyro parameter names."""
-        from photomancy.orbit.init import ti_to_init
-        from photomancy.orbit.thiele_innes import thiele_innes_fit
+    @staticmethod
+    def _period_d(starts, orbit):
+        """Periods (days) of ClassicalChart starts at the fit's stellar mass."""
+        chart = ClassicalChart()
+        return chart.to_orbit(starts, mu_AU3_per_d2=G * orbit["Ms"]).period_d
 
-        orbit = self._consistent_orbit()
-        data = self._make_astrom_data(orbit)
-        result = thiele_innes_fit(
-            data,
-            T=orbit["T"],
-            e=orbit["e"],
-            tp=orbit["tp"],
-            Ms=orbit["Ms"],
-            dist_pc=orbit["dist_pc"],
-        )
-
-        init_dict = ti_to_init(result)
-        expected_keys = {"log_P", "e_raw", "w_raw", "cos_i", "W", "M0"}
-        assert set(init_dict.keys()) == expected_keys
-
-    def test_ti_to_init_values_near_truth(self):
-        """Converted values should be close to truth parameters."""
-        from photomancy.orbit.init import ti_to_init
-        from photomancy.orbit.thiele_innes import thiele_innes_fit
-
-        orbit = self._consistent_orbit()
-        data = self._make_astrom_data(orbit)
-        result = thiele_innes_fit(
-            data,
-            T=orbit["T"],
-            e=orbit["e"],
-            tp=orbit["tp"],
-            Ms=orbit["Ms"],
-            dist_pc=orbit["dist_pc"],
-        )
-
-        init_dict = ti_to_init(result)
-
-        # log_P should match
-        assert jnp.allclose(
-            init_dict["log_P"][0],
-            jnp.log10(orbit["T"]),
-            atol=0.01,
-        )
-        # e_raw should match
-        assert jnp.allclose(init_dict["e_raw"][0], orbit["e"], atol=0.01)
-        # All values should be finite
-        for key, val in init_dict.items():
-            assert jnp.all(jnp.isfinite(val)), f"Non-finite in {key}"
-
-    def test_find_init_returns_valid_dict(self):
-        """find_init should return a valid init dict near truth."""
+    def test_find_init_returns_valid_starts(self):
+        """find_init should return finite chart starts with a period near truth."""
         from photomancy.orbit.init import find_init
 
         orbit = self._consistent_orbit()
         data = self._make_astrom_data(orbit, n_pts=25)
         true_log_T = float(jnp.log10(orbit["T"]))
 
-        init_dict = find_init(
+        starts, loglike = find_init(
             data,
             orbit["Ms"],
             orbit["dist_pc"],
             log_T_range=(true_log_T - 0.3, true_log_T + 0.3),
             n_log_T=30,
             n_tp=15,
+            chart=ClassicalChart(),
         )
 
-        # Should have all expected keys
-        assert "log_P" in init_dict
-        assert "M0" in init_dict
-        # Period should be close to truth
+        assert starts.shape == (1, 6)
+        assert jnp.all(jnp.isfinite(starts))
+        assert jnp.isfinite(loglike[0])
         assert jnp.allclose(
-            init_dict["log_P"][0],
-            true_log_T,
-            atol=0.05,
+            jnp.log10(self._period_d(starts, orbit))[0], true_log_T, atol=0.05
         )
 
-    def test_find_init_top_k_returns_k_dicts(self):
-        """find_init_top_k should return k distinct init dicts."""
-        from photomancy.orbit.init import find_init_top_k
+    def test_find_init_returns_k_starts(self):
+        """find_init with k > 1 should return k distinct starts, best first."""
+        from photomancy.orbit.init import find_init
 
         orbit = self._consistent_orbit()
         data = self._make_astrom_data(orbit, n_pts=25)
         true_log_T = float(jnp.log10(orbit["T"]))
 
         k = 3
-        init_list = find_init_top_k(
+        starts, loglike = find_init(
             data,
             orbit["Ms"],
             orbit["dist_pc"],
@@ -1180,15 +923,13 @@ class TestInit:
             log_T_range=(true_log_T - 0.3, true_log_T + 0.3),
             n_log_T=30,
             n_tp=15,
+            chart=ClassicalChart(),
         )
 
-        assert len(init_list) == k
-        # All dicts should have the correct keys
-        for d in init_list:
-            assert set(d.keys()) == {"log_P", "e_raw", "w_raw", "cos_i", "W", "M0"}
+        assert starts.shape == (k, 6)
+        assert len(jnp.unique(starts, axis=0)) == k
+        assert bool(jnp.all(jnp.diff(loglike) <= 0))
         # The best one should be closest to truth
         assert jnp.allclose(
-            init_list[0]["log_P"][0],
-            true_log_T,
-            atol=0.05,
+            jnp.log10(self._period_d(starts, orbit))[0], true_log_T, atol=0.05
         )

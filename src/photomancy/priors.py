@@ -38,6 +38,7 @@ _MIXTURE_NO_CUBE = (
 
 
 RAYLEIGH_SCALES = {"rayleigh": 0.3, "vaneylen19": 0.049}
+ECC_PRIOR_NAMES = ("disk", "kipping13", *RAYLEIGH_SCALES)
 
 
 def _rayleigh_cdf(e, sigma):
@@ -47,6 +48,23 @@ def _rayleigh_cdf(e, sigma):
 def _rayleigh_icdf(unit, sigma, e_max):
     e = sigma * jnp.sqrt(-2.0 * jnp.log1p(-unit * _rayleigh_cdf(e_max, sigma)))
     return jnp.minimum(e, jnp.nextafter(jnp.asarray(e_max, dtype=e.dtype), 0.0))
+
+
+def eccentricity_draws(key, shape, ecc_prior="kipping13"):
+    """Draw eccentricities from a named law on [0, 1), without any sampler context.
+
+    The laws are ``"disk"`` (uniform), ``"kipping13"`` (Beta(0.867, 3.03)),
+    ``"rayleigh"`` (sigma 0.3) and ``"vaneylen19"`` (sigma 0.049), the Rayleigh laws
+    conditioned on ``e < 1``.
+    """
+    if ecc_prior not in ECC_PRIOR_NAMES:
+        raise ValueError(f"Unknown ecc_prior={ecc_prior!r}")
+    if ecc_prior == "kipping13":
+        return jax.random.beta(key, ECC_ALPHA, ECC_BETA, shape)
+    unit = jax.random.uniform(key, shape)
+    if ecc_prior == "disk":
+        return unit
+    return _rayleigh_icdf(unit, RAYLEIGH_SCALES[ecc_prior], 1.0)
 
 
 def _log_uniform_icdf(unit, bounds):
@@ -182,7 +200,7 @@ class FactorizedOrbitPrior(eqx.Module):
             raise ValueError("Period bounds must be positive, finite and ordered.")
         if not 0 < self.e_max <= 1:
             raise ValueError("e_max must lie in (0, 1].")
-        if self.ecc_prior not in ("disk", "kipping13", *RAYLEIGH_SCALES):
+        if self.ecc_prior not in ECC_PRIOR_NAMES:
             raise ValueError(f"Unknown ecc_prior={self.ecc_prior!r}")
 
     def __call__(self, system):

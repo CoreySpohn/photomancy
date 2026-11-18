@@ -48,7 +48,7 @@ def plot_rv(
 ):
     """Radial-velocity curves in m/s, from the library's native AU/day.
 
-    ``predict_rv`` returns AU/day; this panel converts curves to m/s.
+    Orbit velocities are AU/day; this panel converts curves to m/s.
     ``RVData`` observations and uncertainties are already in m/s.
 
     Args:

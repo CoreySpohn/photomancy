@@ -5,8 +5,7 @@ terms at each mode mean. The fitted problem supplies ``to_physical`` for posteri
 samples and mode summaries. Each function first calls the problem's ``require``, so
 a posterior that declares a different chart or epoch than the problem (or declares
 none) is refused with a ``ValueError`` instead of being decoded in the wrong
-coordinates. A problem without ``require`` (the legacy NumPyro ``OrbitProblem``)
-is not checked.
+coordinates.
 """
 
 import jax
@@ -17,13 +16,6 @@ from orbix.equations import period_to_sma
 from photomancy.orbit._frame import frame_from_tp
 
 
-def _require(posterior, problem):
-    """Check the posterior's declared chart and epoch where the problem can."""
-    require = getattr(problem, "require", None)
-    if require is not None:
-        require(posterior)
-
-
 def mode_observables(posterior, problem):
     """Return term log likelihoods and predictions at each chart-space mode.
 
@@ -31,7 +23,7 @@ def mode_observables(posterior, problem):
     The result has the same ``term_values`` and ``predictions`` tuples as
     ``SystemLogDensity.value_and_aux``, with a leading mode axis on each array.
     """
-    _require(posterior, problem)
+    problem.require(posterior)
     return jax.vmap(lambda z: problem.density.value_and_aux(problem.unflatten(z))[1])(
         posterior.means
     )
@@ -51,7 +43,7 @@ def sample_physical(posterior, problem, key, n):
         Dict ``{name: (n,)}`` over the problem's physical parameter names (``T``, ``e``,
         ``a``, ``cos_i``, ...).
     """
-    _require(posterior, problem)
+    problem.require(posterior)
     z = posterior.sample(key, n)
     return jax.vmap(problem.to_physical)(z)
 
@@ -111,7 +103,7 @@ def mode_scalars(posterior, problem, name):
     Returns:
         Tuple ``(values, weights)``, each shape ``(n_modes,)``.
     """
-    _require(posterior, problem)
+    problem.require(posterior)
     values = jnp.stack(
         [
             jnp.squeeze(problem.to_physical(posterior.means[k])[name])
@@ -133,7 +125,7 @@ def mode_summary(posterior, problem):
         A list with one dict per mode -- ``{"weight", "log_evidence", "params"}`` --
         where ``params`` maps each physical parameter name to its MAP value.
     """
-    _require(posterior, problem)
+    problem.require(posterior)
     weights = jnp.exp(posterior.log_weights)
     out = []
     for k in range(posterior.n_modes):

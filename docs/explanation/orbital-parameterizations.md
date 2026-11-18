@@ -10,16 +10,11 @@ adding a sampler, a prior, or a new orbit forward model.
 
 ## Coordinates in the current engine
 
-The orbit fit, its NumPyro reference, and the discovery algorithms use different
-coordinates:
+The orbit fit and the discovery algorithms use different coordinates:
 
 - **Chart inference** uses an orbix Classical, EccentricityVector, Frame, or
   Cartesian chart and explicit scalar coordinates. All backends evaluate the
   same system and data terms.
-- **The NumPyro model** samples $\log_{10} P$ uniformly, eccentricity from
-  the Kipping (2013) Beta prior by default, the angles $\omega$, $\Omega$,
-  and $M_0$ uniformly, and $\cos i$ uniformly. These are the classical
-  elements, chosen for transparent priors.
 - **The discovery tier** (`grid_search`) scans the eccentricity vector
   $(e_x, e_y) = e(\cos\omega, \sin\omega)$ together with $\log_{10} P$,
   $\cos i$, $\Omega$, and an epoch fraction. The scan is quasi-random and
@@ -70,35 +65,26 @@ particles from this prior and tempers the data terms.
 prior. Both return chart rows. Use `problem.to_physical(posterior.samples[i])`
 to decode row `i` with the original fit's chart and epoch.
 
-## NumPyro custom likelihoods and planet scales
+## Custom likelihoods and planet scales
 
-{py:func}`~photomancy.orbit.model.build_model`,
-{py:func}`~photomancy.orbit.inference.build_numpyro_logdensity`, and
-{py:func}`~photomancy.orbit.nested.numpyro_nested_sampling` accept the same
-custom-likelihood and planet-scale arguments:
+A custom likelihood is a term. Pass `build_chart_logdensity` a plain callable that
+takes the built system (or scene) and returns `(log_likelihood, aux)`, with no
+prior terms. Planet scales are explicit independent scalar coordinates:
 
-- `custom_loglike=None`: a JAX-compatible callable taking one parameter dictionary
-  and returning a scalar data log-likelihood without prior terms. It runs once
-  per model evaluation, including for multiple planets. The dictionary contains
-  `T`, `tp` (days), `a`, `Rp` (AU), `Mp`, `Ms` (kg), `dist_pc` (parsec), `e`,
-  `cos_i`, `W`, `M0` (radians), `cos_w`, `sin_w`, `Ag`, and
-  `Lambda = Ag * Rp**2`. Planet parameters are scalars for one planet and vectors
-  for multiple planets. Nested sampling currently fits one planet.
-- `custom_data=None`: a pytree available as `params["custom_data"]` inside the
-  callback. Use array leaves that support the callback's JAX transformations.
-  Custom fits use separate model traces so their bound data stay isolated.
-- `sample_planet_scale=False`: activate independent uniform priors on `log_Rp`,
-  `log_Ag`, and `log_Mp` even without built-in observations. A custom likelihood
-  activates these sites automatically. With no likelihood this is a prior-only
-  fit. The ranges are set by `log_Rp_range` (`log10(Rp/AU)`), `log_Ag_range`
-  (`log10(Ag)`), and `log_Mp_range` (`log10(Mp/M_earth)`).
-- `allow_overlap=False`: reject custom likelihoods combined with any supplied
-  built-in channel. Set True explicitly to add all supplied likelihood terms.
-  Absent built-in channels contribute no likelihood terms.
+- `scalars={name: ScalarCoordinate(prior)}`: a sampled radius (`radius_AU`),
+  albedo (`albedo`), mass (`mass_Mearth`) or jitter (`jitter_m_per_s`). The
+  default is logarithmic; `ScalarCoordinate(prior, logarithmic=False)` samples the
+  value itself. A {py:class}`~photomancy.priors.LogUniformPrior` or
+  {py:class}`~photomancy.priors.HalfNormalPrior` also supports nested sampling.
+- `body_inputs=("radius_AU", "albedo")`: scalars passed to the scene builder.
+- `term_inputs={0: ("radius_AU", "albedo")}`: scalars passed as keyword
+  arguments to the term at that index, so a callable
+  `term(system, *, radius_AU, albedo)` reads the sampled scales directly. Terms
+  never share state, so each closure carries its own data.
 
-The log-density and nested-sampling entry points share model and data
-construction. Nested posteriors retain `Rp`, `Ag`, and `Lambda` when active;
-conversion to unconstrained coordinates preserves the sampled radius and albedo.
+Several terms add. A prior-only fit passes `terms=()`. Nested sampling integrates
+the terms over the factorized prior and returns chart rows;
+`problem.to_physical` decodes `Rp`, `Ag`, `Lambda = Ag * Rp**2` and the mass.
 
 ## The geometry of the circular limit
 

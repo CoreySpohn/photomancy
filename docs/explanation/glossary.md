@@ -122,8 +122,7 @@ Backend
    starting point, and it returns a {term}`posterior`. The menu runs from the fast
    {term}`Laplace approximation` through the [BlackJAX](https://blackjax-devs.github.io/blackjax/)
    No-U-Turn and sequential Monte Carlo samplers to nested sampling via
-   [jaxns](https://jaxns.readthedocs.io/en/latest/) and
-   [NumPyro](https://num.pyro.ai/en/stable/contrib.html), so the same fit can be run cheaply
+   [jaxns](https://jaxns.readthedocs.io/en/latest/), so the same fit can be run cheaply
    for a first look or rigorously when the evidence matters.
 
 Posterior
@@ -202,8 +201,6 @@ The libraries photomancy builds on, for the terms borrowed from them:
   Monte Carlo samplers behind those backends.
 - [jaxns](https://jaxns.readthedocs.io/en/latest/) -- nested sampling and the evidence it
   integrates.
-- [NumPyro](https://num.pyro.ai/) -- probabilistic programming, and the nested-sampling
-  wrapper the orbit backend uses.
 - [orbix](https://github.com/CoreySpohn/orbix) -- the orbital geometry behind the orbit
   domain.
 - [skyscapes](https://github.com/CoreySpohn/skyscapes) -- the scene and reflected-light

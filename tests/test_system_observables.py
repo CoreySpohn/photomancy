@@ -8,16 +8,21 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
-from numpyro.infer.util import log_density
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, System
 from skyscapes.scene.system import System as Scene
 from test_system_density import _floor
-from test_system_priors import _orbit_sites, _orbits, _scale_coordinates, _scene
+from test_system_priors import _orbits, _scale_coordinates, _scene
 from test_terms import _data, _new_term
 
-from photomancy.orbit.data import ImagingData, NullData, OrbitData
+from photomancy.orbit.data import (
+    ImagingData,
+    NullData,
+    PMAnomalyData,
+    RelativeAstromData,
+    RVData,
+    StellarAstromData,
+)
 from photomancy.orbit.inference import build_chart_logdensity
-from photomancy.orbit.model import build_model
 from photomancy.priors import orbit_log_prior
 from photomancy.system_terms import (
     ImagingTerm,
@@ -30,6 +35,78 @@ from photomancy.system_terms import (
 
 DYNAMICAL = ("rv", "relative_astrom", "stellar_astrom", "pm_anomaly")
 CHANNELS = (*DYNAMICAL, "null", "imaging", "custom")
+
+# Frozen from the retired NumPyro joint at the four _orbits(23.0) points: per-channel
+# log factors in CHANNELS order, their sum, and the constrained joint transformed to
+# the physical measure (the reference measure of the physical-orbit density).
+_FACTORS = [
+    [
+        -13.65882781405432,
+        -8.01563595197823,
+        27.379562458845115,
+        27.424456247836655,
+        -2.2505191679061682,
+        -33.94885489118106,
+        -0.07123173736508238,
+    ],
+    [
+        -7.861283711114213,
+        -21.676237792774554,
+        28.337968122265124,
+        27.432471436302908,
+        -0.0001157326822710765,
+        -47.92106506840513,
+        -0.0201692217160477,
+    ],
+    [
+        -6.505474449349913,
+        -41.26712469420502,
+        27.26816594769562,
+        27.42542569570769,
+        -0.0002980509959258402,
+        -26.60136077113804,
+        -0.01964650830939847,
+    ],
+    [
+        -10.414682236896756,
+        -110.95304960656905,
+        27.641056812284845,
+        27.402684121535767,
+        -0.00017467008139153704,
+        -42.17993640196971,
+        -0.24224498015664636,
+    ],
+]
+_TOTAL = [
+    -3.141050855803087,
+    -21.70843196812418,
+    -19.70031283059499,
+    -108.74634696185295,
+]
+_COMMON = [
+    -6.457427490045797,
+    -26.849742187702834,
+    -26.799394651432088,
+    -118.5752126335516,
+]
+# Frozen independent-pair factors in DYNAMICAL order for the two-planet fixture.
+_PAIR_FACTORS = [
+    -5.697835665953152,
+    -16.947408675704036,
+    31.03823489541007,
+    27.592546878285674,
+]
+
+
+class Measurements(eqx.Module):
+    """One container for every channel's data."""
+
+    rv: RVData
+    relative_astrom: RelativeAstromData
+    stellar_astrom: StellarAstromData
+    pm_anomaly: PMAnomalyData
+    null: NullData
+    imaging: ImagingData
 
 
 @pytest.fixture(scope="module")
@@ -50,7 +127,7 @@ def data():
         max_n=4,
         max_pts=3,
     )
-    return OrbitData(
+    return Measurements(
         rv=_new_term("rv", max_n=5).data,
         relative_astrom=relative,
         stellar_astrom=_new_term("stellar", max_n=5).data,
@@ -82,13 +159,7 @@ def _check_scores(name, actual, expected, components):
     assert np.all(errors <= floors), (name, errors, floors)
 
 
-def _factors(trace, names):
-    return jnp.stack([trace[f"ll_{name}"]["fn"].log_factor for name in names])
-
-
-@pytest.mark.medium(
-    reason="Compiles the full joint in two charts and the NumPyro reference."
-)
+@pytest.mark.medium(reason="Compiles the full joint in two charts.")
 def test_all_channels_and_reference_measure(data):
     """Fails if an observable, its multiplicity, or a reference Jacobian changes.
 
@@ -104,13 +175,6 @@ def test_all_channels_and_reference_measure(data):
         residual = scene.dynamics.orbits.e[0] - observed_e
         return -(residual**2), residual
 
-    model = build_model(
-        **{f"has_{name}": True for name in CHANNELS[:-1]},
-        custom_loglike=lambda p: -((p["e"] - p["custom_data"]) ** 2),
-        custom_data=observed_e,
-        allow_overlap=True,
-        jitter_scale=0.8,
-    )
     terms = (
         *_dynamical_terms(data),
         NullTerm(data.null),
@@ -118,23 +182,7 @@ def test_all_channels_and_reference_measure(data):
         custom_term,
     )
     orbits = _orbits(mass)
-
-    def reference(orbit):
-        sites = dict(
-            **_orbit_sites(orbit),
-            log_Mp=jnp.log10(mass),
-            log_Rp=jnp.log10(radius),
-            log_Ag=jnp.log10(albedo),
-            jitter=jitter,
-        )
-        joint, trace = log_density(
-            model, (Msun2kg, 10.0, data), {}, jax.tree.map(jnp.atleast_1d, sites)
-        )
-        log_jac = jnp.log(1.5 / (jnp.log(10.0) * orbit.e))
-        log_jac -= jnp.log(mass * radius * albedo * jnp.log(10.0) ** 3)
-        return _factors(trace, CHANNELS), trace["ll_total"]["value"], joint + log_jac
-
-    factors, total, common = eqx.filter_jit(jax.vmap(reference))(orbits)
+    factors, total, common = (jnp.asarray(x) for x in (_FACTORS, _TOTAL, _COMMON))
     assert np.ptp(factors[:, CHANNELS.index("null")]) > 1e-3
     physical = dict(
         mass_Mearth=mass, radius_AU=radius, albedo=albedo, jitter_m_per_s=jitter
@@ -209,7 +257,6 @@ def two_planets(data):
     """One geometry in both conventions; the relative data alternate planet IDs."""
     masses = jnp.array([100.0, 320.0])
     orbits = jax.tree.map(lambda x: x[:2], _orbits(jnp.tile(masses, 2)))
-    sites = _orbit_sites(orbits)
     scenes = tuple(
         _scene(
             jax.tree.map(lambda leaf, i=i: leaf[i], orbits),
@@ -241,38 +288,26 @@ def two_planets(data):
     data = eqx.tree_at(
         lambda d: d.relative_astrom.planet_id, data, jnp.array([0, 1, 0, 1, 0])
     )
-    return (
-        data,
-        pairs,
-        scene,
-        dict(**sites, log_Mp=jnp.log10(masses)),
-    )
+    return data, pairs, scene
 
 
 def test_independent_pair_scores(two_planets):
     """Fails if the multi-planet terms use the outer pair's wrong mass or origin.
 
-    The old joint first sums stellar RV, reflex and PMA, and selects each
+    The frozen reference first sums stellar RV, reflex and PMA, and selects each
     planet's relative rows. Scores use the per-factor float64 density floor.
     """
-    data, pairs, _, sites = two_planets
+    data, pairs, _ = two_planets
     jitter = jnp.array([0.4, 0.7, 0.1])
-    model = build_model(
-        n_planets=2, **{f"has_{k}": True for k in DYNAMICAL}, jitter_scale=0.8
-    )
 
     @eqx.filter_jit
-    def compare(data, pairs, sites):
-        _, trace = log_density(
-            model, (Msun2kg, 10.0, data), {}, dict(**sites, jitter=jitter)
-        )
+    def compare(data, pairs):
         rv, *others = _dynamical_terms(data)
-        scores = jnp.stack(
+        return jnp.stack(
             [rv(pairs, jitter_m_per_s=jitter)[0], *(term(pairs)[0] for term in others)]
         )
-        return scores, _factors(trace, DYNAMICAL)
 
-    scores, expected = compare(data, pairs, sites)
+    scores, expected = compare(data, pairs), jnp.asarray(_PAIR_FACTORS)
     for name, score, target in zip(DYNAMICAL, scores, expected, strict=True):
         _check_scores(f"independent {name}", score, target, [target])
 
@@ -286,7 +321,7 @@ def test_jacobi_predictions(two_planets):
     Reference the orbix ephemeris at the actual Jacobi masses and times.
     Prediction rtol is 1e-12, with atol in m/s, arcsec, arcsec and arcsec/day.
     """
-    data, pairs, scene, _ = two_planets
+    data, pairs, scene = two_planets
     jacobi = scene.dynamics
     time_d = data.rv.times
     eph = jacobi.solve(time_d)
@@ -328,14 +363,9 @@ def test_jacobi_predictions(two_planets):
     assert (
         np.max(np.abs(actual[1] - pair_positions)) > 1e-7
     )  # arcsec, resolved physics change
-    for name, term in (
-        ("null", NullTerm(data.null)),
-        ("imaging", ImagingTerm(data.imaging)),
-    ):
+    for term in (NullTerm(data.null), ImagingTerm(data.imaging)):
         with pytest.raises(ValueError, match=r"(?i)multi-planet"):
             term(jacobi, area_AU2=1e-8)
-        with pytest.raises(ValueError, match=r"(?i)multi-planet"):
-            build_model(n_planets=2, **{f"has_{name}": True})
 
 
 def test_radiative_padding_and_dark_limit(data):

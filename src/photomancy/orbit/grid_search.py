@@ -17,7 +17,6 @@ from orbix.system import EccentricityVectorChart, FrameOrbit
 from photomancy.orbit._frame import (
     ORBIT_ROWS_CHART,
     orbit_rows,
-    relative_offsets_arcsec,
     sky_offsets_arcsec,
 )
 from photomancy.orbit.data import RelativeAstromData
@@ -49,18 +48,6 @@ class ParamBounds(eqx.Module):
         return self.low + u * (self.high - self.low)
 
 
-class AbstractShapeParam(eqx.Module):
-    """Maps an ordered unit-cube sample to a physical orbit-shape dict."""
-
-    @abstractmethod
-    def default_bounds(self, log_T_range, e_max) -> ParamBounds:
-        """Return default ParamBounds for this parameterization."""
-
-    @abstractmethod
-    def to_physical(self, u, bounds, Ms) -> dict:
-        """Convert unit-cube samples to a physical orbit-parameter dict."""
-
-
 def chart_box_bounds(log_T_range=(0.0, 4.0), e_max=0.9):
     """Unit-cube box ``(logT, ex, ey, cos_i, W, tp_frac)`` of the eccentricity grid.
 
@@ -71,59 +58,6 @@ def chart_box_bounds(log_T_range=(0.0, 4.0), e_max=0.9):
     low = jnp.array([log_T_range[0], -e_max, -e_max, -1.0, 0.0, 0.0])
     high = jnp.array([log_T_range[1], e_max, e_max, 1.0, 2.0 * jnp.pi, 1.0])
     return ParamBounds(low=low, high=high, names=names)
-
-
-class EccVectorShape(AbstractShapeParam):
-    """Eccentricity-vector coordinate ``(logT, ex, ey, cos_i, W, tp_frac)``.
-
-    Sampled names in order: ``logT, ex, ey, cos_i, W, tp_frac``.
-    Derived quantities: ``T = 10**logT``, ``a = period_to_sma(T, Ms)``,
-    ``e = hypot(ex, ey)``, ``cos_w = ex/e`` (1 when e=0), ``sin_w = ey/e``
-    (0 when e=0), ``W`` in radians, ``tp = tp_frac * T``.
-    """
-
-    def default_bounds(self, log_T_range=(0.0, 4.0), e_max=0.9):
-        """Return default ParamBounds for EccVectorShape.
-
-        Args:
-            log_T_range: ``(log10_T_min, log10_T_max)`` in days.
-            e_max: Maximum eccentricity vector component magnitude.
-
-        Returns:
-            ParamBounds with six named parameters.
-        """
-        return chart_box_bounds(log_T_range, e_max)
-
-    def to_physical(self, u, bounds, Ms):
-        """Convert unit-cube samples to physical orbit parameters.
-
-        Args:
-            u: Unit-cube samples of shape ``(n, 6)``.
-            bounds: ParamBounds returned by ``default_bounds``.
-            Ms: Stellar mass in kg.
-
-        Returns:
-            Dict of physical parameter arrays, each of shape ``(n,)``.
-            Keys: ``T, a, e, cos_i, W, cos_w, sin_w, tp``.
-        """
-        p = bounds.scale(u)
-        logT, ex, ey, cos_i, W, tp_frac = (p[:, i] for i in range(6))
-        T = 10.0**logT
-        a = period_to_sma(T, Ms)
-        e = jnp.hypot(ex, ey)
-        safe_e = jnp.where(e > 0.0, e, 1.0)
-        cos_w = jnp.where(e > 0.0, ex / safe_e, 1.0)
-        sin_w = jnp.where(e > 0.0, ey / safe_e, 0.0)
-        return {
-            "T": T,
-            "a": a,
-            "e": e,
-            "cos_i": cos_i,
-            "W": W,
-            "cos_w": cos_w,
-            "sin_w": sin_w,
-            "tp": tp_frac * T,
-        }
 
 
 class AbstractGridStrategy(eqx.Module):
@@ -144,16 +78,14 @@ class AdaptiveImportanceSampler(AbstractGridStrategy):
     Attributes:
         n_modes: Number of Gaussian mixture components in Stage 2.
         jitter: Diagonal regularization added to the empirical covariance.
-        clip: Clip Stage-2 draws onto the unit cube. Clipping piles probability
-            mass into atoms on the cube faces while ``log_q`` stays the unclipped
-            mixture density, so the weights are not importance weights. With
-            ``clip=False`` draws may leave the cube; the target is zero there and
-            ``chart_grid_search`` assigns them zero weight, which is exact.
+
+    Stage-2 draws may leave the unit cube; the target is zero there and
+    ``grid_search`` assigns them zero weight, which keeps the weights exact
+    importance weights of the mixture density ``log_q``.
     """
 
     n_modes: int = eqx.field(static=True, default=5)
     jitter: float = eqx.field(static=True, default=1e-6)
-    clip: bool = eqx.field(static=True, default=True)
 
     def stage1(self, key, ndim, n):
         """Return ``(n, ndim)`` Roberts quasi-random points in the unit cube.
@@ -173,8 +105,7 @@ class AdaptiveImportanceSampler(AbstractGridStrategy):
 
         Picks ``n_modes`` survivor centers (first rows, assumed sorted best-first),
         fits an isotropic-plus-empirical covariance to the full survivor set, then
-        draws a balanced mixture. Samples are clipped to the unit cube when
-        ``clip`` is set.
+        draws a balanced mixture. Samples are not clipped.
 
         Args:
             key: JAX PRNG key.
@@ -182,9 +113,8 @@ class AdaptiveImportanceSampler(AbstractGridStrategy):
             n: Number of new samples to draw.
 
         Returns:
-            Tuple ``(z, log_q)`` where ``z`` has shape ``(n, d)`` (clipped to
-            ``[0, 1)`` when ``clip`` is set) and ``log_q`` has shape ``(n,)``
-            (mixture log-density).
+            Tuple ``(z, log_q)`` where ``z`` has shape ``(n, d)`` (it may leave
+            the unit cube) and ``log_q`` has shape ``(n,)`` (mixture log-density).
         """
         if survivors.shape[0] < self.n_modes:
             raise ValueError(
@@ -200,8 +130,6 @@ class AdaptiveImportanceSampler(AbstractGridStrategy):
         comp = jax.random.randint(k_pick, (n,), 0, m)
         eps = jax.random.normal(k_draw, (n, d))
         z = centers[comp] + eps @ chol.T
-        if self.clip:
-            z = jnp.clip(z, 0.0, 1.0 - 1e-7)
         diff = z[:, None, :] - centers[None, :, :]
         diff_flat = diff.reshape(n * m, d)
         sol_flat = jax.scipy.linalg.solve_triangular(chol, diff_flat.T, lower=True)
@@ -212,47 +140,6 @@ class AdaptiveImportanceSampler(AbstractGridStrategy):
         return z, log_q
 
 
-def build_evaluator(data, Ms, dist_pc, shape):
-    """Return ``single_eval(phys) -> scalar log-likelihood`` over present data.
-
-    ``data`` is a tuple of present data containers. v1 handles RelativeAstromData;
-    absent observables contribute nothing. The ``if astrom is not None`` check
-    runs at build time (static), not under JAX trace, so it is JAX-safe.
-
-    Args:
-        data: Tuple of data containers (e.g. RelativeAstromData).
-        Ms: Stellar mass (kg).
-        dist_pc: Distance to system (parsec).
-        shape: An AbstractShapeParam instance (unused here, reserved for Plan 2).
-
-    Returns:
-        A pure function ``single_eval(phys) -> scalar`` where ``phys`` is a
-        dict of scalar orbit parameters (as returned by ``to_physical`` for
-        a single particle).
-    """
-    astrom = next((d for d in data if isinstance(d, RelativeAstromData)), None)
-
-    def single_eval(phys):
-        ll = 0.0
-        if astrom is not None:
-            ra, dec = relative_offsets_arcsec(
-                astrom.times,
-                phys["a"],
-                phys["e"],
-                phys["cos_i"],
-                phys["W"],
-                phys["cos_w"],
-                phys["sin_w"],
-                phys["tp"],
-                Ms,
-                dist_pc,
-            )
-            ll = ll + loglike_relative_astrom(ra, dec, astrom)
-        return ll
-
-    return single_eval
-
-
 def batched_loglike(single_eval, phys, n_particles, chunk_size):
     """Evaluate ``single_eval`` over ``n_particles`` via vmap inside lax.scan.
 
@@ -260,7 +147,7 @@ def batched_loglike(single_eval, phys, n_particles, chunk_size):
     at ``O(chunk_size)`` per step; the per-particle time series stay in registers.
 
     Args:
-        single_eval: Callable ``phys_scalar -> scalar`` as from ``build_evaluator``.
+        single_eval: Callable ``phys_scalar -> scalar`` scoring one particle.
         phys: Dict of arrays, each of shape ``(n_particles, ...)``.
         n_particles: Total number of particles. Must be divisible by ``chunk_size``.
         chunk_size: Number of particles evaluated per scan step.
@@ -287,80 +174,7 @@ def batched_loglike(single_eval, phys, n_particles, chunk_size):
     return ll.reshape(-1)
 
 
-def grid_search(
-    data,
-    *,
-    Ms,
-    dist_pc,
-    shape,
-    sampler,
-    log_T_range,
-    e_max,
-    n_particles=10**6,
-    chunk_size=10**5,
-    n_survivors=5000,
-    key,
-):
-    """Two-stage adaptive-importance-sampling orbit grid-search.
-
-    Stage 1 fills the unit cube with quasi-random samples, evaluates the
-    log-likelihood for each, and selects the top survivors. Stage 2 draws
-    a refined Gaussian-mixture proposal around those survivors, reweights by
-    ``ll - log_q``, and returns a normalized ParticlePosterior.
-
-    Args:
-        data: Tuple of data containers (e.g. RelativeAstromData).
-        Ms: Stellar mass (kg).
-        dist_pc: Distance to system (parsec).
-        shape: An AbstractShapeParam instance.
-        sampler: An AbstractGridStrategy instance.
-        log_T_range: ``(log10_T_min, log10_T_max)`` in days.
-        e_max: Maximum eccentricity vector component magnitude.
-        n_particles: Total particles per stage. Must be divisible by chunk_size.
-        chunk_size: Scan chunk size for memory control.
-        n_survivors: Number of Stage-1 top particles passed to Stage 2.
-        key: JAX PRNG key.
-
-    Returns:
-        ParticlePosterior with physical shape-parameter rows and normalized
-        log-importance weights.
-    """
-    k1, k2 = jax.random.split(key)
-    bounds = shape.default_bounds(log_T_range=log_T_range, e_max=e_max)
-    ndim = len(bounds.names)
-    ev = build_evaluator(data, Ms=Ms, dist_pc=dist_pc, shape=shape)
-    phys_names = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
-
-    def physical_rows(u):
-        phys = shape.to_physical(u, bounds, Ms=Ms)
-        return phys, jnp.stack([phys[n] for n in phys_names], axis=1)
-
-    u1 = sampler.stage1(k1, ndim, n_particles)
-    phys1, _ = physical_rows(u1)
-    ll1 = batched_loglike(ev, phys1, n_particles, chunk_size)
-
-    order = jnp.argsort(ll1)[::-1][:n_survivors]
-    u2, log_q = sampler.stage2(k2, u1[order], n_particles)
-    phys2, rows2 = physical_rows(u2)
-    ll2 = batched_loglike(ev, phys2, n_particles, chunk_size)
-    log_w, log_total, _ = normalize_log_weights(ll2 - log_q)
-    log_Z = log_total - jnp.log(n_particles)
-
-    return SamplePosterior(
-        samples=rows2, log_weights=log_w, evidence=log_Z, param_names=phys_names
-    )
-
-
 _CHART = EccentricityVectorChart()
-
-
-def _ecc_square_disk_area(half_width):
-    """Area of ``[-s, s]^2`` intersected with the open unit disk, ``s = half_width``."""
-    s = min(float(half_width), 1.0)
-    if s <= 1.0 / math.sqrt(2.0):
-        return 4.0 * s * s
-    x0 = math.sqrt(1.0 - s * s)
-    return 4.0 * (s * x0 + 0.5 * (math.asin(s) - math.asin(x0)))
 
 
 def _box_to_chart(p, star_mass_kg):
@@ -411,7 +225,7 @@ def _box_log_jacobian(p, bounds):
     )
 
 
-def chart_grid_search(
+def grid_search(
     data,
     *,
     star_mass_kg,
@@ -422,7 +236,6 @@ def chart_grid_search(
     n_particles=10**6,
     chunk_size=10**5,
     n_survivors=5000,
-    disk_support=False,
     key,
     epoch=None,
 ):
@@ -431,15 +244,9 @@ def chart_grid_search(
     The target is the likelihood times a flat density against the chart reference
     measure over the box ``(logT, ex, ey, cos_i, W, tp_frac)``, built through orbix
     and weighted by ``log prior + chart log volume + proposal Jacobian + log
-    likelihood - log q``. At identical box points this equals ``grid_search``'s
-    weight plus one constant. The flat prior is normalized on its support, so the
-    evidence is the mean likelihood over the support.
-
-    Defaults reproduce ``grid_search``, restricted to bound orbits (``e < 1``):
-    ``(ex, ey)`` fills the square ``[-e_max, e_max]^2`` and a clipped sampler puts
-    atoms on the cube faces. Both are corrected opt-in: ``disk_support=True``
-    restricts to ``e < e_max`` and ``AdaptiveImportanceSampler(clip=False)`` draws
-    unclipped Gaussian-mixture samples, giving draws outside the cube zero weight.
+    likelihood - log q``. The flat prior is normalized on its support, the disk
+    ``e < min(e_max, 1)`` of the ``(ex, ey)`` square, so the evidence is the mean
+    likelihood over the support. Draws outside the unit cube get zero weight.
 
     Args:
         data: Tuple of data containers (``RelativeAstromData`` is scored).
@@ -447,11 +254,10 @@ def chart_grid_search(
         dist_pc: Distance (parsec).
         sampler: An ``AbstractGridStrategy``.
         log_T_range: ``(log10_T_min, log10_T_max)`` in days.
-        e_max: Half width of the square (radius of the disk) of the ``(ex, ey)`` box.
+        e_max: Radius of the eccentricity disk; the box is ``[-e_max, e_max]^2``.
         n_particles: Particles per stage; divisible by ``chunk_size``.
         chunk_size: Scan chunk size for memory control.
         n_survivors: Stage-1 particles passed to Stage 2.
-        disk_support: Restrict the eccentricity support to the disk ``e < e_max``.
         key: JAX PRNG key.
         epoch: The :class:`~hwoutils.epoch.Epoch` that the data times (and the
             returned ``tp``) are measured from; declared on the posterior.
@@ -465,9 +271,7 @@ def chart_grid_search(
     bounds = chart_box_bounds(log_T_range=log_T_range, e_max=e_max)
     astrom = next((d for d in data if isinstance(d, RelativeAstromData)), None)
     mu = G * star_mass_kg
-    area = _ecc_square_disk_area(e_max)
-    if disk_support:
-        area = math.pi * min(e_max, 1.0) ** 2
+    area = math.pi * min(e_max, 1.0) ** 2
     # Measure of the support: eccentricity area x d ln a x (d cos i dW d longitude).
     log_prior = -(
         math.log(area)
@@ -480,8 +284,7 @@ def chart_grid_search(
         x, bound = _box_to_chart(p, star_mass_kg)
         ecc = jnp.hypot(p[..., 1], p[..., 2])
         support = bound & jnp.all((u >= 0.0) & (u < 1.0), axis=-1)
-        if disk_support:
-            support &= ecc < e_max
+        support &= ecc < e_max
         return x, support, p
 
     def single_loglike(phys):
