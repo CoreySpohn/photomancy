@@ -19,6 +19,9 @@ from orbix.system import (
 
 from photomancy.system_density import SystemLogDensity
 
+# Chart name that posteriors over ``FrameOrbit.periapsis_rows`` columns declare.
+ORBIT_ROWS_CHART = "OrbitRows"
+
 
 def orbit_chart_log_volume(chart, coords):
     """Normalized chart pullback of e de d(cos i) dW dw dM dln(a/AU).

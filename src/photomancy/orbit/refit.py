@@ -46,12 +46,11 @@ import numpy as np
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
 from jax.scipy.special import betainc, logsumexp, ndtr
 from orbix.equations.orbit import mean_motion, thiele_innes_to_elements
-from orbix.system import ThieleInnesChart, sky_block_to_frame
+from orbix.system import FrameOrbit, ThieleInnesChart, sky_block_to_frame
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 from orbix.system.rotation import rotate
 
 from photomancy.orbit._contrast import interpolate_contrast_curve
-from photomancy.orbit._frame import frame_from_tp, plane_from_phase
 from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel
 from photomancy.orbit.ofti import scored_orbit
@@ -515,9 +514,9 @@ def _report_xy(target, theta, data):
     """Orbit-plane ``(cos E - e, sqrt(1 - e^2) sin E)`` at the report epochs."""
     e, ln_period, tau = theta[0], theta[1], theta[2]
     m = target.model
-    xy, _ = plane_from_phase(e, ln_period, tau, m.t_ref).perifocal_coordinates(
-        data.epochs
-    )
+    xy, _ = FrameOrbit.unit_plane_from_phase(
+        e, ln_period, tau, m.t_ref
+    ).perifocal_coordinates(data.epochs)
     return xy[..., 0], xy[..., 1]
 
 
@@ -572,7 +571,7 @@ def _element_geometry(target, el, data):
     period = jnp.exp(el[0])
     mass = jnp.exp(el[6]) * Msun2kg
     a = (G * mass / (two_pi / period) ** 2) ** (1.0 / 3.0)
-    orbit = frame_from_tp(
+    orbit = FrameOrbit.from_periapsis_time(
         a,
         el[1],
         el[2],
@@ -580,7 +579,7 @@ def _element_geometry(target, el, data):
         jnp.cos(el[4]),
         jnp.sin(el[4]),
         target.model.t_ref + el[5] * period,
-        G * mass,
+        mu_AU3_per_d2=G * mass,
     )
     position, _ = orbit.at(data.epochs)
     alpha = separation_arcsec(position, target.dist_pc)

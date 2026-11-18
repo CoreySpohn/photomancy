@@ -1327,16 +1327,16 @@ def _physical_rows_fn():
     import jax.numpy as jnp
     from hwoutils.constants import G, two_pi
     from orbix.equations.orbit import mean_motion
-
-    from photomancy.orbit._frame import relative_offsets_arcsec
+    from orbix.system import FrameOrbit
 
     @jax.jit
     def fn(rows, times, ms_kg, dist_pc):
         def one(row):
             a, e, cos_i, w_node, cos_w, sin_w, tp = row
-            return relative_offsets_arcsec(
-                times, a, e, cos_i, w_node, cos_w, sin_w, tp, ms_kg, dist_pc
+            orbit = FrameOrbit.from_periapsis_time(
+                a, e, cos_i, w_node, cos_w, sin_w, tp, mu_AU3_per_d2=G * ms_kg
             )
+            return orbit.offsets_arcsec(times, dist_pc)
 
         east, north = jax.vmap(one)(rows)
         ln_p = jnp.log(two_pi / mean_motion(rows[:, 0], G * ms_kg))

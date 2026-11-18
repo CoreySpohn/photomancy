@@ -22,7 +22,6 @@ from orbix.system import (
 )
 from sky_reference import position_au, sky_position
 
-from photomancy.orbit._frame import frame_from_tp, orbit_rows
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.eig import _astrometry, _photometry
 from photomancy.orbit.ofti import chart_scale_rotate
@@ -257,7 +256,9 @@ def fit(data, p):
 
 def bare_system(a, e, cos_i, W, cos_w, sin_w, tp, mass_kg, dist_pc):
     """One-planet orbix system for explicit classical elements."""
-    orbit = frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, G * mass_kg)
+    orbit = FrameOrbit.from_periapsis_time(
+        a, e, cos_i, W, cos_w, sin_w, tp, mu_AU3_per_d2=G * mass_kg
+    )
     return System(
         Body(mass_kg / Msun2kg),
         Body(jnp.zeros(1)),
@@ -444,7 +445,7 @@ def test_ofti_hits_independent_target():
         mu_AU3_per_d2=mu,
         dist_pc=10.0,
     )
-    a, e, cos_i, W, cos_w, sin_w, tp = np.asarray(orbit_rows(orbit))
+    a, e, cos_i, W, cos_w, sin_w, tp = np.asarray(orbit.periapsis_rows())
     period = 2 * np.pi * np.sqrt(a**3 / mu)
     actual = sky_position(
         times,

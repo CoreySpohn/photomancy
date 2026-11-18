@@ -42,9 +42,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import G, Msun2kg, Rearth2AU, mas2arcsec, two_pi
+from orbix.system import FrameOrbit
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 
-from photomancy.orbit._frame import frame_from_tp, relative_offsets_arcsec
 from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import MU_SUN
@@ -80,7 +80,10 @@ def predict_photometry(
     times, a, e, cos_i, W, cos_w, sin_w, tp, mass_kg, area_AU2, dist_pc
 ):
     """Separation (arcsec) and Lambert dMag of one orbit at total mass ``mass_kg``."""
-    position, _ = frame_from_tp(a, e, cos_i, W, cos_w, sin_w, tp, G * mass_kg).at(times)
+    orbit = FrameOrbit.from_periapsis_time(
+        a, e, cos_i, W, cos_w, sin_w, tp, mu_AU3_per_d2=G * mass_kg
+    )
+    position, _ = orbit.at(times)
     model, radius_Rearth = lambertian_from_area(area_AU2)
     return separation_arcsec(position, dist_pc), lambertian_dmag(
         phase_angle_rad(position), distance_AU(position), model, radius_Rearth
@@ -94,20 +97,17 @@ def positions(elements, times):
         period = jnp.exp(el[0])
         mass = jnp.exp(el[6]) * Msun2kg
         a = (G * mass / (two_pi / period) ** 2) ** (1.0 / 3.0)
-        return jnp.stack(
-            relative_offsets_arcsec(
-                times,
-                a,
-                el[1],
-                el[2],
-                el[3],
-                jnp.cos(el[4]),
-                jnp.sin(el[4]),
-                el[5] * period,
-                mass,
-                DIST_PC,
-            )
+        orbit = FrameOrbit.from_periapsis_time(
+            a,
+            el[1],
+            el[2],
+            el[3],
+            jnp.cos(el[4]),
+            jnp.sin(el[4]),
+            el[5] * period,
+            mu_AU3_per_d2=G * mass,
         )
+        return jnp.stack(orbit.offsets_arcsec(times, DIST_PC))
 
     return jax.vmap(one)(elements)
 
@@ -119,9 +119,10 @@ def fixture(k):
     period = two_pi / jnp.sqrt(G * mass / a**3)
     tp = -m_ref / two_pi * period
     times = jnp.asarray(EPOCHS_D[:k])
-    ra, dec = relative_offsets_arcsec(
-        times, a, e, cos_i, node, jnp.cos(omega), jnp.sin(omega), tp, mass, DIST_PC
+    orbit = FrameOrbit.from_periapsis_time(
+        a, e, cos_i, node, jnp.cos(omega), jnp.sin(omega), tp, mu_AU3_per_d2=G * mass
     )
+    ra, dec = orbit.offsets_arcsec(times, DIST_PC)
     sigma = SIGMA_MAS * mas2arcsec
     noise = sigma * jax.random.normal(jax.random.key(11, impl="threefry2x32"), (2, k))
     n = CAPACITY

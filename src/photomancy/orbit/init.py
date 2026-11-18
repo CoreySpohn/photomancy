@@ -16,7 +16,6 @@ import jax
 import jax.numpy as jnp
 from orbix.system import EccentricityVectorChart
 
-from photomancy.orbit._frame import sky_offsets_arcsec
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import fixed_mass_orbits, thiele_innes_grid
 
@@ -81,7 +80,7 @@ def find_init(
     sheet = 0 if branch == 1 else 1
 
     def candidate_loglike(orbit):
-        ra, dec = sky_offsets_arcsec(orbit, data.times, dist_pc)
+        ra, dec = orbit.offsets_arcsec(data.times, dist_pc)
         return loglike_relative_astrom(ra, dec, data)
 
     ll = jax.vmap(candidate_loglike)(jax.tree.map(lambda leaf: leaf[:, 0], orbits))

@@ -10,7 +10,6 @@ from kinematics import predict_relative_astrometry
 from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart
 
-from photomancy.orbit._frame import ORBIT_ROWS_CHART, orbit_rows, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.grid_search import (
     AdaptiveImportanceSampler,
@@ -21,7 +20,7 @@ from photomancy.orbit.grid_search import (
     chart_box_bounds,
     grid_search,
 )
-from photomancy.orbit.inference import orbit_chart_log_volume
+from photomancy.orbit.inference import ORBIT_ROWS_CHART, orbit_chart_log_volume
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.quasi_random import roberts_sequence
 from photomancy.posterior import SamplePosterior
@@ -95,7 +94,7 @@ def _chart_loglike(data, star):
 
     def single(phys):
         orbit = chart.to_orbit(phys["x"], mu_AU3_per_d2=G * star, epoch_d=0.0)
-        ra, dec = sky_offsets_arcsec(orbit, data.times, 10.0)
+        ra, dec = orbit.offsets_arcsec(data.times, 10.0)
         return loglike_relative_astrom(ra, dec, data)
 
     return single
@@ -325,8 +324,8 @@ def test_chart_grid_target_in_common_coordinates(e_max):
     assert keep.sum() >= 60
 
     orbit = chart.to_orbit(x, mu_AU3_per_d2=G * star)
-    ra_new, dec_new = jax.vmap(lambda o: sky_offsets_arcsec(o, data.times, 10.0))(orbit)
-    rows = orbit_rows(orbit)
+    ra_new, dec_new = jax.vmap(lambda o: o.offsets_arcsec(data.times, 10.0))(orbit)
+    rows = orbit.periapsis_rows()
     ra_old, dec_old = jax.vmap(
         lambda r: predict_relative_astrometry(data.times, *r, MSUN, 10.0)
     )(rows)

@@ -23,11 +23,7 @@ import jax.numpy as jnp
 from hwoutils.constants import G
 from orbix.system import ClassicalChart
 
-from photomancy.orbit._frame import (
-    ORBIT_ROWS_CHART,
-    orbit_rows,
-    sky_offsets_arcsec,
-)
+from photomancy.orbit.inference import ORBIT_ROWS_CHART
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.posterior import SamplePosterior
 from photomancy.priors import eccentricity_draws
@@ -148,7 +144,7 @@ def scored_orbit(
 ):
     """Scale-and-rotate one drawn shape onto a target and score it on ``data``.
 
-    Returns ``(row, loglike)``: the orbit's ``orbit_rows`` row
+    Returns ``(row, loglike)``: the orbit's ``periapsis_rows`` row
     ``(a, e, cos_i, W, cos_w, sin_w, tp)`` and the relative-astrometry
     log-likelihood of the valid rows of ``data`` (the caller masks the reference
     epoch), ``-inf`` outside the period range or ``e < e_max``. The score carries
@@ -165,11 +161,11 @@ def scored_orbit(
         mu_AU3_per_d2=mu_AU3_per_d2,
         dist_pc=dist_pc,
     )
-    ra, dec = sky_offsets_arcsec(orbit, data.times, dist_pc)
+    ra, dec = orbit.offsets_arcsec(data.times, dist_pc)
     ll = loglike_relative_astrom(ra, dec, data)
     log_P = jnp.log10(orbit.period_d)
     in_support = (log_P >= log_P_lo) & (log_P <= log_P_hi) & (e < e_max)
-    return orbit_rows(orbit), jnp.where(in_support, ll, -jnp.inf)
+    return orbit.periapsis_rows(), jnp.where(in_support, ll, -jnp.inf)
 
 
 class ScaleAndRotate(AbstractConditioner):

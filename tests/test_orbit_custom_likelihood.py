@@ -9,7 +9,6 @@ from kinematics import predict_photometry, predict_relative_astrometry
 from orbit_fit import classical_coordinates, scale_problem
 
 from photomancy import NullTerm
-from photomancy.orbit._frame import orbit_rows
 from photomancy.orbit.data import NullData, RelativeAstromData
 from photomancy.orbit.likelihoods import loglike_null, loglike_relative_astrom
 
@@ -22,7 +21,7 @@ ORBIT = classical_coordinates(1.6, 0.2, 0.3, 0.8, 0.5, 40.0, PERIOD_D)
 
 def _rows(scene):
     """One planet's ``(a, e, cos_i, W, cos_w, sin_w, tp)`` from a scene."""
-    return orbit_rows(jax.tree.map(lambda leaf: leaf[0], scene.dynamics.orbits))
+    return jax.tree.map(lambda leaf: leaf[0], scene.dynamics.orbits).periapsis_rows()
 
 
 def test_physical_scale_coordinates_decode_to_radius_albedo_and_area():

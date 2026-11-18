@@ -17,7 +17,6 @@ from hwoutils.constants import G, Msun2kg  # noqa: E402
 from kinematics import predict_relative_astrometry  # noqa: E402
 from scipy import stats  # noqa: E402
 
-from photomancy.orbit._frame import sky_offsets_arcsec  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import TIBasisModel  # noqa: E402
 from photomancy.orbit.likelihoods import loglike_relative_astrom  # noqa: E402
@@ -552,7 +551,7 @@ def test_thiele_innes_chart_orbit_matches_the_basis_forward_model(ecc, ln_period
     theta = jnp.array([ecc, ln_period, tau, 0.7, -0.3, 0.2, 0.9])
     times = jnp.array([0.0, 40.0, 300.0, 1500.0])
     ra, dec = target.predict(theta, times)
-    east, north = sky_offsets_arcsec(target.chart_orbit(theta), times, 12.0)
+    east, north = target.chart_orbit(theta).offsets_arcsec(times, 12.0)
     np.testing.assert_allclose(east, ra, rtol=1e-12, atol=1e-13)
     np.testing.assert_allclose(north, dec, rtol=1e-12, atol=1e-13)
     _, log_jac = target.chart_coordinates(theta)

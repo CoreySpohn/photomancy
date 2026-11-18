@@ -17,7 +17,6 @@ from kinematics import predict_relative_astrometry
 from orbix.equations import period_to_sma
 from orbix.system import ClassicalChart, EccentricityVectorChart, periapsis_chart_shape
 
-from photomancy.orbit._frame import orbit_rows, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.init import find_init
 from photomancy.orbit.likelihoods import loglike_relative_astrom
@@ -68,7 +67,7 @@ def test_find_init_period_is_kepler_consistent():
     """find_init's period must imply (via Kepler III) the true orbit size."""
     data, a_true = _seed3001_three_epoch()
     orbit, _ = _best_start(data)
-    a_kepler = float(orbit_rows(orbit)[0])
+    a_kepler = float(orbit.periapsis_rows()[0])
     # the Kepler-implied semimajor axis must match the true orbit, not an a-free alias
     assert abs(a_kepler - a_true) / a_true < 0.15, (
         f"got T={float(orbit.period_d):.0f}d -> a={a_kepler:.3f}, truth {a_true:.3f}"
@@ -82,7 +81,7 @@ def test_find_init_kepler_residual_is_small():
     """The Kepler-implied orbit from find_init should thread the data to ~noise."""
     data, _ = _seed3001_three_epoch()
     orbit, _ = _best_start(data)
-    ra, dec = sky_offsets_arcsec(orbit, data.times, DIST_PC)
+    ra, dec = orbit.offsets_arcsec(data.times, DIST_PC)
     sq = (ra - data.ra) ** 2 + (dec - data.dec) ** 2
     rms_mas = float(jnp.sqrt(jnp.mean(sq)) * 1000.0)
     assert rms_mas < 5.0, f"find_init Kepler orbit rms = {rms_mas:.1f} mas"
@@ -206,7 +205,7 @@ def test_chart_fit_matches_frozen_perifocal_fit_over_trials():
             floor = max(1e-10, 64 * eps * (1.0 + abs(want)))
             assert abs(float(got) - want) <= floor * max(1.0, abs(want))
             worst = max(worst, abs(float(got) - want) / max(1.0, abs(want)))
-        rows = np.asarray(orbit_rows(new.orbits))
+        rows = np.asarray(new.orbits.periapsis_rows())
         np.testing.assert_allclose(rows[:, 0], a, rtol=1e-8)
         np.testing.assert_allclose(rows[:, 2], cos_i, rtol=1e-8, atol=1e-10)
         np.testing.assert_allclose(rows[:, 1], e, rtol=1e-10)
@@ -215,8 +214,8 @@ def test_chart_fit_matches_frozen_perifocal_fit_over_trials():
         assert sorted(np.asarray(new.branches).tolist()) == [-1, 1]
         sky = [
             np.asarray(
-                sky_offsets_arcsec(
-                    jax.tree.map(lambda x, k=k: x[k], new.orbits), data.times, DIST_PC
+                jax.tree.map(lambda x, k=k: x[k], new.orbits).offsets_arcsec(
+                    data.times, DIST_PC
                 )
             )
             for k in (0, 1)
@@ -359,8 +358,8 @@ def test_find_init_writes_starts_in_the_declared_chart_and_epoch():
             coords, mu_AU3_per_d2=G * MSUN, epoch_d=epoch_d
         )
         for i in range(2):
-            ra, dec = sky_offsets_arcsec(
-                jax.tree.map(lambda leaf, i=i: leaf[i], orbits), data.times, DIST_PC
+            ra, dec = jax.tree.map(lambda leaf, i=i: leaf[i], orbits).offsets_arcsec(
+                data.times, DIST_PC
             )
             got = float(loglike_relative_astrom(ra, dec, data))
             floor = max(1e-10, 64 * np.finfo(float).eps * (1.0 + abs(float(ll[i]))))

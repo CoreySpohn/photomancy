@@ -16,8 +16,8 @@ from kinematics import predict_relative_astrometry
 from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_anomaly_tp, mean_motion
 
-from photomancy.orbit._frame import ORBIT_ROWS_CHART
 from photomancy.orbit.data import RelativeAstromData
+from photomancy.orbit.inference import ORBIT_ROWS_CHART
 from photomancy.orbit.ofti import (
     PARAM_NAMES,
     ScaleAndRotate,

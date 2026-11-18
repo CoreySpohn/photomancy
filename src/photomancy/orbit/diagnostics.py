@@ -12,8 +12,7 @@ import jax
 import jax.numpy as jnp
 from hwoutils.constants import G
 from orbix.equations import period_to_sma
-
-from photomancy.orbit._frame import frame_from_tp
+from orbix.system import FrameOrbit
 
 
 def mode_observables(posterior, problem):
@@ -76,7 +75,7 @@ def orbits_from_samples(samples, Ms_kg, *, reference_day):
         Scalar inputs produce an unbatched orbit.
     """
     total_mass = Ms_kg + samples.get("Mp", 0.0)
-    return frame_from_tp(
+    return FrameOrbit.from_periapsis_time(
         period_to_sma(samples["T"], total_mass),
         samples["e"],
         samples["cos_i"],
@@ -84,7 +83,7 @@ def orbits_from_samples(samples, Ms_kg, *, reference_day):
         samples["cos_w"],
         samples["sin_w"],
         reference_day + samples["tp"],
-        G * total_mass,
+        mu_AU3_per_d2=G * total_mass,
     )
 
 

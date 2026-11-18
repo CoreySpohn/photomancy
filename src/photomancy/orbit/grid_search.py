@@ -14,13 +14,8 @@ from hwoutils.constants import G
 from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart, FrameOrbit
 
-from photomancy.orbit._frame import (
-    ORBIT_ROWS_CHART,
-    orbit_rows,
-    sky_offsets_arcsec,
-)
 from photomancy.orbit.data import RelativeAstromData
-from photomancy.orbit.inference import orbit_chart_log_volume
+from photomancy.orbit.inference import ORBIT_ROWS_CHART, orbit_chart_log_volume
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.quasi_random import roberts_sequence
 from photomancy.particles import normalize_log_weights
@@ -292,7 +287,7 @@ def grid_search(
         if astrom is None:
             return 0.0
         orbit = _CHART.to_orbit(x, mu_AU3_per_d2=mu, epoch_d=0.0)
-        ra, dec = sky_offsets_arcsec(orbit, astrom.times, dist_pc)
+        ra, dec = orbit.offsets_arcsec(astrom.times, dist_pc)
         return loglike_relative_astrom(ra, dec, astrom)
 
     def scored(u):
@@ -317,7 +312,7 @@ def grid_search(
         jnp.where(support2 & jnp.isfinite(log_target), log_target - log_q, -jnp.inf)
     )
     orbits = _CHART.to_orbit(safe_x, mu_AU3_per_d2=mu, epoch_d=0.0)
-    rows = orbit_rows(orbits)
+    rows = orbits.periapsis_rows()
     rows = rows.at[:, 6].set(jnp.mod(rows[:, 6], orbits.period_d))
     return SamplePosterior(
         samples=rows,

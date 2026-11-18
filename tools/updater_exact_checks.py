@@ -551,8 +551,7 @@ def physical_nodes(setup, counts, chunk=4096):
     import numpy as np
     from hwoutils.constants import G
     from orbix.equations.orbit import mean_motion
-
-    from photomancy.orbit._frame import relative_offsets_arcsec
+    from orbix.system import FrameOrbit
 
     target = setup["target"]
     ms = float(target.Ms_kg)
@@ -578,9 +577,10 @@ def physical_nodes(setup, counts, chunk=4096):
 
     def position(a, e, cos_i, cos_w, sin_w, m_ref, t):
         tp = -m_ref / mean_motion(a, mu)
-        x, y = relative_offsets_arcsec(
-            jnp.reshape(t, (1,)), a, e, cos_i, 0.0, cos_w, sin_w, tp, ms, dist
+        orbit = FrameOrbit.from_periapsis_time(
+            a, e, cos_i, 0.0, cos_w, sin_w, tp, mu_AU3_per_d2=G * ms
         )
+        x, y = orbit.offsets_arcsec(jnp.reshape(t, (1,)), dist)
         return x[0], y[0]
 
     def one(e, cos_i, omega, m_ref, w_out):

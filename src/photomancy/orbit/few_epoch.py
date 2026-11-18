@@ -54,7 +54,6 @@ from orbix.system import (
     sky_block_geometry,
 )
 
-from photomancy.orbit._frame import plane_from_phase, sky_offsets_arcsec
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import TI_CHART_PARAM_NAMES
 from photomancy.posterior import SamplePosterior
@@ -98,7 +97,9 @@ class TIBasisModel(eqx.Module):
         with X = cos(E) - e and Y = sqrt(1-e^2) sin(E).
         """
         e, lnP, tau = theta[0], theta[1], theta[2]
-        xy, _ = plane_from_phase(e, lnP, tau, self.t_ref).perifocal_coordinates(times)
+        xy, _ = FrameOrbit.unit_plane_from_phase(
+            e, lnP, tau, self.t_ref
+        ).perifocal_coordinates(times)
         X, Y = xy[..., 0], xy[..., 1]
         east_X, east_Y, north_X, north_Y = theta[3:]
         east = east_X * X + east_Y * Y
@@ -287,7 +288,7 @@ def _chart_lambert_batch(
         x = _TI_CHART.from_orbit(orbit)
         _, ln_jac = jnp.linalg.slogdet(jax.jacfwd(fn)(u))
         _, _, ok_lam = lambert_solve(u[0:3], u[3:6], tof, jnp.exp(u[6]), N, way, high)
-        ra, dec = sky_offsets_arcsec(orbit, data_other.times, dist_pc)
+        ra, dec = orbit.offsets_arcsec(data_other.times, dist_pc)
         ln_like = loglike_relative_astrom(ra, dec, data_other)
         ok = (
             ok_lam
@@ -330,7 +331,7 @@ def _chart_ar_batch(
         _, ln_jac = jnp.linalg.slogdet(
             jax.jacfwd(lambda uu: _TI_CHART.from_orbit(orbit_of_u(uu)))(u)
         )
-        ra, dec = sky_offsets_arcsec(orbit, data_other.times, dist_pc)
+        ra, dec = orbit.offsets_arcsec(data_other.times, dist_pc)
         ln_like = loglike_relative_astrom(ra, dec, data_other)
         ok = chart_in_support(model, x) & jnp.isfinite(ln_jac) & jnp.isfinite(ln_like)
         return _chart_parts(model, x, orbit, ok, ln_jac, ln_like)

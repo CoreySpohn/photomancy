@@ -110,7 +110,6 @@ from orbix.system import (
     disk_to_plane,
 )
 
-from photomancy.orbit._frame import plane_from_phase, sky_offsets_arcsec
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
 from photomancy.orbit.inference import orbit_chart_log_volume
@@ -591,7 +590,7 @@ class ThieleInnesTarget(AbstractUpdateTarget):
             Tuple ``(H_ra, H_dec)``, each shape ``(K, 4)``.
         """
         e, ln_period, tau = theta[0], theta[1], theta[2]
-        orbit = plane_from_phase(e, ln_period, tau, self.model.t_ref)
+        orbit = FrameOrbit.unit_plane_from_phase(e, ln_period, tau, self.model.t_ref)
         xy, _ = orbit.perifocal_coordinates(times)
         x, y = xy[..., 0] / self.dist_pc, xy[..., 1] / self.dist_pc
         zero = jnp.zeros_like(x)
@@ -763,7 +762,7 @@ class FixedMassTarget(AbstractUpdateTarget):
 
     def predict(self, theta, times):
         """Relative astrometry of the chart point (arcsec)."""
-        return sky_offsets_arcsec(self.orbit(theta), times, self.dist_pc)
+        return self.orbit(theta).offsets_arcsec(times, self.dist_pc)
 
 
 class UpdaterBelief(eqx.Module):

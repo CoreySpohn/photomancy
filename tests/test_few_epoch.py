@@ -15,7 +15,6 @@ from orbix.system import (  # noqa: E402
 )
 from orbix.system.rotation import rotate  # noqa: E402
 
-from photomancy.orbit._frame import sky_offsets_arcsec  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import (  # noqa: E402
     MU_SUN,
@@ -315,7 +314,7 @@ def test_third_epoch_tightens_period():
     orbit = ThieleInnesChart(branch=int(parts3["branch"][best])).to_orbit(
         post3.samples[best], mu_AU3_per_d2=MU_SUN, epoch_d=float(data3.times[0])
     )
-    east, north = sky_offsets_arcsec(orbit, data3.times, DIST_PC)
+    east, north = orbit.offsets_arcsec(data3.times, DIST_PC)
     resid = np.hypot(np.asarray(east - data3.ra), np.asarray(north - data3.dec))
     assert float(resid[1]) < 4.0 * sigma / DIST_PC
 
@@ -448,7 +447,7 @@ def test_lambert_weights_and_sky_match_frozen_legacy_fit():
         orbit = ThieleInnesChart(branch=int(branch[i])).to_orbit(
             jnp.asarray(x[i]), mu_AU3_per_d2=MU_SUN, epoch_d=float(data.times[0])
         )
-        east, north = sky_offsets_arcsec(orbit, data.times, DIST_PC)
+        east, north = orbit.offsets_arcsec(data.times, DIST_PC)
         np.testing.assert_allclose(east, data.ra, atol=6.0 * SIGMA_AU / DIST_PC)
         np.testing.assert_allclose(north, data.dec, atol=6.0 * SIGMA_AU / DIST_PC)
     print("lambert parity: like floor", floor, "prior+jac spread", spread)

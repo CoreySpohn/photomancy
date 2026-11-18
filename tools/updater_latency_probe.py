@@ -29,11 +29,12 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.constants import Msun2kg, mas2arcsec
+from hwoutils.constants import G, Msun2kg, mas2arcsec
 
 jax.config.update("jax_enable_x64", True)
 
-from photomancy.orbit._frame import relative_offsets_arcsec  # noqa: E402
+from orbix.system import FrameOrbit  # noqa: E402
+
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import TIBasisModel, lambert_depth_fit  # noqa: E402
 from photomancy.orbit.likelihoods import loglike_relative_astrom  # noqa: E402
@@ -79,9 +80,10 @@ def physical_loglike(mass_kg):
 
     def one(row, data):
         a, e, cos_i, W, cos_w, sin_w, tp = row
-        ra, dec = relative_offsets_arcsec(
-            data.times, a, e, cos_i, W, cos_w, sin_w, tp, mass_kg, DIST_PC
+        orbit = FrameOrbit.from_periapsis_time(
+            a, e, cos_i, W, cos_w, sin_w, tp, mu_AU3_per_d2=G * mass_kg
         )
+        ra, dec = orbit.offsets_arcsec(data.times, DIST_PC)
         return loglike_relative_astrom(ra, dec, data)
 
     return eqx.filter_jit(jax.vmap(one, in_axes=(0, None)))
