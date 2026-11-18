@@ -15,12 +15,10 @@ analytic EIG layer the same way ``LaplaceMixtureBackend`` does.
 than baking into the compiled kernel as constants.
 """
 
-import blackjax.vi.pathfinder as pathfinder
 import equinox as eqx
 import jax
-from blackjax.optimizers.lbfgs import lbfgs_inverse_hessian_formula_1
 
-from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.backends.base import AbstractBackend, import_extra
 from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
 
 
@@ -40,6 +38,8 @@ def pathfinder_fit(logdensity, init, key, maxiter, maxcor):
         covariance ``(d, d)`` reconstructed from the L-BFGS factors, and the scalar
         ELBO (a lower bound on ``log Z``).
     """
+    pathfinder = import_extra("blackjax.vi.pathfinder", "blackjax")
+    lbfgs = import_extra("blackjax.optimizers.lbfgs", "blackjax")
     state, _ = pathfinder.approximate(
         rng_key=key,
         logdensity_fn=logdensity,
@@ -47,7 +47,7 @@ def pathfinder_fit(logdensity, init, key, maxiter, maxcor):
         maxiter=maxiter,
         maxcor=maxcor,
     )
-    cov = lbfgs_inverse_hessian_formula_1(state.alpha, state.beta, state.gamma)
+    cov = lbfgs.lbfgs_inverse_hessian_formula_1(state.alpha, state.beta, state.gamma)
     return state.position, cov, state.elbo
 
 

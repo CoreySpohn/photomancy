@@ -31,6 +31,14 @@ every domain at once.
 pip install photomancy
 ```
 
+The Laplace and staged MAP backends work from the base install. The sampler backends are
+optional extras: `photomancy[blackjax]` for NUTS, MCLMC, Pathfinder and SMC,
+`photomancy[jaxns]` for nested sampling, or `photomancy[samplers]` for both.
+
+```bash
+pip install "photomancy[samplers]"
+```
+
 photomancy requires Python 3.11 or newer and is in early development, so the API may still
 change. For a source checkout with the test and documentation extras, clone the repository
 and run `pip install -e ".[test,docs]"`.

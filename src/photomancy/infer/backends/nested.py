@@ -14,13 +14,13 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.backends.base import AbstractBackend, import_extra
 from photomancy.infer.posterior import SamplePosterior
 
-# jaxns is imported lazily inside the functions below: importing it enables JAX x64
-# globally as a side effect and pulls in tensorflow-probability transitively, so we keep
-# ``import photomancy`` light, paying that only when nested sampling runs. The prior
-# adapter below uses only the jaxctx ``AbstractPrior`` interface -- no tfp of our own.
+# jaxns is an optional extra and is imported inside the functions below: importing it
+# enables JAX x64 globally as a side effect and pulls in tensorflow-probability
+# transitively, so ``import photomancy`` stays light and pays that only when nested
+# sampling runs. The prior adapter uses only the jaxctx ``AbstractPrior`` interface.
 
 
 def jaxns_prior(prior, *, name):
@@ -38,7 +38,7 @@ def jaxns_prior(prior, *, name):
     Returns:
         A jaxctx prior; call ``.realise()`` on it inside a jaxns prior model.
     """
-    from jaxctx.priors import AbstractPrior as JaxctxPrior
+    JaxctxPrior = import_extra("jaxctx.priors", "jaxns").AbstractPrior
 
     class _JaxnsPrior(JaxctxPrior):
         def __init__(self, dist, *, name):
@@ -90,7 +90,7 @@ def build_scene_nested_model(scene, forward, likelihood, *, fit_leaves, prior):
         sample row back to the fitted-leaf PyTree (the same z-space as
         ``build_scene_logdensity``).
     """
-    from jaxns.model import Model
+    Model = import_extra("jaxns.model", "jaxns").Model
 
     n_fit = len(fit_leaves(scene))
     mask = jax.tree_util.tree_map(lambda _: False, scene)
@@ -134,7 +134,7 @@ class JaxnsBackend(AbstractBackend):
 
     def run(self, model, init=None, key=None):
         """Run nested sampling on ``model``; returns weighted samples + ``log Z``."""
-        from jaxns.core import NestedSampler
+        NestedSampler = import_extra("jaxns.core", "jaxns").NestedSampler
 
         if key is None:
             raise ValueError("JaxnsBackend.run requires a PRNG key.")

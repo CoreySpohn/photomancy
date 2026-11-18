@@ -15,7 +15,7 @@ self-version constraint on shallow VCS checkouts.
 
 | Dependency | Declared floor | Resolved version | Groups |
 | --- | --- | --- | --- |
-| blackjax | >=1.6 | 1.6 | runtime |
+| blackjax | >=1.6 | 1.6 | blackjax, samplers, docs, test |
 | coronalyze | >=1.2.0 | 1.1.2.dev52+g541a25c86 | imaging |
 | equinox | >=0.13.2 | 0.13.2 | runtime |
 | eyepiece | >=0.1.0 | 0.16.1.dev25+gc7a4bea5a | docs, test, viz |
@@ -29,9 +29,9 @@ self-version constraint on shallow VCS checkouts.
 | ipython | >=8.18 | 8.18.0 | docs |
 | ipywidgets | >=8.1.1 | 8.1.1 | docs |
 | jax | >=0.8.1 | 0.9.0 | runtime |
-| jaxctx | >=1.2.0 | 1.2.0 | runtime |
+| jaxctx | >=1.2.0 | 1.2.0 | jaxns, samplers, docs, test |
 | jaxlib | >=0.8.1 | 0.9.0 | runtime |
-| jaxns | >=3.0.0 | 3.0.0 | runtime |
+| jaxns | >=3.0.0 | 3.0.0 | jaxns, samplers, docs, test |
 | matplotlib | >=3.11 | 3.11.0 | docs, test, viz |
 | myst-nb | >=1.1 | 1.1.0 | docs |
 | numpy | >=2.1.2 | 2.1.2 | runtime |

@@ -4,6 +4,10 @@ Each backend wraps one inference method (Laplace, NUTS, adaptive-tempered SMC,
 nested sampling, MCLMC, Pathfinder, and a staged PyTree MAP fit today; a
 normalizing-flow VI backend to come) behind a uniform
 ``run(logdensity, init, key)`` that returns a Posterior.
+
+The Laplace and staged MAP backends need only optax. The BlackJAX backends (NUTS,
+MCLMC, Pathfinder, SMC) and the jaxns backend import their sampler when they run:
+install ``photomancy[blackjax]``, ``photomancy[jaxns]`` or ``photomancy[samplers]``.
 """
 
 from photomancy.infer.backends.base import AbstractBackend

@@ -10,13 +10,11 @@ Module its forward's array leaves (e.g. a coronagraph PSF datacube) thread as tr
 inputs to BlackJAX rather than being baked into the compiled kernel as constants.
 """
 
-import blackjax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from blackjax.util import run_inference_algorithm
 
-from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.backends.base import AbstractBackend, import_extra
 from photomancy.infer.posterior import SamplePosterior
 
 
@@ -42,6 +40,10 @@ class NUTSBackend(AbstractBackend):
         """Adapt, then sample NUTS from ``init``; returns equal-weight samples."""
         if key is None:
             raise ValueError("NUTSBackend.run requires a PRNG key.")
+        blackjax = import_extra("blackjax", "blackjax")
+        run_inference_algorithm = import_extra(
+            "blackjax.util", "blackjax"
+        ).run_inference_algorithm
         key_warmup, key_sample = jax.random.split(key)
 
         warmup = blackjax.window_adaptation(

@@ -17,16 +17,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dependencies = [
-    # >=1.6: the MCLMC tuner requires logdensity_fn from 1.6 on, and 1.5 does
-    # not accept the keyword, so the two cannot be supported by one call.
-    "blackjax>=1.6",
     "equinox>=0.13.2",
     "hwoutils[jax]>=1.15.0",
     "jax>=0.8.1",
     "jaxlib>=0.8.1",
-    # jaxctx supplies the prior interface the jaxns 3 adapter subclasses.
-    "jaxctx>=1.2.0",
-    "jaxns>=3.0.0",
     "numpy>=2.1.2",
     # >=0.2.4: fixes stalled orbit fits with the revised L-BFGS defaults.
     # >=0.2.5: the L-BFGS state keeps one dtype under x64, which blackjax's
@@ -55,9 +49,13 @@ docs = [
     "hwostyle>=1.7.0",
     "matplotlib>=3.11",
     "eyepiece>=0.1.0",
+    # The example notebooks run the sampler backends.
+    "blackjax>=1.6",
+    "jaxctx>=1.2.0",
+    "jaxns>=3.0.0",
 ]
-# Include the plotting dependencies directly so viz tests run without a recursive
-# self-version constraint, including in shallow VCS checkouts.
+# Include the plotting and sampler dependencies directly so their tests run without
+# a recursive self-version constraint, including in shallow VCS checkouts.
 test = [
     "pytest>=7.3.2",
     "pytest-xdist>=2.5",
@@ -73,8 +71,17 @@ test = [
     "tfp-nightly>=0.26.0.dev20260621",
     "eyepiece>=0.1.0",
     "matplotlib>=3.11",
+    "blackjax>=1.6",
+    "jaxctx>=1.2.0",
+    "jaxns>=3.0.0",
 ]
-# Optional extras (jaxns is a core dep, not an extra):
+# Sampler backends. The Laplace and staged MAP backends need neither.
+# >=1.6: the MCLMC tuner requires logdensity_fn from 1.6 on, and 1.5 does
+# not accept the keyword, so the two cannot be supported by one call.
+blackjax = ["blackjax>=1.6"]  # NUTS, MCLMC, Pathfinder and tempered SMC
+# jaxctx supplies the prior interface the jaxns 3 adapter subclasses.
+jaxns = ["jaxctx>=1.2.0", "jaxns>=3.0.0"]  # nested sampling
+samplers = ["blackjax>=1.6", "jaxctx>=1.2.0", "jaxns>=3.0.0"]
 imaging = ["coronalyze>=1.2.0"]  # differentiable detection/extraction likelihood helpers
 # eyepiece>=0.1.0 carries every interface photomancy.viz calls (corner,
 # corner_overlay, sky_fan, cov_ellipse, save_fig, PlotResult); checked by

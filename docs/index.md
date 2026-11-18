@@ -80,6 +80,14 @@ reference for the equations and paper citations.
 pip install photomancy
 ```
 
+The Laplace and staged MAP backends work from the base install. The sampler backends are
+optional extras: `photomancy[blackjax]` for NUTS, MCLMC, Pathfinder and SMC,
+`photomancy[jaxns]` for nested sampling, or `photomancy[samplers]` for both.
+
+```bash
+pip install "photomancy[samplers]"
+```
+
 photomancy is in early development, and the API may still change.
 
 ## Status

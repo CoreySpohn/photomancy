@@ -17,16 +17,11 @@ left at its ``None`` default) and renamed ``Lfactor`` to ``l_factor``; the pinne
 is 1.6 because 1.5 does not accept the keyword at all.
 """
 
-import blackjax
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from blackjax.mcmc.integrators import isokinetic_mclachlan
-from blackjax.mcmc.mclmc import build_kernel
-from blackjax.mcmc.mclmc import init as mclmc_init
-from blackjax.util import run_inference_algorithm
 
-from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.backends.base import AbstractBackend, import_extra
 from photomancy.infer.posterior import SamplePosterior
 
 
@@ -46,14 +41,20 @@ class MCLMCBackend(AbstractBackend):
         """Tune L / step size / mass matrix, then sample MCLMC from ``init``."""
         if key is None:
             raise ValueError("MCLMCBackend.run requires a PRNG key.")
+        blackjax = import_extra("blackjax", "blackjax")
+        mclmc = import_extra("blackjax.mcmc.mclmc", "blackjax")
+        integrators = import_extra("blackjax.mcmc.integrators", "blackjax")
+        run_inference_algorithm = import_extra(
+            "blackjax.util", "blackjax"
+        ).run_inference_algorithm
         key_init, key_tune, key_sample = jax.random.split(key, 3)
 
-        state = mclmc_init(position=init, logdensity_fn=logdensity, rng_key=key_init)
+        state = mclmc.init(position=init, logdensity_fn=logdensity, rng_key=key_init)
 
         # From BlackJAX 1.6 build_kernel takes only the integrator and returns a
         # kernel that is handed logdensity_fn, inverse_mass_matrix, L and step_size
         # per call by the tuner; before 1.6 it was a factory closing over them.
-        kernel = build_kernel(integrator=isokinetic_mclachlan)
+        kernel = mclmc.build_kernel(integrator=integrators.isokinetic_mclachlan)
 
         tuned_state, params, *_ = blackjax.mclmc_find_L_and_step_size(
             mclmc_kernel=kernel,

@@ -1,8 +1,34 @@
 """The Backend protocol: how inference is run on a logdensity."""
 
+import importlib
 from abc import abstractmethod
 
 import equinox as eqx
+
+
+def import_extra(module, extra):
+    """Import a sampler library that photomancy installs only as an extra.
+
+    Args:
+        module: Dotted module name, for example ``"blackjax.smc.resampling"``.
+        extra: The photomancy extra that provides it (``"blackjax"`` or ``"jaxns"``).
+
+    Returns:
+        The imported module.
+
+    Raises:
+        ImportError: Naming the extra, when the library itself is not installed.
+    """
+    try:
+        return importlib.import_module(module)
+    except ImportError as error:
+        package = module.partition(".")[0]
+        if error.name is None or error.name.partition(".")[0] != package:
+            raise
+        raise ImportError(
+            f"{package} is not installed. This backend needs the optional "
+            f"dependency: pip install 'photomancy[{extra}]'."
+        ) from error
 
 
 class AbstractBackend(eqx.Module):

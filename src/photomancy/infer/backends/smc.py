@@ -18,14 +18,11 @@ compiled kernel as constants -- which is what makes coronagraph/IFS-aware eviden
 (``log Z``) tractable.
 """
 
-import blackjax
-import blackjax.smc.resampling as resampling
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from blackjax.smc import extend_params
 
-from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.backends.base import AbstractBackend, import_extra
 from photomancy.infer.posterior import SamplePosterior
 
 
@@ -47,8 +44,10 @@ class SMCBackend(AbstractBackend):
         """Temper the particles ``init`` (shape ``(n, d)``) from prior to posterior."""
         if key is None:
             raise ValueError("SMCBackend.run requires a PRNG key.")
+        blackjax = import_extra("blackjax", "blackjax")
+        resampling = import_extra("blackjax.smc.resampling", "blackjax")
         d = init.shape[-1]
-        mcmc_parameters = extend_params(
+        mcmc_parameters = import_extra("blackjax.smc", "blackjax").extend_params(
             {"step_size": self.step_size, "inverse_mass_matrix": jnp.ones(d)}
         )
         smc = blackjax.adaptive_tempered_smc(

@@ -14,6 +14,7 @@ from jax.scipy.special import ndtr, ndtri
 from orbix.equations import period_to_sma
 from orbix.system import FrameChart, FrameOrbit
 
+from photomancy.infer.backends.base import import_extra
 from photomancy.infer.backends.nested import jaxns_prior
 from photomancy.infer.backends.smc import SMCBackend
 from photomancy.infer.posterior import SamplePosterior
@@ -133,8 +134,8 @@ class OrbitPriorTransform(eqx.Module):
 
 def build_chart_nested_model(problem):
     """Build a jaxns model with the fit's chart columns and a terms-only likelihood."""
-    from jaxctx.context import set_state
-    from jaxns.model import Model
+    set_state = import_extra("jaxctx.context", "jaxns").set_state
+    Model = import_extra("jaxns.model", "jaxns").Model
 
     transform = OrbitPriorTransform(problem)
     unit_prior = jaxns_prior(
@@ -216,9 +217,9 @@ def orbit_nested_sampling(
 def _run_nested(
     model, model_args, run_key, num_live_points, max_samples, evidence_tolerance
 ):
-    from jaxns.algorithm.depth import _depth_condition_reached
-    from jaxns.core import NestedSampler
-    from jaxns.depth_condition import DepthCondition
+    depth = import_extra("jaxns.algorithm.depth", "jaxns")
+    NestedSampler = import_extra("jaxns.core", "jaxns").NestedSampler
+    DepthCondition = import_extra("jaxns.depth_condition", "jaxns").DepthCondition
 
     ns = NestedSampler(
         model=model,
@@ -228,7 +229,7 @@ def _run_nested(
     )
     state = ns.run(key=run_key, args=model_args)
     results = state.to_result().trim()
-    converged = _depth_condition_reached(state, ns.depth_condition)
+    converged = depth._depth_condition_reached(state, ns.depth_condition)
     return results, state, converged
 
 
