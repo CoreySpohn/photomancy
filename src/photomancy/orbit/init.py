@@ -22,9 +22,15 @@ import jax
 import jax.numpy as jnp
 from orbix.equations import period_to_sma
 
+from photomancy.orbit._frame import sky_offsets_arcsec
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.likelihoods import loglike_relative_astrom
-from photomancy.orbit.thiele_innes import thiele_innes_fit
+from photomancy.orbit.thiele_innes import (
+    chart_thiele_innes_grid,
+    fixed_mass_coordinates,
+    fixed_mass_orbits,
+    thiele_innes_fit,
+)
 
 
 def elements_to_sites(T, e, cos_i, W, cos_w, sin_w, tp, n_planets=1):
@@ -261,3 +267,61 @@ def find_init_top_k(
         single = jax.tree.map(lambda x, i=idx: x[i], results)
         init_dicts.append(ti_to_init(single, n_planets=n_planets))
     return init_dicts
+
+
+def chart_find_init(
+    relative_astrom_data,
+    star_mass_kg,
+    dist_pc,
+    k=1,
+    log_T_range=(1.0, 4.0),
+    n_log_T=100,
+    e_grid=None,
+    n_tp=30,
+    branch=1,
+):
+    """Top-k Kepler-consistent starts in fixed-mass eccentricity-vector coordinates.
+
+    Runs the chart Thiele-Innes grid, resizes every candidate to Kepler's third law
+    at ``star_mass_kg`` (see ``fixed_mass_orbits``) and ranks them by the
+    relative-astrometry log-likelihood of that fixed-mass orbit. Starts are chart
+    coordinates ``(ln a, ux, uy, atanh(cos i), W, M0 + w)``, regular at ``e = 0``
+    and unclamped, for ``ChartOrbitProblem`` positions. The two line-of-sight
+    sheets have identical sky predictions; ``branch`` picks the reported one.
+    Candidates with a non-finite score rank last.
+
+    Args:
+        relative_astrom_data: ``RelativeAstromData`` (arcsec).
+        star_mass_kg: Stellar mass (kg).
+        dist_pc: Distance (parsec).
+        k: Number of starts to return.
+        log_T_range: ``(min, max)`` of log10(T/days) for the period grid.
+        n_log_T: Number of period grid points.
+        e_grid: Eccentricities to search; default ``[0, 0.1, ..., 0.8]``.
+        n_tp: Periapsis-time grid points per period.
+        branch: Line-of-sight sheet, +1 or -1.
+
+    Returns:
+        ``(coordinates, log_likelihood)`` of shapes ``(k, 6)`` and ``(k,)``, best first.
+    """
+    if branch not in (-1, 1):
+        raise ValueError("branch must be +1 or -1")
+    if e_grid is None:
+        e_grid = jnp.linspace(0.0, 0.8, 9)
+    data = relative_astrom_data
+    log_T_grid = jnp.linspace(log_T_range[0], log_T_range[1], n_log_T)
+    fits = chart_thiele_innes_grid(data, dist_pc, log_T_grid, e_grid, n_tp)
+    orbits = fixed_mass_orbits(fits, star_mass_kg)
+    sheet = 0 if branch == 1 else 1
+
+    def candidate_loglike(orbit):
+        ra, dec = sky_offsets_arcsec(orbit, data.times, dist_pc)
+        return loglike_relative_astrom(ra, dec, data)
+
+    ll = jax.vmap(candidate_loglike)(jax.tree.map(lambda leaf: leaf[:, 0], orbits))
+    ll = jnp.where(jnp.isnan(ll), -jnp.inf, ll)
+    top = jnp.argsort(ll)[-k:][::-1]
+    coordinates = fixed_mass_coordinates(
+        jax.tree.map(lambda leaf: leaf[top], fits), star_mass_kg
+    )
+    return coordinates[:, sheet], ll[top]

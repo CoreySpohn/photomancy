@@ -47,10 +47,15 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import G, Msun2kg, two_pi
 from orbix.equations import lambert_solve
-from orbix.system import FrameOrbit, sky_block_geometry
+from orbix.system import FrameOrbit, ThieleInnesChart, sky_block_geometry
 
-from photomancy.orbit._frame import plane_from_phase
+from photomancy.orbit._frame import (
+    line_of_sight_branch,
+    plane_from_phase,
+    sky_offsets_arcsec,
+)
 from photomancy.orbit.likelihoods import loglike_relative_astrom
+from photomancy.orbit.thiele_innes import TI_CHART_PARAM_NAMES
 from photomancy.posterior import SamplePosterior
 
 MU_SUN = G * Msun2kg  # AU^3 / day^2
@@ -460,3 +465,269 @@ def admissible_region_fit(
         n_particles,
     )
     return _assemble(theta, lp, lj, ll, return_parts)
+
+
+# ---------------------------------------------------------------------------
+# Chart route: ThieleInnesChart coordinates, extended by d ln mu
+# ---------------------------------------------------------------------------
+
+_TI_CHART = ThieleInnesChart()
+
+
+def chart_in_support(model, x):
+    """Whether chart point ``x`` satisfies the model's bounds and implied-mass window.
+
+    ``x = (ln n, ux, uy, A, B, F, G)`` as in ``ThieleInnesChart``; the period is
+    ``2 pi / n`` and the eccentricity ``|u| / sqrt(1 + |u|**2)``.
+    """
+    usq = jnp.sum(x[1:3] ** 2)
+    e = jnp.sqrt(usq / (1.0 + usq))
+    ln_period = jnp.log(two_pi) - x[0]
+    mu = _TI_CHART.implied_mu(x)
+    return (
+        (e > 0.0)
+        & (e < model.e_max)
+        & (ln_period > model.lnP_lo)
+        & (ln_period < model.lnP_hi)
+        & (mu >= model.mu_lo)
+        & (mu <= model.mu_hi)
+        & jnp.all(jnp.isfinite(x))
+    )
+
+
+def chart_log_prior(model, x):
+    """Model log density against the chart reference measure times ``d ln mu``.
+
+    Flat in ``e``, ``ln P`` and the phase, Gaussian in the four constants, up to a
+    constant, and ``-inf`` outside ``chart_in_support``. Against that measure the
+    density is ``exp(-|C|**2 / (2 s**2)) J / e`` with ``J = a**4 (1 - cos(i)**2)``
+    the determinant from the constants' angles and size. Add
+    ``ThieleInnesChart.log_volume`` for the density against the chart's own
+    differential.
+    """
+    usq = jnp.sum(x[1:3] ** 2)
+    e = jnp.sqrt(usq / (1.0 + usq))
+    a, gap = sky_block_geometry(x[3], x[4], x[5], x[6])
+    log_density = (
+        -0.5 * jnp.sum(x[3:] ** 2) / model.s_ti**2
+        + 2.0 * jnp.log(a)
+        + jnp.log(gap)
+        - jnp.log(jnp.where(e > 0.0, e, 1.0))
+    )
+    return jnp.where(chart_in_support(model, x), log_density, -jnp.inf)
+
+
+def _chart_parts(model, x, orbit, ok, ln_jac, ln_like):
+    """Mask invalid lanes as ``_finalize_parts`` does, and report the sheet."""
+    ln_prior = chart_log_prior(model, x) + _TI_CHART.log_volume(x)
+    return (
+        x,
+        jnp.where(ok, ln_prior, -jnp.inf),
+        jnp.where(ok, ln_jac, 0.0),
+        jnp.where(ok, ln_like, 0.0),
+        line_of_sight_branch(orbit),
+    )
+
+
+@partial(jax.jit, static_argnames=("n_particles",))
+def _chart_lambert_batch(
+    key,
+    obs4,
+    sig4,
+    t1,
+    t2,
+    data_other,
+    dist_pc,
+    model,
+    z_max,
+    fam_N,
+    fam_way,
+    fam_high,
+    n_particles,
+):
+    """Chart-coordinate weighted particles for all Lambert families, (F, n, ...)."""
+    tof = t2 - t1
+
+    def orbit_of_u(u, N, way, high):
+        v1, _, _ = lambert_solve(u[0:3], u[3:6], tof, jnp.exp(u[6]), N, way, high)
+        return FrameOrbit.from_cartesian(
+            u[0:3], v1, mu_AU3_per_d2=jnp.exp(u[6]), epoch_d=t1
+        )
+
+    def one(k, N, way, high):
+        kz, km, kx = jax.random.split(k, 3)
+        z12 = jax.random.uniform(kz, (2,), minval=-z_max, maxval=z_max)
+        lnmu = jax.random.uniform(
+            km, (), minval=jnp.log(model.mu_lo), maxval=jnp.log(model.mu_hi)
+        )
+        xy = obs4 + sig4 * jax.random.normal(kx, (4,))
+        u = jnp.array([xy[0], xy[1], z12[0], xy[2], xy[3], z12[1], lnmu])
+
+        def fn(uu):
+            return _TI_CHART.from_orbit(orbit_of_u(uu, N, way, high))
+
+        orbit = orbit_of_u(u, N, way, high)
+        x = _TI_CHART.from_orbit(orbit)
+        _, ln_jac = jnp.linalg.slogdet(jax.jacfwd(fn)(u))
+        _, _, ok_lam = lambert_solve(u[0:3], u[3:6], tof, jnp.exp(u[6]), N, way, high)
+        ra, dec = sky_offsets_arcsec(orbit, data_other.times, dist_pc)
+        ln_like = loglike_relative_astrom(ra, dec, data_other)
+        ok = (
+            ok_lam
+            & chart_in_support(model, x)
+            & jnp.isfinite(ln_jac)
+            & jnp.isfinite(ln_like)
+        )
+        return _chart_parts(model, x, orbit, ok, ln_jac, ln_like)
+
+    keys = jax.random.split(key, fam_N.shape[0] * n_particles)
+    keys = keys.reshape((fam_N.shape[0], n_particles, *keys.shape[1:]))
+    per_family = jax.vmap(
+        lambda ks, N, way, high: jax.vmap(lambda k: one(k, N, way, high))(ks)
+    )
+    return per_family(keys, fam_N, fam_way, fam_high)
+
+
+@partial(jax.jit, static_argnames=("n_particles",))
+def _chart_ar_batch(
+    key, obs2, sig2, t1, data_other, dist_pc, model, z_max, v_max, n_particles
+):
+    """Chart-coordinate weighted particles of the single-epoch reduction."""
+
+    def orbit_of_u(u):
+        return FrameOrbit.from_cartesian(
+            u[0:3], u[3:6], mu_AU3_per_d2=jnp.exp(u[6]), epoch_d=t1
+        )
+
+    def one(k):
+        kz, kv, km, kx = jax.random.split(k, 4)
+        z = jax.random.uniform(kz, (), minval=-z_max, maxval=z_max)
+        vel = jax.random.uniform(kv, (3,), minval=-v_max, maxval=v_max)
+        lnmu = jax.random.uniform(
+            km, (), minval=jnp.log(model.mu_lo), maxval=jnp.log(model.mu_hi)
+        )
+        xy = obs2 + sig2 * jax.random.normal(kx, (2,))
+        u = jnp.array([xy[0], xy[1], z, vel[0], vel[1], vel[2], lnmu])
+        orbit = orbit_of_u(u)
+        x = _TI_CHART.from_orbit(orbit)
+        _, ln_jac = jnp.linalg.slogdet(
+            jax.jacfwd(lambda uu: _TI_CHART.from_orbit(orbit_of_u(uu)))(u)
+        )
+        ra, dec = sky_offsets_arcsec(orbit, data_other.times, dist_pc)
+        ln_like = loglike_relative_astrom(ra, dec, data_other)
+        ok = chart_in_support(model, x) & jnp.isfinite(ln_jac) & jnp.isfinite(ln_like)
+        return _chart_parts(model, x, orbit, ok, ln_jac, ln_like)
+
+    return jax.vmap(one)(jax.random.split(key, n_particles))
+
+
+def _assemble_chart(x, lp, lj, ll, branch, return_parts):
+    """Flatten family axes and build the chart-coordinate SamplePosterior (+ parts)."""
+    x = x.reshape(-1, 7)
+    lp, lj, ll, branch = (v.reshape(-1) for v in (lp, lj, ll, branch))
+    post = SamplePosterior(
+        samples=x,
+        log_weights=lp + lj + ll,
+        evidence=jnp.nan,
+        param_names=TI_CHART_PARAM_NAMES,
+    )
+    if not return_parts:
+        return post
+    return post, {"ln_prior": lp, "ln_jac": lj, "ln_like": ll, "branch": branch}
+
+
+def chart_lambert_depth_fit(
+    data,
+    *,
+    dist_pc,
+    model,
+    key,
+    idx=None,
+    n_per_family=8000,
+    n_max_rev=6,
+    z_max_au=8.0,
+    return_parts=False,
+):
+    """``lambert_depth_fit`` weighted in ``ThieleInnesChart`` coordinates.
+
+    The latents, families and likelihood are those of ``lambert_depth_fit``; the
+    state is mapped through ``FrameOrbit.from_cartesian`` to chart coordinates
+    ``(ln n, ux, uy, A, B, F, G)`` (``TI_CHART_PARAM_NAMES``), the constants on the
+    conditioned epoch's mean-longitude axes. Weights are
+    ``chart_log_prior + chart log volume + |det dx/du| + likelihood``. At identical
+    latents this equals the ``lambert_depth_fit`` weight plus one constant.
+
+    Args: as ``lambert_depth_fit``.
+
+    Returns:
+        A ``SamplePosterior`` over the chart coordinates; with ``return_parts``, a
+        ``(posterior, parts)`` tuple whose parts hold ``ln_prior`` (density against
+        the chart differential), ``ln_jac``, ``ln_like`` and each particle's
+        line-of-sight ``branch`` (+1 or -1).
+    """
+    i1, i2 = _conditioned_pair(data, idx)
+    obs4 = jnp.array([data.ra[i1], data.dec[i1], data.ra[i2], data.dec[i2]]) * dist_pc
+    sig4 = (
+        jnp.array(
+            [data.ra_err[i1], data.dec_err[i1], data.ra_err[i2], data.dec_err[i2]]
+        )
+        * dist_pc
+    )
+    fam_N, fam_way, fam_high = lambert_families(n_max_rev)
+    parts = _chart_lambert_batch(
+        key,
+        obs4,
+        sig4,
+        data.times[i1],
+        data.times[i2],
+        _mask_epochs(data, (i1, i2)),
+        dist_pc,
+        model,
+        z_max_au,
+        fam_N,
+        fam_way,
+        fam_high,
+        n_per_family,
+    )
+    return _assemble_chart(*parts, return_parts)
+
+
+def chart_admissible_region_fit(
+    data,
+    *,
+    dist_pc,
+    model,
+    key,
+    idx=None,
+    n_particles=100_000,
+    z_max_au=8.0,
+    return_parts=False,
+):
+    """``admissible_region_fit`` weighted in ``ThieleInnesChart`` coordinates.
+
+    Args: as ``admissible_region_fit``; returns as ``chart_lambert_depth_fit``.
+    """
+    valid = np.flatnonzero(np.asarray(data.is_valid, dtype=bool))
+    i1 = int(valid[0]) if idx is None else int(idx)
+    if i1 not in valid:
+        raise ValueError(f"epoch {i1} is not valid")
+    if abs(float(data.corr[i1])) > 1e-12:
+        raise ValueError("conditioned epoch must have zero RA/DEC correlation")
+    obs2 = jnp.array([data.ra[i1], data.dec[i1]]) * dist_pc
+    sig2 = jnp.array([data.ra_err[i1], data.dec_err[i1]]) * dist_pc
+    rho = float(jnp.linalg.norm(obs2))
+    r_floor = max(rho - 5.0 * float(sig2.max()), 1e-3)
+    v_max = float(jnp.sqrt(2.0 * model.mu_hi / r_floor))
+    parts = _chart_ar_batch(
+        key,
+        obs2,
+        sig2,
+        data.times[i1],
+        _mask_epochs(data, (i1,)),
+        dist_pc,
+        model,
+        z_max_au,
+        v_max,
+        n_particles,
+    )
+    return _assemble_chart(*parts, return_parts)

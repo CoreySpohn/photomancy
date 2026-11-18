@@ -7,15 +7,22 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from orbix.system import sky_block_geometry, sky_block_to_frame  # noqa: E402
+from orbix.system import (  # noqa: E402
+    ThieleInnesChart,
+    sky_block_geometry,
+    sky_block_to_frame,
+)
 from orbix.system.rotation import rotate  # noqa: E402
 
+from photomancy.orbit._frame import sky_offsets_arcsec  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import (  # noqa: E402
     MU_SUN,
     TI_PARAM_NAMES,
     TIBasisModel,
     admissible_region_fit,
+    chart_admissible_region_fit,
+    chart_lambert_depth_fit,
     lambert_depth_fit,
     state_to_theta,
 )
@@ -359,3 +366,79 @@ def test_conditioned_pair_validation():
             key=jax.random.PRNGKey(0),
             n_per_family=10,
         )
+
+
+def _parity_parts(legacy, chart):
+    """Common-coordinate comparison of two parts dicts at identical latents."""
+    keep = np.isfinite(np.asarray(legacy["ln_prior"]))
+    np.testing.assert_array_equal(keep, np.isfinite(np.asarray(chart["ln_prior"])))
+    assert keep.sum() > 50
+    like_old = np.asarray(legacy["ln_like"])[keep]
+    like_new = np.asarray(chart["ln_like"])[keep]
+    floor = max(1e-10, 64 * np.finfo(float).eps * np.sum(1.0 + np.abs(like_old)))
+    assert np.max(np.abs(like_new - like_old)) <= floor
+    old = (np.asarray(legacy["ln_prior"]) + np.asarray(legacy["ln_jac"]))[keep]
+    new = (np.asarray(chart["ln_prior"]) + np.asarray(chart["ln_jac"]))[keep]
+    offset = new - old
+    floor = max(1e-10, 64 * np.finfo(float).eps * np.sum(1.0 + np.abs(old)))
+    return keep, float(offset.max() - offset.min()), floor
+
+
+def test_chart_lambert_matches_lambert_weights_and_sky():
+    """Fails if the chart route's weights or orbits differ from the legacy fit.
+
+    Two epochs, one key (hence the same 2 x 1 x 600 latents and families): the
+    support masks agree exactly, the log likelihood matches at the 64 eps floor,
+    log prior + Jacobian differs by one constant over every lane (the chart
+    normalization, not a per-lane term), the chart orbit of each top lane on its
+    reported sheet passes within 6 sigma of both observed sky positions (the
+    latents draw the positions about the data), and both line-of-sight branches
+    occur.
+    """
+    data = _make_data(2)
+    key = jax.random.PRNGKey(0)
+    kwargs = dict(
+        dist_pc=DIST_PC,
+        model=MODEL,
+        key=key,
+        n_per_family=600,
+        n_max_rev=1,
+        return_parts=True,
+    )
+    _, legacy = lambert_depth_fit(data, **kwargs)
+    post, chart = chart_lambert_depth_fit(data, **kwargs)
+    keep, spread, floor = _parity_parts(legacy, chart)
+    assert spread <= floor
+    branch = np.asarray(chart["branch"])[keep]
+    assert set(np.unique(branch)) == {-1, 1}
+    x = np.asarray(post.samples)[keep]
+    top = np.argsort(np.asarray(post.log_weights)[keep])[-8:]
+    for i in top:
+        orbit = ThieleInnesChart(branch=int(branch[i])).to_orbit(
+            jnp.asarray(x[i]), mu_AU3_per_d2=MU_SUN, epoch_d=float(data.times[0])
+        )
+        east, north = sky_offsets_arcsec(orbit, data.times, DIST_PC)
+        np.testing.assert_allclose(east, data.ra, atol=6.0 * SIGMA_AU / DIST_PC)
+        np.testing.assert_allclose(north, data.dec, atol=6.0 * SIGMA_AU / DIST_PC)
+    print("lambert chart parity: like floor", floor, "prior+jac spread", spread)
+
+
+def test_chart_admissible_region_matches_admissible_region():
+    """Fails if the one-epoch chart route drifts from the legacy fit at equal latents.
+
+    One epoch, 10000 particles, one key: masks and likelihood equal, prior plus
+    Jacobian offset by one constant, and the reported sheets take both signs.
+    """
+    data = _make_data(1)
+    kwargs = dict(
+        dist_pc=DIST_PC,
+        model=MODEL,
+        key=jax.random.PRNGKey(4),
+        n_particles=10000,
+        return_parts=True,
+    )
+    _, legacy = admissible_region_fit(data, **kwargs)
+    _, chart = chart_admissible_region_fit(data, **kwargs)
+    keep, spread, floor = _parity_parts(legacy, chart)
+    assert spread <= floor
+    assert set(np.unique(np.asarray(chart["branch"])[keep])) == {-1, 1}

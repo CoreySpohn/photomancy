@@ -5,7 +5,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from photomancy.orbit.projected import astrometric_loss, make_astrometric_evaluator
+from photomancy.orbit.projected import (
+    astrometric_loss,
+    chart_astrometric_loss,
+    make_astrometric_evaluator,
+    make_chart_astrometric_evaluator,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -72,3 +77,40 @@ def test_circular_closed_form():
     np.testing.assert_allclose(
         actual, 0.5 * jnp.sum((prediction / 0.2) ** 2), rtol=2e-15
     )
+
+
+def _to_chart_features(legacy, epoch_d):
+    """Perifocal features to epoch-frame features (same orbits, same prediction)."""
+    e, tp_d, n, ax, ay, bx, by = legacy.T
+    mean_anom = n * (epoch_d - tp_d)
+    ex, ey = e * jnp.cos(mean_anom), -e * jnp.sin(mean_anom)
+    phi = jnp.arctan2(ey, ex)
+    c, s = jnp.cos(phi), jnp.sin(phi)
+    # block_chart = block_peri @ R(phi): perifocal axes sit at -phi from stored axes.
+    a_new = jnp.stack([ax * c - bx * s, ay * c - by * s])
+    b_new = jnp.stack([ax * s + bx * c, ay * s + by * c])
+    return jnp.stack([ex, ey, n, a_new[0], a_new[1], b_new[0], b_new[1]], axis=1)
+
+
+@pytest.mark.parametrize("epoch_d", [0.0, 0.35])
+def test_chart_loss_and_gradient_match_perifocal_loss(epoch_d):
+    """Fails if the epoch-frame loss or its pulled-back gradient drift from perifocal.
+
+    Three orbits, 19 epochs, e in (0.01, 0.98), at two reference epochs. The loss
+    at the mapped features matches the perifocal loss to rtol 1e-12, and the chart
+    gradient pulled back through the feature map (vjp) equals the analytic
+    perifocal gradient to rtol 1e-9 (forward map conditioning, 7 columns).
+    """
+    legacy, times, observed, sigma = inputs(3, 19)
+    chart = _to_chart_features(legacy, epoch_d)
+    want = astrometric_loss(legacy, times, observed, sigma)
+    got = chart_astrometric_loss(chart, times, observed, sigma, epoch_d=epoch_d)
+    np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-12)
+    value, grad_chart = make_chart_astrometric_evaluator()(
+        chart, times, observed, sigma, epoch_d=epoch_d
+    )
+    np.testing.assert_allclose(value, want, rtol=1e-12, atol=1e-12)
+    _, pullback = jax.vjp(lambda f: _to_chart_features(f, epoch_d), legacy)
+    pulled = pullback(grad_chart)[0]
+    _, grad_legacy = make_astrometric_evaluator()(legacy, times, observed, sigma)
+    np.testing.assert_allclose(pulled, grad_legacy, rtol=1e-9, atol=1e-9)

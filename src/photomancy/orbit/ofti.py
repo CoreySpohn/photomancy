@@ -22,7 +22,9 @@ import jax
 import jax.numpy as jnp
 from hwoutils.constants import G
 from orbix.equations.orbit import mean_motion
+from orbix.system import ClassicalChart
 
+from photomancy.orbit._frame import orbit_rows, sky_offsets_arcsec
 from photomancy.orbit.forward import predict_relative_astrometry
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.priors import ecc_distribution
@@ -124,6 +126,31 @@ def _scale_rotate_score(
     return row, ll
 
 
+def _draw_anchor_proposals(key, n, data, ref_idx, ecc_prior):
+    """Draw shapes from their priors and a reference target from its Gaussian error.
+
+    Returns ``(e, cos_i, omega, m_ref, tx, ty)``, each shape ``(n,)``: eccentricity
+    from the named law, ``cos_i`` uniform, argument of periapsis and reference mean
+    anomaly uniform, and the target offset (arcsec) as the observed reference point
+    plus its correlated Gaussian noise.
+    """
+    k_e, k_i, k_w, k_m, k_n1, k_n2 = jax.random.split(key, 6)
+    e = ecc_distribution(ecc_prior).sample(k_e, (n,))
+    cos_i = jax.random.uniform(k_i, (n,), minval=-1.0, maxval=1.0)
+    omega = jax.random.uniform(k_w, (n,), minval=0.0, maxval=_TWO_PI)
+    m_ref = jax.random.uniform(k_m, (n,), minval=0.0, maxval=_TWO_PI)
+    sx = data.ra_err[ref_idx]
+    sy = data.dec_err[ref_idx]
+    rho = data.corr[ref_idx]
+    z1 = jax.random.normal(k_n1, (n,))
+    z2 = jax.random.normal(k_n2, (n,))
+    tx = data.ra[ref_idx] + sx * z1
+    ty = data.dec[ref_idx] + sy * (
+        rho * z1 + jnp.sqrt(jnp.maximum(1.0 - rho**2, 0.0)) * z2
+    )
+    return e, cos_i, omega, m_ref, tx, ty
+
+
 class AbstractConditioner(eqx.Module):
     """Proposes orbits from priors and conditions them on the data.
 
@@ -174,24 +201,11 @@ class ScaleAndRotate(AbstractConditioner):
             Scores include only nonreference valid epochs and are ``-inf``
             outside the truncated support.
         """
-        k_e, k_i, k_w, k_m, k_n1, k_n2 = jax.random.split(key, 6)
-        e = ecc_distribution(ecc_prior).sample(k_e, (n,))
-        cos_i = jax.random.uniform(k_i, (n,), minval=-1.0, maxval=1.0)
-        omega = jax.random.uniform(k_w, (n,), minval=0.0, maxval=_TWO_PI)
+        e, cos_i, omega, m_ref, tx, ty = _draw_anchor_proposals(
+            key, n, data, ref_idx, ecc_prior
+        )
         cos_w = jnp.cos(omega)
         sin_w = jnp.sin(omega)
-        m_ref = jax.random.uniform(k_m, (n,), minval=0.0, maxval=_TWO_PI)
-
-        # Reference-epoch target = observed point + correlated Gaussian noise.
-        sx = data.ra_err[ref_idx]
-        sy = data.dec_err[ref_idx]
-        rho = data.corr[ref_idx]
-        z1 = jax.random.normal(k_n1, (n,))
-        z2 = jax.random.normal(k_n2, (n,))
-        tx = data.ra[ref_idx] + sx * z1
-        ty = data.dec[ref_idx] + sy * (
-            rho * z1 + jnp.sqrt(jnp.maximum(1.0 - rho**2, 0.0)) * z2
-        )
 
         mu = G * Ms
         t_ref = data.times[ref_idx]
@@ -221,6 +235,108 @@ class ScaleAndRotate(AbstractConditioner):
 
         rows, ll = jax.vmap(cond_one)(e, cos_i, cos_w, sin_w, m_ref, tx, ty)
         return rows, ll
+
+
+_CLASSICAL = ClassicalChart()
+
+
+def chart_scale_rotate(
+    e, cos_i, omega, m_ref, tx, ty, *, epoch_d, mu_AU3_per_d2, dist_pc
+):
+    """Orbit of the drawn shape scaled and rotated onto the target, as an orbix orbit.
+
+    The shape ``(e, cos_i, omega, m_ref)`` is built in the classical chart with
+    ``a = 1 AU`` and ``W = 0`` at ``epoch_d``, where its mean anomaly is ``m_ref``.
+    Its epoch sky position fixes the scale ``a`` and the rotation ``W`` that move it
+    onto the target ``(tx, ty)`` (arcsec). The epoch is the chart epoch, so the
+    phase needs no period-dependent bookkeeping.
+
+    At fixed shape the map ``(tx, ty) -> (ln a, W)`` has Jacobian determinant
+    ``1 / rho**2`` with ``rho = hypot(tx, ty)``. Drawing the target from a Gaussian
+    therefore induces the prior ``f(e) rho**2 / e`` against the chart reference
+    measure (``f`` the eccentricity law), not the flat-ln-a prior ``f(e) / e``.
+    """
+    angles = jnp.stack(
+        [
+            jnp.zeros_like(e),
+            jnp.log(e) - jnp.log1p(-e),
+            jnp.arctanh(cos_i),
+            jnp.zeros_like(e),
+            omega,
+            m_ref,
+        ],
+        axis=-1,
+    )
+    unit = _CLASSICAL.to_orbit(angles, mu_AU3_per_d2=mu_AU3_per_d2, epoch_d=epoch_d)
+    position, _ = unit.to_cartesian()
+    x0, y0 = position[..., 0] / dist_pc, position[..., 1] / dist_pc
+    r0 = jnp.maximum(jnp.hypot(x0, y0), 1e-30)
+    log_a = jnp.log(jnp.hypot(tx, ty) / r0)
+    node = (jnp.arctan2(tx, ty) - jnp.arctan2(x0, y0)) % _TWO_PI
+    return _CLASSICAL.to_orbit(
+        angles.at[..., 0].set(log_a).at[..., 3].set(node),
+        mu_AU3_per_d2=mu_AU3_per_d2,
+        epoch_d=epoch_d,
+    )
+
+
+class ChartScaleAndRotate(ScaleAndRotate):
+    """Scale-and-rotate conditioning built on orbix charts.
+
+    Draws and scores as ``ScaleAndRotate`` does, with the orbit constructed by
+    ``chart_scale_rotate``. The induced prior ``f(e) rho**2 / e`` of
+    scale-and-rotate is kept by default. Opt in with ``correct_induced_prior=True``
+    to target the flat-ln-a prior ``f(e) / e`` instead: each score gets
+    ``-2 ln rho`` (the importance weight ``1 / rho**2``), where ``rho`` is the
+    target's separation at the reference epoch. Strict rejection then needs a
+    ``loglike_ref`` bound on that corrected score, ``-2 ln rho_min`` plus the
+    other epochs' bound, and ``rho`` is unbounded below, so any bound is an
+    approximation in the far tail. The default empirical bound is optimistic.
+
+    Attributes:
+        correct_induced_prior: Weight by ``1 / rho**2`` to remove the induced prior.
+    """
+
+    correct_induced_prior: bool = eqx.field(static=True, default=False)
+
+    def sample_and_score(
+        self, key, n, data, ref_idx, Ms, dist_pc, ecc_prior, log_P_range, e_max
+    ):
+        """As ``ScaleAndRotate.sample_and_score``, through ``chart_scale_rotate``."""
+        e, cos_i, omega, m_ref, tx, ty = _draw_anchor_proposals(
+            key, n, data, ref_idx, ecc_prior
+        )
+        mu = G * Ms
+        t_ref = data.times[ref_idx]
+        log_P_lo, log_P_hi = log_P_range
+        score_data = eqx.tree_at(
+            lambda d: d.is_valid, data, data.is_valid.at[ref_idx].set(False)
+        )
+        safe_e = jnp.clip(e, 1e-12, 1.0 - 1e-12)
+
+        def condition(e_i, ci_i, w_i, m_i, tx_i, ty_i):
+            orbit = chart_scale_rotate(
+                e_i,
+                ci_i,
+                w_i,
+                m_i,
+                tx_i,
+                ty_i,
+                epoch_d=t_ref,
+                mu_AU3_per_d2=mu,
+                dist_pc=dist_pc,
+            )
+            ra, dec = sky_offsets_arcsec(orbit, score_data.times, dist_pc)
+            ll = loglike_relative_astrom(ra, dec, score_data)
+            log_P = jnp.log10(orbit.period_d)
+            ll = jnp.where(
+                (log_P >= log_P_lo) & (log_P <= log_P_hi) & (e_i < e_max), ll, -jnp.inf
+            )
+            if self.correct_induced_prior:
+                ll = ll - 2.0 * jnp.log(jnp.hypot(tx_i, ty_i))
+            return orbit_rows(orbit), ll
+
+        return jax.vmap(condition)(safe_e, cos_i, omega, m_ref, tx, ty)
 
 
 def ofti(
