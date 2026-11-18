@@ -18,9 +18,9 @@ from kinematics import (
     predict_stellar_astrometry,
 )
 from skyscapes.physical_model import LambertianPhysicalModel
+from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
-from skyscapes.scene.system import System
 
 from photomancy import (
     AbstractTerm,
@@ -65,7 +65,7 @@ def _system(elements=_ELEMENTS, mass=_MASS, *, epoch=_EPOCH):
         Rp_Rearth=jnp.ones(1),
         physical_model=LambertianPhysicalModel(Ag=jnp.array([0.3])),
     )
-    return System.from_classical(
+    return Scene.from_classical(
         FlatStar(1.0),
         (planet,),
         star_mass_Msun=1.0,
@@ -415,14 +415,14 @@ def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
     term = ProperMotionAnomalyTerm(replace(_new_term("pma").data, n_epochs=n_epochs))
     system = _system()
     calls = []
-    original = System.ephemeris
+    original = Scene.ephemeris
 
     def record(self, time_d, **kwargs):
         calls.append(time_d)
         return original(self, time_d, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(System, "ephemeris", record)
+        patch.setattr(Scene, "ephemeris", record)
         actual, prediction = term(system)
     assert len(calls) == 1
     data = term.data
@@ -630,7 +630,7 @@ def test_photometry_band_planet_epoch_routing():
         for planet, albedo in ((first, 0.2), (second, 0.4))
     )
     a, e, node, inc, peri, mean, epoch_d = _ELEMENTS
-    system = System.from_classical(
+    system = Scene.from_classical(
         FlatStar(1.0),
         planets,
         star_mass_Msun=1.0,

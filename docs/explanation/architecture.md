@@ -19,7 +19,7 @@ flat parameter vector `z`. That function is assembled from three plug-ins: a for
 model that maps a structured scene to predicted data, a likelihood that scores the
 prediction against the observation, and a prior over the fitted parameters.
 
-The scene is an Equinox module, for example a skyscapes `System` or an orbit parameter
+The scene is an Equinox module, for example a skyscapes `Scene` or an orbit parameter
 set, and the parameters being fit are a subset of its array leaves. {py:obj}`~photomancy.core.model.build_scene_logdensity`
 partitions the scene into the fitted leaves and a static remainder, ravels the fitted
 leaves into the flat vector `z` that a sampler manipulates, and wraps a `logdensity`

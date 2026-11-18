@@ -16,9 +16,9 @@ from hwoutils.epoch import Epoch
 from orbix.equations import period_to_sma
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, SkyFrame, System
 from skyscapes.physical_model import LambertianPhysicalModel
+from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
-from skyscapes.scene.system import System as SceneSystem
 
 from photomancy import RelativeAstrometryTerm, SystemLogDensity
 from photomancy.orbit.data import RelativeAstromData
@@ -348,7 +348,7 @@ def test_bare_system_matches_scene(fits):
     """
     _, density, points, _ = fits[0]
     system = density.build(points[1])
-    scene = SceneSystem(
+    scene = Scene(
         FlatStar(1.0),
         (
             Planet(

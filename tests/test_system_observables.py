@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, System
-from skyscapes.scene.system import System as Scene
+from skyscapes.scene import Scene
 from test_system_density import _floor
 from test_system_priors import _orbits, _scale_coordinates, _scene
 from test_terms import _data, _new_term

@@ -1,4 +1,4 @@
-"""Disk fitting: recover a skyscapes System's disk via the scene-as-PyTree engine."""
+"""Disk fitting: recover a skyscapes Scene's disk via the scene-as-PyTree engine."""
 
 import jax
 import pytest
@@ -36,11 +36,11 @@ def _FIT(s):
 def make_system():
     """Import the scene stack only on the worker that executes these disk tests."""
     from skyscapes.disk import GraterDisk
-    from skyscapes.scene import FlatStar, System
+    from skyscapes.scene import FlatStar, Scene
     from zodi import DensityDust
 
     def build(sma=50.0, alpha_in=5.0, alpha_out=-5.0, ksi0=1.0, incl=55.0, pa=30.0):
-        """Star + GraterDisk System; orientation held as arrays so it is fittable."""
+        """Star + GraterDisk Scene; orientation held as arrays so it is fittable."""
         disk = GraterDisk(
             sma_AU=jnp.array(sma),
             alpha_in=jnp.array(alpha_in),
@@ -59,7 +59,7 @@ def make_system():
             n_slices_los=31,
         )
         star = FlatStar(flux_phot_per_nm_m2=1e9)
-        return System.from_classical(
+        return Scene.from_classical(
             star=star,
             planets=(),
             disk=disk,
@@ -94,7 +94,7 @@ def test_build_disk_logdensity_is_finite_and_differentiable(make_system):
     assert z0.shape == (6,)  # sma, alpha_in, alpha_out, ksi0, incl, pa
     assert jnp.isfinite(logdensity(z0))
     assert jnp.all(jnp.isfinite(jax.grad(logdensity)(z0)))
-    # unravel recovers the fitted leaves in System structure
+    # unravel recovers the fitted leaves in Scene structure
     assert float(unravel(z0).disk.sma_AU) == 50.0
 
 

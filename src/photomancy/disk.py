@@ -1,6 +1,6 @@
-"""Fit a skyscapes System's disk through the scene-as-PyTree engine.
+"""Fit a skyscapes Scene's disk through the scene-as-PyTree engine.
 
-photomancy reimplements no disk physics -- the forward is skyscapes' own ``System`` /
+photomancy reimplements no disk physics -- the forward is skyscapes' own ``Scene`` /
 disk render. Only the inference glue lives here: select the fitted leaves, build a
 Gaussian-image likelihood, and delegate to ``build_scene_logdensity``. The forward is an
 injected callable, so the radiance render now and a coronagraph render later
@@ -51,10 +51,10 @@ def build_disk_logdensity(
     forward,
     prior=None,
 ):
-    """Flat logdensity fitting selected ``System`` leaves to a disk image.
+    """Flat logdensity fitting selected ``Scene`` leaves to a disk image.
 
     Args:
-        system: A skyscapes ``System`` (the scene; its selected leaves are the params).
+        system: A skyscapes ``Scene`` (its its selected leaves are the params).
         image: Observed disk image, shape ``(ny, nx)``.
         fit_leaves: ``system -> list[leaf]`` selecting the leaves to fit (e.g.
             ``lambda s: [s.disk.sma_AU, s.midplane_inc_deg, ...]``).
@@ -118,7 +118,7 @@ def default_disk_prior(system):
     with ``disk_fit_leaves`` so the prior's z matches the fit's z.
 
     Args:
-        system: A skyscapes ``System`` whose current disk geometry centers the prior.
+        system: A skyscapes ``Scene`` whose current disk geometry centers the prior.
 
     Returns:
         An ``IndependentPrior`` over the raveled ``disk_fit_leaves`` selection (ndim 6).

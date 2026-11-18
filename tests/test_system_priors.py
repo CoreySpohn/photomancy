@@ -25,8 +25,7 @@ from orbix.system import (
 )
 from scipy import integrate, stats
 from skyscapes.physical_model import LambertianPhysicalModel
-from skyscapes.scene import FlatStar, Planet
-from skyscapes.scene.system import System as Scene
+from skyscapes.scene import FlatStar, Planet, Scene
 
 from photomancy import RadialVelocityTerm, SystemLogDensity
 from photomancy.orbit.data import RVData

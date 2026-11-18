@@ -170,8 +170,7 @@ def scale_problem(
 
     from hwoutils.constants import Rearth2AU
     from skyscapes.physical_model import LambertianPhysicalModel
-    from skyscapes.scene import FlatStar, Planet
-    from skyscapes.scene.system import System as Scene
+    from skyscapes.scene import FlatStar, Planet, Scene
 
     from photomancy.priors import log_uniform_prior
 
