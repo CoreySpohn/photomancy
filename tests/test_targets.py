@@ -4,7 +4,7 @@ import ineedvalidation as vv
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
-from hwoutils.spectral import Transmission
+from hwoutils.spectral import Band, Transmission
 from test_terms import _ELEMENTS, _system
 
 from photomancy import TermLogDensity, load_target
@@ -71,8 +71,8 @@ def test_target_routing_and_composition(tmp_path):
     path = tmp_path / "target.toml"
     path.write_text(_TOML)
     bands = {
-        "L'": Transmission.tophat(3500.0, 100.0),
-        "H": Transmission.tophat(1600.0, 100.0),
+        "L'": Transmission.from_band(Band(3450.0, 3550.0)),
+        "H": Transmission.from_band(Band(1550.0, 1650.0)),
     }
     loaded = load_target(path, epoch=_EPOCH, pixel_data_ids=("img-1",))
     assert loaded.target["name"] == "X"
@@ -98,15 +98,17 @@ def test_target_routing_and_composition(tmp_path):
         loaded.terms()
     with pytest.raises(ValueError, match="L'"):
         loaded.terms(bandpasses={"H": bands["H"]})
-    terms = loaded.terms(select=lambda m: m["system"], bandpasses=bands)
     model = {"system": _system()}
+    terms = loaded.terms(
+        system=model["system"], select=lambda m: m["system"], bandpasses=bands
+    )
     expected = sum(term(model)[0] for term in terms)
     np.testing.assert_allclose(TermLogDensity(terms)(model), expected, rtol=1e-14)
     pending = load_target(path, epoch=_EPOCH, include_pending=True, bandpasses=bands)
     assert pending.band_names == ("L'", "H")
     assert pending.relative_astrometry.times.size == 2
     np.testing.assert_array_equal(pending.photometry.is_upper_limit, [False, True])
-    assert len(pending.terms()) == 2
+    assert len(pending.terms(system=model["system"])) == 2
     assert len(pending.comparisons["astrometry"]) == 1
     assert pending.comparisons["photometry"] == []
 
@@ -154,8 +156,8 @@ def test_target_epoch_invariance(tmp_path, include_pending):
     path = tmp_path / "target.toml"
     path.write_text(_TOML)
     bands = {
-        "L'": Transmission.tophat(3500.0, 100.0),
-        "H": Transmission.tophat(1600.0, 100.0),
+        "L'": Transmission.from_band(Band(3450.0, 3550.0)),
+        "H": Transmission.from_band(Band(1550.0, 1650.0)),
     }
     epochs = (Epoch(2460000.0, 0.125), Epoch(2460100.0, 0.375))
     loaded = [
@@ -173,5 +175,5 @@ def test_target_epoch_invariance(tmp_path, include_pending):
         elements[-1] += epochs[0].days_between(data.epoch)
         system = _system(elements, epoch=data.epoch)
         assert system.epoch is data.epoch
-        values.append([term(system)[0] for term in data.terms()])
+        values.append([term(system)[0] for term in data.terms(system=system)])
     np.testing.assert_allclose(values[0], values[1], rtol=1e-10, atol=0)

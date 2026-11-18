@@ -14,6 +14,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.epoch import Epoch
+from hwoutils.spectral import Quadrature, Transmission
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 
@@ -175,7 +176,8 @@ class ReportTable(eqx.Module):
     Separations have shape (n_modes, P). Finite knots increase strictly;
     padding is a trailing +inf separation with zero rate. Rates are expected
     planet counts per unit linear contrast per second. ``bandpasses`` contains
-    one bandpass per mode, used by the same model reader as PhotometryTerm.
+    one response per mode. Build the matching quadrature on the host, with
+    the system and these responses, as for PhotometryTerm.
     Diffraction scales have shape (n_modes,). ``epoch`` is the static origin of
     the report times; a predictor raises if the model's epoch differs.
     """
@@ -183,7 +185,8 @@ class ReportTable(eqx.Module):
     sep_arcsec: jax.Array = eqx.field(converter=_float64)
     counts_per_contrast_s: jax.Array = eqx.field(converter=_float64)
     lod_arcsec: jax.Array = eqx.field(converter=_float64)
-    bandpasses: tuple
+    quadrature: Quadrature
+    bandpasses: tuple[Transmission, ...]
     epoch: Epoch = eqx.field(static=True)
 
     def __check_init__(self):
@@ -192,6 +195,7 @@ class ReportTable(eqx.Module):
             self.sep_arcsec.ndim != 2
             or self.counts_per_contrast_s.shape != self.sep_arcsec.shape
             or self.lod_arcsec.shape != (self.sep_arcsec.shape[0],)
+            or len(self.quadrature.bands) != self.sep_arcsec.shape[0]
             or len(self.bandpasses) != self.sep_arcsec.shape[0]
             or self.sep_arcsec.shape[1] < 1
         ):
@@ -226,7 +230,12 @@ class TabulatedReportPredictor(AbstractReportPredictor):
         planet_id = jnp.full(clean.time_d.shape, self.planet, jnp.int32)
         ra, dec = _relative_positions(model, clean.time_d, planet_id)
         contrast = _band_contrasts(
-            model, self.table.bandpasses, clean.time_d, clean.mode, planet_id
+            model,
+            self.table.quadrature,
+            self.table.bandpasses,
+            clean.time_d,
+            clean.mode,
+            planet_id,
         )
         radius2 = ra**2 + dec**2
         sep = jnp.sqrt(jnp.where(radius2 > 0, radius2, 1.0))

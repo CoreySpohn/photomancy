@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from hwoutils.epoch import Epoch
+from hwoutils.spectral import Band, Quadrature
 
 from photomancy.orbit.data import PhotometryData, RelativeAstromData
 from photomancy.system_terms import PhotometryTerm, RelativeAstrometryTerm, _identity
@@ -33,11 +34,13 @@ class TargetData:
     epoch: Epoch
     _bandpasses: Mapping | None = field(default=None, repr=False, compare=False)
 
-    def terms(self, select=_identity, bandpasses=None):
+    def terms(self, select=_identity, bandpasses=None, *, system=None):
         """Build terms for present data, using filter-name to bandpass mappings.
 
         ``select`` defaults to the identity, accepting a system directly.
         An explicit mapping overrides the mapping supplied to ``load_target``.
+        Photometric terms require the concrete reference system to split the
+        integration at its spectral breaks before tracing the likelihood.
         Missing photometric filters raise ``ValueError`` naming those filters.
         """
         result = []
@@ -54,8 +57,14 @@ class TargetData:
                 raise ValueError(
                     f"Missing bandpasses for filters: {', '.join(missing)}"
                 )
-            bands = tuple(mapping[name] for name in self.band_names)
-            result.append(PhotometryTerm(self.photometry, bands, select))
+            if system is None:
+                raise ValueError(
+                    "Photometric terms need a system to build the quadrature"
+                )
+            curves = tuple(mapping[name] for name in self.band_names)
+            bands = tuple(Band(curve.low_nm, curve.high_nm) for curve in curves)
+            rule = Quadrature.build(bands, system, *curves)
+            result.append(PhotometryTerm(self.photometry, rule, curves, select))
         return tuple(result)
 
 

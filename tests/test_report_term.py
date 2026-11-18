@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
-from hwoutils.spectral import Transmission
+from hwoutils.spectral import Band, Quadrature, Transmission
 from scipy.special import ndtr
 from scipy.stats import norm
 
@@ -32,9 +32,11 @@ class _Scene(eqx.Module):
     def ephemeris(self, time_d):
         return time_d
 
-    def band_contrasts(self, bandpass, time_d, ephemeris=None):
+    def band_contrasts(self, quadrature, time_d, *, bandpass=None):
         # Mode, planet and time dependence makes all three row indices observable.
-        scale = jnp.mean(bandpass.wavelength_nm) / 600.0
+        scale = (
+            jnp.asarray([b.center_nm for b in quadrature.bands])[:, None, None] / 600.0
+        )
         return self.contrast * scale * jnp.stack((1 + 0.01 * time_d, 2 + 0.01 * time_d))
 
 
@@ -52,11 +54,13 @@ class _ExtraVariance(AbstractReportPredictor):
 @pytest.fixture(scope="module")
 def report_case():
     """Two modes, one padded grid bank and three shared exposure rows."""
-    bands = (Transmission.tophat(600.0, 100.0), Transmission.tophat(900.0, 100.0))
+    edges = (Band(550.0, 650.0), Band(850.0, 950.0))
+    bands = tuple(Transmission.from_band(b) for b in edges)
     table = ReportTable(
         jnp.array([[0.05, 0.25, 0.4, jnp.inf], [0.05, 0.25, jnp.inf, jnp.inf]]),
         jnp.array([[100.0, 200.0, 400.0, 0.0], [300.0, 500.0, 0.0, 0.0]]),
         jnp.array([0.03, 0.05]),
+        Quadrature.build(edges, *bands),
         bands,
         Epoch(),
     )
@@ -203,6 +207,7 @@ def test_surrogate_and_routing(report_case):
         table.sep_arcsec,
         table.counts_per_contrast_s,
         table.lod_arcsec,
+        table.quadrature,
         table.bandpasses,
         system.epoch,
     )
@@ -210,7 +215,12 @@ def test_surrogate_and_routing(report_case):
     with pytest.raises(ValueError, match="epoch"):
         TabulatedReportPredictor(table, 0)(system, term.rows)
     contrasts = jnp.stack(
-        [system.band_contrasts(b, term.rows.time_d) for b in table.bandpasses]
+        [
+            system.band_contrasts(
+                table.quadrature.band(i), term.rows.time_d, bandpass=b
+            )[0]
+            for i, b in enumerate(table.bandpasses)
+        ]
     )
     pos = np.asarray(system.positions(term.rows.time_d))[:, 0]
     rate = np.array(

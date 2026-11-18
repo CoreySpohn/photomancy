@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
-from hwoutils.spectral import Transmission
+from hwoutils.spectral import Band, Quadrature, Transmission
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
@@ -484,7 +484,8 @@ def _new_term(kind, max_n=4):
             is_upper_limit=[False, True, False, True],
             max_n=max_n,
         ),
-        (Transmission.tophat(600.0, 100.0),),
+        Quadrature.build((Band(550.0, 650.0),)),
+        (Transmission.from_band(Band(550.0, 650.0)),),
     )
 
 
@@ -566,9 +567,10 @@ def test_contrast_detection_and_limits():
     Fails if: detections use magnitudes or limits use the wrong tail/unstable CDF.
     """
     system = _system()
-    band = Transmission.tophat(600.0, 100.0)
+    band = Transmission.from_band(Band(550.0, 650.0))
     times = jnp.asarray(_TIMES[:3])
-    model = system.band_contrasts(band, times)[0]
+    rule = Quadrature.build((Band(550.0, 650.0),), system, band)
+    model = system.band_contrasts(rule, times, bandpass=band)[0, 0]
     err = model / 100.0
     observed = model + jnp.array([0.7, 12.0, -40.0]) * err
     data = PhotometryData(
@@ -582,7 +584,7 @@ def test_contrast_detection_and_limits():
     )
     for i in range(3):
         row = jax.tree.map(lambda x, i=i: x[i : i + 1], data)
-        value, prediction = PhotometryTerm(row, (band,))(system)
+        value, prediction = PhotometryTerm(row, rule, (band,))(system)
         np.testing.assert_allclose(prediction, model[i : i + 1], rtol=1e-13)
         if i == 0:
             expected = -0.5 * ((observed[i] - model[i]) / err[i]) ** 2 - np.log(
@@ -641,7 +643,12 @@ def test_photometry_band_planet_epoch_routing():
         epoch_d=epoch_d,
         epoch=Epoch(2451545.0),
     )
-    bands = (Transmission.tophat(500.0, 100.0), Transmission.tophat(900.0, 100.0))
+    edges = (Band(450.0, 550.0), Band(850.0, 950.0))
+    bands = (
+        Transmission.from_band(edges[0]),
+        Transmission([850, 885, 950], [0, 1, 0.3]),
+    )
+    rule = Quadrature.build(edges, system, *bands)
     band_ids, planet_ids = [1, 0, 1, 0], [0, 1, 1, 0]
     data = PhotometryData.from_dmag(
         times=_TIMES,
@@ -650,9 +657,9 @@ def test_photometry_band_planet_epoch_routing():
         band_id=band_ids,
         planet_id=planet_ids,
     )
-    _, prediction = PhotometryTerm(data, bands, select=lambda m: m[0])((system,))
+    _, prediction = PhotometryTerm(data, rule, bands, select=lambda m: m[0])((system,))
     expected = [
-        system.band_contrasts(bands[b], jnp.array([t]))[p, 0]
+        system.band_contrasts(rule.band(b), jnp.array([t]), bandpass=bands[b])[0, p, 0]
         for b, p, t in zip(band_ids, planet_ids, _TIMES, strict=True)
     ]
     np.testing.assert_allclose(prediction, expected, rtol=1e-13, atol=0)
@@ -710,8 +717,8 @@ class _SamplingSystem(eqx.Module):
     def star_radial_velocity(self, time_d):
         return time_d * 0.01
 
-    def band_contrasts(self, bandpass, time_d, ephemeris=None):
-        return jnp.full((1, time_d.size), 1e-10)
+    def band_contrasts(self, quadrature, time_d, *, bandpass=None):
+        return jnp.full((len(quadrature.bands), 1, time_d.size), 1e-10)
 
 
 @pytest.mark.parametrize("kind", ["relative", "stellar", "rv", "pma", "photometry"])

@@ -15,6 +15,7 @@ from typing import Self
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from hwoutils.spectral import Quadrature, Transmission
 from jax.scipy.stats import norm
 from orbix.system import System
 
@@ -59,15 +60,15 @@ def _relative_positions(system, time_d, planet_id):
     return pos[:, planet_id, jnp.arange(time_d.size)]
 
 
-def _band_contrasts(system, bandpasses, time_d, band_id, planet_id):
-    """Read linear contrasts (T,) with one shared ephemeris across bands."""
-    ephemeris = system.ephemeris(time_d=time_d)
-    bands = jnp.stack(
-        [
-            system.band_contrasts(b, time_d=time_d, ephemeris=ephemeris)
-            for b in bandpasses
-        ]
-    )
+def _band_contrasts(system, quadrature, bandpasses, time_d, band_id, planet_id):
+    """Select each row's filter, planet and epoch from a single scene evaluation."""
+
+    def response(nodes_nm):
+        return jnp.stack(
+            [curve(row) for curve, row in zip(bandpasses, nodes_nm, strict=True)]
+        )
+
+    bands = system.band_contrasts(quadrature, time_d, bandpass=response)
     return bands[band_id, planet_id, jnp.arange(time_d.size)]
 
 
@@ -291,21 +292,23 @@ class ProperMotionAnomalyTerm(AbstractTerm):
 class PhotometryTerm(AbstractTerm):
     """Score linear contrasts using Gaussian detections or Gaussian upper limits.
 
-    ``bandpasses`` is a tuple in ``data.band_id`` order. ``select`` maps the
-    model to a system with ``band_contrasts(bandpass, time_d)`` of shape ``(K, T)``.
+    Build ``quadrature`` on the host with the system and filter curves. Its
+    bands and ``bandpasses`` follow ``data.band_id`` order. The selected
+    system returns ``(W, K, T)`` band contrasts.
     Each row selects its own band, planet and epoch. An upper limit contributes
     ``log Phi((limit - prediction) / contrast_err)``. Invalid rows return zero.
     Data ``times`` are days from the system's epoch. Bands share one ephemeris.
     """
 
     data: PhotometryData
-    bandpasses: tuple
+    quadrature: Quadrature
+    bandpasses: tuple[Transmission, ...]
     select: Callable = _identity
 
     def __check_init__(self):
         """Require a bandpass for contrast prediction."""
-        if not self.bandpasses:
-            raise ValueError("PhotometryTerm needs at least one bandpass")
+        if len(self.bandpasses) != len(self.quadrature.bands):
+            raise ValueError("PhotometryTerm needs one bandpass per quadrature band")
 
     def __call__(self, model):
         """Return the log-likelihood and each row's linear contrast, ``(T,)``."""
@@ -321,7 +324,12 @@ class PhotometryTerm(AbstractTerm):
         )
         system = self.select(model)
         prediction = _band_contrasts(
-            system, self.bandpasses, data.times, data.band_id, data.planet_id
+            system,
+            self.quadrature,
+            self.bandpasses,
+            data.times,
+            data.band_id,
+            data.planet_id,
         )
         prediction = jnp.where(valid, prediction, 0.0)
         z = (data.contrast - prediction) / data.contrast_err
