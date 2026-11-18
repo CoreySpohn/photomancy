@@ -1118,8 +1118,10 @@ def test_ti_two_epoch_period_masses_match_lambert_reference():
         n_max_rev=math.ceil(400.0 / math.exp(TI_MODEL.lnP_lo)),
         z_max_au=(1.0 + TI_MODEL.e_max) * a_max,
     )
+    # ThieleInnesChart coordinates start with ln n (rad/day): ln P = ln(2 pi) - ln n.
     reference = _period_masses(
-        np.asarray(post.samples)[:, 1], np.asarray(post.log_weights)
+        np.log(2.0 * np.pi) - np.asarray(post.samples)[:, 0],
+        np.asarray(post.log_weights),
     )
 
     updater = OrbitUpdater(n_particles=8192, n_rungs=32, n_moves=4, record_capacity=2)
