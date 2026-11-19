@@ -73,6 +73,71 @@ def test_plot_corner_posterior_door_requires_problem_and_key():
         plot_corner(posterior)
 
 
+@pytest.mark.medium(
+    reason="prior draws, one draw model and the corner door compile apart, 7 s cold"
+)
+def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
+    """Fails if the Posterior door ignores the weights, the orbit path or the row.
+
+    Two prior draws of a one-planet orbit fit, all the weight on the second: every
+    corner sample is that draw's orbit, read through the fit at ``dynamics.orbits``
+    (period, eccentricity and cos i to rtol 1e-12), and a missing path is refused.
+    """
+    from hwoutils.model_paths import resolve
+    from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
+    from priorities import LogUniform
+    from skyscapes.population import kipping_eccentricity
+    from system_helpers import _orbits, _scene
+
+    from photomancy.infer import Fit, Posterior
+    from photomancy.orbit import posterior_physical
+    from photomancy.viz import plot_corner
+
+    model = _scene(
+        jax.tree.map(lambda x: x[1], _orbits()),
+        mass_Mearth=1.0,
+        radius_AU=1e-4,
+        albedo=0.3,
+    )
+    law = OrbitLaw(
+        period_d=LogUniform(600.0, 1600.0), eccentricity=kipping_eccentricity()
+    )
+    block = OrbitBlock(ClassicalChart(), law, rows=(0,), system="dynamics")
+    fit = Fit(model, {"dynamics.orbits": block}, ())
+    draws = fit.sample_prior(jax.random.key(0), (2,))
+    posterior = Posterior(
+        samples=draws,
+        log_weights=jnp.array([-jnp.inf, 0.0]),
+        log_target=fit.log_density(draws),
+        log_evidence=jnp.array(0.0),
+        log_evidence_se=jnp.array(0.0),
+        fit=fit,
+        info=None,
+        kind="monte_carlo",
+    )
+    orbit = resolve(posterior.model(1), "dynamics.orbits")
+    expected = {
+        "T": orbit.period_d[0],
+        "e": orbit.e[0],
+        "cos_i": jnp.cos(orbit.to_classical()["i_rad"][0]),
+    }
+    physical = posterior_physical(
+        posterior, jax.random.key(1), 16, orbit_path="dynamics.orbits"
+    )
+    for name, value in expected.items():
+        np.testing.assert_allclose(physical[name], value, rtol=1e-12, atol=0)
+    result = plot_corner(
+        posterior,
+        key=jax.random.key(1),
+        n=16,
+        orbit_path="dynamics.orbits",
+        params=["T", "e", "cos_i"],
+    )
+    assert result.axes.shape == (3, 3)
+    with pytest.raises(TypeError, match="orbit_path"):
+        plot_corner(posterior, key=jax.random.key(1))
+
+
 def test_plot_corner_ranges_pin_the_grid():
     """A range pins its column x-limits and off-diagonal row y-limits."""
     from photomancy.viz import plot_corner

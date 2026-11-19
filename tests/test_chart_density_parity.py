@@ -29,7 +29,6 @@ from photomancy.orbit.refit import (  # noqa: E402
     physical_prior_target,
     report_log_weights,
 )
-from photomancy.orbit.updater import FixedMassTarget  # noqa: E402
 
 EPS = np.finfo(float).eps
 DIST_PC = 10.0
@@ -109,101 +108,6 @@ def _lambert_dmag(east, north, away, area_AU2):
 # ---------------------------------------------------------------------------
 # Chart log target
 # ---------------------------------------------------------------------------
-
-
-def _fixed_mass_elements(target):
-    """Elements ``(a, e, cos_i, W, omega, M_ref)`` over e, i, P and phase."""
-    mu = G * float(target.Ms_kg)
-    rows = []
-    for ie, e in enumerate((0.05, 0.3, 0.6, 0.85)):
-        for ip, period in enumerate((80.0, 700.0, 4000.0)):
-            for ic, cos_i in enumerate((-0.8, 0.15, 0.9)):
-                k = ie + 2 * ip + 3 * ic
-                rows.append(
-                    (
-                        (mu * (period / two_pi) ** 2) ** (1.0 / 3.0),
-                        e,
-                        cos_i,
-                        np.mod(0.3 + 0.7 * k, two_pi),
-                        np.mod(1.1 + 0.9 * k, two_pi),
-                        np.mod(0.4 + 1.9 * k, two_pi),
-                    )
-                )
-    # Off support: a period under the lower bound and an eccentricity over e_max.
-    rows.append(((mu * (30.0 / two_pi) ** 2) ** (1.0 / 3.0), 0.3, 0.2, 1.0, 2.0, 3.0))
-    rows.append(((mu * (700.0 / two_pi) ** 2) ** (1.0 / 3.0), 0.95, 0.2, 1.0, 2.0, 3.0))
-    return np.array(rows)
-
-
-def _old_fixed_mass_theta(elements):
-    """Old chart ``(ln a, sqrt(e) cos w, sqrt(e) sin w, cos i, W, w + M_ref)``."""
-    a, e, cos_i, node, omega, m_ref = elements
-    return jnp.array(
-        [
-            jnp.log(a),
-            jnp.sqrt(e) * jnp.cos(omega),
-            jnp.sqrt(e) * jnp.sin(omega),
-            cos_i,
-            jnp.mod(node, two_pi),
-            jnp.mod(omega + m_ref, two_pi),
-        ]
-    )
-
-
-def _old_fixed_mass_terms(theta, target):
-    """Terms of the old normalized fixed-mass density in its own chart, ``(5,)``.
-
-    ``-log(ln a range)``, the truncated Beta term, ``log 2`` of the ``(h, k)``
-    Jacobian, ``-3 log 2 pi`` for W, omega and M_ref, and ``-log 2`` for cos i.
-    """
-    mu = G * float(target.Ms_kg)
-    ln_a = [
-        np.log(mu * (float(p) / two_pi) ** 2) / 3.0
-        for p in (target.period_lo_day, target.period_hi_day)
-    ]
-    e = theta[1] ** 2 + theta[2] ** 2
-    e_max = float(target.e_max)
-    log_e = stats.beta.logpdf(e, BETA_A, BETA_B) - np.log(
-        special.betainc(BETA_A, BETA_B, e_max)
-    )
-    return np.array(
-        [
-            -np.log(ln_a[1] - ln_a[0]),
-            log_e,
-            np.log(2.0),
-            -3.0 * np.log(two_pi),
-            -np.log(2.0),
-        ]
-    ), (ln_a[0] <= theta[0] <= ln_a[1]) and e < e_max and abs(theta[3]) <= 1.0
-
-
-def test_fixed_mass_chart_density_equals_the_old_density_pulled_back():
-    """Fails if the prior and chart volume differ from the old fixed-mass density.
-
-    The old density is normalized in ``(ln a, sqrt(e) cos w, sqrt(e) sin w, cos i, W,
-    w + M_ref)``. Pulled into the new eccentricity-vector chart by the log absolute
-    determinant (automatic differentiation of the new-to-old coordinate map) it is
-    the new density, both normalized, so there is no additive constant: the two
-    agree at the floor over e from 0.05 to 0.85, three periods, three inclinations
-    and several phases, and both are minus infinity off the support.
-    """
-    target = FixedMassTarget(dist_pc=DIST_PC)
-    elements = _fixed_mass_elements(target)
-    x = jax.vmap(target.from_physical)(jnp.asarray(elements))
-
-    def old_theta(point):
-        return _old_fixed_mass_theta(target.to_physical(point))
-
-    theta = np.asarray(jax.vmap(old_theta)(x))
-    log_det = np.asarray(jnp.linalg.slogdet(jax.vmap(jax.jacfwd(old_theta))(x))[1])
-    want, floors = [], []
-    for row, ld in zip(theta, log_det, strict=True):
-        terms, support = _old_fixed_mass_terms(row, target)
-        want.append(terms.sum() + ld if support else -np.inf)
-        floors.append(_floor(terms, ld))
-    got = jax.vmap(target.log_prior)(x)
-    assert np.isneginf(want[-2]) and np.isneginf(want[-1])
-    _check("fixed-mass chart log prior", got, want, floors)
 
 
 def _ti_theta(elements, t_ref=0.0):
@@ -355,47 +259,6 @@ def _increments(target, theta, ra_pred, dec_pred, measured, truth):
 
 def _truth_orbit():
     return dict(a=1.8, e=0.35, cos_i=0.4, node=1.2, omega=2.4, M0=0.9)
-
-
-def test_fixed_mass_likelihood_increments_equal_the_old_ones():
-    """Fails if the chart orbit predicts astrometry unlike the old forward model.
-
-    Five correlated records (two padded rows ignored) are scored at perturbed
-    versions of the orbit that made them; the old prediction is the independent
-    Kepler solve of the classical elements with ``tp = t_ref - M_ref / n`` and the
-    old likelihood is SciPy's bivariate Gaussian. Each record's increment, and the
-    ``(rest, selected)`` split the updater uses, match at the floor.
-    """
-    target = FixedMassTarget(dist_pc=DIST_PC, t_ref_day=25.0)
-    mu = G * float(target.Ms_kg)
-    truth = _truth_orbit()
-    n_true = np.sqrt(mu / truth["a"] ** 3)
-    east, north, _ = _sky(
-        TIMES, truth["a"], truth["e"], truth["cos_i"], truth["node"], truth["omega"],
-        n_true, 25.0 - truth["M0"] / n_true,
-    )  # fmt: skip
-    truth_xy = (east / DIST_PC, north / DIST_PC)
-    worst, worst_floor = 0.0, 0.0
-    for da, de, dc, dw, dm in (
-        (0.0, 0.0, 0.0, 0.0, 0.0),
-        (0.02, 0.03, 0.02, 0.02, 0.03),
-        (-0.04, -0.05, 0.03, -0.03, 0.04),
-        (0.06, 0.0, -0.04, 0.05, -0.05),
-    ):
-        a, e = truth["a"] * (1.0 + da), truth["e"] + de
-        cos_i, node = truth["cos_i"] + dc, truth["node"] + dw
-        omega, m_ref = truth["omega"] + dw, truth["M0"] + dm
-        x = target.from_physical(jnp.array([a, e, cos_i, node, omega, m_ref]))
-        n = np.sqrt(mu / a**3)
-        ra_e, dec_n, _ = _sky(TIMES, a, e, cos_i, node, omega, n, 25.0 - m_ref / n)
-        _, measured = _records(*truth_xy, 5)
-        for k, want, got, (_, selected), floor in _increments(
-            target, x, ra_e / DIST_PC, dec_n / DIST_PC, measured, truth_xy
-        ):
-            assert abs(got - want) <= floor, (k, got - want, floor)
-            assert abs(selected - want) <= floor
-            worst, worst_floor = max(worst, abs(got - want)), max(worst_floor, floor)
-    print(f"fixed-mass increments: max_error={worst:.3g} floor={worst_floor:.3g}")
 
 
 def test_extended_thiele_innes_likelihood_increments_equal_the_old_ones():

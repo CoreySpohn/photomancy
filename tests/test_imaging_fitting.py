@@ -75,6 +75,38 @@ def test_loglike_null_gradient_finite_on_real_padded_curve():
     assert jnp.isfinite(grad)
 
 
+def test_null_epochs_penalize_only_a_planet_bright_enough_to_see():
+    """Fails if a null epoch penalizes the wrong planets or pushes the wrong way.
+
+    One null epoch of an all-null dMag container (a 1e-10 contrast limit, dMag 25,
+    from 0.2 to 1 arcsec): a planet 5 mag brighter than the limit at 0.2 arcsec is
+    penalized by more than 10 nats; a planet 5 mag fainter, or a bright one inside
+    the inner or beyond the outer working angle, by less than 0.01. At the limit the
+    gradient in dMag is positive (fainter is more likely).
+    """
+    contrast = jnp.array([[1e-8, 1e-9, 1e-10, 1e-10, 1e-10]])
+    nulls = ImagingData.from_detections_and_nulls(
+        jnp.zeros(0),
+        jnp.zeros(0),
+        jnp.zeros(0),
+        jnp.zeros((0, 5)),
+        jnp.zeros((0, 5)),
+        jnp.array([0.0]),
+        jnp.array([[0.05, 0.1, 0.2, 0.5, 1.0]]),
+        -2.5 * jnp.log10(contrast),
+        max_n=1,
+        max_pts=5,
+    )
+
+    def score(separation, dmag):
+        return loglike_imaging(jnp.array([separation]), jnp.array([dmag]), nulls)
+
+    assert score(0.2, 20.0) < -10.0
+    for separation, dmag in ((0.2, 30.0), (5.0, 15.0), (0.01, 15.0)):
+        assert score(separation, dmag) > -0.01, (separation, dmag)
+    assert jax.grad(score, argnums=1)(0.2, 25.0) > 0.0
+
+
 def test_nulldata_pad_produces_max_sized_valid_container():
     """NullData.pad pads epochs + grids to MAX with a correct validity mask."""
     epochs = jnp.array([100.0, 500.0, 900.0])
@@ -156,14 +188,14 @@ def test_joint_astrom_imaging_fit_recovers_period():
 
     from orbix.system import ClassicalChart
     from priorities import LogUniform
-    from test_system_priors import BOUNDS, _scene
+    from system_helpers import BOUNDS, _scene
 
     from photomancy import DMagTerm, RelativeAstrometryTerm
     from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
     from photomancy.orbit.init import find_init
     from photomancy.orbit.laplace import map_laplace_mixture_fit
+    from photomancy.orbit.system_density import ScalarCoordinate
     from photomancy.priors import FactorizedOrbitPrior
-    from photomancy.system_density import ScalarCoordinate
 
     chart = ClassicalChart()
     density = build_chart_logdensity(

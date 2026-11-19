@@ -10,68 +10,35 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
-from hwoutils.constants import G, Mearth2kg, Msun2kg, Rearth2AU, two_pi
+from hwoutils.constants import Msun2kg, two_pi
 from hwoutils.epoch import Epoch
-from orbit_fit import ecc_law
-from orbix.equations import period_to_sma
 from orbix.system import (
-    Body,
-    CartesianChart,
     ClassicalChart,
-    EccentricityVectorChart,
     FrameChart,
-    SkyFrame,
-    System,
 )
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
 from scipy import integrate, stats
-from skyscapes.physical_model import LambertianPhysicalModel
-from skyscapes.scene import FlatStar, Planet, Scene
+from skyscapes.scene import FlatStar, Scene
+from system_helpers import BOUNDS, _orbits, ecc_law
 
-from photomancy import RadialVelocityTerm, SystemLogDensity
-from photomancy.measurements import RVData
 from photomancy.orbit.inference import (
     build_chart_logdensity,
     orbit_chart_log_volume,
 )
-from photomancy.orbit.updater import FixedMassTarget
+from photomancy.orbit.system_density import ScalarCoordinate, SystemLogDensity
 from photomancy.priors import (
     LOG_HAAR,
     PopulationPrior,
     orbit_log_prior,
 )
-from photomancy.system_density import ScalarCoordinate
 
 ATOL = 1e-10
-BOUNDS = {
-    "mass_Mearth": (0.01, 1e4),
-    "radius_AU": (1e-5, 10**-2.5),
-    "albedo": (0.01, 1.0),
-}
 
 
 def _check(label, actual, expected):
     error = np.max(np.abs(np.asarray(actual) - np.asarray(expected)))
     print(f"{label}: max_error={error:.4g} atol={ATOL:g}")
     np.testing.assert_allclose(actual, expected, rtol=0, atol=ATOL)
-
-
-def _orbits(mass_Mearth=0.0):
-    mass_kg = Msun2kg + Mearth2kg * mass_Mearth
-    period_d = jnp.array([75.0, 320.0, 1130.0, 3800.0])
-    x = jnp.stack(
-        [
-            jnp.log(period_to_sma(period_d, mass_kg)),
-            jnp.array([-3.1, -1.6, -0.2, 1.4]),
-            jnp.array([1.0, 0.2, -0.4, -1.2]),
-            jnp.array([0.2, 1.7, 3.4, 5.6]),
-            jnp.array([0.6, 2.1, 3.1, 4.4]),
-            jnp.array([0.7, 1.6, 4.2, 5.7]),
-        ],
-        axis=-1,
-    )
-    return ClassicalChart().to_orbit(x, mu_AU3_per_d2=G * mass_kg)
 
 
 # Frozen eccentricity-site log densities of the retired NumPyro laws at _orbits().e.
@@ -96,28 +63,6 @@ _ECC_LOG_PROB = {
         -2.409595213299103,
     ],
 }
-# Frozen log density and its gradient at the second point of the sampled-jitter test:
-# the retired unconstrained NumPyro joint plus the log determinant of the map from the
-# chart point to its unconstrained sites.
-_OLD_JOINT = [
-    -11.983164735105953,
-    -15.124466212443133,
-    -18.04801104334017,
-    -21.734194578606996,
-]
-_OLD_GRAD = [
-    -4.540111035731708,
-    -1.400878134936334,
-    9.818543780126888,
-    2.424568770699403,
-    -1.5065999591547925,
-    5.900001510120951,
-    -0.027998079921538157,
-    4.6066979547215587e-17,
-    5.94982916365241e-17,
-    0.8227612236659537,
-    -0.23563430122799972,
-]
 
 
 def test_eccentricity_sites_and_conditional_cdfs():
@@ -217,66 +162,6 @@ def test_independent_nuisance_inputs():
     )
 
 
-def test_fixed_mass_reference_across_charts():
-    """Remove each chart's Jacobian at identical orbits, including truncation.
-
-    The reference is the closed-form fixed-mass element density against
-    e de d(cos i) dW dw dM d(ln a): the truncated Beta law of e over e, 1/2 for
-    cos i, 1/(2 pi) per angle and 1/ln(a_hi/a_lo), written with SciPy and no
-    photomancy code. The updater's fixed-mass target is one more chart of it.
-    """
-    target = FixedMassTarget(e_max=0.7)
-    orbits = _orbits()
-    e = np.asarray(orbits.e)
-    ln_a_range = 2.0 / 3.0 * np.log(5000.0 / 50.0)
-    reference = (
-        stats.beta.logpdf(e, 0.867, 3.03)
-        - stats.beta.logcdf(0.7, 0.867, 3.03)
-        - np.log(e)
-        - np.log(2.0)
-        - 3.0 * np.log(two_pi)
-        - np.log(ln_a_range)
-    )
-    reference = np.where(e < 0.7, reference, -np.inf)
-    assert np.isneginf(reference[-1])
-    point = EccentricityVectorChart().from_orbit(orbits)
-    fixed = jax.vmap(target.log_prior)(point)
-    assert np.isneginf(fixed[-1])
-    _check(
-        "FixedMassTarget",
-        fixed[:-1]
-        - jax.vmap(EccentricityVectorChart().log_volume)(point)[:-1]
-        - LOG_HAAR,
-        reference[:-1],
-    )
-    for chart in (
-        ClassicalChart(),
-        EccentricityVectorChart(),
-        CartesianChart(scale_AU=2.1),
-        FrameChart(),
-        FrameChart(gauge_sd=None),
-    ):
-        density = build_chart_logdensity(
-            chart,
-            lambda o: o,
-            partial(
-                orbit_log_prior,
-                period_range_d=(50, 5000),
-                eccentricity=TruncatedDistribution(ecc_law("kipping13"), high=0.7),
-            ),
-            star_mass_kg=Msun2kg,
-        )
-        params = {"orbit": chart.from_orbit(orbits)}
-        values, aux = eqx.filter_jit(eqx.filter_vmap(density.value_and_aux))(params)
-        assert aux == {"term_values": (), "predictions": ()}
-        assert np.isneginf(values[-1])
-        physical = values - jax.vmap(density.log_volume)(params)
-        _check(type(chart).__name__, physical[:-1], reference[:-1])
-        if isinstance(chart, (ClassicalChart, EccentricityVectorChart)):
-            outside = params["orbit"][0].at[-1].add(two_pi)
-            assert np.isneginf(density({"orbit": outside}))
-
-
 def test_frame_gauge_integral():
     """Integrate r^3 dr dS3 over both quaternion signs at zero disk offset."""
     for sd in (None, 0.1, 0.9):
@@ -294,107 +179,6 @@ def test_frame_gauge_integral():
             epsrel=1e-12,
         )
         _check(f"Frame gauge sd={sd}", area / (8 * np.pi**2), 1.0)
-
-
-def _scene(orbit, *, mass_Mearth, radius_AU, albedo):
-    dynamics = System(
-        Body(1.0),
-        Body(jnp.atleast_1d(mass_Mearth * Mearth2kg / Msun2kg)),
-        jax.tree.map(lambda x: x[None], orbit),
-        SkyFrame(10.0, Epoch()),
-    )
-    return Scene(
-        FlatStar(1.0),
-        (
-            Planet(
-                Rp_Rearth=jnp.atleast_1d(radius_AU / Rearth2AU),
-                physical_model=LambertianPhysicalModel(Ag=jnp.atleast_1d(albedo)),
-            ),
-        ),
-        dynamics,
-    )
-
-
-def _scale_coordinates(jitter_scale):
-    """Physical measures for the three body scales and instrument jitters."""
-    scalars = {
-        name: ScalarCoordinate(LogUniform(*bounds)) for name, bounds in BOUNDS.items()
-    }
-    scalars["jitter_m_per_s"] = ScalarCoordinate(HalfNormal(jitter_scale))
-    return scalars
-
-
-@pytest.mark.medium
-def test_old_unconstrained_joint_with_sampled_jitter():
-    """Fails if the pulled-back joint or gradient departs from the frozen reference."""
-    chart = CartesianChart(scale_AU=1.6)
-    data = RVData(
-        times=jnp.array([0.0, 31.0, 77.0, 103.0, 0.0]),
-        rv=jnp.array([0.4, -0.2, 0.1, 0.3, 0.0]),
-        rv_err=jnp.ones(5),
-        inst_ids=jnp.array([0, 1, 0, 1, 0]),
-        n_inst=2,
-        is_valid=jnp.array([True, True, True, True, False]),
-    )
-    scalars = _scale_coordinates(0.8)
-    poisoned = eqx.tree_at(
-        lambda d: (d.rv, d.rv_err, d.times, d.inst_ids),
-        data,
-        (
-            data.rv.at[-1].set(jnp.nan),
-            data.rv_err.at[-1].set(jnp.nan),
-            data.times.at[-1].set(jnp.nan),
-            data.inst_ids.at[-1].set(99),
-        ),
-    )
-    density = build_chart_logdensity(
-        chart,
-        _scene,
-        lambda s: orbit_log_prior(
-            s.dynamics.orbits, period_range_d=(10, 1e4), eccentricity=ecc_law("disk")
-        )[0],
-        star_mass_kg=Msun2kg,
-        terms=(RadialVelocityTerm(poisoned),),
-        scalars=scalars,
-        body_inputs=("radius_AU", "albedo"),
-        term_inputs={0: ("jitter_m_per_s",)},
-    )
-
-    def unpack(x):
-        return dict(
-            orbit=x[:6],
-            mass_Mearth=x[6],
-            radius_AU=x[7],
-            albedo=x[8],
-            jitter_m_per_s=x[9:],
-        )
-
-    mass = jnp.array([0.5, 2.0, 8.0, 13.0])
-    points = jnp.column_stack(
-        (
-            chart.from_orbit(_orbits(mass)),
-            jnp.log(mass),
-            jnp.log(jnp.linspace(0.0001, 0.001, 4)),
-            jnp.log(jnp.linspace(0.1, 0.7, 4)),
-            jnp.log(jnp.linspace(0.1, 0.6, 4)),
-            jnp.log(jnp.linspace(1.0, 0.3, 4)),
-        )
-    )
-
-    def compare(x):
-        value, aux = density.value_and_aux(unpack(x))
-        return value, aux["predictions"][0][-1]
-
-    value, masked = eqx.filter_jit(jax.vmap(compare))(points)
-    old_value = jnp.asarray(_OLD_JOINT)
-    np.testing.assert_array_equal(masked, 0.0)
-    _check("full old z pullback", value, old_value)
-    x = points[1]
-    new_grad = jax.jit(jax.grad(lambda x: density(unpack(x))))(x)
-    old_grad = jnp.asarray(_OLD_GRAD)
-    np.testing.assert_allclose(new_grad, old_grad, rtol=1e-9, atol=ATOL)
-    print(f"pulled-back gradient: max_error={np.max(np.abs(new_grad - old_grad)):.4g}")
-    assert np.isneginf(eqx.filter_jit(density)(unpack(x.at[:6].set(0.0))))
 
 
 def test_fixed_count_population_intensity():

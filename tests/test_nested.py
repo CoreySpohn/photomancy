@@ -9,14 +9,11 @@ import tensorflow_probability.substrates.jax as tfp
 from hwoutils.constants import Msun2kg
 from jaxctx import ScopedDict
 from jaxctx import transform as transform_model
-from orbit_fit import ecc_law
 from orbix.system import EccentricityVectorChart, FrameChart
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
-from test_system_density import _floor
-from test_system_priors import BOUNDS, _scene
-from test_terms import _new_term
+from system_helpers import BOUNDS, _floor, _new_term, _scene, ecc_law, rv_normalization
+from term_utils import sampled_jitter_rv
 
-from photomancy import RadialVelocityTerm, ScalarCoordinate
 from photomancy.infer.backends import JaxnsBackend, build_scene_nested_model
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 from photomancy.orbit.nested import (
@@ -24,6 +21,7 @@ from photomancy.orbit.nested import (
     build_chart_nested_model,
     orbit_nested_sampling,
 )
+from photomancy.orbit.system_density import ScalarCoordinate
 from photomancy.priors import FactorizedOrbitPrior
 
 # jaxns requires x64; make the standalone file independent of other tests.
@@ -152,7 +150,7 @@ def _nested_problem(chart, ecc_prior, rv=None, e_max=1.0):
         _scene,
         prior,
         star_mass_kg=Msun2kg,
-        terms=() if rv is None else (RadialVelocityTerm(rv),),
+        terms=() if rv is None else (sampled_jitter_rv(rv),),
         scalars=scalars,
         body_inputs=("radius_AU", "albedo"),
         term_inputs={} if rv is None else {0: ("jitter_m_per_s",)},
@@ -497,6 +495,8 @@ def test_chart_nested_cube_matches_frozen_reference(name):
     ) % 0.94 + 0.02
     actual, likelihood, joint, logdet = eqx.filter_jit(jax.vmap(compare))(points)
     expected, reference = (jnp.asarray(x) for x in _FROZEN_CUBE[name])
+    # The frozen likelihood predates the normalization of the flat-offset RV marginal.
+    reference = reference + rv_normalization(rv)
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
     tolerances = np.array(
         [_floor(*row) for row in zip(reference, likelihood, joint, logdet, strict=True)]

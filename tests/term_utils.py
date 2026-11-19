@@ -2,7 +2,7 @@
 
 import jax.numpy as jnp
 
-from photomancy.measurements import DMagTerm, ImagingData
+from photomancy.measurements import DMagTerm, ImagingData, RadialVelocityTerm
 
 
 def both(term, model, **keywords):
@@ -24,3 +24,17 @@ def null_dmag_term(null):
             snr_thresh=null.snr_thresh,
         )
     )
+
+
+def sampled_jitter_rv(data):
+    """An RV likelihood whose jitter is the sampled ``jitter_m_per_s`` coordinate.
+
+    A caller-defined term for a density that binds the jitter by keyword: it builds
+    the ``RadialVelocityTerm`` with that jitter and returns ``(value, prediction)``.
+    """
+
+    def term(system, *, jitter_m_per_s):
+        rv = RadialVelocityTerm(data, jitters=jitter_m_per_s)
+        return rv(system), rv.predict(system)
+
+    return term

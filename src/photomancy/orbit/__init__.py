@@ -2,9 +2,8 @@
 
 The orbit-domain plug-ins for the photomancy inference engine: one-planet chart
 problems every backend consumes, blind initializers (Thiele-Innes grid search, OFTI,
-adaptive importance sampling), the MAP + Laplace / EIG machinery, and a fixed-capacity
-sequential updater (``OrbitUpdater``) that assimilates one record at a time. Data,
-likelihoods and terms live in ``photomancy.measurements``. Built on orbix geometry
+adaptive importance sampling) and the MAP + Laplace / EIG machinery. Data, likelihoods
+and terms live in ``photomancy.measurements``. Built on orbix geometry
 (``orbix.equations``, ``orbix.kepler``, ``orbix.system``).
 """
 
@@ -14,6 +13,7 @@ from photomancy.orbit.diagnostics import (
     mode_scalars,
     mode_summary,
     orbits_from_samples,
+    posterior_physical,
     sample_physical,
 )
 from photomancy.orbit.eig import (
@@ -42,7 +42,6 @@ from photomancy.orbit.laplace import (
     map_laplace_fit,
     map_laplace_mixture_fit,
 )
-from photomancy.orbit.migration import migrate_sky_convention
 from photomancy.orbit.nested import (
     OrbitPriorTransform,
     build_chart_nested_model,
@@ -57,33 +56,17 @@ from photomancy.orbit.thiele_innes import (
     thiele_innes_fit,
     thiele_innes_grid_search,
 )
-from photomancy.orbit.updater import (
-    AbstractUpdateTarget,
-    ConjugateGaussianTarget,
-    FixedMassTarget,
-    OrbitUpdater,
-    ThieleInnesTarget,
-    UpdaterBelief,
-    UpdaterDiagnostics,
-    UpdaterRecord,
-    UpdaterStatus,
-)
 
 __all__ = [
     # OFTI (Orbits For The Impatient) rejection sampler
     "AbstractConditioner",
     # Grid-search (adaptive importance sampling)
     "AbstractGridStrategy",
-    # Fixed-capacity sequential updater
-    "AbstractUpdateTarget",
     "AdaptiveImportanceSampler",
     "ChartOrbitProblem",
     "CompletedProposal",
     "Completion",
-    "ConjugateGaussianTarget",
-    "FixedMassTarget",
     "OrbitPriorTransform",
-    "OrbitUpdater",
     "ParamBounds",
     "ScaleAndRotate",
     "ScaleRotateProposal",
@@ -91,11 +74,6 @@ __all__ = [
     # Thiele-Innes fitter
     "TIFitResult",
     "ThetaPrior",
-    "ThieleInnesTarget",
-    "UpdaterBelief",
-    "UpdaterDiagnostics",
-    "UpdaterRecord",
-    "UpdaterStatus",
     # Bayesian experimental design
     # Exact few-epoch fitters
     "admissible_region_fit",
@@ -112,7 +90,6 @@ __all__ = [
     "make_astrometric_evaluator",
     "map_laplace_fit",
     "map_laplace_mixture_fit",
-    "migrate_sky_convention",
     "mode_observables",
     "mode_scalars",
     "mode_summary",
@@ -121,6 +98,7 @@ __all__ = [
     "orbit_nested_sampling",
     "orbit_tempered_smc",
     "orbits_from_samples",
+    "posterior_physical",
     "sample_physical",
     "thiele_innes_fit",
     "thiele_innes_grid_search",

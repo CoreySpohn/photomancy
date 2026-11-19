@@ -135,7 +135,7 @@
     ]
    ],
    "RadialVelocityTerm": [
-    -482845.4213644053,
+    -482844.72821722477,
     [
      1558.2644878798476,
      1491.193110634697,
@@ -170,7 +170,7 @@
     ]
    ],
    "RadialVelocityTerm": [
-    -2005690.5518099982,
+    -2005689.8586628176,
     [
      -2270.145498166645,
      394.90223103168273,
@@ -205,7 +205,7 @@
     ]
    ],
    "RadialVelocityTerm": [
-    -443214.5815166282,
+    -443213.88836944767,
     [
      1338.094768638501,
      1290.5824828515815,
@@ -240,7 +240,7 @@
     ]
    ],
    "RadialVelocityTerm": [
-    -1007869.4441694572,
+    -1007868.7510222766,
     [
      1921.969992044309,
      1312.3404073614624,
@@ -275,7 +275,7 @@
     ]
    ],
    "RadialVelocityTerm": [
-    -49469.10379316725,
+    -49468.41064598669,
     [
      234.16916900393377,
      644.7486444141683,
@@ -310,7 +310,7 @@
     ]
    ],
    "RadialVelocityTerm": [
-    -442482.13514632476,
+    -442481.4419991442,
     [
      1549.3997304860338,
      1499.2164675946312,
@@ -701,5 +701,5 @@
    ]
   }
  ],
- "provenance": "Term values and predictions at the golden chart points of tests/infer/test_fit.py, computed on photomancy fit-posterior 79b86ba (before the measurements package) with hwoutils ac2f6ae and orbix 4a8c3fb. g3 also holds DMagTerm and NullTerm on the 4-epoch imaging data of tests/measurements/golden_systems.py."
+ "provenance": "Term values and predictions at the golden chart points of tests/infer/test_fit.py, computed on photomancy fit-posterior 79b86ba (before the measurements package) with hwoutils ac2f6ae and orbix 4a8c3fb. g3 also holds DMagTerm and NullTerm on the 4-epoch imaging data of tests/measurements/golden_systems.py. The radial-velocity values (g2) add 0.5 sum_j log N_j = log 2, the normalization of the flat-offset marginal over its two populated instruments of two epochs each."
 }

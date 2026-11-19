@@ -30,7 +30,6 @@ from photomancy.measurements import (
     TargetData,
     load_target,
 )
-from photomancy.system_density import ScalarCoordinate, SystemLogDensity
 
 try:
     from photomancy._version import __version__
@@ -49,9 +48,7 @@ __all__ = [
     "ReportRows",
     "ReportTable",
     "ReportTerm",
-    "ScalarCoordinate",
     "StellarAstrometryTerm",
-    "SystemLogDensity",
     "TabulatedReportPredictor",
     "TargetData",
     "__version__",

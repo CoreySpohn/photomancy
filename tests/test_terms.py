@@ -17,10 +17,12 @@ from kinematics import (
     predict_stellar_astrometry,
 )
 from optixstuff.spectral import Band, Quadrature, Transmission
+from scipy import integrate
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
+from system_helpers import _TIMES, _data, _new_term
 from term_utils import both
 
 from photomancy import (
@@ -28,7 +30,6 @@ from photomancy import (
     ProperMotionAnomalyTerm,
     RadialVelocityTerm,
     RelativeAstrometryTerm,
-    StellarAstrometryTerm,
 )
 from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
 from photomancy.infer import (
@@ -38,10 +39,8 @@ from photomancy.infer import (
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.measurements import (
     PhotometryData,
-    PMAnomalyData,
     RelativeAstromData,
     RVData,
-    StellarAstromData,
     loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
@@ -52,7 +51,6 @@ from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
 
 # a [AU], e, node [rad], inclination [rad], periapsis [rad], M0 [rad], t0 [day].
 _ELEMENTS = np.array([1.7, 0.31, 1.1, 0.8, 0.6, 0.4, 24.0])
-_TIMES = np.array([31.0, 120.0, 290.0, 470.0])
 
 
 class _Holder(eqx.Module):
@@ -87,18 +85,6 @@ def _system(elements=_ELEMENTS, mass=_MASS, *, epoch=_EPOCH):
         epoch_d=epoch_d,
         epoch=epoch,
         order=(0,),
-    )
-
-
-def _data(max_n=None):
-    """Nonzero residuals and unequal correlated errors exercise every element."""
-    return RelativeAstromData.from_sep_pa(
-        times=_TIMES,
-        sep=[0.13, 0.11, 0.09, 0.15],
-        sep_err=[0.004] * 4,
-        pa_deg=[45.0, 120.0, 210.0, 310.0],
-        pa_err_deg=[1.0] * 4,
-        max_n=max_n,
     )
 
 
@@ -448,57 +434,6 @@ def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
 
 
-def _new_term(kind, max_n=4):
-    """Small observations with residuals and nontrivial covariance/instruments."""
-    if kind == "stellar":
-        return StellarAstrometryTerm(
-            StellarAstromData.pad(
-                times=_TIMES,
-                ra=[1e-4, -2e-4, 3e-4, 2e-4],
-                dec=[-1e-4, 1e-4, 2e-4, -2e-4],
-                ra_err=[5e-5] * 4,
-                dec_err=[8e-5] * 4,
-                corr=[0.2, -0.3, 0.1, 0.0],
-                max_n=max_n,
-            )
-        )
-    if kind == "rv":
-        return RadialVelocityTerm(
-            RVData.pad(
-                times=_TIMES,
-                rv=[2.0, -4.0, 8.0, 1.0],
-                rv_err=[1.5] * 4,
-                inst_ids=[0, 1, 0, 1],
-                n_inst=3,
-                max_n=max_n,
-            ),
-            jitters=jnp.array([0.5, 0.8, 1.0]),
-        )
-    if kind == "pma":
-        return ProperMotionAnomalyTerm(
-            PMAnomalyData(
-                t_hip=jnp.array(0.0),
-                t_gaia=jnp.array(9000.0),
-                gaia_window=jnp.array(1023.0),
-                pm_anomaly=jnp.array([2e-7, -3e-7]),
-                pm_anomaly_cov=jnp.array([[4e-14, 1e-14], [1e-14, 9e-14]]),
-                is_valid=jnp.array(True),
-            )
-        )
-    return PhotometryTerm(
-        PhotometryData.from_dmag(
-            times=_TIMES,
-            dmag=[25.0, 25.2, 24.5, 26.0],
-            dmag_err=[0.2] * 4,
-            band_id=[0] * 4,
-            is_upper_limit=[False, True, False, True],
-            max_n=max_n,
-        ),
-        Quadrature.build((Band(550.0, 650.0),)),
-        (Transmission.from_band(Band(550.0, 650.0)),),
-    )
-
-
 @eqx.filter_jit
 def _new_term_value_grad(term, parameters):
     """Compile each observable once, reusing data shapes for validity changes."""
@@ -714,6 +649,48 @@ def test_rv_default_jitter_and_selection():
         np.testing.assert_array_equal(a, b)
     with pytest.raises(ValueError, match="jitters"):
         RadialVelocityTerm(data, jitters=jnp.zeros(1))
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_rv_marginal_integrates_to_one_over_the_contrast():
+    """Truth source: the flat-offset marginal is a density of the data modulo a shift.
+
+    Two epochs of one instrument (errors 1.5 and 2.5 m/s, jitter 0.7 m/s) leave one
+    contrast direction, ``(1, -1) / sqrt(2)``; the likelihood is constant along the
+    shift ``(1, 1) / sqrt(2)``. Adaptive quadrature over the contrast, at an
+    arbitrary shift, must give 1 (tolerance 1e-9 against a quadrature error
+    estimate under 1e-10). A lone epoch of a second instrument removes no dimension
+    and adds nothing. Fails if: the ``0.5 sum_j log N_j`` normalization is missing
+    (the integral is ``1 / sqrt(2)``) or is taken over all valid epochs instead of
+    per instrument (``sqrt(3 / 2)``).
+    """
+    data = RVData.pad(
+        times=[0.0, 1.0, 2.0],
+        rv=[0.0, 0.0, 0.0],
+        rv_err=[1.5, 2.5, 1.0],
+        inst_ids=[0, 0, 1],
+        n_inst=2,
+    )
+    jitters = jnp.array([0.7, 0.3])
+    model = jnp.where(data.is_valid, 3.0, 0.0)
+
+    @jax.jit
+    def likelihood(s):
+        shift = 4.0 * jnp.array([1.0, 1.0]) / jnp.sqrt(2.0)
+        pair = shift + s * jnp.array([1.0, -1.0]) / jnp.sqrt(2.0)
+        rv = data.rv.at[:2].set(model[:2] + pair).at[2].set(-11.0)
+        return jnp.exp(
+            loglike_rv_marginalized(
+                rv, model, data.rv_err, data.inst_ids, 2, jitters, data.is_valid
+            )
+        )
+
+    area, error = integrate.quad(
+        lambda s: float(likelihood(s)), -np.inf, np.inf, epsabs=1e-13, epsrel=1e-13
+    )
+    print(f"RV contrast integral: {area:.12f} (quadrature error {error:.1e})")
+    assert error < 1e-10
+    np.testing.assert_allclose(area, 1.0, rtol=0, atol=1e-9)
 
 
 class _SamplingSystem(eqx.Module):

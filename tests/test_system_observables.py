@@ -10,10 +10,16 @@ import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, System
 from skyscapes.scene import Scene
-from term_utils import null_dmag_term
-from test_system_density import _floor
-from test_system_priors import _orbits, _scale_coordinates, _scene
-from test_terms import _data, _new_term
+from system_helpers import (
+    _data,
+    _floor,
+    _new_term,
+    _orbits,
+    _scale_coordinates,
+    _scene,
+    rv_normalization,
+)
+from term_utils import null_dmag_term, sampled_jitter_rv
 
 from photomancy.measurements import (
     DMagTerm,
@@ -174,13 +180,17 @@ def test_all_channels_and_reference_measure(data):
         return -(residual**2), residual
 
     terms = (
-        *_dynamical_terms(data),
+        sampled_jitter_rv(data.rv),
+        *_dynamical_terms(data)[1:],
         null_dmag_term(data.null),
         DMagTerm(data.imaging),
         custom_term,
     )
     orbits = _orbits(mass)
     factors, total, common = (jnp.asarray(x) for x in (_FACTORS, _TOTAL, _COMMON))
+    # The frozen RV factors predate the normalization of the flat-offset marginal.
+    norm = rv_normalization(data.rv)
+    factors, total, common = factors.at[:, 0].add(norm), total + norm, common + norm
     assert np.ptp(factors[:, CHANNELS.index("null")]) > 1e-3
     physical = dict(
         mass_Mearth=mass, radius_AU=radius, albedo=albedo, jitter_m_per_s=jitter
@@ -300,12 +310,12 @@ def test_independent_pair_scores(two_planets):
 
     @eqx.filter_jit
     def compare(data, pairs):
-        rv, *others = _dynamical_terms(data)
-        return jnp.stack(
-            [rv(pairs, jitter_m_per_s=jitter), *(term(pairs) for term in others)]
-        )
+        _, *others = _dynamical_terms(data)
+        rv = RadialVelocityTerm(data.rv, jitters=jitter)
+        return jnp.stack([rv(pairs), *(term(pairs) for term in others)])
 
-    scores, expected = compare(data, pairs), jnp.asarray(_PAIR_FACTORS)
+    scores = compare(data, pairs)
+    expected = jnp.asarray(_PAIR_FACTORS).at[0].add(rv_normalization(data.rv))
     for name, score, target in zip(DYNAMICAL, scores, expected, strict=True):
         _check_scores(f"independent {name}", score, target, [target])
 
@@ -365,7 +375,7 @@ def test_jacobi_predictions(two_planets):
     )  # arcsec, resolved physics change
     for term in (null_dmag_term(data.null), DMagTerm(data.imaging)):
         with pytest.raises(ValueError, match=r"(?i)multi-planet"):
-            term(jacobi, area_AU2=1e-8)
+            DMagTerm(term.data, area_AU2=1e-8)(jacobi)
 
 
 def test_radiative_padding_and_dark_limit(data):
@@ -380,8 +390,8 @@ def test_radiative_padding_and_dark_limit(data):
     log_area = jnp.log(0.32 * 0.00012**2)
 
     def score(log_area, term):
-        area = jnp.exp(log_area)
-        return term(model, area_AU2=area), term.predict(model, area_AU2=area)
+        term = DMagTerm(term.data, area_AU2=jnp.exp(log_area))
+        return term(model), term.predict(model)
 
     evaluate = eqx.filter_jit(jax.value_and_grad(score, has_aux=True))
     for term in (DMagTerm(data.imaging), null_dmag_term(data.null)):
@@ -406,5 +416,5 @@ def test_radiative_padding_and_dark_limit(data):
         (value, prediction), gradient = evaluate(log_area, masked)
         np.testing.assert_array_equal(jnp.stack(prediction), 0.0)
         np.testing.assert_array_equal([value, gradient], 0.0)
-        _, dark_dmag = term.predict(model, area_AU2=0.0)
+        _, dark_dmag = DMagTerm(term.data, area_AU2=0.0).predict(model)
         np.testing.assert_allclose(dark_dmag[:-1], 750.0, rtol=0, atol=1e-12)

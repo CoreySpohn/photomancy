@@ -114,19 +114,9 @@ explanation/glossary
 :caption: How-to
 :hidden:
 
-how-to/migrate-sky-convention
 how-to/staged-map-fit
 how-to/likelihood-ratio-map
 how-to/calibrate-detection
-```
-
-```{toctree}
-:maxdepth: 1
-:caption: Validation
-:hidden:
-
-updater-protocol
-updater-panel-grading
 ```
 
 ```{toctree}

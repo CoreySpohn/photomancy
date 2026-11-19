@@ -440,6 +440,39 @@ class _ReadsNothing(AbstractTerm):
         return self
 
 
+class _RadiusReading(AbstractTerm):
+    """A caller-defined Gaussian reading of the planet radius, holding its own value."""
+
+    observed: jax.Array
+    reads = ()
+
+    def __call__(self, model):
+        return -0.5 * ((model.planets[0].Rp_Rearth[0] - self.observed) / 0.3) ** 2
+
+    def draw(self, key, model):
+        return self
+
+
+def test_a_caller_defined_term_adds_only_its_own_value():
+    """Fails if a caller-defined term gains a hidden factor or two terms share data.
+
+    At three radii the density of a fit with one caller-defined term is its prior
+    plus that term's value at the draw's model, to 1e-12. Two fits whose terms hold
+    different observations each get their own term's value, and their densities
+    differ by more than 1e-6, so a term's data never leaks into another fit.
+    """
+    x = {"planets[0].Rp_Rearth": jnp.array([[1.3], [2.2], [3.1]])}
+    densities = []
+    for observed in (1.0, 2.5):
+        term = _RadiusReading(jnp.asarray(observed))
+        fit = _simple_fit(terms=(term,))
+        own = jax.vmap(lambda xi, fit=fit, term=term: term(fit.model_at(xi)))(x)
+        density = fit.log_density(x)
+        np.testing.assert_allclose(density, fit.log_prior(x) + own, rtol=0, atol=1e-12)
+        densities.append(density)
+    assert np.min(np.abs(densities[0] - densities[1])) > 1e-6
+
+
 def test_refuses_without_x64():
     """Construction on the host refuses when float64 is off."""
     jax.config.update("jax_enable_x64", False)

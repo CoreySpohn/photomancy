@@ -72,9 +72,14 @@ def loglike_rv_marginalized(
     marginalization of zero-points gamma_j collapses to O(N) segment sums. This
     avoids sampling ``n_inst`` nuisance parameters. Each populated instrument
     removes one Gaussian dimension, so the normalization uses ``N_valid - J``.
-    Relative to retaining all ``N_valid`` dimensions, log evidence increases by
-    ``J / 2 * log(2 * pi)`` for a fixed set of populated instruments. The flat
-    offset measure is in m/s.
+
+    The result is a normalized density of the data modulo the offsets: over the
+    valid velocities of each instrument it integrates to 1 on the hyperplane
+    orthogonal to a common shift (Lebesgue measure in m/s there). The flat
+    integral over an offset gamma_j shifts the ``N_j`` velocities of instrument
+    ``j`` along ``(1, ..., 1)``, whose unit vector is that direction over
+    ``sqrt(N_j)``, so the marginal carries ``1 / sqrt(N_j)`` per instrument and the
+    returned value adds ``0.5 * sum_j log(N_j)`` over the populated instruments.
 
     Args:
         rv_obs: Observed RVs (m/s). Shape ``(N,)``.
@@ -105,6 +110,8 @@ def loglike_rv_marginalized(
     B = jax.ops.segment_sum(w * r, inst_ids, num_segments=n_inst)
     C = jax.ops.segment_sum(w * r**2, inst_ids, num_segments=n_inst)
 
+    counts = jax.ops.segment_sum(mask.astype(float), inst_ids, num_segments=n_inst)
+
     # Marginalized log-likelihood -- only count valid observations
     N_valid = jnp.sum(mask)
     J = jnp.sum(A > 0)
@@ -114,6 +121,7 @@ def loglike_rv_marginalized(
         + jnp.sum(jnp.log(A_safe))
         + jnp.sum(jnp.where(mask, jnp.log(var), 0.0))
         + (N_valid - J) * jnp.log(2.0 * jnp.pi)
+        - jnp.sum(jnp.log(jnp.where(counts > 0, counts, 1.0)))
     )
 
 
@@ -141,12 +149,8 @@ class RadialVelocityTerm(AbstractTerm):
         if self.jitters is not None and jnp.shape(self.jitters) != (self.data.n_inst,):
             raise ValueError("jitters must have shape (data.n_inst,)")
 
-    def _jitters(self, model, jitter_m_per_s):
-        if jitter_m_per_s is not None:
-            if self.jitters is not None or self.jitter_path is not None:
-                raise ValueError("Choose fixed or sampled RV jitter")
-            jitters = jitter_m_per_s
-        elif self.jitter_path is not None:
+    def _jitters(self, model):
+        if self.jitter_path is not None:
             jitters = resolve(model, self.jitter_path)
         elif self.jitters is not None:
             jitters = self.jitters
@@ -156,7 +160,7 @@ class RadialVelocityTerm(AbstractTerm):
             raise ValueError("jitters must have shape (data.n_inst,)")
         return jitters
 
-    def _score(self, model, jitter_m_per_s=None):
+    def _score(self, model):
         valid = self.data.is_valid
         data = RVData(
             times=jnp.where(valid, self.data.times, 0.0),
@@ -180,24 +184,20 @@ class RadialVelocityTerm(AbstractTerm):
             data.rv_err,
             data.inst_ids,
             data.n_inst,
-            self._jitters(model, jitter_m_per_s),
+            self._jitters(model),
             valid,
         )
         return value, prediction
 
-    def __call__(self, model, *, jitter_m_per_s=None):
-        """Score RVs with fixed or sampled per-instrument jitter (m/s).
-
-        The keyword is for a caller that samples the jitter as its own coordinate; a
-        ``Fit`` calls with the model alone, and reads ``jitters`` or ``jitter_path``.
-        """
-        return self._score(model, jitter_m_per_s)[0]
+    def __call__(self, model):
+        """Score RVs with the jitter of ``jitters`` or ``jitter_path`` (m/s)."""
+        return self._score(model)[0]
 
     def predict(self, model):
         """Return the stellar radial velocity at each epoch (m/s), invalid rows zero."""
         return self._score(model)[1]
 
-    def draw(self, key, model, *, jitter_m_per_s=None) -> Self:
+    def draw(self, key, model) -> Self:
         """Draw Gaussian RV noise with zero instrument offsets.
 
         The score marginalizes offsets against a flat measure and is therefore
@@ -208,7 +208,7 @@ class RadialVelocityTerm(AbstractTerm):
         data = self.data
         valid = data.is_valid
         ids = jnp.where(valid, data.inst_ids, 0)
-        jitter = self._jitters(model, jitter_m_per_s)
+        jitter = self._jitters(model)
         sigma = jnp.sqrt(jnp.where(valid, data.rv_err, 1.0) ** 2 + jitter[ids] ** 2)
         draw = self.predict(model) + sigma * jax.random.normal(
             key, data.rv.shape, dtype=jnp.float64

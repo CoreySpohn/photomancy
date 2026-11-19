@@ -17,8 +17,8 @@ from orbix.system import (
     FrameChart,
 )
 
+from photomancy.orbit.system_density import SystemLogDensity
 from photomancy.priors import LOG_HAAR
-from photomancy.system_density import SystemLogDensity
 
 # Chart name that posteriors over the periapsis elements of
 # ``FrameOrbit.to_periapsis_elements`` (stacked as columns) declare.
@@ -81,8 +81,9 @@ def build_chart_logdensity(
     ``build(orbit, **body)`` constructs the system scored by ``prior(system)``.
     A sampled ``mass_Mearth`` goes into both the two-body orbit and the builder.
     List other physical properties (e.g. radius_AU and albedo) in body_inputs.
-    Bind instrument coordinates to likelihood keywords with term_inputs, e.g.
-    ``{0: ("jitter_m_per_s",)}``. An empty terms tuple gives a prior-only fit.
+    Bind scalar coordinates to the keywords of a caller-defined likelihood with
+    term_inputs, e.g. ``{0: ("radius_AU", "albedo")}``. An empty terms tuple gives a
+    prior-only fit.
     """
     scalars = {} if scalars is None else scalars
     if "mass_Mearth" in scalars and "mass_Mearth" not in body_inputs:

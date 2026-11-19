@@ -12,8 +12,9 @@ from kinematics import (  # noqa: E402
     predict_relative_astrometry,
     predict_rv,
 )
-from orbit_fit import classical_coordinates, mass_problem  # noqa: E402
+from orbit_fit import mass_problem  # noqa: E402
 from orbix.equations import period_to_sma  # noqa: E402
+from system_helpers import classical_coordinates  # noqa: E402
 
 from photomancy import RadialVelocityTerm, RelativeAstrometryTerm  # noqa: E402
 from photomancy.infer.legacy_posterior import MixturePosterior  # noqa: E402

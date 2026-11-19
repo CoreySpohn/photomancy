@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg
 from kinematics import predict_photometry, predict_relative_astrometry
-from orbit_fit import classical_coordinates, ecc_law, mass_problem
+from orbit_fit import mass_problem
 from orbix.equations import period_to_sma
+from system_helpers import classical_coordinates, ecc_law
 
 from photomancy.infer.legacy_posterior import MixturePosterior
 from photomancy.orbit.diagnostics import orbits_from_samples
