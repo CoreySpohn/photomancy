@@ -54,7 +54,7 @@ def any_epoch(n_draws=2**16, n_rounds=3, **adaptive):
 
     The evidence has a third condition, read from the pool of constants that each shape
     draws (:class:`CompletedProposal`): it is NaN unless at least half of that pool is
-    effective for the draws that carry the weight (``info.proposal_valid``). A fit that
+    effective, on average over the live draws (``info.proposal_valid``). A fit that
     one or two epochs leave with a tight constraint on the orbit size, which the pool
     does not know, fails it; the draws and weights are still returned.
 

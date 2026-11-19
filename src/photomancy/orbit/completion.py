@@ -454,14 +454,18 @@ class CompletedProposal(AbstractProposal):
     Pool condition. The screen resamples the pool, so the estimate is an average over
     the pool only while the screen is spread over it. The pool fraction of a draw is
     the Kish size of its screen, ``(sum_j s_j)**2 / sum_j s_j**2``, over ``n_pool``;
-    the reading of the cloud is the mean of that fraction under the normalized weights.
-    Below one half the screen is a lottery over a few live members, the weights of the
-    shapes that carry the posterior are dominated by it, and the importance evidence
-    reads low with a standard error that does not show it. ``valid`` is true when the
-    reading is at least ``min_pool_fraction``; the backend then publishes an evidence,
-    and otherwise returns the draws and weights with a NaN evidence. The cause is a
-    pool drawn at the reference scale that does not know a tight constraint on the
-    orbit size (a mass law over a few epochs); a larger pool does not remove it.
+    the reading of the cloud is the plain mean of that fraction over the draws with a
+    finite weight. Below one half the screen is a lottery over a few live members, the
+    weights of the shapes that carry the posterior are dominated by it, and the
+    importance evidence can read low with a standard error that does not show it.
+    ``valid`` is true when the reading is at least ``min_pool_fraction``; the backend
+    then publishes an evidence, and otherwise returns the draws and weights with a NaN
+    evidence. The reading does not use the weights: a weighted mean leans on the draws
+    whose own screen is luckiest, which are the ones that read the evidence worst. The
+    condition is conservative, and a starved pool can still give a calibrated
+    evidence that it refuses. The cause is a pool drawn at the reference scale that
+    does not know a tight constraint on the orbit size (a mass law over a few epochs);
+    a larger pool does not remove it.
 
     Attributes:
         base: Proposal over ``shape`` (it is given the :class:`Completion`, which
@@ -477,8 +481,8 @@ class CompletedProposal(AbstractProposal):
         leaf_widen: Factor on the standard deviation of the leaf proposal components
             (see the module docstring); only used when a term proposes a free leaf.
         leaf_uniform: Share of the leaf's support drawn uniformly.
-        min_pool_fraction: Smallest weighted mean pool fraction (see the pool condition
-            above) for which ``weigh`` reports its weights valid.
+        min_pool_fraction: Smallest mean pool fraction over the live draws (see the
+            pool condition above) for which ``weigh`` reports its weights valid.
     """
 
     base: AbstractDensityProposal
@@ -521,11 +525,11 @@ class CompletedProposal(AbstractProposal):
         lw = jnp.where(jnp.isnan(completion.scale_AU), jnp.nan, lw)
         log_w = lw - log_q
         live = jnp.isfinite(log_w)
-        weights = jnp.where(
-            live, jnp.exp(log_w - jnp.max(log_w, where=live, initial=-jnp.inf)), 0.0
+        n_live = jnp.sum(live)
+        reading = (
+            jnp.sum(jnp.where(live, pool_kish, 0.0)) / jnp.maximum(n_live, 1) / n_pool
         )
-        reading = jnp.sum(weights * pool_kish) / jnp.sum(weights) / n_pool
-        valid = jnp.where(jnp.any(live), reading >= self.min_pool_fraction, True)
+        valid = jnp.where(n_live > 0, reading >= self.min_pool_fraction, True)
         return z, log_w, log_target, valid
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):

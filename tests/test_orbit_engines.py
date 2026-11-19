@@ -369,9 +369,10 @@ def test_the_pool_reading_gates_the_evidence_and_matches_a_direct_one(fit):
 
     The direct reading takes ``(sum s)**2 / sum s**2`` from the screen of each shape
     (``Completion._constants`` at the draw key of ``complete``) and averages it over
-    the normalized weights; ``CompletedProposal.weigh`` must agree on the verdict at a
-    threshold just below and just above that reading. When the verdict is false the
-    ``Importance`` backend returns finite weights and a NaN evidence.
+    the draws with a finite weight, unweighted; ``CompletedProposal.weigh`` must agree
+    on the verdict at a threshold just below and just above that reading. When the
+    verdict is false the ``Importance`` backend returns finite weights and a NaN
+    evidence.
     """
     comp = Completion.from_fit(fit)
     n = 256
@@ -391,8 +392,8 @@ def test_the_pool_reading_gates_the_evidence_and_matches_a_direct_one(fit):
         np.where(np.isfinite(lw), direct, 0.0),
         rtol=1e-9,
     )
-    w = np.exp(np.asarray(lw - log_q) - np.max(np.asarray(lw - log_q)))
-    reading = float(np.sum(w * np.asarray(kish)) / np.sum(w) / 8)
+    live = np.isfinite(np.asarray(lw - log_q))
+    reading = float(np.mean(np.asarray(kish)[live]) / 8)
     for threshold, expected in ((reading * 0.99, True), (reading * 1.01, False)):
         proposal = CompletedProposal(ShapePriorProposal(), min_pool_fraction=threshold)
         *_, valid = eqx.filter_jit(proposal.weigh)(jax.random.key(3), fit, n)
