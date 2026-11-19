@@ -380,14 +380,31 @@ def test_append_agrees_with_a_refit_and_the_exact_evidence():
     assert abs(m2 - 1.65) < 1e-3 and abs(s2 - WIDTH / math.sqrt(2)) < 1e-3
 
 
-def test_append_refuses_a_term_that_reads_a_free_path(cloud):
-    """The static check of ``Fit`` runs first and raises on the host."""
+def test_append_runs_the_static_checks_of_fit(cloud):
+    """The static checks of ``Fit`` run first and raise on the host.
+
+    Fails if a term that reads a free path is appended, or if a second term that sums
+    over a latent another term already sums over (``marginalizes``) is accepted, at
+    construction or through ``append``; both refusals name the path or the latent.
+    """
 
     class _Reads(_Gauss):
         reads = (KEY,)
 
+    class _Sums(_Gauss):
+        marginalizes = ("orbits[0].sheet",)
+
     with pytest.raises(ValueError, match="Rp_Rearth"):
         cloud.append(_Reads(jnp.asarray(1.0)), min_n_eff=0, max_khat=1.0)
+    fit = cloud.fit
+    with pytest.raises(ValueError, match=r"orbits\[0\]\.sheet"):
+        Fit(fit.model, fit.free, (_Sums(jnp.asarray(1.5)), _Sums(jnp.asarray(1.8))))
+    summed = eqx.tree_at(
+        lambda p: p.fit, cloud, Fit(fit.model, fit.free, (_Sums(jnp.asarray(1.5)),))
+    )
+    with pytest.raises(ValueError, match=r"orbits\[0\]\.sheet"):
+        summed.append(_Sums(jnp.asarray(1.8)), min_n_eff=0, max_khat=1.0)
+    summed.append(_Gauss(jnp.asarray(1.8)), min_n_eff=0, max_khat=jnp.inf)
 
 
 # ----- per-slice refusal under vmap ----------------------------------------------

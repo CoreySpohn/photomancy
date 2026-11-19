@@ -145,10 +145,12 @@ class Pathfinder(AbstractBackend):
     Hessian when a mode is poorly conditioned) and weighted by its ELBO. The proposal
     is the mixture of the paths, wrapped on every periodic coordinate; the draws are
     weighted to the fit with the wrapped density, so the evidence is the importance mean
-    and the proposal quality shows in the weights. The backend promises nothing about
-    ``khat`` and does not gate. A path whose ELBO is not finite leaves the mixture; with
-    none left the slice is NaN. The cases where a Gaussian is a poor proposal, and the
-    seed for ``AdaptiveImportance``, are those of ``Laplace``.
+    and the proposal quality shows in the weights. The evidence and its standard error
+    are NaN when the Pareto k-hat of the weights is above ``khat_threshold(n_draws)``
+    (``info.importance.khat``); the draws and weights are not gated. A path whose ELBO
+    is not finite leaves the mixture; with none left the slice is NaN. The cases where
+    a Gaussian is a poor proposal, and the seed for ``AdaptiveImportance``, are those
+    of ``Laplace``.
 
     Args:
         n_draws: Importance draws.

@@ -11,7 +11,14 @@ import jax.numpy as jnp
 import numpy as np
 from priorities import Uniform
 
-from photomancy.infer import AbstractTerm, AdaptiveImportance, Fit, PriorProposal, run
+from photomancy.infer import (
+    AbstractTerm,
+    AdaptiveImportance,
+    Fit,
+    PriorProposal,
+    importance_evidence,
+    khat_threshold,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -45,7 +52,10 @@ def test_defensive_share_recovers_both_masses_of_a_two_mode_target():
     Eight keys of ``AdaptiveImportance`` seeded from the prior (defensive share 0.1; the
     tempering ladder needs about eight rounds to reach the posterior, ten here):
     the mean far-mode mass is 0.2 and the mean evidence is ``1 / 12^3``, each within
-    3 standard errors of the key-to-key scatter.
+    3 standard errors of the key-to-key scatter. The evidence is the importance mean of
+    each key's raw weights, because a key whose k-hat is above ``khat_threshold``
+    publishes a NaN evidence; the published evidence is that mean where the k-hat
+    passes and NaN where it does not.
     """
     fit = Fit(
         _Model(jnp.zeros(3)),
@@ -55,14 +65,19 @@ def test_defensive_share_recovers_both_masses_of_a_two_mode_target():
     backend = AdaptiveImportance(
         PriorProposal(), n_draws=2000, n_round=2**13, n_rounds=10, n_centers=64
     )
-    mass, log_z = [], []
+    mass, log_z, published, khat = [], [], [], []
     for key in jax.random.split(jax.random.key(0), 8):
-        post = run(fit, backend, key)
-        w = np.exp(np.asarray(post.log_weights))
-        far = np.asarray(post.samples["x"])[:, 0] > 0
+        draws = backend._run(fit, key)
+        w = np.asarray(jax.nn.softmax(draws.log_weights))
+        far = np.asarray(draws.samples["x"])[:, 0] > 0
         mass.append(float(np.sum(w[far])))
-        log_z.append(float(post.log_evidence))
+        log_z.append(float(importance_evidence(draws.log_weights)[0]))
+        published.append(float(draws.log_evidence))
+        khat.append(float(draws.info.khat))
     mass, log_z = np.array(mass), np.array(log_z)
+    published, passes = np.array(published), np.array(khat) <= khat_threshold(2000)
+    np.testing.assert_allclose(published[passes], log_z[passes], rtol=1e-12)
+    assert np.all(np.isnan(published[~passes]))
     assert abs(mass.mean() - 0.2) < 3 * mass.std(ddof=1) / np.sqrt(8)
     exact = -3 * np.log(2 * HALF)
     assert abs(log_z.mean() - exact) < 3 * log_z.std(ddof=1) / np.sqrt(8)

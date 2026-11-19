@@ -51,6 +51,7 @@ from photomancy.orbit.nested import (
 from photomancy.orbit.ofti import AbstractConditioner, ScaleAndRotate, ofti
 from photomancy.orbit.projected import astrometric_loss, make_astrometric_evaluator
 from photomancy.orbit.proposals import ScaleRotateProposal
+from photomancy.orbit.sheets import SheetSum
 from photomancy.orbit.thiele_innes import (
     TIFitResult,
     thiele_innes_fit,
@@ -70,6 +71,7 @@ __all__ = [
     "ParamBounds",
     "ScaleAndRotate",
     "ScaleRotateProposal",
+    "SheetSum",
     "TIBasisModel",
     # Thiele-Innes fitter
     "TIFitResult",

@@ -222,10 +222,12 @@ class Laplace(AbstractBackend):
     2. The draws are weighted ``density / proposal`` with the wrapped proposal density.
        The weights correct the Gaussian to the posterior; the evidence is the importance
        mean and is consistent whenever the weights have a finite mean.
-    3. The backend promises nothing about ``khat``. The caller reads it from the result
-       (``pareto_khat``); a value above 0.7 means the Gaussian is a poor match and the
-       standard error is optimistic. The backend does not gate: the operations of a
-       ``Posterior`` do.
+    3. The evidence and its standard error are NaN when the Pareto k-hat of the
+       weights is above ``khat_threshold(n_draws)`` (``info.importance.khat``), as for
+       :class:`~photomancy.infer.backends.importance.Importance`: a Gaussian that
+       misses the tail of the posterior gives weights of infinite variance and an
+       optimistic error. The draws and weights are still returned and are not gated;
+       the operations of a ``Posterior`` gate them.
     4. Expected to be poor: a posterior that is flat or nearly flat in an angle (a
        Gaussian cannot match a flat density on a circle), a posterior with more than one
        mode, and a mode near a zero-density region of a block.
@@ -234,8 +236,10 @@ class Laplace(AbstractBackend):
        n_centers=...), n_draws)``, with ``z`` the flat vectors of the cloud.
     6. Started from the prior, the modes found can miss the posterior: on a concentrated
        orbit fit two of four keys kept only modes whose cloud had a Kish size near 1
-       and a k-hat above 3 (log evidence about 1200 nats low). Gate on those, or start
-       from a draw that is already near the posterior.
+       and a k-hat above 3 (log evidence about 1200 nats low), and the other two a
+       k-hat of 0.7 to 0.9 with an evidence about three stated errors low. All four
+       return a NaN evidence; seed ``AdaptiveImportance`` from the cloud (item 5), or
+       start from a draw that is already near the posterior.
     7. Widening the covariance is not a remedy: it makes the weights worse.
 
     A mode is dropped from the proposal when it is not a mode: when the unregularized

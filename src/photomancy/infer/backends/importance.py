@@ -5,7 +5,10 @@ and weights each draw by ``fit.real_log_prob(z) - log_q``, the target density in
 flat unconstrained vector over the proposal's own (wrapped) density. The evidence is
 the importance mean (:func:`photomancy.infer.evidence.importance_evidence`) and is
 consistent whenever the proposal has positive density wherever the target does and the
-weights have a finite mean. ``AdaptiveImportance`` is population Monte Carlo: it
+weights have a finite mean. Its standard error needs a finite variance of the weights,
+which the Pareto k-hat of the weights tests: the evidence and its error are NaN unless
+``khat <= khat_threshold(n_draws)`` (a NaN k-hat refuses). The draws and their weights
+are returned either way. ``AdaptiveImportance`` is population Monte Carlo: it
 tempers the target, refits a Gaussian mixture on each round's weighted cloud and
 draws the returned cloud from the last proposal.
 
@@ -24,7 +27,12 @@ from jax.flatten_util import ravel_pytree
 
 from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
-from photomancy.infer.diagnostics import kish_ess, kish_temperature
+from photomancy.infer.diagnostics import (
+    khat_threshold,
+    kish_ess,
+    kish_temperature,
+    pareto_khat,
+)
 from photomancy.infer.evidence import importance_evidence
 from photomancy.infer.proposals import (
     AbstractProposal,
@@ -52,12 +60,16 @@ class ImportanceInfo(eqx.Module):
         reached: True when the proposal of the last round was fitted at temperature
             one (always for ``Importance``). When false, the evidence, its standard
             error and the log weights of the slice are NaN.
+        khat: Pareto k-hat of the returned weights, the value judged against
+            ``khat_threshold(n_draws)``. Above it, or NaN, the evidence and its
+            standard error are NaN.
     """
 
     n_rounds: int = eqx.field(static=True)
     temperatures: jax.Array
     kish_per_round: jax.Array
     reached: jax.Array
+    khat: jax.Array
 
 
 def _unravel(fit):
@@ -88,10 +100,13 @@ class Importance(AbstractBackend):
     """Importance sampling from one proposal.
 
     The draws are weighted ``fit.real_log_prob(z) - log_q`` and the evidence is the
-    importance mean, so it is consistent for any proposal that covers the target. How
-    well the proposal matches shows in the weights (``khat``, ``n_eff``); the backend
-    does not gate on them, the operations of the ``Posterior`` do. ``PriorProposal``
-    gives the prior-sampling estimate, whose weights are the likelihood.
+    importance mean, so it is consistent for any proposal that covers the target. The
+    evidence and its standard error are NaN when the Pareto k-hat of the weights is
+    not at or below ``khat_threshold(n_draws)`` (``info.khat``): above it the variance
+    of the weights is not finite and the standard error is not an error bar. The
+    draws and weights are not gated; a caller's thresholds on them (``min_n_eff``,
+    ``max_khat``) stay on the operations of the ``Posterior``. ``PriorProposal`` gives
+    the prior-sampling estimate, whose weights are the likelihood.
 
     Attributes:
         proposal: The :class:`~photomancy.infer.proposals.AbstractProposal` to draw
@@ -108,12 +123,17 @@ class Importance(AbstractBackend):
         """Draw from the proposal and weight the draws to the fit."""
         x, log_target, log_w = _weigh(fit, self.proposal, key, self.n_draws, batch_size)
         log_z, se = importance_evidence(log_w)
-        info = ImportanceInfo(1, jnp.ones(1), kish_ess(log_w)[None], jnp.asarray(True))
+        khat = pareto_khat(log_w)
+        valid = khat <= khat_threshold(self.n_draws)
+        nan = jnp.asarray(jnp.nan)
+        info = ImportanceInfo(
+            1, jnp.ones(1), kish_ess(log_w)[None], jnp.asarray(True), khat
+        )
         return BackendDraws(
             samples=x,
             log_weights=log_w,
-            log_evidence=log_z,
-            log_evidence_se=se,
+            log_evidence=jnp.where(valid, log_z, nan),
+            log_evidence_se=jnp.where(valid, se, nan),
             info=info,
             kind="monte_carlo",
             log_target=log_target,
@@ -169,8 +189,9 @@ class AdaptiveImportance(AbstractBackend):
     temperature one and each refits on the weights of the fit's own density. The last
     round draws ``n_draws`` points from the final proposal and weights them to the
     fit's own density, so the returned weights and evidence come from that round alone
-    and are importance estimates from independent draws. The round count is fixed and
-    there is no early exit.
+    and are importance estimates from independent draws: the last round is an
+    :class:`Importance` run, whose k-hat refusal of the evidence applies. The round
+    count is fixed and there is no early exit.
 
     The ladder needs one rung per factor of the likelihood that the cloud can absorb,
     and a concentrated posterior needs about a dozen. If the last proposal was fitted
@@ -242,21 +263,24 @@ class AdaptiveImportance(AbstractBackend):
                 n_centers=self.n_centers,
                 defensive=self.defensive,
             )
-        x, log_target, log_w = _weigh(fit, proposal, key, self.n_draws, batch_size)
-        log_z, se = importance_evidence(log_w)
+        last = Importance(proposal, self.n_draws)._run(fit, key, batch_size=batch_size)
         reached = jnp.asarray(True) if self.n_rounds == 1 else beta >= 1.0
         nan = jnp.asarray(jnp.nan)
         temperatures.append(jnp.ones(()))
-        kish.append(kish_ess(log_w))
+        kish.append(last.info.kish_per_round[0])
         info = ImportanceInfo(
-            self.n_rounds, jnp.stack(temperatures), jnp.stack(kish), reached
+            self.n_rounds,
+            jnp.stack(temperatures),
+            jnp.stack(kish),
+            reached,
+            last.info.khat,
         )
         return BackendDraws(
-            samples=x,
-            log_weights=jnp.where(reached, log_w, nan),
-            log_evidence=jnp.where(reached, log_z, nan),
-            log_evidence_se=jnp.where(reached, se, nan),
+            samples=last.samples,
+            log_weights=jnp.where(reached, last.log_weights, nan),
+            log_evidence=jnp.where(reached, last.log_evidence, nan),
+            log_evidence_se=jnp.where(reached, last.log_evidence_se, nan),
             info=info,
             kind="monte_carlo",
-            log_target=log_target,
+            log_target=last.log_target,
         )

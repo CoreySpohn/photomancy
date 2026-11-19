@@ -1,0 +1,124 @@
+"""The sum over the two line-of-sight sheets of one orbit row, as a term combinator.
+
+A Thiele-Innes block holds the orbit of its row on one sheet; the reflection of that
+orbit through the sky plane has the same sky track and the opposite line-of-sight sign.
+Relative astrometry cannot tell the two apart, but radial velocity and phase-dependent
+photometry can. ``SheetSum`` scores the terms it holds on both sheets and averages the
+likelihoods, which is the likelihood of the block's sheet-summed density.
+"""
+
+from typing import Self
+
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+from hwoutils.model_paths import assign, resolve
+from orbix.system import reflect_line_of_sight
+
+from photomancy.infer import AbstractConditionalTerm, AbstractTerm, LeafConditional
+
+__all__ = ["SheetSum"]
+
+
+class SheetSum(AbstractConditionalTerm):
+    """The terms that tell the sheets of one orbit row apart, summed over both sheets.
+
+    The value is ``logaddexp(sum_t t(model), sum_t t(reflected)) - log 2``, with
+    ``reflected`` the model whose orbit row ``row`` at ``orbit_path`` is reflected
+    through the sky plane (:func:`orbix.system.reflect_line_of_sight`). Every term that
+    tells the sheets of that row apart belongs inside one ``SheetSum``: a product of
+    two sheet sums is not the sheet sum of the product. ``marginalizes`` names the
+    sheet, so a ``Fit`` refuses a second ``SheetSum`` over the same row, and a term
+    added later enters through ``replace_term`` of the ``SheetSum``. Terms that do not
+    see the sheet (relative astrometry) stay outside it. For an orbit law that is
+    symmetric under the reflection the sum is exact.
+
+    The leaf record is that of the one held term that proposes a leaf, on both sheets:
+    its components on the model, then those on the reflected model.
+
+    Attributes:
+        terms: The terms summed over the two sheets.
+        orbit_path: Model path of the stacked orbits.
+        row: Orbit row whose sheet is summed.
+    """
+
+    terms: tuple[AbstractTerm, ...]
+    orbit_path: str = eqx.field(static=True)
+    row: int = eqx.field(static=True, default=0)
+
+    def __check_init__(self):
+        """Refuse an empty sum, a non-term, or two held terms that propose a leaf."""
+        if not self.terms:
+            raise ValueError("SheetSum needs at least one term")
+        for i, term in enumerate(self.terms):
+            if not isinstance(term, AbstractTerm):
+                raise TypeError(
+                    f"terms[{i}] is a {type(term).__name__}; expected an AbstractTerm"
+                )
+        if len(self._proposers()) > 1:
+            raise ValueError("SheetSum holds at most one term that proposes a leaf")
+
+    def _proposers(self):
+        return [
+            t
+            for t in self.terms
+            if isinstance(t, AbstractConditionalTerm) and t.leaf_path is not None
+        ]
+
+    @property
+    def reads(self) -> tuple[str, ...]:
+        """The reads of every held term."""
+        return tuple(r for t in self.terms for r in t.reads)
+
+    @property
+    def marginalizes(self) -> tuple[str, ...]:
+        """The sheet of the orbit row, and what the held terms marginalize."""
+        own = f"{self.orbit_path}[{self.row}].sheet"
+        return (own, *(m for t in self.terms for m in t.marginalizes))
+
+    @property
+    def leaf_path(self) -> str | None:
+        """The leaf the held proposing term offers, or ``None``."""
+        proposers = self._proposers()
+        return proposers[0].leaf_path if proposers else None
+
+    def reflected(self, model):
+        """``model`` with the orbit row reflected through the sky plane."""
+        orbits = resolve(model, self.orbit_path)
+        return assign(model, self.orbit_path, reflect_line_of_sight(orbits, self.row))
+
+    def _total(self, model):
+        return sum(t(model) for t in self.terms)
+
+    def __call__(self, model) -> jax.Array:
+        """The log of the mean of the two sheets' likelihoods."""
+        return jnp.logaddexp(
+            self._total(model), self._total(self.reflected(model))
+        ) - jnp.log(2.0)
+
+    def leaf_conditional(self, model) -> LeafConditional:
+        """The proposing term's record on both sheets, components concatenated.
+
+        Raises:
+            ValueError: When no held term proposes a leaf.
+        """
+        proposers = self._proposers()
+        if not proposers:
+            raise ValueError("no term in this SheetSum proposes a leaf")
+        term = proposers[0]
+        plus = term.leaf_conditional(model)
+        minus = term.leaf_conditional(self.reflected(model))
+        return LeafConditional(
+            plus.path,
+            jnp.concatenate([plus.mean, minus.mean]),
+            jnp.concatenate([plus.sd, minus.sd]),
+            jnp.concatenate([plus.log_pi, minus.log_pi]),
+            jnp.minimum(plus.low, minus.low),
+            jnp.maximum(plus.high, minus.high),
+        )
+
+    def draw(self, key, model) -> Self:
+        """Draw each held term's data at ``model``, on the sheet the model holds."""
+        keys = jax.random.split(key, len(self.terms))
+        terms = tuple(t.draw(k, model) for t, k in zip(self.terms, keys, strict=True))
+        return eqx.tree_at(lambda s: s.terms, self, terms)
