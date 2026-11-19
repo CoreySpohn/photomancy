@@ -34,7 +34,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock
-from hwoutils.model_paths import assign, resolve
+from hwoutils.model_paths import assign
 from jax.flatten_util import ravel_pytree
 from priorities import Mixture, MultivariateNormal
 
@@ -50,7 +50,6 @@ from photomancy.infer.particles import (
 __all__ = ["Forecast", "Posterior", "cluster_to_mixture", "ravel_samples"]
 
 _KINDS = ("monte_carlo", "quadrature")
-_ROUND_TRIP = 1e-7
 
 
 class Forecast(eqx.Module):
@@ -83,12 +82,14 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
     Returns the new normalized log weights (all NaN on refusal), the log evidence
     increment and the standard error of that increment (both NaN on refusal). The
     increment is the self-normalized mean of the ratio under the old weights, so its
-    error is the delta-method error of that mean; it is zero for a ratio of one.
+    error is the delta-method error of that mean; it is zero for a ratio of one. A draw
+    with zero old weight (dead, with NaN coordinates after a support swap) cannot
+    refuse the slice: the gate counts NaN and ``+inf`` at live draws only.
     """
     lw = jnp.asarray(log_weights, jnp.float64)
     ratio = jnp.asarray(log_ratio, jnp.float64)
     live = ~jnp.isneginf(lw)
-    bad = jnp.any(jnp.isnan(lw)) | jnp.any(jnp.isnan(ratio))
+    bad = jnp.any(jnp.isnan(lw)) | jnp.any(jnp.isnan(ratio) & live)
     bad = bad | jnp.any(jnp.isposinf(ratio) & live)
     combined = jnp.where(live, lw + ratio, -jnp.inf)
     log_z_new, _ = importance_evidence(combined)
@@ -111,19 +112,21 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
     )
 
 
-def _round_trips(block, coords, model):
-    """Whether ``block.forward(coords)`` writes the values ``model`` already holds.
+def _live_draws(samples, log_weights):
+    """``samples`` with each dead draw replaced by a live one, shapes unchanged.
 
-    A draw outside the block's support has no coordinates: the inverse saturates or
-    returns a non-finite value, so the forward map does not give the draw back.
+    A dead draw (zero weight) may hold NaN coordinates after a support swap; a term
+    or prior evaluated there returns garbage that is masked afterwards. Evaluating at a
+    live draw instead keeps every evaluation on valid values.
     """
-    ok = jnp.all(jnp.isfinite(ravel_pytree(coords)[0]))
-    for path, value in block.forward(coords, model).items():
-        for got, held in zip(
-            jax.tree.leaves(value), jax.tree.leaves(resolve(model, path)), strict=True
-        ):
-            ok = ok & jnp.all(jnp.isclose(got, held, rtol=_ROUND_TRIP, atol=1e-9))
-    return ok
+    live = ~jnp.isneginf(log_weights)
+    first = jnp.argmax(live)
+
+    def pick(a):
+        mask = live.reshape(live.shape + (1,) * (a.ndim - 1))
+        return jnp.where(mask, a, a[first])
+
+    return jax.tree.map(pick, samples)
 
 
 def _support_swap(old_fit, new_fit, moved):
@@ -133,7 +136,9 @@ def _support_swap(old_fit, new_fit, moved):
     the change of the normalized prior at the draw (the target in the new
     coordinates); ``log_ratio`` adds the log Jacobian of the old-to-new coordinate map,
     the weight factor of a draw whose cloud density lives in the old coordinates. Both
-    are ``-inf`` where the new support does not hold the draw.
+    are ``-inf`` where the new support does not hold the draw; such a draw keeps the
+    NaN coordinates of ``new_block.inverse`` so that it is visibly dead in every later
+    use.
     """
 
     def one(x):
@@ -153,7 +158,7 @@ def _support_swap(old_fit, new_fit, moved):
                 return ravel_pytree(new_block.inverse(mapped))[0]
 
             logdet = logdet + jnp.linalg.slogdet(jax.jacfwd(to_new)(flat))[1]
-            finite = finite & _round_trips(new_block, x_new[key], model)
+            finite = finite & jnp.all(jnp.isfinite(ravel_pytree(x_new[key])[0]))
         old = old_fit._log_prior_one(x)
         new = new_fit._log_prior_one(x_new)
         outside = ~finite | jnp.isneginf(old) | ~jnp.isfinite(logdet)
@@ -427,20 +432,31 @@ class Posterior(eqx.Module):
                 ``kind``.
         """
         self._require_slice("with_priors")
-        new_fit = self.fit.with_priors(priors, support_change=True)
+        new_fit = self.fit.with_priors(priors)
         moved = tuple(
             key
             for key, entry in priors.items()
             if isinstance(entry, AbstractBlock)
             and not self.fit.free[key].same_map(entry)
         )
+        live = _live_draws(self.samples, self.log_weights)
+        dead = jnp.isneginf(self.log_weights)
         if not moved:
-            old = self.fit.log_prior(self.samples, batch_size=batch_size)
-            new = new_fit.log_prior(self.samples, batch_size=batch_size)
-            ratio = jnp.where(jnp.isneginf(old), -jnp.inf, new - old)
+            old = self.fit.log_prior(live, batch_size=batch_size)
+            new = new_fit.log_prior(live, batch_size=batch_size)
+            ratio = jnp.where(jnp.isneginf(old) | dead, -jnp.inf, new - old)
             return self._reweighted(new_fit, ratio, min_n_eff, max_khat)
         one = _support_swap(self.fit, new_fit, moved)
-        x_new, ratio, target_ratio = self.fit._over_batch(one, self.samples, batch_size)
+        x_new, ratio, target_ratio = self.fit._over_batch(one, live, batch_size)
+        ratio = jnp.where(dead, -jnp.inf, ratio)
+        target_ratio = jnp.where(dead, -jnp.inf, target_ratio)
+        x_new = jax.tree.map(
+            lambda new, old: jnp.where(
+                dead.reshape(dead.shape + (1,) * (new.ndim - 1)), old, new
+            ),
+            x_new,
+            self.samples,
+        )
         return self._reweighted(
             new_fit,
             ratio,
@@ -465,7 +481,11 @@ class Posterior(eqx.Module):
                 ratio if old is None else ratio - jnp.asarray(old(model), jnp.float64)
             )
 
-        return fit._over_batch(one, self.samples, batch_size)
+        dead = jnp.isneginf(self.log_weights)
+        ratio = fit._over_batch(
+            one, _live_draws(self.samples, self.log_weights), batch_size
+        )
+        return jnp.where(dead, -jnp.inf, ratio)
 
     def append(self, term, *, min_n_eff, max_khat, batch_size=None):
         """Add one observation by importance reweighting; no old term is evaluated.

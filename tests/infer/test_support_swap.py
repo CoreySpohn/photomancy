@@ -102,7 +102,10 @@ def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
     Truth source: a direct prior-sampling estimate of the evidence under the narrow
     law (the refit), with the size term.
     Tolerance basis: 3 combined standard errors of the swap and the refit.
-    Fails if: out-of-support draws keep weight, or the evidence ignores the cut.
+    Dead draws carry NaN coordinates (visibly dead), the live ones are finite, and an
+    ``append`` on the swapped cloud is not refused by the dead draws.
+    Fails if: out-of-support draws keep weight or finite wall coordinates, the
+    evidence ignores the cut, or a dead draw's NaN refuses a later operation.
     """
     term = (_SizeTerm(),)
     wide = _fit(0.5, 6.0, term)
@@ -116,6 +119,13 @@ def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
     assert np.all(np.isneginf(np.asarray(out.log_weights)[outside]))
     assert np.all(np.isfinite(np.asarray(out.log_weights)[~outside]))
     assert np.all(np.isneginf(np.asarray(out.log_target)[outside]))
+    for v in out.samples[KEY].values():
+        assert np.isnan(np.asarray(v)[outside]).all()
+        assert np.isfinite(np.asarray(v)[~outside]).all()
+    appended = out.append(_SizeTerm(), min_n_eff=0.0, max_khat=jnp.inf)
+    assert np.isfinite(float(appended.log_evidence))
+    assert np.all(np.isneginf(np.asarray(appended.log_weights)[outside]))
+    assert np.all(np.isfinite(np.asarray(appended.log_weights)[~outside]))
     ref = _cloud(Fit(_scene(), {KEY: narrow_block}, term), seed=5)
     se = np.hypot(float(out.log_evidence_se), float(ref.log_evidence_se))
     assert abs(float(out.log_evidence) - float(ref.log_evidence)) < 3 * se
@@ -128,14 +138,14 @@ def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
 
 
 def test_a_chart_change_is_refused_by_name():
-    """Another chart is not a prior swap: the message names both charts.
+    """Another chart is not a prior swap: the layout differs.
 
     Fails if: a chart change is treated as a support change (the stored coordinates
     would then be read as another chart's).
     """
     cloud = _cloud(_fit(0.8, 3.0))
     other = _block(_law(0.8, 3.0), chart=EccentricityVectorChart())
-    with pytest.raises(ValueError, match="ClassicalChart to EccentricityVectorChart"):
+    with pytest.raises(ValueError, match="same layout"):
         cloud.with_priors({KEY: other}, **GATE)
 
 

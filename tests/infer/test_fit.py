@@ -158,8 +158,7 @@ COORDS = _block().coordinate_names
 def _orbit_map(mass=0.0):
     """The golden block's chart and the chart-coordinate bounds its law maps."""
     block, model = _block(), _scene(planet_mass_Msun=mass)
-    mu = block._mu(model)[..., jnp.asarray(block.rows)]
-    return block.chart, block._support(mu)
+    return block.chart, block.chart_support(model)
 
 
 def _coords(point, mass=0.0):
@@ -384,10 +383,11 @@ def test_refuses_an_index_into_an_array_leaf():
 
 
 def test_refuses_a_changed_free_set():
-    """with_priors keeps the free set and the map of a block.
+    """with_priors keeps the free set and the layout of a block.
 
-    A law whose bounds move changes the map (the bounds are the coordinates' range), so
-    it is refused; a law with the same bounds and another shape is a swap.
+    A block of another chart is refused (``same_layout``). A law whose bounds move is
+    a swap here, as is a law with the same bounds and another shape: whether stored
+    draws survive is the posterior's question (``same_map``), not the fit's.
     """
     fit = Fit(
         _scene(),
@@ -396,7 +396,7 @@ def test_refuses_a_changed_free_set():
     )
     with pytest.raises(ValueError, match="cannot change the free set"):
         fit.with_priors({"planets[0].physical_model.Ag": Uniform(0.0, 1.0)})
-    with pytest.raises(ValueError, match="same map"):
+    with pytest.raises(ValueError, match="same layout"):
         fit.with_priors(
             {
                 "dynamics.orbits": _block(
@@ -409,8 +409,8 @@ def test_refuses_a_changed_free_set():
     swapped = fit.with_priors({"planets[0].Rp_Rearth": LogUniform(1.0, 2.0)})
     assert swapped.free["planets[0].Rp_Rearth"].low == 1.0
     moved = OrbitLaw(period_d=LogUniform(100.0, 3000.0), eccentricity=Uniform(0.0, 1.0))
-    with pytest.raises(ValueError, match="same map"):
-        fit.with_priors({"dynamics.orbits": _block(moved)})
+    wide = fit.with_priors({"dynamics.orbits": _block(moved)})
+    assert not fit.free["dynamics.orbits"].same_map(wide.free["dynamics.orbits"])
     reshaped = OrbitLaw(
         period_d=LogUniform(*PERIOD_RANGE), eccentricity=Uniform(0.0, 1.0)
     )
