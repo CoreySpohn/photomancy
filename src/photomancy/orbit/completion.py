@@ -374,7 +374,7 @@ class Completion(eqx.Module):
             self.fit_rest.log_density(x) + volume - _log_reference(c, self.scale_AU)
         )
         r = target - log_q_leaf - log_s[idx]
-        r = jnp.where(alive & ~jnp.isnan(r), r, -jnp.inf)
+        r = jnp.where(alive, r, -jnp.inf)
         keep = jnp.argmax(r + jax.random.gumbel(k_keep, (n_scored,)))
         lw = jnp.where(alive, lw + logsumexp(r) - jnp.log(n_scored), -jnp.inf)
         return z[keep], lw, log_z + _log_conditional(c[keep], mean, chol) + target[keep]
@@ -611,7 +611,9 @@ class CompletedProposal(AbstractProposal):
     kept draw with weight ``W`` is properly weighted. The screen and the leaf records
     are proposals, never targets: they change the variance of the weights, never their
     mean, and need only be positive wherever ``f`` is. A ``theta`` whose pool has no
-    draw inside the prior gets ``W = 0`` (``-inf``). With no term left to score,
+    draw inside the prior gets ``W = 0`` (``-inf``). A NaN score (a NaN term or record
+    at a live draw) is an error, not a zero: it reaches ``W``, and the importance
+    backend returns a NaN slice. With no term left to score,
     ``r_k = 1``: ``W = Z * S / M`` and the kept draw is picked on ``s``.
 
     ``sample`` returns the flat vector of the kept draw and the ``log_q`` that makes

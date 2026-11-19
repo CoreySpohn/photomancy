@@ -19,7 +19,7 @@ from orbix.system.core import Body, SkyFrame
 from priorities import LogUniform, Uniform
 from skyscapes.population import kipping_eccentricity
 
-from photomancy.infer import AbstractTerm, Fit, Importance
+from photomancy.infer import AbstractTerm, Fit, Importance, run
 from photomancy.infer.backends._flat import draw_template
 from photomancy.measurements import RelativeAstromData, RelativeAstrometryTerm
 from photomancy.orbit.backends import collapsed, few_epoch
@@ -207,6 +207,34 @@ def test_the_screened_weight_is_unbiased(fit):
         w_ref.std(0, ddof=1) / np.sqrt(len(w_ref)) / w_ref.mean(0),
     )
     assert np.all(np.abs(ratio.mean(0) - 1.0) < 4.0 * se)
+
+
+class _NanTerm(AbstractTerm):
+    """Zero, but NaN on a fine comb of star masses (one draw in 500)."""
+
+    reads: ClassVar[tuple[str, ...]] = ()
+
+    def __call__(self, model):
+        comb = jnp.mod(model.star.mass_Msun * 1e6, 1.0)
+        return jnp.where(comb < 0.002, jnp.nan, 0.0)
+
+    def draw(self, key, model):
+        raise NotImplementedError
+
+
+@pytest.mark.medium(reason="one small collapsed run on the scoring path, 10 s cold")
+def test_a_nan_score_refuses_the_slice(fit):
+    """Fails if a NaN term at a live draw is read as a zero weight.
+
+    The term is NaN at scattered draws: at this key some scored draws are NaN while
+    every kept draw is finite, so only the score can carry the NaN to the weights.
+    The run of ``collapsed`` must be a refused slice (every weight and the evidence
+    NaN), never a finite cloud that dropped the broken draws as zero weights.
+    """
+    broken = Fit(fit.model, fit.free, (*fit.terms, _NanTerm()))
+    post = run(broken, collapsed(n_round=2**12, n_rounds=2, n_centers=64), KEY)
+    assert np.all(np.isnan(np.asarray(post.log_weights)))
+    assert np.isnan(float(post.log_evidence))
 
 
 def test_completion_refuses_a_term_on_another_system():
