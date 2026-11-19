@@ -7,15 +7,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
-from orbix.system import Body, ClassicalChart, EccentricityVectorChart, System
+from hwoutils.constants import Mearth2kg, Msun2kg
+from orbix.system import Body, System
 from skyscapes.scene import Scene
 from system_helpers import (
     _data,
     _floor,
     _new_term,
     _orbits,
-    _scale_coordinates,
     _scene,
     rv_normalization,
 )
@@ -34,15 +33,12 @@ from photomancy.measurements import (
     StellarAstromData,
     StellarAstrometryTerm,
 )
-from photomancy.orbit.inference import build_chart_logdensity
-from photomancy.priors import orbit_log_prior
 
 DYNAMICAL = ("rv", "relative_astrom", "stellar_astrom", "pm_anomaly")
 CHANNELS = (*DYNAMICAL, "null", "imaging", "custom")
 
 # Frozen from the retired NumPyro joint at the four _orbits(23.0) points: per-channel
-# log factors in CHANNELS order, their sum, and the constrained joint transformed to
-# the physical measure (the reference measure of the physical-orbit density).
+# log factors in CHANNELS order and their sum.
 _FACTORS = [
     [
         -13.65882781405432,
@@ -86,12 +82,6 @@ _TOTAL = [
     -21.70843196812418,
     -19.70031283059499,
     -108.74634696185295,
-]
-_COMMON = [
-    -6.457427490045797,
-    -26.849742187702834,
-    -26.799394651432088,
-    -118.5752126335516,
 ]
 # Frozen independent-pair factors in DYNAMICAL order for the two-planet fixture.
 _PAIR_FACTORS = [
@@ -163,77 +153,42 @@ def _check_scores(name, actual, expected, components):
     assert np.all(errors <= floors), (name, errors, floors)
 
 
-@pytest.mark.medium(reason="Compiles the full joint in two charts.")
-def test_all_channels_and_reference_measure(data):
-    """Fails if an observable, its multiplicity, or a reference Jacobian changes.
+@pytest.mark.medium(reason="compiles every channel's term on one scene")
+def test_every_channel_scores_the_frozen_factors(data):
+    """Fails if an observable, its multiplicity or a channel's normalization changes.
 
-    The constrained joint is per dlog10(P) de dc dW dw dM dlog10(body) dj.
-    Transform it to the physical measure independently of either chart. Each
-    score allows max(1e-10, 64 eps sum(1 + abs(contribution))) per orbit.
+    Every term is scored on the scene of each of the four synthetic orbits and
+    compared, channel by channel and summed, with the factors frozen from the retired
+    NumPyro joint. Each score allows max(1e-10, 64 eps sum(1 + abs(contribution)))
+    per orbit.
     """
     mass, radius, albedo = 23.0, 0.00012, 0.32
     jitter = jnp.array([0.4, 0.7, 0.1])
     observed_e = jnp.array(0.31)
+    rv = sampled_jitter_rv(data.rv)
 
-    def custom_term(scene):
+    def scores(orbit):
+        scene = _scene(orbit, mass_Mearth=mass, radius_AU=radius, albedo=albedo)
         residual = scene.dynamics.orbits.e[0] - observed_e
-        return -(residual**2), residual
+        return jnp.stack(
+            [
+                rv(scene, jitter_m_per_s=jitter)[0],
+                *(term(scene) for term in _dynamical_terms(data)[1:]),
+                null_dmag_term(data.null)(scene),
+                DMagTerm(data.imaging)(scene),
+                -(residual**2),
+            ]
+        )
 
-    terms = (
-        sampled_jitter_rv(data.rv),
-        *_dynamical_terms(data)[1:],
-        null_dmag_term(data.null),
-        DMagTerm(data.imaging),
-        custom_term,
-    )
-    orbits = _orbits(mass)
-    factors, total, common = (jnp.asarray(x) for x in (_FACTORS, _TOTAL, _COMMON))
+    factors, total = jnp.asarray(_FACTORS), jnp.asarray(_TOTAL)
     # The frozen RV factors predate the normalization of the flat-offset marginal.
     norm = rv_normalization(data.rv)
-    factors, total, common = factors.at[:, 0].add(norm), total + norm, common + norm
+    factors, total = factors.at[:, 0].add(norm), total + norm
     assert np.ptp(factors[:, CHANNELS.index("null")]) > 1e-3
-    physical = dict(
-        mass_Mearth=mass, radius_AU=radius, albedo=albedo, jitter_m_per_s=jitter
-    )
-    log_scales = jax.tree.map(jnp.log, physical)
-    for chart in (ClassicalChart(), EccentricityVectorChart()):
-        density = build_chart_logdensity(
-            chart,
-            _scene,
-            lambda s: orbit_log_prior(s.dynamics.orbits)[0],
-            star_mass_kg=Msun2kg,
-            terms=terms,
-            scalars=_scale_coordinates(0.8),
-            body_inputs=("radius_AU", "albedo"),
-            term_inputs={0: ("jitter_m_per_s",)},
-        )
-
-        def evaluate(x, density=density):
-            params = dict(orbit=x, **log_scales)
-            value, aux = density.value_and_aux(params)
-            return jnp.stack(aux["term_values"]), value, density.log_volume(params)
-
-        points = chart.from_orbit(orbits)
-        outside = points[:1].at[:, -1].add(two_pi)
-        scores, joint, volume = eqx.filter_jit(jax.vmap(evaluate))(
-            jnp.concatenate([points, outside])
-        )
-        assert jnp.isneginf(joint[-1])
-        actual = scores[:-1]
-        reference_value = joint[:-1] - volume[:-1]
-        label = type(chart).__name__
-        for i, name in enumerate(CHANNELS):
-            _check_scores(f"{label} {name}", actual[:, i], factors[:, i], factors[:, i])
-        _check_scores(f"{label} summed", actual.sum(axis=1), total, factors)
-        parts = jnp.column_stack((factors, common - total))
-        _check_scores(f"{label} full", reference_value, common, parts)
-    # A vector-valued user factor would turn the joint into a vector.
-    bad = eqx.tree_at(
-        lambda d: d.terms, density, (lambda s: (s.dynamics.orbits.e, None),)
-    )
-    bad = eqx.tree_at(lambda d: d.term_inputs, bad, {})
-    with pytest.raises(ValueError, match="scalar log-likelihood"):
-        eqx.filter_eval_shape(bad, dict(orbit=points[0], **log_scales))
+    actual = eqx.filter_jit(jax.vmap(scores))(_orbits(mass))
+    for i, name in enumerate(CHANNELS):
+        _check_scores(name, actual[:, i], factors[:, i], factors[:, i])
+    _check_scores("summed", actual.sum(axis=1), total, factors)
 
 
 class _IndependentPairs(eqx.Module):

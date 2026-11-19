@@ -212,10 +212,10 @@ class MixturePosterior(AbstractPosterior):
 
 
 class SamplePosterior(AbstractPosterior):
-    """A posterior represented by weighted samples (OFTI, grid_search, NUTS, SMC).
+    """A posterior represented by weighted samples (NUTS, SMC).
 
     Columns are named by ``param_names`` -- the space is whatever those names denote
-    (physical for OFTI / grid_search, unconstrained ``z`` for NUTS / SMC). ``sample``
+    (unconstrained ``z`` for NUTS / SMC). ``sample``
     resamples particles by weight (inverse-CDF SIR, ``O(n)`` memory); ``log_prob`` is
     unsupported; ``evidence`` is the backend's ``log Z`` (or ``NaN``).
 

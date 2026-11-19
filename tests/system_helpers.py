@@ -8,7 +8,7 @@ from hwoutils.epoch import Epoch
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.equations import period_to_sma
 from orbix.system import Body, ClassicalChart, SkyFrame, System
-from priorities import HalfNormal, LogUniform, Uniform
+from priorities import Uniform
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.population import kipping_eccentricity, rayleigh_eccentricity
 from skyscapes.scene import FlatStar, Planet, Scene
@@ -26,7 +26,6 @@ from photomancy.measurements import (
     RVData,
     StellarAstromData,
 )
-from photomancy.orbit.system_density import ScalarCoordinate
 
 
 def ecc_law(name):
@@ -106,15 +105,6 @@ def _scene(orbit, *, mass_Mearth, radius_AU, albedo):
         ),
         dynamics,
     )
-
-
-def _scale_coordinates(jitter_scale):
-    """Physical measures for the three body scales and instrument jitters."""
-    scalars = {
-        name: ScalarCoordinate(LogUniform(*bounds)) for name, bounds in BOUNDS.items()
-    }
-    scalars["jitter_m_per_s"] = ScalarCoordinate(HalfNormal(jitter_scale))
-    return scalars
 
 
 _TIMES = np.array([31.0, 120.0, 290.0, 470.0])

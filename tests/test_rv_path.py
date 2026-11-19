@@ -60,30 +60,6 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
     assert likelihood(1.0) > likelihood(2.0)
 
 
-@pytest.mark.parametrize("n_inst", [1, 2])
-def test_sampled_rv_jitter_matches_instrument_count(n_inst):
-    """The sampled jitter coordinate has one entry per instrument.
-
-    Fails if the chart problem decodes a single jitter for a multi-instrument
-    dataset or loses a column when the instrument count changes.
-    """
-    from test_nested import _nested_problem
-
-    data = RVData(
-        times=jnp.array([0.0, 10.0]),
-        rv=jnp.array([3.0, -2.0]),
-        rv_err=jnp.ones(2),
-        inst_ids=jnp.array([0, n_inst - 1]),
-        is_valid=jnp.ones(2, dtype=bool),
-        n_inst=n_inst,
-    )
-    from orbix.system import EccentricityVectorChart
-
-    problem = _nested_problem(EccentricityVectorChart(), "disk", data)
-    physical = problem.to_physical(problem.flatten(problem.position_template))
-    assert jnp.atleast_1d(physical["jitter_m_per_s"]).shape == (n_inst,)
-
-
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
 def test_invalid_rv_rows_have_finite_likelihood_and_gradient(invalid_value):
     """Invalid observations, predictions, errors, and jitters cannot poison sums."""

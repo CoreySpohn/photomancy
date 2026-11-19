@@ -28,23 +28,6 @@ def _samples(n=200, seed=3):
     }
 
 
-class _Problem:
-    """A minimal problem stand-in with a traceable to_physical."""
-
-    param_names = ("z0", "z1")
-
-    def require(self, posterior):
-        """Accept any posterior; chart checks are covered elsewhere."""
-
-    def to_physical(self, z):
-        """Map a flat z to a physical dict, leaking ll_total like the real one."""
-        return {
-            "T": 900.0 + 40.0 * z[0],
-            "e": 0.3 * jax.nn.sigmoid(z[1]),
-            "ll_total": z[0],
-        }
-
-
 def test_plot_corner_samples_door_excludes_ll_total():
     """Default params keep the curated order and never show ll_total."""
     import eyepiece as ep
@@ -56,21 +39,6 @@ def test_plot_corner_samples_door_excludes_ll_total():
     assert result.axes.shape == (3, 3)
     labels = [result.axes[2, j].get_xlabel() for j in range(3)]
     assert labels == ["T [days]", "e", "cos i"]
-
-
-def test_plot_corner_posterior_door_requires_problem_and_key():
-    """The posterior door draws via sample_physical and names what is missing."""
-    from photomancy.infer.legacy_posterior import GaussianPosterior
-    from photomancy.viz import plot_corner
-
-    posterior = GaussianPosterior(
-        mean=jnp.zeros(2), cov=jnp.eye(2), evidence=jnp.array(0.0)
-    )
-    result = plot_corner(posterior, _Problem(), key=jax.random.PRNGKey(0), n=64)
-    assert result.axes.shape == (2, 2)
-
-    with pytest.raises(TypeError, match="problem, key"):
-        plot_corner(posterior)
 
 
 @pytest.mark.medium(
