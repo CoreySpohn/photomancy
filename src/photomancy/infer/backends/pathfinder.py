@@ -157,9 +157,11 @@ class Pathfinder(AbstractBackend):
         n_modes: Number of starts and proposal components.
         maxiter: Maximum L-BFGS iterations along the path.
         maxcor: L-BFGS history size.
-        init: ``None`` for prior draws as starts, one constrained draw, or a
-            ``Posterior`` whose weights pick the starts; the starts are placed in the
-            flat vector by ``fit.to_flat``.
+        init: ``None`` for prior draws as starts, one constrained draw (repeated for
+            every start), an entry dict whose every leaf has a leading axis of length
+            ``n_modes`` (one explicit start each, so each alias keeps its own mode),
+            or a ``Posterior`` whose weights pick the starts; the starts are placed in
+            the flat vector by ``fit.to_flat``.
     """
 
     n_draws: int = eqx.field(static=True, default=2000)
