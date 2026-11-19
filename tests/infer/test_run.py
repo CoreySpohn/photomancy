@@ -356,7 +356,12 @@ _WORLD_BACKENDS = {
     "laplace": Laplace(n_draws=200),
     "importance": Importance(PriorProposal(), n_draws=200),
     "adaptive": AdaptiveImportance(
-        PriorProposal(), n_draws=200, n_round=400, n_rounds=2, n_centers=16
+        PriorProposal(),
+        n_draws=200,
+        n_round=400,
+        n_rounds=2,
+        n_centers=16,
+        target_cess=0.05,
     ),
     "grid": Grid({KEY: midpoint(0.0, HIGH, 120)}),
 }
@@ -438,23 +443,26 @@ def test_smc_prior_only_evidence_on_an_orbit_block_is_zero():
     assert abs(float(post.log_evidence)) < 0.1
 
 
+@pytest.mark.medium(reason="eight 4000-draw runs of one compiled Laplace, 25 s cold")
 def test_laplace_prior_only_evidence_on_an_orbit_block_is_zero():
-    """The prior-only evidence through ``Laplace`` is 0 within 3 standard errors.
+    """The prior-only evidence through ``Laplace`` averages to 0 over eight keys.
 
-    Truth source: the block prior is normalized, so ``log Z = 0``.
-    Tolerance basis: 3 standard errors of the importance mean, with a k-hat below 1
-    (a finite mean of the weights). The weights of the prior-only fit are heavy
-    tailed (k-hat 0.5 to 0.8), which biases the estimate by about 0.02 nat at 4000
-    draws.
-    Fails if: the wrapped proposal density does not integrate to one over a cell.
+    Truth source: the block prior is normalized, so ``log Z = 0``. A single key passes
+    on only about 79 percent of keys at the old floor of 0.1, which carried a bias of
+    about -0.02 nat (24 keys: -0.027 +- 0.005; at 0.03: +0.001 +- 0.005), so the test
+    averages eight keys.
+    Tolerance basis: the mean within 3 standard errors of the mean, the reported
+    errors of the eight runs added in quadrature over 8, with every k-hat below 1 (a
+    finite mean of the weights).
+    Fails if: the wrapped proposal density does not integrate to one over a cell, or
+    the default floor narrows the proposal enough to bias the evidence.
     """
-    post = run(
-        _prior_only_orbit_fit(),
-        Laplace(n_draws=4000, min_eigenvalue=0.1),
-        jax.random.key(0),
-    )
-    assert abs(float(post.log_evidence)) < 3 * float(post.log_evidence_se)
-    assert float(pareto_khat(post.log_weights)) < 1.0
+    fit = _prior_only_orbit_fit()
+    posts = [run(fit, Laplace(n_draws=4000), jax.random.key(k)) for k in range(8)]
+    z = np.array([float(p.log_evidence) for p in posts])
+    se = np.array([float(p.log_evidence_se) for p in posts])
+    assert abs(z.mean()) < 3 * np.sqrt(np.sum(se**2)) / 8, (z, se)
+    assert max(float(pareto_khat(p.log_weights)) for p in posts) < 1.0
 
 
 def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
@@ -465,7 +473,7 @@ def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
     the periodic wrap or the tail cover.
     """
     fit = _prior_only_orbit_fit()
-    laplace = run(fit, Laplace(n_draws=4000, min_eigenvalue=0.1), jax.random.key(0))
+    laplace = run(fit, Laplace(n_draws=4000), jax.random.key(0))
     flat = _flat_samples(fit, laplace.samples)
     seed = MixtureProposal.from_cloud(
         jax.random.key(1),
@@ -518,6 +526,65 @@ def test_prior_importance_recovers_the_conjugate_evidence(sequence):
     )
     se = float(post.log_evidence_se)
     assert abs(float(post.log_evidence) - _exact_log_z()) < 3 * se
+
+
+def test_a_ladder_that_stops_short_of_one_refuses_the_slice():
+    """An adaptive run whose last proposal was fitted below temperature one is NaN.
+
+    Truth source: ``_exact_log_z`` for the one-leaf fit. With 2000 draws per round and
+    16 centers, a rung needs a Kish size of 1000 and the full step to temperature one
+    leaves about 380: two rounds stop at a temperature below one (NaN evidence,
+    standard error and weights, ``reached`` false, the rung on record); eight rounds
+    reach one and the evidence is within 3 standard errors. Fails if a short ladder
+    returns weights from a proposal fitted at a lower temperature, whose Kish size
+    and k-hat look healthy.
+    """
+    fit = _leaf_fit()
+    settings = {"n_draws": 2000, "n_round": 2000, "n_centers": 16}
+    short = run(
+        fit,
+        AdaptiveImportance(PriorProposal(), n_rounds=2, **settings),
+        jax.random.key(0),
+    )
+    assert not bool(short.info.reached)
+    assert 0.0 < float(short.info.temperatures[0]) < 1.0
+    assert float(short.info.temperatures[-1]) == 1.0
+    assert np.isnan(float(short.log_evidence))
+    assert np.isnan(float(short.log_evidence_se))
+    assert np.isnan(np.asarray(short.log_weights)).all()
+    full = run(
+        fit,
+        AdaptiveImportance(PriorProposal(), n_rounds=8, **settings),
+        jax.random.key(0),
+    )
+    assert bool(full.info.reached)
+    assert bool(np.all(np.diff(np.asarray(full.info.temperatures)) >= 0))
+    se = float(full.log_evidence_se)
+    assert abs(float(full.log_evidence) - _exact_log_z()) < 3 * se
+
+
+def test_a_seeded_adaptive_run_starts_at_temperature_one():
+    """A proposal other than the prior is a seed: every round is at temperature one.
+
+    Fails if a seeded run tempers from zero (it then discards the seed and, with a
+    short ladder, is refused for a posterior its seed already covers).
+    """
+    fit = _leaf_fit()
+    laplace = run(fit, Laplace(n_draws=2000), jax.random.key(0))
+    seed = MixtureProposal.from_cloud(
+        jax.random.key(1),
+        _flat_samples(fit, laplace.samples),
+        laplace.log_weights,
+        n_centers=16,
+        periods=fit.periods(),
+    )
+    post = run(
+        fit,
+        AdaptiveImportance(seed, n_draws=2000, n_round=2000, n_rounds=2, n_centers=16),
+        jax.random.key(0),
+    )
+    assert bool(post.info.reached)
+    assert float(post.info.temperatures[0]) == 1.0
 
 
 def test_importance_evidence_is_the_importance_mean_of_its_weights():
@@ -662,6 +729,39 @@ def _chain_features(post, n_chains, n_draws):
     """Wrap-invariant features of each chain mean, ``(n_chains, 9)``."""
     f = _wrap_angles(_new_coords(post).reshape(n_chains, n_draws, 6))
     return f.mean(axis=1), f.reshape(-1, f.shape[-1]).std(axis=0)
+
+
+GOLDEN_LOG_Z = -19.04
+
+
+@pytest.mark.slow
+def test_adaptive_importance_on_the_golden_orbit_converges_or_refuses():
+    """Adaptive importance from the prior returns the converged evidence or NaN.
+
+    Truth source: the converged evidence -19.04 of a 40-round run (two keys gave
+    -19.046 and -19.039, standard error 0.015). With the default three rounds the
+    ladder cannot reach temperature one on this concentrated posterior, so the slice is
+    NaN with ``reached`` false; the old rule returned -175, -82 and -106 with a standard
+    error of 1.0 and a k-hat of 0.02. With 40 rounds of 2**13 the evidence is within 3
+    standard errors of -19.04 and the k-hat is below 0.7. Fails if a short ladder
+    returns a finite number, or a long one converges to a different value.
+    """
+    fit = _golden_fit()
+    short = run(fit, AdaptiveImportance(PriorProposal()), jax.random.key(0))
+    assert not bool(short.info.reached)
+    assert np.isnan(float(short.log_evidence))
+    assert np.isnan(np.asarray(short.log_weights)).all()
+    full = run(
+        fit,
+        AdaptiveImportance(
+            PriorProposal(), n_draws=2**13, n_round=2**13, n_rounds=40, n_centers=64
+        ),
+        jax.random.key(0),
+    )
+    assert bool(full.info.reached)
+    se = float(full.log_evidence_se)
+    assert abs(float(full.log_evidence) - GOLDEN_LOG_Z) < 3 * max(se, 0.015)
+    assert float(pareto_khat(full.log_weights)) < 0.7
 
 
 @pytest.mark.slow

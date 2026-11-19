@@ -29,7 +29,7 @@ from photomancy.infer import (
     PriorProposal,
     run,
 )
-from photomancy.infer.diagnostics import next_temperature
+from photomancy.infer.diagnostics import kish_temperature
 
 jax.config.update("jax_enable_x64", True)
 
@@ -115,6 +115,30 @@ def test_a_mixture_density_is_periodic_and_its_draws_match_log_q():
     )
 
 
+def test_mixture_picks_follow_the_weights_and_skip_zero_weight():
+    """The inverse-CDF pick draws components in proportion to their weights.
+
+    Shares 0.2, 0.5, 0.3 with zero-weight components between and after them, tagged by
+    well separated means along one unwrapped coordinate; N = 8192 (4 sigma of 0.02 on
+    the largest variance). Fails if the pick is biased or draws a zero-weight component.
+    """
+    fit = _orbit_fit()
+    periods = fit.periods()
+    d = len(periods)
+    j = next(i for i, p in enumerate(periods) if p is None)
+    pi = np.array([0.2, 0.0, 0.5, 0.3, 0.0])
+    with np.errstate(divide="ignore"):
+        log_pi = jnp.log(jnp.asarray(pi))
+    means = jnp.zeros((5, d)).at[:, j].set(10.0 * jnp.arange(5.0))
+    mixture = MixtureProposal(means, 1e-4 * jnp.eye(d), log_pi)
+    n = 8192
+    z, _ = mixture.sample(jax.random.key(0), fit, n)
+    pick = np.rint(np.asarray(z[:, j]) / 10.0).astype(int)
+    share = np.bincount(pick, minlength=5) / n
+    assert share[1] == 0.0 and share[4] == 0.0
+    assert np.all(np.abs(share - pi) <= 4.0 * np.sqrt(pi * (1.0 - pi) / n) + 1e-12)
+
+
 def test_the_shared_covariance_path_equals_the_general_path():
     """One shared covariance gives the density of the same one tiled per component.
 
@@ -174,23 +198,37 @@ def test_a_defensive_proposal_is_the_prior_mixture_of_its_base():
     np.testing.assert_allclose(np.asarray(log_q), np.asarray(expected), rtol=1e-9)
 
 
-def test_next_temperature_hits_the_target_conditional_ess():
-    """The step lands where the conditional ESS fraction equals the target.
+def test_kish_temperature_hits_the_target_kish_size_of_the_cloud():
+    """The rung lands where the Kish size of the tempered cloud is the target.
 
-    Truth source: the fraction ``(sum a) ** 2 / (N sum a ** 2)`` for equal weights and
-    ``a = exp(delta * loglik)`` is evaluated directly at the returned step; tolerance
-    1e-6 (the bisection runs to machine precision). A full step is returned as 1
-    when the target is met at beta = 1.
+    Truth source: the Kish size ``(sum w) ** 2 / sum w ** 2`` of ``exp(b * loglik)``
+    (a base of zero, equal prior and proposal, so 2000 at ``b = 0``) evaluated at the
+    returned ``b``; tolerance 1e-3 relative (bisection to machine precision, the size
+    is smooth). A full step returns 1, a floor above the current size does not move,
+    and NaN propagates. Fails if the criterion measures the move from the previous
+    temperature rather than the cloud the next proposal is fitted from, or ignores
+    the floor.
     """
     loglik = -jnp.linspace(0.0, 200.0, 2000)
-    lw = jnp.zeros(2000)
-    beta = float(next_temperature(loglik, lw, 0.0, 0.5))
+    base = jnp.zeros(2000)
+    beta = float(kish_temperature(base, loglik, 0.0, 0.5, 100.0))
     a = jnp.exp(beta * loglik)
     assert 0.0 < beta < 1.0
-    assert abs(float(jnp.sum(a) ** 2 / (2000 * jnp.sum(a**2))) - 0.5) < 1e-6
-    assert float(next_temperature(0.001 * loglik, lw, 0.0, 0.5)) == 1.0
-    assert float(next_temperature(loglik, lw, 1.0, 0.5)) == 1.0
-    assert math.isnan(float(next_temperature(loglik.at[3].set(jnp.nan), lw, 0.0, 0.5)))
+    np.testing.assert_allclose(
+        float(jnp.sum(a) ** 2 / jnp.sum(a**2)), 1000.0, rtol=1e-3
+    )
+    floored = float(kish_temperature(base, loglik, 0.0, 0.5, 1500.0))
+    b = jnp.exp(floored * loglik)
+    np.testing.assert_allclose(
+        float(jnp.sum(b) ** 2 / jnp.sum(b**2)), 1500.0, rtol=1e-3
+    )
+    assert float(kish_temperature(base, 0.001 * loglik, 0.0, 0.5)) == 1.0
+    assert float(kish_temperature(base, loglik, 1.0, 0.5)) == 1.0
+    assert float(kish_temperature(base, loglik, 0.0, 0.5, 2001.0)) < 1e-6
+    nan = loglik.at[3].set(jnp.nan)
+    assert math.isnan(float(kish_temperature(base, nan, 0.0, 0.5)))
+    dead = base.at[:1500].set(-jnp.inf)
+    assert float(kish_temperature(dead, 0.001 * loglik, 0.0, 0.5)) == 1.0
 
 
 def test_a_batch_size_gives_the_same_importance_run():

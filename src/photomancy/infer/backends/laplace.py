@@ -251,9 +251,13 @@ class Laplace(AbstractBackend):
         n_modes: Number of starts and proposal components.
         n_steps: L-BFGS iterations per start.
         min_eigenvalue: Floor on the precision eigenvalues of the proposal covariance
-            and the indefiniteness threshold. At the default the standard deviation of
-            a flat direction is at most 3.2, which the image window of the wrapped
-            density covers (``MixtureProposal``).
+            and the indefiniteness threshold, in units of inverse squared unconstrained
+            coordinate (the standard deviation of a flat direction is at most
+            ``1 / sqrt(min_eigenvalue)``). It trades a narrow proposal, whose weights
+            have a heavy right tail that a few thousand draws under-sample (a bias of
+            about 0.02 nat on a prior-only orbit fit at 0.1), against a wide one,
+            whose weights vary more (variance). The default 0.03 is unbiased on that
+            fit.
         max_decrement: Largest Newton decrement, in nats, of a mode that is kept.
         init: ``None`` for prior draws as starts, one constrained draw, or a
             ``Posterior`` whose weights pick the starts.
@@ -262,7 +266,7 @@ class Laplace(AbstractBackend):
     n_draws: int = eqx.field(static=True, default=2000)
     n_modes: int = eqx.field(static=True, default=1)
     n_steps: int = eqx.field(static=True, default=100)
-    min_eigenvalue: float = 0.1
+    min_eigenvalue: float = 0.03
     max_decrement: float = 1.0
     init: Posterior | dict | None = None
 

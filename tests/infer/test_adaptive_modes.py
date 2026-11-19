@@ -42,7 +42,8 @@ class _TwoModes(AbstractTerm):
 def test_defensive_share_recovers_both_masses_of_a_two_mode_target():
     """Fails if the adaptive rounds drop the smaller mode or bias the evidence.
 
-    Eight keys of ``AdaptiveImportance`` seeded from the prior (defensive share 0.1):
+    Eight keys of ``AdaptiveImportance`` seeded from the prior (defensive share 0.1; the
+    tempering ladder needs about eight rounds to reach the posterior, ten here):
     the mean far-mode mass is 0.2 and the mean evidence is ``1 / 12^3``, each within
     3 standard errors of the key-to-key scatter.
     """
@@ -52,7 +53,7 @@ def test_defensive_share_recovers_both_masses_of_a_two_mode_target():
         (_TwoModes(),),
     )
     backend = AdaptiveImportance(
-        PriorProposal(), n_draws=2000, n_round=2**13, n_rounds=3, n_centers=64
+        PriorProposal(), n_draws=2000, n_round=2**13, n_rounds=10, n_centers=64
     )
     mass, log_z = [], []
     for key in jax.random.split(jax.random.key(0), 8):

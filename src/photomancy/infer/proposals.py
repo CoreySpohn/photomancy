@@ -28,7 +28,6 @@ starts outside.
 
 import math
 from abc import abstractmethod
-from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -42,6 +41,7 @@ from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.particles import systematic_indices
 
 __all__ = [
+    "AbstractDensityProposal",
     "AbstractProposal",
     "DefensiveProposal",
     "MixtureProposal",
@@ -98,32 +98,20 @@ def _blockwise(fn, z, per_row):
 
 
 class AbstractProposal(eqx.Module):
-    """A distribution over the flat unconstrained vector of a fit, with its density.
+    """A distribution over the flat unconstrained vector of a fit.
 
-    The only proposal interface. ``sample`` and ``log_prob`` agree: ``log_q`` is the
-    density of the draws (wrapped over the cell for periodic coordinates, see the module
-    docstring). Subclasses are ``eqx.Module`` configurations.
-
-    A proposal that is properly weighted but not a density (``log_q`` of a draw is the
-    value that makes ``log_target - log_q`` its importance weight, and ``log_prob`` is
-    undefined) sets ``temperable = False``: ``AdaptiveImportance`` then refits it on the
-    weights of the fit's own density, because a tempered target would need the density
-    of the draw. It also overrides ``adapt`` to say what a refit means for it.
-
-    Attributes:
-        temperable: Whether ``log_q`` is a density, so that ``AdaptiveImportance`` may
-            weight its draws to a tempered target.
+    ``sample`` returns ``(z, log_q)``: the draws and the value that makes
+    ``fit.real_log_prob(z) - log_q`` their importance weight. For a density proposal
+    (:class:`AbstractDensityProposal`) ``log_q`` is the density of the draws, wrapped
+    over the cell for periodic coordinates (see the module docstring). A proposal that
+    is properly weighted but not a density (the ``log_q`` of a draw is the value that
+    gives its weight and no density at ``z`` exists) derives from this class directly.
+    Subclasses are ``eqx.Module`` configurations.
     """
-
-    temperable: ClassVar[bool] = True
 
     @abstractmethod
     def sample(self, key, fit, n: int) -> tuple[jax.Array, jax.Array]:
         """Draw ``n`` points; return ``(z, log_q)`` with ``z`` of shape ``(n, d)``."""
-
-    @abstractmethod
-    def log_prob(self, z, fit) -> jax.Array:
-        """Return the proposal log density of ``z (n, d)`` as ``(n,)``."""
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
         """Return the next round's proposal, fitted to a weighted cloud ``z``.
@@ -149,7 +137,20 @@ class AbstractProposal(eqx.Module):
         return DefensiveProposal(mixture, defensive)
 
 
-class PriorProposal(AbstractProposal):
+class AbstractDensityProposal(AbstractProposal):
+    """A proposal whose ``log_q`` is its density, evaluable at any point.
+
+    ``sample`` and ``log_prob`` agree: ``log_q`` is ``log_prob`` at the draws. The
+    tempering of :class:`~photomancy.infer.backends.importance.AdaptiveImportance` and
+    the defensive mixture need the density at points the proposal did not draw.
+    """
+
+    @abstractmethod
+    def log_prob(self, z, fit) -> jax.Array:
+        """Return the proposal log density of ``z (n, d)`` as ``(n,)``."""
+
+
+class PriorProposal(AbstractDensityProposal):
     """The fit's prior, as a proposal in the flat unconstrained vector.
 
     ``log_q`` is the prior density in the unconstrained coordinates (``log_prior`` of
@@ -205,7 +206,7 @@ def _roberts(key, n, dim):
     return jnp.clip(cube, 1e-12, 1.0 - 1e-12)
 
 
-class MixtureProposal(AbstractProposal):
+class MixtureProposal(AbstractDensityProposal):
     """A Gaussian mixture; a single Gaussian is one component.
 
     Draws are reduced to the cell of every periodic coordinate and ``log_q`` is the
@@ -369,15 +370,19 @@ class MixtureProposal(AbstractProposal):
 
         return _blockwise(block, z, shifts.shape[0] * k)
 
-    def _pick(self, key, n):
-        """Component index of each of ``n`` draws (a subclass may pick faster)."""
-        return jax.random.categorical(key, self.log_pi, shape=(n,))
-
     def sample(self, key, fit, n):
-        """Draw ``n`` points, reduce them to the cell and return the wrapped density."""
+        """Draw ``n`` points, reduce them to the cell and return the wrapped density.
+
+        Components are picked by the inverse CDF of the weights, one uniform per draw
+        (``jax.random.categorical`` draws ``n * K`` Gumbel variates, which at
+        ``K = 256`` costs more than the rest of a round); a component of zero weight is
+        never picked.
+        """
         periods = fit.periods()
         k_comp, k_eps = jax.random.split(key)
-        comp = self._pick(k_comp, n)
+        cdf = jnp.cumsum(jnp.exp(self.log_pi))
+        u = jax.random.uniform(k_comp, (n,), dtype=cdf.dtype)
+        comp = jnp.minimum(jnp.searchsorted(cdf, u, side="right"), cdf.shape[0] - 1)
         eps = jax.random.normal(k_eps, (n, self.dim), jnp.float64)
         chol = self.chols[jnp.where(self.chols.shape[0] == 1, 0, comp)]
         z = self._reduced_means(periods)[comp] + jnp.einsum("nij,nj->ni", chol, eps)
@@ -385,7 +390,7 @@ class MixtureProposal(AbstractProposal):
         return z, self.log_prob(z, fit)
 
 
-class DefensiveProposal(AbstractProposal):
+class DefensiveProposal(AbstractDensityProposal):
     """The mixture ``fraction * prior + (1 - fraction) * base``.
 
     The prior component keeps the proposal density positive wherever the prior is, so
@@ -398,9 +403,9 @@ class DefensiveProposal(AbstractProposal):
             proposal over a sub-vector of the fit supplies its own.
     """
 
-    base: AbstractProposal
+    base: AbstractDensityProposal
     fraction: float = eqx.field(static=True, default=0.1)
-    prior: AbstractProposal = eqx.field(default_factory=PriorProposal)
+    prior: AbstractDensityProposal = eqx.field(default_factory=PriorProposal)
 
     def __check_init__(self):
         """Refuse a fraction outside the open unit interval."""

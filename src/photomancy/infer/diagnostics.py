@@ -24,8 +24,8 @@ from jax.scipy.special import logsumexp
 __all__ = [
     "khat_threshold",
     "kish_ess",
+    "kish_temperature",
     "mc_se",
-    "next_temperature",
     "normalize_log_weights",
     "pareto_khat",
     "ratio_mc_se",
@@ -382,54 +382,52 @@ def ratio_mc_se(log_weights, numerator, denominator, *, r_eff=None):
     )
 
 
-def _conditional_ess_fraction(log_weights, log_increment, delta):
-    """CESS / N of weights ``W`` moved by ``exp(delta * log_increment)``."""
-    first = logsumexp(log_weights + delta * log_increment)
-    second = logsumexp(log_weights + 2.0 * delta * log_increment)
-    return jnp.exp(2.0 * first - second)
+def kish_temperature(
+    log_base, log_likelihood, beta, target_fraction, min_size=0.0, n_bisect=60
+):
+    """Return the next temperature, by the Kish size of the cloud the next fit sees.
 
-
-def next_temperature(log_increment, log_weights, beta, target_cess, n_bisect=60):
-    """Return the next tempering parameter by a conditional-ESS bisection.
-
-    A tempered target is ``prior * likelihood ** beta``. Particles weighted for the
-    temperature ``beta`` (``log_weights``, normalized here) move to ``beta + delta``
-    with the factor ``exp(delta * log_increment)``, where ``log_increment`` is the log
-    likelihood of each particle. The conditional effective sample size of the moved
-    weights, ``(sum W a) ** 2 / sum (W a ** 2)`` as a fraction of ``N`` with
-    ``a = exp(delta * log_increment)``, falls from one as ``delta`` grows. The result
-    is the largest temperature at which it is still at least ``target_cess``, found by
-    bisection on ``delta``; it is ``1`` when the full step to one keeps the fraction
-    at or above the target. One slice (draw axis last); a ``-inf`` log weight or
-    increment is a particle with zero weight, and NaN propagates to a NaN temperature.
+    The cloud was drawn from a proposal and the tempered target is ``prior *
+    likelihood ** b``, so a draw has the log weight ``log_base + b * log_likelihood``
+    with ``log_base = log prior - log q``. The Kish size of that cloud at ``beta`` is
+    ``n_now``; the result is the largest ``b`` in ``[beta, 1]`` at which the size is
+    still at least ``clip(target_fraction * n_now, min_size, n_now)``, found by
+    bisection (the size falls as ``b`` grows). It is ``1`` when the full step keeps
+    that size, and ``beta`` when no step does. The criterion is on the cloud the next
+    proposal is fitted from (the weights of the draws at the new temperature), not on
+    the move from the previous temperature, and the floor keeps enough draws for the
+    fit. One slice (draw axis last); a ``-inf`` base or likelihood is a draw with zero
+    weight, ``0 * -inf`` at ``b = 0`` is zero, and NaN propagates to a NaN temperature.
 
     Args:
-        log_increment: Log likelihood of each particle ``(N,)``.
-        log_weights: Log weights ``(N,)`` at temperature ``beta``.
+        log_base: Log prior density minus log proposal density of each draw ``(N,)``.
+        log_likelihood: Log likelihood of each draw ``(N,)``.
         beta: Current temperature in ``[0, 1]``.
-        target_cess: Required conditional ESS as a fraction of ``N`` in ``(0, 1]``.
+        target_fraction: Fraction of the current Kish size that the step may keep, in
+            ``(0, 1]``.
+        min_size: Smallest Kish size, in draws, that a step may leave.
         n_bisect: Bisection steps (a static count).
 
     Returns:
         The new temperature in ``[beta, 1]``.
     """
-    log_increment = jnp.asarray(log_increment)
-    log_weights = jnp.asarray(log_weights)
-    log_weights = log_weights - logsumexp(log_weights)
-    span = 1.0 - beta
+    log_base = jnp.asarray(log_base)
+    log_likelihood = jnp.asarray(log_likelihood)
 
-    def fraction(delta):
-        return _conditional_ess_fraction(log_weights, log_increment, delta)
+    def size(b):
+        scaled = jnp.where(b == 0.0, 0.0, b * log_likelihood)
+        return _kish(jnp.where(jnp.isneginf(log_base), -jnp.inf, log_base + scaled))
+
+    n_now = size(beta)
+    target = jnp.clip(target_fraction * n_now, min_size, n_now)
 
     def body(_, bounds):
         low, high = bounds
         mid = 0.5 * (low + high)
-        ok = fraction(mid) >= target_cess
+        ok = size(mid) >= target
         return jnp.where(ok, mid, low), jnp.where(ok, high, mid)
 
-    low, _ = jax.lax.fori_loop(0, n_bisect, body, (jnp.zeros(()), span))
-    full = fraction(span) >= target_cess
-    nan = jnp.isnan(fraction(span))
-    step = jnp.where(full, span, low)
-    new = jnp.where(nan, jnp.nan, jnp.clip(beta + step, beta, 1.0))
-    return jnp.where(span <= 0.0, beta, new)
+    low, _ = jax.lax.fori_loop(0, n_bisect, body, (beta, jnp.ones(())))
+    new = jnp.where(size(jnp.ones(())) >= target, 1.0, low)
+    nan = jnp.any(jnp.isnan(log_base)) | jnp.any(jnp.isnan(log_likelihood))
+    return jnp.where(nan, jnp.nan, jnp.where(beta >= 1.0, beta, new))

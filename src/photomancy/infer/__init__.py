@@ -41,8 +41,8 @@ from photomancy.infer.backends import (
 from photomancy.infer.diagnostics import (
     khat_threshold,
     kish_ess,
+    kish_temperature,
     mc_se,
-    next_temperature,
     normalize_log_weights,
     pareto_khat,
     ratio_mc_se,
@@ -74,6 +74,7 @@ from photomancy.infer.posterior import (
 from photomancy.infer.posterior_utils import project_samples, sample_capped
 from photomancy.infer.priors import IndependentPrior
 from photomancy.infer.proposals import (
+    AbstractDensityProposal,
     AbstractProposal,
     DefensiveProposal,
     MixtureProposal,
@@ -89,6 +90,7 @@ __all__ = [
     "NUTS",
     "SMC",
     "AbstractBackend",
+    "AbstractDensityProposal",
     "AbstractLinearTerm",
     "AbstractLogDensity",
     "AbstractPosterior",
@@ -135,9 +137,9 @@ __all__ = [
     "importance_evidence",
     "khat_threshold",
     "kish_ess",
+    "kish_temperature",
     "mc_se",
     "midpoint",
-    "next_temperature",
     "normalize_log_weights",
     "pareto_khat",
     "project_samples",
