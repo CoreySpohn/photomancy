@@ -37,7 +37,7 @@ A domain supplies three plug-ins over a scene, and the engine turns them into a 
 This sketch requires a user-supplied scene, forward model, likelihood, and prior.
 
 ```python notest
-from photomancy import LaplaceBackend, build_scene_logdensity
+from photomancy.infer import LaplaceBackend, build_scene_logdensity
 
 # forward:    scene -> predicted data
 # likelihood: predicted -> scalar log-likelihood
@@ -60,7 +60,7 @@ bound-based, two-sided Gaussian significance used by Benneke and Seager (2013):
 This comparison requires posteriors from two user-supplied model fits.
 
 ```python notest
-from photomancy import sigma_from_log_bayes_factor
+from photomancy.infer import sigma_from_log_bayes_factor
 
 log_bayes_factor = posterior_with.evidence - posterior_without.evidence
 sigma = sigma_from_log_bayes_factor(log_bayes_factor)

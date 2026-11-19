@@ -23,15 +23,17 @@ from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
 
 from photomancy import (
-    AbstractTerm,
     PhotometryTerm,
     ProperMotionAnomalyTerm,
     RadialVelocityTerm,
     RelativeAstrometryTerm,
     StellarAstrometryTerm,
-    TermLogDensity,
 )
 from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
+from photomancy.infer import (
+    AbstractTerm,
+    TermLogDensity,
+)
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.orbit.data import (
     PhotometryData,

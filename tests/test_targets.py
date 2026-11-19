@@ -7,7 +7,8 @@ from hwoutils.epoch import Epoch
 from optixstuff.spectral import Band, Transmission
 from test_terms import _ELEMENTS, _system
 
-from photomancy import TermLogDensity, load_target
+from photomancy import load_target
+from photomancy.infer import TermLogDensity
 
 _EPOCH = Epoch(2451545.0)
 

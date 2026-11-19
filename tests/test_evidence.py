@@ -8,7 +8,7 @@ from jax.scipy.special import erfc
 from scipy.optimize import brentq
 from scipy.special import erfcinv, log_ndtr, ndtri_exp
 
-from photomancy import sigma_from_log_bayes_factor
+from photomancy.infer import sigma_from_log_bayes_factor
 
 
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])

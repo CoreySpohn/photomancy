@@ -22,7 +22,7 @@ from kinematics import (  # noqa: E402
 from orbix.equations.orbit import period_a, period_to_sma  # noqa: E402
 from priorities import Uniform  # noqa: E402
 
-from photomancy import LaplaceBackend, build_scene_logdensity  # noqa: E402
+from photomancy.infer import LaplaceBackend, build_scene_logdensity  # noqa: E402
 from photomancy.orbit import PMAnomalyData, loglike_pm_anomaly  # noqa: E402
 
 MSUN_KG = 1.989e30
