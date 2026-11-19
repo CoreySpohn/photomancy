@@ -89,6 +89,11 @@ class ExposureTerm(AbstractTerm):
             model.instrument, model.exposures[self.exposure_index], model.scene
         )
 
+    def value_and_prediction(self, model):
+        """Return the log-likelihood and the image, rendering once."""
+        image = self.predict(model)
+        return self.likelihood(image), image
+
     def __call__(self, model):
         """Return the scalar log-likelihood of the data at ``model``."""
         return self.likelihood(self.predict(model))

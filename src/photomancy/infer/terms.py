@@ -39,11 +39,11 @@ class TermLogDensity(AbstractLogDensity):
 
     def value_and_aux(self, params):
         """Return ``(log_density, predictions)`` with one prediction per term."""
-        values = [term(params) for term in self.terms]
-        total = values[0]
-        for value in values[1:]:
+        results = [term.value_and_prediction(params) for term in self.terms]
+        total = results[0][0]
+        for value, _ in results[1:]:
             total = total + value
-        predictions = [term.predict(params) for term in self.terms]
+        predictions = [prediction for _, prediction in results]
         if self.prior is not None:
             total = total + self.prior(params)
         return total, tuple(predictions)
