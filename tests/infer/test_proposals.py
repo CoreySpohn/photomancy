@@ -158,12 +158,15 @@ def test_the_shared_covariance_path_equals_the_general_path():
     )
 
 
-def test_from_cloud_unwraps_a_cloud_across_the_cell_edge():
+def test_from_cloud_unwraps_the_cell_edge_and_skips_dead_draws():
     """A cloud straddling the cell edge gets its true spread, not a cell-wide one.
 
     Truth source: the cloud is a normal of sd 0.1 around the edge of the angle cell, so
-    the kernel sd is well below one radian. Fails if: the moments are taken without the
-    circular unwrap, which inflates the covariance to the order of the period.
+    the kernel sd is well below one radian. The same cloud with NaN rows at weight
+    ``-inf`` inserted (a proposal's dead draws) gives the same mixture to 1e-12. Fails
+    if: the moments are taken without the circular unwrap, which inflates the
+    covariance to the order of the period, or a dead draw reaches the moments (NaN
+    Cholesky factors).
     """
     fit = _orbit_fit()
     periods = fit.periods()
@@ -179,6 +182,14 @@ def test_from_cloud_unwraps_a_cloud_across_the_cell_edge():
     sd = float(mixture.chols[0, i, i])
     assert 0.0 < sd < 0.2
     assert mixture.means.shape == (32, d)
+    rows = jnp.asarray([0, 1000, n])
+    dead_x = jnp.insert(x, rows, jnp.nan, axis=0)
+    dead_lw = jnp.insert(jnp.zeros(n), rows, -jnp.inf)
+    dead = MixtureProposal.from_cloud(
+        jax.random.key(1), dead_x, dead_lw, n_centers=32, periods=periods
+    )
+    for got, want in ((dead.means, mixture.means), (dead.chols, mixture.chols)):
+        np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-12)
 
 
 def test_a_defensive_proposal_is_the_prior_mixture_of_its_base():

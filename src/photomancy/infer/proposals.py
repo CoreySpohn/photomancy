@@ -314,7 +314,9 @@ class MixtureProposal(AbstractDensityProposal):
         share of the variance is added on the diagonal so a cloud that is flat in some
         direction keeps a positive-definite covariance. Periodic coordinates are
         unwrapped around their circular mean before the moments are taken, so a cloud
-        that straddles a cell edge has the covariance of its true spread.
+        that straddles a cell edge has the covariance of its true spread. A draw of
+        zero weight is not read, so the dead draws of a proposal (NaN coordinates at
+        weight ``-inf``) give the mixture of the cloud without them.
 
         Args:
             key: PRNG key (the resampling of the centers).
@@ -332,6 +334,8 @@ class MixtureProposal(AbstractDensityProposal):
         log_w = log_weights - logsumexp(log_weights)
         w = jnp.exp(log_w)
         ess = 1.0 / jnp.sum(w**2)
+        # A dead draw (zero weight, possibly NaN) must not reach the weighted sums.
+        x = jnp.where(w[:, None] > 0, x, 0.0)
         xs = x
         for i, period in enumerate(periods or ()):
             if period is None:
