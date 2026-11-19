@@ -193,6 +193,11 @@ DELETED = (
     "photomancy.priors",
     "ChartOrbitProblem",
     "Updater",
+    "NullData",
+    "loglike_null",
+    "ImagingData",
+    "loglike_imaging",
+    "area_AU2",
 )
 
 

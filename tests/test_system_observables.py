@@ -18,12 +18,11 @@ from system_helpers import (
     _scene,
     rv_normalization,
 )
-from term_utils import null_dmag_term, sampled_jitter_rv
+from term_utils import sampled_jitter_rv
 
 from photomancy.measurements import (
+    DMagData,
     DMagTerm,
-    ImagingData,
-    NullData,
     PMAnomalyData,
     ProperMotionAnomalyTerm,
     RadialVelocityTerm,
@@ -99,8 +98,8 @@ class Measurements(eqx.Module):
     relative_astrom: RelativeAstromData
     stellar_astrom: StellarAstromData
     pm_anomaly: PMAnomalyData
-    null: NullData
-    imaging: ImagingData
+    null: DMagData
+    imaging: DMagData
 
 
 @pytest.fixture(scope="module")
@@ -126,14 +125,28 @@ def data():
         relative_astrom=relative,
         stellar_astrom=_new_term("stellar", max_n=5).data,
         pm_anomaly=replace(_new_term("pma").data, n_epochs=9),
-        null=NullData.pad(**curve),
-        imaging=ImagingData.pad(
+        null=DMagData.pad(
+            **curve, is_detected=[False] * 3, dmag_obs=[0.0] * 3, dmag_err=[1.0] * 3
+        ),
+        imaging=DMagData.pad(
             **curve,
             is_detected=[True, False, True],
             dmag_obs=[22.0, 0.0, 19.0],
             dmag_err=[0.4, 1.0, 0.7],
         ),
     )
+
+
+class _Lit(eqx.Module):
+    """A bare dynamical system with a held photometric area ``Ag * Rp**2`` (AU^2)."""
+
+    system: System
+    albedo_area_AU2: jax.Array
+
+
+def _lit(data):
+    """A DMagTerm that reads the system and its area from a :class:`_Lit`."""
+    return DMagTerm(data, system_path="system", area_path="albedo_area_AU2")
 
 
 def _dynamical_terms(data):
@@ -174,7 +187,7 @@ def test_every_channel_scores_the_frozen_factors(data):
             [
                 rv(scene, jitter_m_per_s=jitter)[0],
                 *(term(scene) for term in _dynamical_terms(data)[1:]),
-                null_dmag_term(data.null)(scene),
+                DMagTerm(data.null)(scene),
                 DMagTerm(data.imaging)(scene),
                 -(residual**2),
             ]
@@ -328,9 +341,9 @@ def test_jacobi_predictions(two_planets):
     assert (
         np.max(np.abs(actual[1] - pair_positions)) > 1e-7
     )  # arcsec, resolved physics change
-    for term in (null_dmag_term(data.null), DMagTerm(data.imaging)):
+    for term in (DMagTerm(data.null), DMagTerm(data.imaging)):
         with pytest.raises(ValueError, match=r"(?i)multi-planet"):
-            DMagTerm(term.data, area_AU2=1e-8)(jacobi)
+            _lit(term.data)(_Lit(jacobi, jnp.asarray(1e-8)))
 
 
 def test_radiative_padding_and_dark_limit(data):
@@ -345,11 +358,11 @@ def test_radiative_padding_and_dark_limit(data):
     log_area = jnp.log(0.32 * 0.00012**2)
 
     def score(log_area, term):
-        term = DMagTerm(term.data, area_AU2=jnp.exp(log_area))
-        return term(model), term.predict(model)
+        lit, held = _lit(term.data), _Lit(model, jnp.exp(log_area))
+        return lit(held), lit.predict(held)
 
     evaluate = eqx.filter_jit(jax.value_and_grad(score, has_aux=True))
-    for term in (DMagTerm(data.imaging), null_dmag_term(data.null)):
+    for term in (DMagTerm(data.imaging), DMagTerm(data.null)):
         poisoned_data = jax.tree.map(
             lambda a: (
                 a.at[-1].set(jnp.nan) if jnp.issubdtype(a.dtype, jnp.floating) else a
@@ -371,5 +384,5 @@ def test_radiative_padding_and_dark_limit(data):
         (value, prediction), gradient = evaluate(log_area, masked)
         np.testing.assert_array_equal(jnp.stack(prediction), 0.0)
         np.testing.assert_array_equal([value, gradient], 0.0)
-        _, dark_dmag = DMagTerm(term.data, area_AU2=0.0).predict(model)
+        _, dark_dmag = _lit(term.data).predict(_Lit(model, jnp.asarray(0.0)))
         np.testing.assert_allclose(dark_dmag[:-1], 750.0, rtol=0, atol=1e-12)

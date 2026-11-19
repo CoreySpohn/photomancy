@@ -30,117 +30,20 @@ from photomancy.measurements._padding import (
 from photomancy.measurements.report import ReportLaw, ReportPrediction
 
 __all__ = [
+    "DMagData",
     "DMagTerm",
-    "ImagingData",
-    "NullData",
     "PhotometryData",
     "PhotometryTerm",
     "interpolate_contrast_curve",
     "lambertian_dmag",
     "lambertian_from_area",
-    "loglike_imaging",
-    "loglike_null",
+    "loglike_dmag",
     "system_separation_dmag",
 ]
 
 
-class NullData(eqx.Module):
-    """Non-detection (null) observation data.
-
-    Stores the detection threshold as a dMag grid per epoch. Both Tier 1
-    (static contrast curves) and Tier 2 (physics-aware ``dMag0Grid``) data
-    are stored in the same format after pre-slicing.
-
-    Args:
-        epochs: Observation epochs (days). Shape ``(N_epochs,)``.
-        sep_grid: Separation grid per epoch (arcsec), padded and monotonic.
-            Shape ``(N_epochs, N_pts)``.
-        dmag0_grid: Limiting dMag per epoch, padded with ``-jnp.inf`` for
-            undetectable regions. Shape ``(N_epochs, N_pts)``.
-        is_valid: Boolean validity mask. Shape ``(N_epochs,)``.
-        snr_thresh: SNR detection threshold (static). Default 5.0.
-    """
-
-    epochs: jnp.ndarray
-    sep_grid: jnp.ndarray
-    dmag0_grid: jnp.ndarray
-    is_valid: jnp.ndarray
-    snr_thresh: float = eqx.field(static=True, default=5.0)
-
-    @classmethod
-    def from_contrast_curves(
-        cls,
-        epochs,
-        sep_grids,
-        contrast_grids,
-        snr_thresh=5.0,
-        max_n=MAX_IMG,
-        max_pts=MAX_CC_PTS,
-    ):
-        """Create NullData from contrast curves (Tier 1).
-
-        Converts contrast values to dMag space: ``dMag = -2.5 * log10(contrast)``.
-
-        Args:
-            epochs: Observation epochs. Shape ``(N_epochs,)``.
-            sep_grids: Separation grids per epoch (arcsec).
-                Shape ``(N_epochs, N_pts)``.
-            contrast_grids: Contrast detection limits per epoch.
-                Shape ``(N_epochs, N_pts)``.
-            snr_thresh: SNR detection threshold.
-            max_n: Padding size for epochs.
-            max_pts: Padding size for contrast curve points.
-
-        Returns:
-            A ``NullData`` instance with the contrast curves converted to dMag.
-        """
-        epochs = jnp.asarray(epochs)
-        sep_grids = jnp.asarray(sep_grids)
-        dmag0_grid = contrast_to_delta_mag(contrast_grids)
-        n = epochs.shape[0]
-        return cls(
-            epochs=_pad_1d(epochs, max_n),
-            sep_grid=_pad_2d(sep_grids, max_n, max_pts),
-            dmag0_grid=_pad_2d(dmag0_grid, max_n, max_pts, fill=-jnp.inf),
-            is_valid=_valid_mask(n, max_n),
-            snr_thresh=snr_thresh,
-        )
-
-    @classmethod
-    def pad(
-        cls,
-        *,
-        epochs,
-        sep_grid,
-        dmag0_grid,
-        snr_thresh=5.0,
-        max_n=MAX_IMG,
-        max_pts=MAX_CC_PTS,
-    ):
-        """Create a padded NullData with an ``is_valid`` mask."""
-        n = jnp.asarray(epochs).shape[0]
-        return cls(
-            epochs=_pad_1d(epochs, max_n),
-            sep_grid=_pad_2d(sep_grid, max_n, max_pts),
-            dmag0_grid=_pad_2d(dmag0_grid, max_n, max_pts, fill=-jnp.inf),
-            is_valid=_valid_mask(n, max_n),
-            snr_thresh=snr_thresh,
-        )
-
-    @classmethod
-    def zeros(cls, max_n=MAX_IMG, max_pts=MAX_CC_PTS, snr_thresh=5.0):
-        """Create an all-invalid placeholder."""
-        return cls(
-            epochs=jnp.zeros(max_n),
-            sep_grid=jnp.zeros((max_n, max_pts)),
-            dmag0_grid=jnp.full((max_n, max_pts), -jnp.inf),
-            is_valid=jnp.zeros(max_n, dtype=bool),
-            snr_thresh=snr_thresh,
-        )
-
-
-class ImagingData(eqx.Module):
-    """Unified imaging data for detection and null epochs.
+class DMagData(eqx.Module):
+    """Single-planet dMag detections and contrast-curve nulls.
 
     Combines astrometric detection epochs (with measured brightness) and
     null detection epochs (with contrast-curve limits) into a single
@@ -212,7 +115,7 @@ class ImagingData(eqx.Module):
             max_pts: Padding size for contrast curve grid points.
 
         Returns:
-            An ``ImagingData`` instance.
+            A ``DMagData`` instance.
         """
         det_epochs = jnp.asarray(det_epochs)
         null_epochs = jnp.asarray(null_epochs)
@@ -247,6 +150,44 @@ class ImagingData(eqx.Module):
         )
 
     @classmethod
+    def from_contrast_curves(
+        cls,
+        epochs,
+        sep_grids,
+        contrast_grids,
+        snr_thresh=5.0,
+        max_n=MAX_IMG,
+        max_pts=MAX_CC_PTS,
+    ):
+        """Null epochs from contrast curves, with every epoch a non-detection.
+
+        Converts each contrast limit to a dMag limit, ``dMag = -2.5 * log10(contrast)``.
+
+        Args:
+            epochs: Observation epochs (days). Shape ``(N_epochs,)``.
+            sep_grids: Separation grids per epoch (arcsec).
+                Shape ``(N_epochs, N_pts)``.
+            contrast_grids: Contrast detection limits per epoch.
+                Shape ``(N_epochs, N_pts)``.
+            snr_thresh: SNR detection threshold.
+            max_n: Padding size for epochs.
+            max_pts: Padding size for contrast curve points.
+        """
+        epochs = jnp.asarray(epochs)
+        n = epochs.shape[0]
+        return cls.pad(
+            epochs=epochs,
+            sep_grid=jnp.asarray(sep_grids),
+            dmag0_grid=contrast_to_delta_mag(jnp.asarray(contrast_grids)),
+            is_detected=jnp.zeros(n, dtype=bool),
+            dmag_obs=jnp.zeros(n),
+            dmag_err=jnp.ones(n),
+            snr_thresh=snr_thresh,
+            max_n=max_n,
+            max_pts=max_pts,
+        )
+
+    @classmethod
     def pad(
         cls,
         *,
@@ -260,7 +201,7 @@ class ImagingData(eqx.Module):
         max_n=MAX_IMG,
         max_pts=MAX_CC_PTS,
     ):
-        """Create a padded ImagingData with an ``is_valid`` mask."""
+        """Create a padded DMagData with an ``is_valid`` mask."""
         n = jnp.asarray(epochs).shape[0]
         return cls(
             epochs=_pad_1d(epochs, max_n),
@@ -428,7 +369,7 @@ def interpolate_contrast_curve(alpha_pred, sep_grid, dmag0_grid, limit_grid=None
     return dmag0, limit
 
 
-def lambertian_from_area(area_AU2):
+def lambertian_from_area(albedo_area_AU2):
     """Map Lambda = Ag Rp^2 to a unit-albedo model and radius in Earth radii.
 
     Reflected light identifies only the area product. Fix Ag=1 and put
@@ -438,7 +379,7 @@ def lambertian_from_area(area_AU2):
     with jax.ensure_compile_time_eval():
         from skyscapes.physical_model import LambertianPhysicalModel
 
-    area = jnp.atleast_1d(area_AU2)
+    area = jnp.atleast_1d(albedo_area_AU2)
     return LambertianPhysicalModel(Ag=jnp.ones_like(area)), jnp.sqrt(area) / Rearth2AU
 
 
@@ -450,7 +391,7 @@ def lambertian_dmag(phase_rad, distance_AU, model, radius_Rearth):
     return contrast_to_delta_mag(jnp.maximum(contrast, 1e-300))
 
 
-def system_separation_dmag(system, time_d, *, area_AU2=None):
+def system_separation_dmag(system, time_d, *, albedo_area_AU2=None):
     """Predict separation (arcsec) and dMag at days from a one-planet epoch.
 
     A scene supplies its Lambertian reflector and radius. An explicit
@@ -463,10 +404,10 @@ def system_separation_dmag(system, time_d, *, area_AU2=None):
         raise ValueError(
             "Multi-planet null and imaging require a detection model per planet"
         )
-    if area_AU2 is None:
+    if albedo_area_AU2 is None:
         if bare:
             raise ValueError(
-                "A dynamical system needs area_AU2 for Lambertian photometry"
+                "A dynamical system needs albedo_area_AU2 for Lambertian photometry"
             )
         with jax.ensure_compile_time_eval():
             from skyscapes.physical_model import LambertianPhysicalModel
@@ -479,9 +420,11 @@ def system_separation_dmag(system, time_d, *, area_AU2=None):
             )
         radius_Rearth = planet.Rp_Rearth
     else:
-        if jnp.size(area_AU2) != 1:
-            raise ValueError("area_AU2 must specify one planet's photometric area")
-        model, radius_Rearth = lambertian_from_area(jnp.reshape(area_AU2, (1,)))
+        if jnp.size(albedo_area_AU2) != 1:
+            raise ValueError(
+                "albedo_area_AU2 must specify one planet's photometric area"
+            )
+        model, radius_Rearth = lambertian_from_area(jnp.reshape(albedo_area_AU2, (1,)))
     if not bare:
         radius_Rearth = jnp.where(system.valid, radius_Rearth, 0.0)
     ephemeris = system.solve(time_d) if bare else system.ephemeris(time_d)
@@ -505,36 +448,8 @@ def _fixed_noise_null(alpha_pred, dMag_pred, data):
     return law.log_null_probability(1.0, prediction)
 
 
-def loglike_null(alpha_pred, dMag_pred, data):
-    """Non-detection log-likelihood via exact flux-space z-score.
-
-    Uses the reporting law with fixed noise in flux space.
-
-    Sign convention: larger dMag = fainter. If a planet is brighter than
-    the detection limit (``dMag_pred < dMag0_limit``), the flux ratio
-    exceeds 1, producing a negative z-score and a heavy log-likelihood
-    penalty.
-
-    Outside the contrast curve, the finite "undetectable" sentinel from
-    :func:`interpolate_contrast_curve` gives a flux ratio near zero and a null
-    probability near one.
-
-    Args:
-        alpha_pred: Predicted angular separation (arcsec). Shape
-            ``(N_epochs,)``.
-        dMag_pred: Predicted delta-magnitude. Shape ``(N_epochs,)``.
-        data: A :class:`~photomancy.measurements.photometry.NullData` instance.
-
-    Returns:
-        Scalar log-likelihood value.
-    """
-    return jnp.sum(
-        jnp.where(data.is_valid, _fixed_noise_null(alpha_pred, dMag_pred, data), 0.0)
-    )
-
-
-def loglike_imaging(alpha_pred, dMag_pred, data):
-    """Unified imaging log-likelihood for detection + null epochs.
+def loglike_dmag(alpha_pred, dMag_pred, data):
+    """Log-likelihood of dMag detections and contrast-curve nulls.
 
     At **detection epochs** (``data.is_detected == True``): evaluates a
     Gaussian photometric likelihood comparing the predicted dMag to the
@@ -542,7 +457,11 @@ def loglike_imaging(alpha_pred, dMag_pred, data):
     penalty that prevents the optimizer from crushing Lambda to zero.
 
     At **null epochs** (``data.is_detected == False``): uses the existing
-    flux-space z-score approach via :func:`loglike_null`.
+    flux-space z-score of the predicted counts against the reporting rule's
+    detection threshold, with fixed noise in flux space. A planet brighter than the
+    limit (``dMag_pred < dMag0``) has a flux ratio above one and a heavy penalty;
+    outside the contrast curve the finite "undetectable" sentinel of
+    :func:`interpolate_contrast_curve` gives a null probability near one.
 
     The two branches are combined with :func:`jnp.where` for branchless
     JIT compatibility.
@@ -551,7 +470,7 @@ def loglike_imaging(alpha_pred, dMag_pred, data):
         alpha_pred: Predicted angular separation (arcsec). Shape
             ``(M,)``.
         dMag_pred: Predicted delta-magnitude. Shape ``(M,)``.
-        data: An :class:`~photomancy.measurements.photometry.ImagingData` instance.
+        data: A :class:`~photomancy.measurements.photometry.DMagData` instance.
 
     Returns:
         Scalar log-likelihood value.
@@ -664,44 +583,34 @@ class DMagTerm(AbstractTerm):
     supplied contrast curve. A data set of nulls alone is an all-False ``is_detected``.
 
     A scene supplies its Lambertian albedo and radius. For a bare dynamical system, or
-    to override the scene, give the photometric area ``Ag * Rp**2`` (AU^2) as the
-    ``area_AU2`` field or as a model leaf at ``area_path``.
+    to override the scene, the photometric area ``Ag * Rp**2`` (AU^2) is a model leaf at
+    ``area_path`` (a held leaf for a fixed area, a free one to fit it).
 
     Attributes:
         data: Detection and null epochs with their contrast curves.
         system_path: Model path of the one-planet system; the empty path is the model.
-        area_AU2: Fixed photometric area, or None.
         area_path: Model path of the photometric area, or None.
     """
 
-    data: ImagingData
+    data: DMagData
     system_path: str = eqx.field(static=True, default="")
-    area_AU2: jax.Array | None = None
     area_path: str | None = eqx.field(static=True, default=None)
     reads: ClassVar[tuple[str, ...]] = ()
-
-    def __check_init__(self):
-        """Require at most one source of the photometric area."""
-        if self.area_AU2 is not None and self.area_path is not None:
-            raise ValueError("Choose a fixed area_AU2 or an area_path, not both")
-
-    def _area(self, model):
-        if self.area_path is not None:
-            return resolve(model, self.area_path)
-        return self.area_AU2
 
     def _prediction(self, model):
         valid = self.data.is_valid
         prediction = system_separation_dmag(
             resolve(model, self.system_path),
             jnp.where(valid, self.data.epochs, 0.0),
-            area_AU2=self._area(model),
+            albedo_area_AU2=None
+            if self.area_path is None
+            else resolve(model, self.area_path),
         )
         return tuple(jnp.where(valid, x, 0.0) for x in prediction)
 
     def __call__(self, model):
         """Return the combined dMag and null log likelihood."""
-        return loglike_imaging(*self._prediction(model), self.data)
+        return loglike_dmag(*self._prediction(model), self.data)
 
     def predict(self, model):
         """Return (separation in arcsec, dMag) at each epoch, zero on padded rows."""

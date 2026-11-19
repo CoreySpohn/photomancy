@@ -17,14 +17,14 @@ from infer.test_fit import (
     _stellar,
 )
 
-from photomancy.measurements import DMagTerm, ImagingData, NullData
+from photomancy.measurements import DMagData, DMagTerm
 
 
 def imaging_data():
     """Two detections and two nulls on a flat 24 mag contrast curve."""
     sep = jnp.tile(jnp.linspace(0.02, 0.5, 20), (4, 1))
     curve = jnp.full((4, 20), 24.0)
-    return ImagingData.pad(
+    return DMagData.pad(
         epochs=TIMES,
         sep_grid=sep,
         dmag0_grid=curve,
@@ -33,7 +33,16 @@ def imaging_data():
         dmag_err=[0.3, 1.0, 0.3, 1.0],
         max_n=4,
         max_pts=20,
-    ), NullData.pad(epochs=TIMES, sep_grid=sep, dmag0_grid=curve, max_n=4, max_pts=20)
+    ), DMagData.pad(
+        epochs=TIMES,
+        sep_grid=sep,
+        dmag0_grid=curve,
+        is_detected=[False] * 4,
+        dmag_obs=[0.0] * 4,
+        dmag_err=[1.0] * 4,
+        max_n=4,
+        max_pts=20,
+    )
 
 
 def _g2_entry(i):

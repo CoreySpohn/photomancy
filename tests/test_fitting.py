@@ -12,10 +12,8 @@ from kinematics import (
 from orbix.kepler import Halley, kepler
 
 from photomancy.measurements import (
-    NullData,
     RelativeAstromData,
     RVData,
-    loglike_null,
     loglike_relative_astrom,
     loglike_rv_marginalized,
 )
@@ -167,42 +165,6 @@ class TestDataContainers:
         )
         assert data.times.shape == (3,)
         assert data.n_inst == 2
-
-    def test_nulldata_from_contrast(self):
-        """from_contrast_curves should convert contrast to dMag correctly."""
-        epochs = jnp.array([0.0, 100.0])
-        seps = jnp.array([[0.1, 0.2, 0.3], [0.1, 0.2, 0.3]])
-        contrast = jnp.array([[1e-9, 1e-10, 1e-10], [1e-8, 1e-9, 1e-10]])
-
-        data = NullData.from_contrast_curves(epochs, seps, contrast)
-
-        # dMag = -2.5 * log10(contrast). Check only valid entries.
-        expected = -2.5 * jnp.log10(contrast)
-        n_ep, n_pts = expected.shape
-        assert jnp.allclose(data.dmag0_grid[:n_ep, :n_pts], expected)
-        assert data.snr_thresh == 5.0
-        assert data.is_valid[:n_ep].all()
-        assert not data.is_valid[n_ep:].any()
-
-    def test_nulldata_padding(self):
-        """Padding with -inf should produce zero likelihood penalty."""
-        epochs = jnp.array([0.0])
-        seps = jnp.array([[0.1, 0.5, 100.0]])  # 100 arcsec = beyond OWA
-        dmag0 = jnp.array([[25.0, 25.0, -jnp.inf]])  # padded
-
-        data = NullData(
-            epochs=epochs,
-            sep_grid=seps,
-            dmag0_grid=dmag0,
-            is_valid=jnp.ones(1, dtype=bool),
-        )
-
-        # Planet at padded separation: should get ~zero penalty
-        alpha = jnp.array([100.0])
-        dMag = jnp.array([20.0])  # bright planet at padded location
-        ll = loglike_null(alpha, dMag, data)
-        # At the padded point, dmag0=-inf, flux_ratio=0, z=5, log_ndtr(5)~=0
-        assert ll > -1e-3
 
 
 # ============================================================================
@@ -549,77 +511,6 @@ class TestLoglikeAstrom:
 
         g = jax.grad(loss)(jnp.array([0.1]))
         assert jnp.all(jnp.isfinite(g))
-
-
-class TestLoglikeNull:
-    """Tests for the non-detection likelihood."""
-
-    @pytest.fixture
-    def simple_null_data(self):
-        """Single epoch with a contrast curve."""
-        epochs = jnp.array([0.0])
-        seps = jnp.array([[0.05, 0.1, 0.2, 0.5, 1.0]])  # arcsec
-        contrast = jnp.array([[1e-8, 1e-9, 1e-10, 1e-10, 1e-10]])
-        return NullData.from_contrast_curves(
-            epochs,
-            seps,
-            contrast,
-            max_n=1,
-            max_pts=5,
-        )
-
-    def test_bright_planet_penalized(self, simple_null_data):
-        """A planet 5 mag brighter than limit should be heavily penalized."""
-        # dMag0 limit at 0.2 arcsec is -2.5*log10(1e-10) = 25
-        alpha = jnp.array([0.2])
-        dMag = jnp.array([20.0])  # 5 mag brighter -> should have been detected
-
-        ll = loglike_null(alpha, dMag, simple_null_data)
-        assert ll < -10.0  # heavy penalty
-
-    def test_faint_planet_no_penalty(self, simple_null_data):
-        """A planet fainter than the limit should have near-zero penalty."""
-        alpha = jnp.array([0.2])
-        dMag = jnp.array([30.0])  # 5 mag fainter than limit
-
-        ll = loglike_null(alpha, dMag, simple_null_data)
-        assert ll > -0.01  # essentially zero
-
-    def test_outside_iwa_no_penalty(self, simple_null_data):
-        """Planet outside valid separation range gets no penalty."""
-        alpha = jnp.array([5.0])  # beyond OWA
-        dMag = jnp.array([15.0])  # very bright
-
-        ll = loglike_null(alpha, dMag, simple_null_data)
-        assert ll > -0.01  # no penalty -- planet was invisible
-
-    def test_inside_iwa_no_penalty(self, simple_null_data):
-        """Planet inside IWA gets no penalty."""
-        alpha = jnp.array([0.01])  # inside IWA
-        dMag = jnp.array([15.0])  # very bright
-
-        ll = loglike_null(alpha, dMag, simple_null_data)
-        assert ll > -0.01
-
-    def test_differentiable(self, simple_null_data):
-        """Should be differentiable w.r.t. predictions."""
-
-        def loss(dMag):
-            return loglike_null(jnp.array([0.2]), dMag, simple_null_data)
-
-        g = jax.grad(loss)(jnp.array([25.0]))
-        assert jnp.all(jnp.isfinite(g))
-
-    def test_gradient_direction(self, simple_null_data):
-        """Gradient should push planet toward fainter (larger dMag)."""
-
-        def loss(dMag):
-            return loglike_null(jnp.array([0.2]), dMag, simple_null_data)
-
-        # At the detection boundary, gradient should point toward fainter
-        g = jax.grad(loss)(jnp.array([25.0]))
-        # Positive gradient = increasing dMag increases likelihood
-        assert g[0] > 0
 
 
 # ============================================================================

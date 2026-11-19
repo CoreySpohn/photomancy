@@ -8,7 +8,6 @@ import jax
 import numpy as np
 import pytest
 from golden_systems import imaging_data, model_at, systems
-from term_utils import null_dmag_term
 
 from photomancy.measurements import DMagTerm
 
@@ -47,9 +46,10 @@ def test_terms_equal_the_stored_values(name):
 def test_null_epochs_are_the_old_null_term():
     """Fails if a DMagTerm of nulls differs from the deleted ``NullTerm``.
 
-    ``NullTerm`` scored ``loglike_null`` on ``NullData``; an all-null ``ImagingData``
-    on ``DMagTerm`` selects the same censored kernel on every row, so the deleted
-    term is a special case. Stored ``NullTerm`` values are the reference, rtol 1e-12.
+    ``NullTerm`` scored the censored null kernel on the null epochs of a contrast
+    curve; an all-null ``DMagData`` on ``DMagTerm`` selects the same kernel on every
+    row, so the deleted term is a special case. Stored ``NullTerm`` values are the
+    reference, rtol 1e-12.
     """
     _, null = imaging_data()
     scene, entry, _ = next(
@@ -58,7 +58,7 @@ def test_null_epochs_are_the_old_null_term():
     for i in range(_N_POINTS):
         model = model_at(scene, entry(i))
         value, prediction = STORED["g3"][i]["NullTerm"]
-        term = null_dmag_term(null)
+        term = DMagTerm(null)
         np.testing.assert_allclose(float(term(model)), value, rtol=1e-12, atol=0)
         np.testing.assert_allclose(
             np.asarray(term.predict(model)), prediction, rtol=1e-12, atol=1e-300
@@ -79,7 +79,7 @@ def test_a_dmag_term_with_a_null_epoch_refuses_to_draw():
     )
     model = model_at(scene, entry(0))
     key = jax.random.key(0)
-    for term in (null_dmag_term(null), DMagTerm(detections)):
+    for term in (DMagTerm(null), DMagTerm(detections)):
         with pytest.raises(Exception, match="ReportTerm"):
             term.draw(key, model)
     only = detections.is_detected | ~detections.is_valid

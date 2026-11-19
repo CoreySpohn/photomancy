@@ -110,7 +110,7 @@ def plot_dmag(
     Args:
         t_d: Times in days, shape ``(T,)``.
         dmag: Predicted dMag curves, ``(T,)`` or ``(K, T)``.
-        data: Optional ``ImagingData``; valid detections are drawn as
+        data: Optional ``DMagData``; valid detections are drawn as
             errorbars, valid nulls as downward triangles at ``limit_dmag``
             (nulls are skipped when no limit is given, since a null has no
             measured dMag to sit at).

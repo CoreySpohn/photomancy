@@ -58,11 +58,11 @@ def test_plot_rv_fan_alpha():
 
 def _imaging_data():
     """Two detections and one null, padded, with a tiny contrast grid."""
-    from photomancy.measurements import ImagingData
+    from photomancy.measurements import DMagData
 
     grid = jnp.linspace(0.05, 0.4, 8)
     limit = jnp.full(8, 24.0)
-    return ImagingData.from_detections_and_nulls(
+    return DMagData.from_detections_and_nulls(
         det_epochs=jnp.array([20.0, 150.0]),
         det_dmag_obs=jnp.array([22.5, 23.1]),
         det_dmag_err=jnp.array([0.1, 0.15]),
