@@ -23,11 +23,7 @@ from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
 from photomancy.infer.diagnostics import kish_ess, next_temperature
 from photomancy.infer.evidence import importance_evidence
-from photomancy.infer.proposals import (
-    AbstractProposal,
-    DefensiveProposal,
-    MixtureProposal,
-)
+from photomancy.infer.proposals import AbstractProposal, MixtureProposal
 
 __all__ = ["AdaptiveImportance", "Importance", "ImportanceInfo"]
 
@@ -147,12 +143,14 @@ class AdaptiveImportance(AbstractBackend):
     Round zero draws ``n_round`` points from ``proposal``. Each earlier round picks the
     next temperature of the tempered target ``prior * likelihood ** beta`` with
     :func:`~photomancy.infer.diagnostics.next_temperature` (conditional effective sample
-    size ``target_cess``), weights its draws to that target, fits
-    ``MixtureProposal.from_cloud`` to the weighted cloud and mixes it with the prior
-    (``defensive``). The last round draws ``n_draws`` points from the final proposal and
-    weights them to the fit's own density, so the returned weights and evidence come
-    from that round alone and are importance estimates from independent draws. The round
-    count is fixed and there is no early exit.
+    size ``target_cess``), weights its draws to that target, and refits the proposal to
+    the weighted cloud (``AbstractProposal.adapt``: by default
+    ``MixtureProposal.from_cloud`` mixed with the prior, share ``defensive``). A
+    proposal that is not ``temperable`` is refit on the weights of the fit's own
+    density, at temperature one. The last round draws ``n_draws`` points from the final
+    proposal and weights them to the fit's own density, so the returned weights and
+    evidence come from that round alone and are importance estimates from independent
+    draws. The round count is fixed and there is no early exit.
 
     Attributes:
         proposal: Proposal of round zero (for example ``PriorProposal()`` or a mixture
@@ -184,27 +182,36 @@ class AdaptiveImportance(AbstractBackend):
         """Run the rounds; return the last round's weighted cloud and evidence."""
         proposal = self.proposal
         beta = jnp.zeros(())
-        periods = fit.periods()
         temperatures, kish = [], []
         for _ in range(self.n_rounds - 1):
             k_draw, k_fit, key = jax.random.split(key, 3)
             z, log_q = proposal.sample(k_draw, fit, self.n_round)
             x, volume = _stored(fit, z)
-            log_prior = fit.log_prior(x, batch_size=batch_size) + volume
-            log_like = fit.log_likelihood(x, batch_size=batch_size)
+            if proposal.temperable:
+                log_prior = fit.log_prior(x, batch_size=batch_size) + volume
+                log_like = fit.log_likelihood(x, batch_size=batch_size)
 
-            def tempered(b, log_prior=log_prior, log_like=log_like, log_q=log_q):
-                lw = log_prior + _temper(log_like, b) - log_q
-                return jnp.where(jnp.isneginf(log_prior), -jnp.inf, lw)
+                def tempered(b, log_prior=log_prior, log_like=log_like, log_q=log_q):
+                    lw = log_prior + _temper(log_like, b) - log_q
+                    return jnp.where(jnp.isneginf(log_prior), -jnp.inf, lw)
 
-            beta = next_temperature(log_like, tempered(beta), beta, self.target_cess)
-            log_w = tempered(beta)
+                beta = next_temperature(
+                    log_like, tempered(beta), beta, self.target_cess
+                )
+                log_w = tempered(beta)
+            else:
+                beta = jnp.ones(())
+                log_w = fit.log_density(x, batch_size=batch_size) + volume - log_q
             temperatures.append(beta)
             kish.append(kish_ess(log_w))
-            mixture = MixtureProposal.from_cloud(
-                k_fit, z, log_w, n_centers=self.n_centers, periods=periods
+            proposal = proposal.adapt(
+                k_fit,
+                z,
+                log_w,
+                fit,
+                n_centers=self.n_centers,
+                defensive=self.defensive,
             )
-            proposal = DefensiveProposal(mixture, self.defensive)
         x, log_target, log_w = _weigh(fit, proposal, key, self.n_draws, batch_size)
         log_z, se = importance_evidence(log_w)
         temperatures.append(jnp.ones(()))

@@ -28,6 +28,7 @@ starts outside.
 
 import math
 from abc import abstractmethod
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -102,7 +103,19 @@ class AbstractProposal(eqx.Module):
     The only proposal interface. ``sample`` and ``log_prob`` agree: ``log_q`` is the
     density of the draws (wrapped over the cell for periodic coordinates, see the module
     docstring). Subclasses are ``eqx.Module`` configurations.
+
+    A proposal that is properly weighted but not a density (``log_q`` of a draw is the
+    value that makes ``log_target - log_q`` its importance weight, and ``log_prob`` is
+    undefined) sets ``temperable = False``: ``AdaptiveImportance`` then refits it on the
+    weights of the fit's own density, because a tempered target would need the density
+    of the draw. It also overrides ``adapt`` to say what a refit means for it.
+
+    Attributes:
+        temperable: Whether ``log_q`` is a density, so that ``AdaptiveImportance`` may
+            weight its draws to a tempered target.
     """
+
+    temperable: ClassVar[bool] = True
 
     @abstractmethod
     def sample(self, key, fit, n: int) -> tuple[jax.Array, jax.Array]:
@@ -111,6 +124,29 @@ class AbstractProposal(eqx.Module):
     @abstractmethod
     def log_prob(self, z, fit) -> jax.Array:
         """Return the proposal log density of ``z (n, d)`` as ``(n,)``."""
+
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+        """Return the next round's proposal, fitted to a weighted cloud ``z``.
+
+        The default is a kernel mixture on the cloud with a share ``defensive`` of the
+        fit's prior (:meth:`MixtureProposal.from_cloud`, :class:`DefensiveProposal`).
+
+        Args:
+            key: PRNG key.
+            z: Draws of this proposal in the flat vector, ``(N, d)``.
+            log_weights: Their log weights, ``(N,)``.
+            fit: The fit.
+            n_centers: Kernels of the mixture.
+            defensive: Share of the defensive prior component.
+        """
+        mixture = MixtureProposal.from_cloud(
+            key,
+            z,
+            log_weights,
+            n_centers=n_centers,
+            periods=fit.periods(),
+        )
+        return DefensiveProposal(mixture, defensive)
 
 
 class PriorProposal(AbstractProposal):
@@ -353,11 +389,14 @@ class DefensiveProposal(AbstractProposal):
 
     Attributes:
         base: The proposal that carries ``1 - fraction`` of the draws.
-        fraction: Share of draws from the fit's prior (:class:`PriorProposal`).
+        fraction: Share of draws from the prior component.
+        prior: The prior component, the fit's prior (:class:`PriorProposal`) unless a
+            proposal over a sub-vector of the fit supplies its own.
     """
 
     base: AbstractProposal
     fraction: float = eqx.field(static=True, default=0.1)
+    prior: AbstractProposal = eqx.field(default_factory=PriorProposal)
 
     def __check_init__(self):
         """Refuse a fraction outside the open unit interval."""
@@ -367,7 +406,7 @@ class DefensiveProposal(AbstractProposal):
     def log_prob(self, z, fit):
         """Log density of the two-component mixture."""
         return jnp.logaddexp(
-            math.log(self.fraction) + PriorProposal().log_prob(z, fit),
+            math.log(self.fraction) + self.prior.log_prob(z, fit),
             math.log1p(-self.fraction) + self.base.log_prob(z, fit),
         )
 
@@ -375,7 +414,14 @@ class DefensiveProposal(AbstractProposal):
         """Draw each point from the prior with probability ``fraction``."""
         k_base, k_prior, k_pick = jax.random.split(key, 3)
         z_base, _ = self.base.sample(k_base, fit, n)
-        z_prior, _ = PriorProposal().sample(k_prior, fit, n)
+        z_prior, _ = self.prior.sample(k_prior, fit, n)
         pick = jax.random.uniform(k_pick, (n, 1)) < self.fraction
         z = jnp.where(pick, z_prior, z_base)
         return z, self.log_prob(z, fit)
+
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+        """The default refit, keeping this proposal's own prior component."""
+        refit = super().adapt(
+            key, z, log_weights, fit, n_centers=n_centers, defensive=defensive
+        )
+        return eqx.tree_at(lambda d: d.prior, refit, self.prior)
