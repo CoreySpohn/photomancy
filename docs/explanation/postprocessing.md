@@ -226,7 +226,7 @@ plane. An oriented native grid requires an oriented science grid.
 its `noise_variance` remains per-pixel variance in electrons squared.
 `PPConfig`, `ppfact`, `ez_ppf`, and `n_rolls` configuration fields are removed.
 Analytic post-processing uses explicit residual fractions in
-`jaxedith.PostProcessing`; photomancy does not depend on jaxedith.
+`coronagraphoto.ResidualFractions`; photomancy does not depend on coronagraphoto.
 
 ---
 
@@ -237,26 +237,25 @@ Analytic post-processing uses explicit residual fractions in
 - `examples/postproc_coronagraphoto_pipeline` – End-to-end example with coronagraphoto
 
 
-Detector count statistics belong to optixstuff; analytic exposure planning belongs
-to jaxedith. This example uses aperture photon integrands, image photon
+Detector count statistics belong to optixstuff; exposure planning belongs to
+coronagraphoto. This example uses aperture photon integrands, image photon
 integrands, with the wavelength quadrature carried by each rate record.
 
 ```python notest
-from jaxedith.calculator import snr, exposure_time
+import coronagraphoto as cp
 
-plan = exposure_time(
-    target_snr,
-    rates,
-    detector,
-    frame_time_s=100.0,
-    post_processing=post_processing,
+residuals = cp.ResidualFractions(
+    speckle_residual_fraction=0.1, exozodi_residual_fraction=0.1
 )
-value = snr(rates, detector, plan, post_processing=post_processing)
+plan = cp.exposure_time(
+    rates, detector, target_snr, frame_time_s=100.0, residuals=residuals
+)
+value = cp.snr(rates, detector, plan.time_s, frame_time_s=100.0, residuals=residuals)
 electrons = detector.electrons(rates)
-mean, variance = detector.mean_and_variance(electrons, plan)
+mean, variance = detector.mean_and_variance(electrons, plan.time_s)
 # For image integrands (one detector pixel per spatial sample):
 image_electrons = detector.electrons(image_rates)
-counts = detector.draw(key, image_electrons, plan)
+counts = detector.draw(key, image_electrons, plan.time_s)
 ```
 
 Construct `FrameSet` with a `Band` interval and an `Epoch` host value. Convert

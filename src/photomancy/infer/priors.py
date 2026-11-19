@@ -83,19 +83,19 @@ class IndependentPrior(eqx.Module):
             total = total + (value.sum(-1) if per_entry else value)
         return total
 
-    def sample(self, key, shape=()):
-        """Draw vectors of shape ``shape + (ndim,)``."""
+    def sample(self, key, sample_shape=()):
+        """Draw vectors of shape ``sample_shape + (ndim,)``."""
         keys = jax.random.split(key, len(self.distributions))
         return self._join(
             [
-                dist.sample(k, shape)
+                dist.sample(k, sample_shape)
                 for dist, k in zip(self.distributions, keys, strict=True)
             ]
         )
 
-    def icdf(self, unit):
+    def icdf(self, q):
         """Map a point of the unit cube ``(..., ndim)`` to ``z``."""
-        blocks = self._split(unit)
+        blocks = self._split(q)
         return self._join(
             [dist.icdf(b) for dist, b in zip(self.distributions, blocks, strict=True)]
         )

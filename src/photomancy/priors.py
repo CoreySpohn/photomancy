@@ -19,7 +19,7 @@ from typing import Protocol
 import equinox as eqx
 import jax.numpy as jnp
 from hwoutils.constants import two_pi
-from priorities import LogUniform
+from priorities import AbstractDistribution, LogUniform
 from skyscapes.population import kipping_eccentricity
 
 
@@ -68,7 +68,7 @@ class FactorizedOrbitPrior(eqx.Module):
 
     get_orbit: Callable
     period_range_d: tuple[float, float] = (1.0, 100000.0)
-    eccentricity: object = eqx.field(default_factory=kipping_eccentricity)
+    eccentricity: AbstractDistribution = eqx.field(default_factory=kipping_eccentricity)
 
     def __check_init__(self):
         """Validate the period bounds before sampling."""
@@ -84,13 +84,13 @@ class FactorizedOrbitPrior(eqx.Module):
             eccentricity=self.eccentricity,
         )
 
-    def period_icdf(self, unit):
+    def period_icdf(self, q):
         """Quantile of the log-uniform period in days."""
-        return LogUniform(*self.period_range_d).icdf(unit)
+        return LogUniform(*self.period_range_d).icdf(q)
 
-    def eccentricity_icdf(self, unit):
+    def eccentricity_icdf(self, q):
         """Quantile of the eccentricity distribution."""
-        return self.eccentricity.icdf(unit)
+        return self.eccentricity.icdf(q)
 
 
 class PopulationIntensity(Protocol):

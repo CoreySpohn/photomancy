@@ -362,10 +362,12 @@ lanes) from orbit geometry.
   at every epoch, so the anchor choice does not change the prior.
 - **Prior.** $\ln a$ uniform between the semimajor axes of $P_\mathrm{lo}$ and
   $P_\mathrm{hi}$ at fixed mass (equivalently $\ln P$ uniform on that range);
-  $e \sim \mathrm{Beta}(0.867, 3.03)$ (the `kipping13` prior of
-  `photomancy.priors`) restricted to $e < e_\mathrm{max}$; $\cos i \sim
+  $e \sim \mathrm{Beta}(0.867, 3.03)$ (the Kipping 2013 law, the string `"kipping13"` in the
+  protocol's `ecc_prior` default) restricted to $e < e_\mathrm{max}$; $\cos i \sim
   U(-1, 1)$; $\Omega, \omega, M_\mathrm{ref} \sim U(0, 2\pi)$. These are the
-  arguments of `photomancy.orbit.ofti.ofti` with `ecc_prior="kipping13"`,
+  arguments of `photomancy.orbit.ofti.ofti` with
+  `eccentricity=skyscapes.population.kipping_eccentricity()` (a `priorities`
+  distribution; the protocol string only names it),
   `e_max` = 0.9 and `log_P_range` = $(\log_{10} 50, \log_{10} 5000)$, the
   regime truncations applied to the same arguments.
 - **Support.** $P_\mathrm{lo} \le P \le P_\mathrm{hi}$ and $0 \le e <
