@@ -14,8 +14,11 @@ from photomancy.infer import (
     AbstractTerm,
     Fit,
     Laplace,
+    ReweightInfo,
     eig_contrastive,
     eig_nested,
+    kish_ess,
+    pareto_khat,
     run,
     update,
 )
@@ -126,9 +129,11 @@ def test_the_refusal_is_per_slice_and_update_refits_only_where_refused():
     World a has its posterior at 1.5 and b at 3.5; the new row at 1.8 keeps all of a
     and almost nothing of b, so ``replace_term`` refuses b alone and ``update`` runs
     the backend on b's new fit while a keeps its reweighted cloud.
-    Medium tier: it compiles the Laplace refit under a world vmap.
-    Fails if: the gate raises on a traced value, one decision covers the stack, or the
-    refit is not the posterior of the new fit.
+    Medium tier: it compiles the Laplace refit under a world vmap and a ``lax.map``.
+    ``update`` returns the gate reading of ``replace_term`` in both outcomes, under the
+    vmap and under ``lax.map`` over three worlds (one ``(3,)`` leaf per field).
+    Fails if: the gate raises on a traced value, one decision covers the stack, the
+    refit is not the posterior of the new fit, or the refit drops the gate reading.
     """
     backend = Laplace(n_draws=4000)
     a = run(_padded_fit(1.5), backend, jax.random.key(0))
@@ -152,7 +157,20 @@ def test_the_refusal_is_per_slice_and_update_refits_only_where_refused():
 
     keys = jax.random.split(jax.random.key(5), 2)
     fresh = eqx.filter_vmap(refresh)(stack, keys)
-    assert fresh.info is None and fresh.log_weights.shape == (2, 4000)
+    assert fresh.log_weights.shape == (2, 4000)
+    np.testing.assert_array_equal(np.asarray(out.info.refused), [False, True])
+    for field in ("n_eff", "khat", "refused"):
+        np.testing.assert_array_equal(
+            getattr(fresh.info, field), getattr(out.info, field)
+        )
+    three = jax.tree.map(lambda x, y: jnp.stack([x[0], x[1], y]), stack, a)
+    mapped = jax.lax.map(
+        lambda pk: refresh(*pk), (three, jax.random.split(jax.random.key(5), 3))
+    )
+    for field in ("n_eff", "khat", "refused"):
+        leaf = getattr(mapped.info, field)
+        assert leaf.shape == (3,)
+        np.testing.assert_allclose(leaf[:2], getattr(out.info, field), rtol=1e-12)
     np.testing.assert_allclose(fresh.log_weights[0], alone.log_weights, rtol=1e-12)
     np.testing.assert_allclose(fresh.log_evidence[0], alone.log_evidence, rtol=1e-12)
     assert np.all(np.isfinite(fresh.log_weights[1]))
@@ -169,7 +187,11 @@ def test_the_refusal_is_per_slice_and_update_refits_only_where_refused():
 def test_update_appends_without_an_index_and_keeps_a_passing_cloud(cloud):
     """With no index ``update`` is ``append_term`` when the gate passes.
 
-    Fails if: the backend replaces a cloud that passed, or ``append_term`` is not used.
+    Both return the gate reading: on the passing slice it is the Kish size and k-hat of
+    the returned weights. A refused ``append_term`` (a row far from the cloud) has NaN
+    weights and the reading of the same call with no gate.
+    Fails if: the backend replaces a cloud that passed, ``append_term`` is not used,
+    or the reading is not the gate's (taken after the refusal, or dropped).
     """
     kept = update(
         cloud,
@@ -181,7 +203,21 @@ def test_update_appends_without_an_index_and_keeps_a_passing_cloud(cloud):
     direct = cloud.append_term(_Gauss(jnp.asarray(1.6)), **GATE)
     np.testing.assert_array_equal(kept.log_weights, direct.log_weights)
     np.testing.assert_array_equal(kept.samples[KEY], cloud.samples[KEY])
-    assert len(kept.fit.terms) == 3 and kept.info is None
+    assert len(kept.fit.terms) == 3 and isinstance(kept.info, ReweightInfo)
+    assert not bool(kept.info.refused)
+    np.testing.assert_array_equal(kept.info.n_eff, direct.info.n_eff)
+    np.testing.assert_array_equal(kept.info.khat, direct.info.khat)
+    np.testing.assert_allclose(kept.info.n_eff, kish_ess(kept.log_weights), rtol=1e-12)
+    np.testing.assert_allclose(
+        kept.info.khat, pareto_khat(kept.log_weights), rtol=1e-12
+    )
+    far = _Gauss(jnp.asarray(3.0))
+    refused = cloud.append_term(far, **GATE)
+    ungated = cloud.append_term(far, min_n_eff=0.0, max_khat=jnp.inf)
+    assert np.all(np.isnan(refused.log_weights)) and bool(refused.info.refused)
+    assert not bool(ungated.info.refused)
+    np.testing.assert_array_equal(refused.info.n_eff, ungated.info.n_eff)
+    np.testing.assert_array_equal(refused.info.khat, ungated.info.khat)
 
 
 def test_update_refuses_a_refit_with_another_layout(cloud):

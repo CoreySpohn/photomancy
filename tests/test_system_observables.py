@@ -112,7 +112,7 @@ def data():
         (jnp.full(5, 0.03), jnp.full(5, 0.04)),
     )
     curve = dict(
-        epochs=[9.0, 48.0, 121.0],
+        time_d=[9.0, 48.0, 121.0],
         sep_grid=jnp.tile(jnp.array([0.005, 0.08, 0.6]), (3, 1)),
         dmag0_grid=jnp.array([[19, 20, 19.5], [20, 21, 21.5], [20, 19, 20.5]]),
         snr_thresh=4.0,
@@ -298,7 +298,7 @@ def test_jacobi_predictions(two_planets):
     """
     data, pairs, scene = two_planets
     jacobi = scene.dynamics
-    time_d = data.rv.times
+    time_d = data.rv.time_d
     eph = jacobi.solve(time_d)
     relative = jnp.stack(eph.offset_arcsec(jnp.arange(1, 3), 0))
     pm = data.pm_anomaly

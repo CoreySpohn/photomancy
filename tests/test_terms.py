@@ -97,7 +97,7 @@ def test_sign_anchor(pa_deg, axis):
     Fails if: either conversion or system-term prediction flips or swaps axes.
     """
     data = AstrometryData.from_sep_pa(
-        times=[0.0], sep=[0.1], sep_err=[0.001], pa_deg=[pa_deg], pa_err_deg=[0.1]
+        time_d=[0.0], sep=[0.1], sep_err=[0.001], pa_deg=[pa_deg], pa_err_deg=[0.1]
     )
     observed = np.array([data.ra[0], data.dec[0]])
     system = _system([1.0, 0.2, np.deg2rad(pa_deg), 0.7, 0.0, 0.0, 0.0])
@@ -120,7 +120,7 @@ def test_sep_pa_covariance(max_n):
     """
     sep, sep_err, pa, pa_err = 0.4, 0.0004, 0.6, 0.002
     data = AstrometryData.from_sep_pa(
-        times=[25.0],
+        time_d=[25.0],
         sep=[sep],
         sep_err=[sep_err],
         pa_deg=[np.rad2deg(pa)],
@@ -158,7 +158,7 @@ def test_system_element_parity():
     a, e, node, inc, peri, mean, epoch = _ELEMENTS
     motion = np.sqrt(G * (Msun2kg + _MASS * Mearth2kg) / a**3)
     expected_positions = predict_relative_astrometry(
-        data.times,
+        data.time_d,
         a=a,
         e=e,
         cos_i=np.cos(inc),
@@ -197,13 +197,13 @@ def test_element_gradients_and_padding(padding):
     if padding:
         # Invalid payloads must be sanitized before propagation and division.
         data = eqx.tree_at(
-            lambda d: (d.times, d.ra, d.dec, d.ra_err, d.dec_err, d.corr, d.planet_id),
+            lambda d: (d.time_d, d.ra, d.dec, d.ra_err, d.dec_err, d.corr, d.planet_id),
             data,
             tuple(
                 jnp.where(data.is_valid, x, fill)
                 for x, fill in zip(
                     (
-                        data.times,
+                        data.time_d,
                         data.ra,
                         data.dec,
                         data.ra_err,
@@ -328,14 +328,14 @@ def test_reflex_system_element_parity(kind):
     data = term.data
     args = _element_args()
     if kind == "stellar":
-        prediction = jnp.stack(predict_stellar_astrometry(data.times, **args))
+        prediction = jnp.stack(predict_stellar_astrometry(data.time_d, **args))
         expected = loglike_stellar_astrom(*prediction, data)
         atol = 1e-18
     elif kind == "rv":
         a, e, _, inc, peri, mean, epoch = _ELEMENTS
         motion = np.sqrt(G * (Msun2kg + _MASS * Mearth2kg) / a**3)
         prediction = predict_rv(
-            data.times,
+            data.time_d,
             2 * np.pi / motion,
             Msun2kg,
             _MASS * Mearth2kg * np.sin(inc),
@@ -592,7 +592,7 @@ def test_photometry_band_planet_epoch_routing():
     rule = Quadrature.build(edges, system, *bands)
     band_ids, planet_ids = [1, 0, 1, 0], [0, 1, 1, 0]
     data = PhotometryData.from_dmag(
-        times=_TIMES,
+        time_d=_TIMES,
         dmag=[25.0] * 4,
         dmag_err=[0.2] * 4,
         band_id=band_ids,
@@ -618,7 +618,7 @@ def test_dmag_contrast_error_propagation():
     Fails if: the magnitude sign, base, first-order error or padding is wrong.
     """
     data = PhotometryData.from_dmag(
-        times=[1.0], dmag=[15.0], dmag_err=[0.002], band_id=[1], max_n=3
+        time_d=[1.0], dmag=[15.0], dmag_err=[0.002], band_id=[1], max_n=3
     )
     draws = 10 ** (-0.4 * np.random.default_rng(0).normal(15.0, 0.002, 200_000))
     np.testing.assert_allclose(data.contrast[0], 1e-6, rtol=1e-14)
@@ -661,7 +661,7 @@ def test_rv_marginal_integrates_to_one_over_the_contrast():
     per instrument (``sqrt(3 / 2)``).
     """
     data = RadialVelocityData.pad(
-        times=[0.0, 1.0, 2.0],
+        time_d=[0.0, 1.0, 2.0],
         rv=[0.0, 0.0, 0.0],
         rv_err=[1.5, 2.5, 1.0],
         inst_ids=[0, 0, 1],

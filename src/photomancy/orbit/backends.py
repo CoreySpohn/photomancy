@@ -34,20 +34,25 @@ def any_epoch(n_draws=2**16, n_rounds=3, **adaptive):
     The general engine: any number of epochs, radial velocity, a report, a free leaf a
     term proposes. Round zero draws the nonlinear coordinates from the block's own law
     (:class:`ShapePriorProposal`) and every round refits a kernel mixture on them, with
-    a defensive share of that law. Every round, the last included, has ``n_draws``
-    draws, and the returned cloud and the evidence come from the last round alone.
+    a defensive share of that law. The returned cloud and the evidence come from the
+    last round alone.
+
+    Two sizes set the cost. ``n_draws`` is the size of the returned cloud, the last
+    round. Every earlier round draws ``n_adapt_draws`` points, the default of
+    :class:`~photomancy.infer.AdaptiveImportance` (2**16) unless it is passed. A
+    smaller ``n_draws`` shrinks the Kish size of the returned cloud in proportion; a
+    smaller ``n_adapt_draws`` weakens the fitted proposal.
 
     Args:
-        n_draws: Draws of every round, the returned cloud included.
+        n_draws: Draws of the last round, the returned cloud.
         n_rounds: Number of rounds (the last is the returned cloud).
         **adaptive: Further settings of
-            :class:`~photomancy.infer.AdaptiveImportance` (``n_centers``,
-            ``defensive_fraction``).
+            :class:`~photomancy.infer.AdaptiveImportance` (``n_adapt_draws``,
+            ``n_centers``, ``defensive_fraction``, ``target_cess``).
     """
     return AdaptiveImportance(
         CompletedProposal(ShapePriorProposal()),
         n_draws=n_draws,
-        n_adapt_draws=n_draws,
         n_rounds=n_rounds,
         **adaptive,
     )

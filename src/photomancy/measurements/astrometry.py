@@ -44,7 +44,7 @@ class AstrometryData(eqx.Module):
     the system barycenter (one body, so ``planet_id`` is not read).
 
     Args:
-        times: Observation epochs (days). Shape ``(N,)``.
+        time_d: Observation epochs (days). Shape ``(N,)``.
         ra: East offset Delta alpha* = Delta RA cos Dec (arcsec).
             Shape ``(N,)``.
         dec: North offset Delta Dec (arcsec). Shape ``(N,)``.
@@ -56,7 +56,7 @@ class AstrometryData(eqx.Module):
         is_valid: Boolean validity mask. Shape ``(N,)``.
     """
 
-    times: jnp.ndarray
+    time_d: jnp.ndarray
     ra: jnp.ndarray
     dec: jnp.ndarray
     ra_err: jnp.ndarray
@@ -67,7 +67,7 @@ class AstrometryData(eqx.Module):
 
     @classmethod
     def from_sep_pa(
-        cls, *, times, sep, sep_err, pa_deg, pa_err_deg, planet_id=None, max_n=None
+        cls, *, time_d, sep, sep_err, pa_deg, pa_err_deg, planet_id=None, max_n=None
     ):
         """Convert separation and position angle to east/north astrometry.
 
@@ -77,7 +77,7 @@ class AstrometryData(eqx.Module):
         entry per epoch; ``planet_id`` defaults to zero for every row.
         ``max_n=None`` keeps all rows valid; otherwise pad to ``max_n``.
         """
-        times = jnp.asarray(times)
+        time_d = jnp.asarray(time_d)
         sep, sep_err = jnp.asarray(sep), jnp.asarray(sep_err)
         pa = jnp.deg2rad(jnp.asarray(pa_deg))
         pa_err = jnp.deg2rad(jnp.asarray(pa_err_deg))
@@ -87,9 +87,9 @@ class AstrometryData(eqx.Module):
         dec_err = jnp.sqrt(cos_pa**2 * sep_var + sin_pa**2 * tangential_var)
         cov = sin_pa * cos_pa * (sep_var - tangential_var)
         if planet_id is None:
-            planet_id = jnp.zeros(times.shape, dtype=int)
+            planet_id = jnp.zeros(time_d.shape, dtype=int)
         values = dict(
-            times=times,
+            time_d=time_d,
             ra=sep * sin_pa,
             dec=sep * cos_pa,
             ra_err=ra_err,
@@ -99,13 +99,13 @@ class AstrometryData(eqx.Module):
         )
         if max_n is not None:
             return cls.pad(**values, max_n=max_n)
-        return cls(**values, is_valid=jnp.ones(times.shape, dtype=bool))
+        return cls(**values, is_valid=jnp.ones(time_d.shape, dtype=bool))
 
     @classmethod
     def pad(
         cls,
         *,
-        times,
+        time_d,
         ra,
         dec,
         ra_err,
@@ -115,11 +115,11 @@ class AstrometryData(eqx.Module):
         max_n=MAX_REL_ASTROM,
     ):
         """Pad to ``max_n`` with an ``is_valid`` mask; ``planet_id`` defaults to 0."""
-        n = jnp.asarray(times).shape[0]
+        n = jnp.asarray(time_d).shape[0]
         if planet_id is None:
             planet_id = jnp.zeros(n, dtype=int)
         return cls(
-            times=_pad_1d(times, max_n),
+            time_d=_pad_1d(time_d, max_n),
             ra=_pad_1d(ra, max_n),
             dec=_pad_1d(dec, max_n),
             ra_err=_pad_1d(ra_err, max_n, fill=1.0),
@@ -133,7 +133,7 @@ class AstrometryData(eqx.Module):
     def zeros(cls, max_n=MAX_REL_ASTROM):
         """Create an all-invalid placeholder (for model tracing)."""
         return cls(
-            times=jnp.zeros(max_n),
+            time_d=jnp.zeros(max_n),
             ra=jnp.zeros(max_n),
             dec=jnp.zeros(max_n),
             ra_err=jnp.ones(max_n),
@@ -210,7 +210,7 @@ def _sample_radec(key, term, prediction):
     """Sample correlated east/north errors without changing padded payloads."""
     data = term.data
     valid = data.is_valid
-    eps = jax.random.normal(key, (2, data.times.size), dtype=jnp.float64)
+    eps = jax.random.normal(key, (2, data.time_d.size), dtype=jnp.float64)
     sx = jnp.where(valid, data.ra_err, 1.0)
     sy = jnp.where(valid, data.dec_err, 1.0)
     rho = jnp.where(valid, data.corr, 0.0)
@@ -255,7 +255,7 @@ class RelativeAstrometryTerm(AbstractLinearTerm):
         data: Relative astrometry in arcsec, with a planet index per epoch.
         system_path: Model path of the object whose ``positions(time_d)`` returns
             shape ``(2, K, T)`` in arcsec, rows east and north. The empty path is
-            the model itself. Data ``times`` are days from the system's epoch. A bare
+            the model itself. Data ``time_d`` is in days from the system's epoch. A bare
             ``orbix.system.System`` is also accepted, using ``solve`` and its public
             ``offset_arcsec`` observable; planet indices then refer to zero-based
             Jacobi chain order.
@@ -272,7 +272,7 @@ class RelativeAstrometryTerm(AbstractLinearTerm):
         # Sanitize before propagation and division: masking a NaN result alone
         # does not prevent NaN derivatives from flowing through its operands.
         data = AstrometryData(
-            times=jnp.where(valid, self.data.times, 0.0),
+            time_d=jnp.where(valid, self.data.time_d, 0.0),
             ra=jnp.where(valid, self.data.ra, 0.0),
             dec=jnp.where(valid, self.data.dec, 0.0),
             ra_err=jnp.where(valid, self.data.ra_err, 1.0),
@@ -282,7 +282,7 @@ class RelativeAstrometryTerm(AbstractLinearTerm):
             is_valid=valid,
         )
         system = resolve(model, self.system_path)
-        prediction = _relative_positions(system, data.times, data.planet_id)
+        prediction = _relative_positions(system, data.time_d, data.planet_id)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         east, north = prediction
         return loglike_relative_astrom(east, north, data), prediction
@@ -318,8 +318,8 @@ class RelativeAstrometryTerm(AbstractLinearTerm):
         dynamics = _dynamics(resolve(model, self.system_path))
         shape = jax.tree.map(lambda a: a[row], dynamics.orbits)
         valid = self.data.is_valid
-        times = jnp.where(valid, self.data.times, shape.epoch_d)
-        design = sky_design(shape, times) / dynamics.frame.dist_pc
+        time_d = jnp.where(valid, self.data.time_d, shape.epoch_d)
+        design = sky_design(shape, time_d) / dynamics.frame.dist_pc
         design = eqx.error_if(
             design,
             jnp.asarray(dynamics.orbits.a_AU.shape[-1] > 1),
@@ -339,7 +339,7 @@ class StellarAstrometryTerm(AbstractTerm):
 
     ``system_path`` names the model path of a system whose ``star_reflex(time_d)``
     returns east/north offsets of shape ``(2, T)``; the empty path is the model itself.
-    Data ``times`` are days from the system's epoch.
+    Data ``time_d`` is in days from the system's epoch.
     Invalid rows are sanitized before prediction and returned as zeros.
     """
 
@@ -350,7 +350,7 @@ class StellarAstrometryTerm(AbstractTerm):
     def _score(self, model):
         valid = self.data.is_valid
         data = AstrometryData(
-            times=jnp.where(valid, self.data.times, 0.0),
+            time_d=jnp.where(valid, self.data.time_d, 0.0),
             ra=jnp.where(valid, self.data.ra, 0.0),
             dec=jnp.where(valid, self.data.dec, 0.0),
             ra_err=jnp.where(valid, self.data.ra_err, 1.0),
@@ -360,7 +360,7 @@ class StellarAstrometryTerm(AbstractTerm):
             is_valid=valid,
         )
         system = resolve(model, self.system_path)
-        prediction = _stellar_reflex(system, data.times)
+        prediction = _stellar_reflex(system, data.time_d)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         return loglike_stellar_astrom(*prediction, data), prediction
 

@@ -44,7 +44,7 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
     ) * (AU2m / d2s)
     assert 8.0 < float(jnp.max(jnp.abs(clean))) < 15.0
     rv = RadialVelocityData(
-        times=times,
+        time_d=times,
         rv=clean + 17.0,
         rv_err=jnp.full(times.shape, 0.2),
         inst_ids=jnp.zeros(times.shape, dtype=int),
@@ -251,7 +251,7 @@ def test_rv_term_uses_total_mass():
         K[:, None] * jnp.cos(two_pi * times / periods[:, None]), axis=0
     )
     data = RadialVelocityData(
-        times=times,
+        time_d=times,
         rv=velocities * (AU2m / d2s),
         rv_err=jnp.full(4, 0.5),
         inst_ids=jnp.zeros(4, dtype=int),

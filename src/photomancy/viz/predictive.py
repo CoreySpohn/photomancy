@@ -80,7 +80,7 @@ def plot_rv(
     if data is not None:
         n = _valid_slice(data)
         errbar = ax.errorbar(
-            np.asarray(data.times)[:n],
+            np.asarray(data.time_d)[:n],
             np.asarray(data.rv)[:n],
             yerr=np.asarray(data.rv_err)[:n],
             fmt="o",
@@ -149,7 +149,7 @@ def plot_dmag(
         valid = np.asarray(data.is_valid)
         detected = np.asarray(data.is_detected) & valid
         nulls = ~np.asarray(data.is_detected) & valid
-        epochs = np.asarray(data.epochs)
+        epochs = np.asarray(data.time_d)
         if detected.any():
             errbar = ax.errorbar(
                 epochs[detected],

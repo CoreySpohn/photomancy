@@ -6,13 +6,6 @@ and the term live here and not under ``photomancy.orbit``. Each term is an
 ``system_path``.
 """
 
-from photomancy.measurements._padding import (
-    MAX_CC_PTS,
-    MAX_IMG,
-    MAX_REL_ASTROM,
-    MAX_RV,
-    MAX_STELLAR_ASTROM,
-)
 from photomancy.measurements.astrometry import (
     AstrometryData,
     RelativeAstrometryTerm,
@@ -53,11 +46,6 @@ from photomancy.measurements.report import (
 from photomancy.measurements.targets import TargetData, load_target
 
 __all__ = [
-    "MAX_CC_PTS",
-    "MAX_IMG",
-    "MAX_REL_ASTROM",
-    "MAX_RV",
-    "MAX_STELLAR_ASTROM",
     "AbstractReportPredictor",
     "AstrometryData",
     "CountRateTable",

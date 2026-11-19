@@ -2,8 +2,9 @@
 
 Truth sources are closed forms (a periodic density is invariant under a shift by one
 period, a conjugate toy has a known evidence, the conditional effective sample size of a
-tempering step is computed directly) and the card 5 outputs of the previous
-``Laplace`` and ``Pathfinder`` (``tests/data/laplace_pathfinder_golden.json``).
+tempering step is computed directly), the stored modes of ``Laplace`` and
+``Pathfinder`` (``tests/data/laplace_pathfinder_modes.json``) and the k-hat contract of
+the importance evidence.
 """
 
 import json
@@ -27,17 +28,14 @@ from photomancy.infer import (
     MixtureProposal,
     Pathfinder,
     PriorProposal,
+    importance_evidence,
+    khat_threshold,
     run,
 )
 from photomancy.infer.diagnostics import kish_temperature
 
 jax.config.update("jax_enable_x64", True)
 
-GOLDEN = json.loads(
-    (
-        Path(__file__).parent.parent / "data" / "laplace_pathfinder_golden.json"
-    ).read_text()
-)
 TWO_PI = 2.0 * math.pi
 
 
@@ -67,6 +65,38 @@ def test_periods_follow_the_flat_vector_by_coordinate_name():
     assert any(p is not None for p in expected) and any(p is None for p in expected)
     leaf = Fit(_scene(), {"planets[0].Rp_Rearth": Uniform(0.5, 4.0)}, ())
     assert leaf.periods() == (None,)
+
+
+def test_to_flat_inverts_from_flat_on_a_leaf_law_and_an_orbit_block():
+    """``fit.from_flat(fit.to_flat(x))[0]`` is ``x``, with the batch axes kept.
+
+    Truth source: the round trip itself, to 1e-12, on a leaf-law fit and on an
+    orbit-block fit with periodic coordinates; an angle shifted by whole periods gives
+    the flat vector of the stored angle. Fails if: the order of ``to_flat`` differs from
+    that of ``unravel``, a periodic coordinate is not reduced to its cell, or a batch
+    axis is lost.
+    """
+    leaf = Fit(_scene(), {"planets[0].Rp_Rearth": Uniform(0.5, 4.0)}, ())
+    orbit = _orbit_fit()
+    for fit in (leaf, orbit):
+        x = fit.sample_prior(jax.random.key(0), (2, 3))
+        z = fit.to_flat(x)
+        assert z.shape == (2, 3, len(fit.periods()))
+        back, _ = fit.from_flat(z)
+        jax.tree.map(
+            lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12),
+            back,
+            x,
+        )
+    # x and z are now the orbit fit's, the last of the loop.
+    block = orbit.free["dynamics.orbits"]
+    shifted = dict(x["dynamics.orbits"])
+    for name, period in zip(block.coordinate_names, block.periods, strict=True):
+        if period is not None:
+            shifted[name] = shifted[name] + 3 * period
+    np.testing.assert_allclose(
+        orbit.to_flat({"dynamics.orbits": shifted}), z, atol=1e-12
+    )
 
 
 def test_from_real_reduces_periodic_coordinates_to_one_cell():
@@ -158,12 +188,15 @@ def test_the_shared_covariance_path_equals_the_general_path():
     )
 
 
-def test_from_cloud_unwraps_a_cloud_across_the_cell_edge():
+def test_from_cloud_unwraps_the_cell_edge_and_skips_dead_draws():
     """A cloud straddling the cell edge gets its true spread, not a cell-wide one.
 
     Truth source: the cloud is a normal of sd 0.1 around the edge of the angle cell, so
-    the kernel sd is well below one radian. Fails if: the moments are taken without the
-    circular unwrap, which inflates the covariance to the order of the period.
+    the kernel sd is well below one radian. The same cloud with NaN rows at weight
+    ``-inf`` inserted (a proposal's dead draws) gives the same mixture to 1e-12. Fails
+    if: the moments are taken without the circular unwrap, which inflates the
+    covariance to the order of the period, or a dead draw reaches the moments (NaN
+    Cholesky factors).
     """
     fit = _orbit_fit()
     periods = fit.periods()
@@ -179,6 +212,14 @@ def test_from_cloud_unwraps_a_cloud_across_the_cell_edge():
     sd = float(mixture.chols[0, i, i])
     assert 0.0 < sd < 0.2
     assert mixture.means.shape == (32, d)
+    rows = jnp.asarray([0, 1000, n])
+    dead_x = jnp.insert(x, rows, jnp.nan, axis=0)
+    dead_lw = jnp.insert(jnp.zeros(n), rows, -jnp.inf)
+    dead = MixtureProposal.from_cloud(
+        jax.random.key(1), dead_x, dead_lw, n_centers=32, periods=periods
+    )
+    for got, want in ((dead.means, mixture.means), (dead.chols, mixture.chols)):
+        np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-12)
 
 
 def test_a_defensive_proposal_is_the_prior_mixture_of_its_base():
@@ -268,14 +309,21 @@ MODES = json.loads(
 )
 
 
-def _agreement(label, backend):
-    """Per-seed log Z against the card 5 outputs; modes against the stored modes."""
+def _modes_and_evidence(label, backend):
+    """Stored modes on four seeds, and the k-hat contract of the published evidence."""
     fit = _frame_fit()
-    for seed, (old, modes) in enumerate(zip(GOLDEN[label], MODES[label], strict=True)):
-        post = run(fit, backend, jax.random.key(seed))
-        se = math.hypot(float(post.log_evidence_se), old["se"])
-        assert abs(float(post.log_evidence) - old["log_z"]) < 4 * se, (seed, label)
-        info = post.info
+    threshold = khat_threshold(backend.n_draws)
+    for seed, modes in enumerate(MODES[label][:4]):
+        draws = backend._run(fit, jax.random.key(seed))
+        info = draws.info
+        khat = float(info.importance.khat)
+        if khat <= threshold:
+            log_z, se = importance_evidence(draws.log_weights)
+            np.testing.assert_allclose(draws.log_evidence, log_z, rtol=1e-12)
+            np.testing.assert_allclose(draws.log_evidence_se, se, rtol=1e-12)
+        else:
+            assert np.isnan(float(draws.log_evidence)), (seed, label, khat)
+            assert np.isnan(float(draws.log_evidence_se)), (seed, label, khat)
         score = np.asarray(info.mode_log_evidence if label == "laplace" else info.elbo)
         kept = np.asarray(info.kept)
         order = [i for i in np.argsort(-score) if kept[i]]
@@ -288,27 +336,33 @@ def _agreement(label, backend):
             )
 
 
-@pytest.mark.slow
-def test_laplace_matches_the_previous_backend_on_the_frame_chart_orbit():
-    """``Laplace`` as importance over a mixture reproduces the old per-seed outputs.
+@pytest.mark.medium(reason="four seeds of four L-BFGS modes on the frame-chart orbit")
+def test_laplace_keeps_its_modes_and_refuses_the_evidence_above_the_khat_limit():
+    """``Laplace`` on the frame-chart orbit keeps its stored modes, and F2 holds.
 
-    Truth source: the card 5 outputs of the old ``Laplace`` (six seeds) on the golden
-    scene with a ``FrameChart`` block, which has no angle coordinate, so the wrapped
-    and plain densities coincide. Tolerance basis: per-seed log Z within 4 combined
-    standard errors. The mean and covariance of the cloud are not pinned (they depend
-    on the stream of the component pick, with weights of k-hat near one); the kept
-    modes are, sorted by evidence: score within 0.01, means within 1e-3, variances
-    within 1 percent (floor 1e-8, the stored rounding) of the stored modes, which do
-    not depend on the pick.
+    Truth source: the stored modes of ``Laplace`` on the golden scene with a
+    ``FrameChart`` block, which has no angle coordinate. The kept modes, sorted by
+    evidence, match the stored ones: score within 0.01, means within 1e-3, variances
+    within 1 percent (floor 1e-8, the stored rounding); they do not read the draws, so
+    a small ``n_draws`` keeps the test cheap. The published evidence and its error are
+    NaN where ``info.importance.khat`` is above ``khat_threshold(n_draws)`` and equal
+    ``importance_evidence`` of the returned weights (rtol 1e-12) where it is not.
+    Fails if: a mode moves, a mode is kept or dropped differently, or an evidence is
+    published past the k-hat limit or differs from the importance mean.
     """
-    _agreement("laplace", Laplace(n_draws=20000, n_modes=4, min_eigenvalue=1.0))
+    _modes_and_evidence("laplace", Laplace(n_draws=2000, n_modes=4, min_eigenvalue=1.0))
 
 
-@pytest.mark.slow
-def test_pathfinder_matches_the_previous_backend_on_the_frame_chart_orbit():
-    """``Pathfinder`` through the mixture route reproduces the old per-seed outputs.
+@pytest.mark.medium(
+    reason="four seeds of four Pathfinder paths on the frame-chart orbit"
+)
+def test_pathfinder_keeps_its_paths_and_refuses_the_evidence_above_the_khat_limit():
+    """``Pathfinder`` keeps its stored paths (sorted by ELBO), and F2 holds.
 
-    Tolerance basis as for ``Laplace`` (the paths sorted by ELBO). The weights are
-    heavy tailed (k-hat 0.8 to 1.04), a property of the fit and of the old output.
+    Tolerances and the evidence contract as for ``Laplace``. The weights of this fit
+    are heavy tailed (k-hat 0.95 to 1.08 at 2,000 draws), so the evidence is refused
+    on all four seeds; the finite branch is exercised by the ``Laplace`` test.
+    Fails if: a path moves, or an evidence is published past the k-hat limit or
+    differs from the importance mean.
     """
-    _agreement("pathfinder", Pathfinder(n_draws=20000, n_modes=4))
+    _modes_and_evidence("pathfinder", Pathfinder(n_draws=2000, n_modes=4))

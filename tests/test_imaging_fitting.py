@@ -16,10 +16,10 @@ from kinematics import (  # noqa: E402
 )
 
 from photomancy.measurements import (  # noqa: E402
-    MAX_IMG,
     DMagData,
     loglike_dmag,
 )
+from photomancy.measurements._padding import MAX_IMG  # noqa: E402
 
 MSUN_KG = 1.989e30
 
@@ -27,7 +27,7 @@ MSUN_KG = 1.989e30
 def _predict(data, cos_i):
     """Predicted (separation, dMag) over a container's epochs at a test orbit."""
     return predict_photometry(
-        data.epochs,
+        data.time_d,
         2.0,
         0.1,
         cos_i,
@@ -102,14 +102,14 @@ def test_null_epochs_penalize_only_a_planet_bright_enough_to_see():
 def test_dmag_data_pad_produces_max_sized_valid_container():
     """DMagData.pad pads all per-epoch fields to MAX with a validity mask."""
     padded = DMagData.pad(
-        epochs=jnp.array([200.0, 800.0]),
+        time_d=jnp.array([200.0, 800.0]),
         sep_grid=jnp.broadcast_to(jnp.linspace(0.05, 0.5, 40), (2, 40)),
         dmag0_grid=jnp.full((2, 40), 25.0),
         is_detected=jnp.array([True, False]),
         dmag_obs=jnp.array([22.0, 0.0]),
         dmag_err=jnp.array([0.1, 1.0]),
     )
-    assert padded.epochs.shape == (MAX_IMG,)
+    assert padded.time_d.shape == (MAX_IMG,)
     assert padded.dmag_obs.shape == (MAX_IMG,)
     assert int(padded.is_valid.sum()) == 2
     assert bool(padded.is_detected[0]) and not bool(padded.is_detected[1])

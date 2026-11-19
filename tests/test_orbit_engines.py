@@ -13,7 +13,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.model_paths import resolve  # noqa: F401
-from jax.flatten_util import ravel_pytree
 from orbix.system import OrbitLaw, System, ThieleInnesBlock
 from orbix.system.core import Body, SkyFrame
 from priorities import LogUniform, Uniform
@@ -60,7 +59,7 @@ def _block(system=""):
 
 def _term(n_rows=4, err=0.004, shift=0.0, system_path=""):
     data = AstrometryData.from_sep_pa(
-        times=TIMES[:n_rows],
+        time_d=TIMES[:n_rows],
         sep=np.array([0.13, 0.11, 0.09, 0.15])[:n_rows] + shift,
         sep_err=[err] * n_rows,
         pa_deg=[45.0, 120.0, 210.0, 310.0][:n_rows],
@@ -72,10 +71,6 @@ def _term(n_rows=4, err=0.004, shift=0.0, system_path=""):
 
 def _fit(term=None):
     return Fit(_system(), {"orbits": _block()}, (term or _term(),))
-
-
-def _flat(fit, x):
-    return jax.vmap(lambda one: ravel_pytree(one)[0])(fit.to_real(x))
 
 
 @pytest.fixture(scope="module")
@@ -94,7 +89,7 @@ def test_completion_identity_pins_the_linear_form(fit):
     """
     comp = Completion.from_fit(fit)
     x = fit.sample_prior(jax.random.key(0), (3,))
-    shape, c = comp.split(_flat(fit, x))
+    shape, c = comp.split(fit.to_flat(x))
     for i in range(3):
         mean, chol, log_z = comp.conditional(shape[i])
         diff = chol.T @ (c[i] - mean)
@@ -229,7 +224,11 @@ def test_a_nan_score_refuses_the_slice(fit):
     NaN), never a finite cloud that dropped the broken draws as zero weights.
     """
     broken = Fit(fit.model, fit.free, (*fit.terms, _NanTerm()))
-    post = run(broken, any_epoch(n_draws=2**12, n_rounds=2, n_centers=64), KEY)
+    post = run(
+        broken,
+        any_epoch(n_draws=2**12, n_adapt_draws=2**12, n_rounds=2, n_centers=64),
+        KEY,
+    )
     assert np.all(np.isnan(np.asarray(post.log_weights)))
     assert np.isnan(float(post.log_evidence))
 
@@ -280,7 +279,7 @@ def test_scale_rotate_density_is_normalized_and_matches_the_draws():
     p_draws = inside.mean()
     se_draws = np.sqrt(p_draws * (1 - p_draws) / n)
     xp = fit.sample_prior(jax.random.key(1), (n,))
-    zp = _flat(fit, xp)
+    zp = fit.to_flat(xp)
     log_w = proposal.log_prob(zp, fit) - fit.log_prior(xp)
     w = np.exp(np.asarray(log_w))
     se_prior = w.std() / np.sqrt(n)
@@ -296,12 +295,17 @@ def test_any_epoch_and_few_epoch_agree_and_vmap_equals_the_loop():
     completed run over three worlds under ``filter_vmap`` equal the per-world loop at
     rtol 1e-9 (shared key). The third world has no valid row, so no data scale: its
     slice is refused (NaN weights) in both, and the other two keep live weights.
+    ``any_epoch(n_draws)`` sizes the returned cloud only: the adaptation rounds keep
+    their own size, so the two can be passed together.
     """
+    sizes = any_epoch(n_draws=4000, n_adapt_draws=2**16)
+    assert (sizes.n_draws, sizes.n_adapt_draws) == (4000, 2**16)
+    assert any_epoch().n_draws == any_epoch().n_adapt_draws == 2**16
     fit = _fit(_term(n_rows=1))
     exact = few_epoch(n_draws=2**12)._run(fit, jax.random.key(0))
-    adaptive = any_epoch(n_draws=2**12, n_rounds=2, n_centers=64)._run(
-        fit, jax.random.key(0)
-    )
+    adaptive = any_epoch(
+        n_draws=2**12, n_adapt_draws=2**12, n_rounds=2, n_centers=64
+    )._run(fit, jax.random.key(0))
     gap = abs(float(exact.log_evidence) - float(adaptive.log_evidence))
     assert gap < 4 * float(adaptive.log_evidence_se) + 1e-6
 

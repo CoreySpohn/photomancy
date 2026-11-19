@@ -135,7 +135,8 @@ class AbstractProposal(eqx.Module):
 
         Args:
             key: PRNG key.
-            z: Draws of this proposal in the flat vector, ``(N, d)``.
+            z: Draws in the flat vector, ``(N, d)``: this proposal's, or
+                ``fit.to_flat(posterior.samples)`` for a cloud of another run.
             log_weights: Their log weights, ``(N,)``.
             fit: The fit.
             n_centers: Kernels of the mixture.
@@ -215,8 +216,7 @@ class PriorProposal(AbstractDensityProposal):
             flat, unravel = ravel_pytree(template)
             cube = _roberts(key, n, flat.shape[0])
             x = jax.vmap(lambda c: fit.from_unit(unravel(c)))(cube)
-        z = jax.vmap(lambda one: ravel_pytree(one)[0])(fit.to_real(x))
-        z = _wrap_cell(z, fit.periods())
+        z = fit.to_flat(x)
         return z, self.log_prob(z, fit)
 
     def log_prob(self, z, fit):
@@ -314,7 +314,9 @@ class MixtureProposal(AbstractDensityProposal):
         share of the variance is added on the diagonal so a cloud that is flat in some
         direction keeps a positive-definite covariance. Periodic coordinates are
         unwrapped around their circular mean before the moments are taken, so a cloud
-        that straddles a cell edge has the covariance of its true spread.
+        that straddles a cell edge has the covariance of its true spread. A draw of
+        zero weight is not read, so the dead draws of a proposal (NaN coordinates at
+        weight ``-inf``) give the mixture of the cloud without them.
 
         Args:
             key: PRNG key (the resampling of the centers).
@@ -332,6 +334,8 @@ class MixtureProposal(AbstractDensityProposal):
         log_w = log_weights - logsumexp(log_weights)
         w = jnp.exp(log_w)
         ess = 1.0 / jnp.sum(w**2)
+        # A dead draw (zero weight, possibly NaN) must not reach the weighted sums.
+        x = jnp.where(w[:, None] > 0, x, 0.0)
         xs = x
         for i, period in enumerate(periods or ()):
             if period is None:

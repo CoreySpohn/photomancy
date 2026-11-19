@@ -213,6 +213,15 @@ DELETED = (
     "posterior_physical",
     "n_round",
     "kish_per_round",
+    # The time field of the measurement data classes is ``time_d``. The old field
+    # names are ordinary prose words, so they are guarded as an attribute read and as
+    # a keyword.
+    ".times",
+    ".epochs",
+    "times=",
+    "epochs=",
+    "det_epochs",
+    "null_epochs",
 )
 
 
@@ -258,3 +267,34 @@ def test_orbit_reaches_no_private_or_legacy_name_of_another_subpackage():
         if (reaches := _private_reaches(path))
     }
     assert not found, found
+
+
+def test_measurement_data_name_their_time_time_d_and_hide_the_padding_sizes():
+    """Fails if a data class keeps a ``times`` or ``epochs`` field, or a capacity leaks.
+
+    Every ``*Data`` class of ``photomancy.measurements`` with a time field names it
+    ``time_d``; the padding capacities (``MAX_RV`` and the rest) are the layout of the
+    caller and are not importable from the package.
+    """
+    import dataclasses
+
+    import photomancy.measurements as measurements
+
+    data = [
+        getattr(measurements, name)
+        for name in measurements.__all__
+        if name.endswith("Data")
+        and dataclasses.is_dataclass(getattr(measurements, name))
+    ]
+    assert len(data) >= 6
+    for cls in data:
+        fields = {field.name for field in dataclasses.fields(cls)}
+        assert not fields & {"times", "epochs"}, cls.__name__
+    for name in (
+        "MAX_CC_PTS",
+        "MAX_IMG",
+        "MAX_REL_ASTROM",
+        "MAX_RV",
+        "MAX_STELLAR_ASTROM",
+    ):
+        assert not hasattr(measurements, name), name

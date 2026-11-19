@@ -75,6 +75,7 @@ from photomancy.infer.model import (
 from photomancy.infer.posterior import (
     Forecast,
     Posterior,
+    ReweightInfo,
     cluster_to_mixture,
     ravel_samples,
 )
@@ -134,6 +135,7 @@ __all__ = [
     "PointPosterior",
     "Posterior",
     "PriorProposal",
+    "ReweightInfo",
     "SMCBackend",
     "SamplePosterior",
     "TermLogDensity",

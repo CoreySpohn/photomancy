@@ -158,7 +158,8 @@ class Pathfinder(AbstractBackend):
         maxiter: Maximum L-BFGS iterations along the path.
         maxcor: L-BFGS history size.
         init: ``None`` for prior draws as starts, one constrained draw, or a
-            ``Posterior``.
+            ``Posterior`` whose weights pick the starts; the starts are placed in the
+            flat vector by ``fit.to_flat``.
     """
 
     n_draws: int = eqx.field(static=True, default=2000)

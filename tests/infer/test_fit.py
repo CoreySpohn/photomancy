@@ -56,7 +56,7 @@ EARTH_MASS_MSUN = Mearth2kg / Msun2kg
 def _relative():
     return RelativeAstrometryTerm(
         AstrometryData.from_sep_pa(
-            times=TIMES,
+            time_d=TIMES,
             sep=[0.13, 0.11, 0.09, 0.15],
             sep_err=[0.004] * 4,
             pa_deg=[45.0, 120.0, 210.0, 310.0],
@@ -69,7 +69,7 @@ def _relative():
 def _stellar():
     return StellarAstrometryTerm(
         AstrometryData.pad(
-            times=TIMES,
+            time_d=TIMES,
             ra=[1e-4, -2e-4, 3e-4, 2e-4],
             dec=[-1e-4, 1e-4, 2e-4, -2e-4],
             ra_err=[5e-5] * 4,
@@ -83,7 +83,7 @@ def _stellar():
 def _rv():
     return RadialVelocityTerm(
         RadialVelocityData.pad(
-            times=TIMES,
+            time_d=TIMES,
             rv=[2.0, -4.0, 8.0, 1.0],
             rv_err=[1.5] * 4,
             inst_ids=[0, 1, 0, 1],
@@ -111,7 +111,7 @@ def _photometry():
     band = Band(550.0, 650.0)
     return PhotometryTerm(
         PhotometryData.from_dmag(
-            times=TIMES,
+            time_d=TIMES,
             dmag=[25.0, 25.2, 24.5, 26.0],
             dmag_err=[0.2] * 4,
             band_id=[0] * 4,
@@ -616,7 +616,7 @@ def test_orbit_fit_recovers_the_truth_on_a_scene():
     times = jnp.array(TIMES)
     east, north = scene.positions(times)[:, 0, jnp.arange(4)]
     data = AstrometryData.pad(
-        times=times,
+        time_d=times,
         ra=east,
         dec=north,
         ra_err=jnp.full(4, 1e-4),

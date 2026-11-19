@@ -88,7 +88,7 @@ class ReportData(eqx.Module):
     """One planet slot per exposure; all fields have shape (R,).
 
     ``planned`` stores valid exposure metadata with zero placeholders for outcomes.
-    Call ``sample`` on a term to realize these rows before treating them as data.
+    Call ``ReportTerm.draw`` to realize these rows before treating them as data.
     Null outcome floats are zero. Padding may contain arbitrary stored values.
     """
 
@@ -160,7 +160,7 @@ class ReportData(eqx.Module):
             planet: Index of the planet the rows report (the predictor's ``planet``).
         """
         return AstrometryData(
-            times=self.time_d,
+            time_d=self.time_d,
             ra=self.ra,
             dec=self.dec,
             ra_err=self.ra_err,
