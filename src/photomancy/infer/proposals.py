@@ -435,11 +435,14 @@ class DefensiveProposal(AbstractDensityProposal):
         fraction: Share of draws from the prior component.
         prior: The prior component, the fit's prior (:class:`PriorProposal`) unless a
             proposal over a sub-vector of the fit supplies its own.
+        bandwidth: The ``bandwidth`` of :meth:`MixtureProposal.from_cloud` that
+            :meth:`adapt` refits the base with, in every round.
     """
 
     base: AbstractDensityProposal
     fraction: float = eqx.field(static=True, default=0.1)
     prior: AbstractDensityProposal = eqx.field(default_factory=PriorProposal)
+    bandwidth: str | float = eqx.field(static=True, default="silverman")
 
     def __check_init__(self):
         """Refuse a fraction outside the open unit interval."""
@@ -463,13 +466,15 @@ class DefensiveProposal(AbstractDensityProposal):
         return z, self.log_prob(z, fit)
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
-        """The default refit, keeping this proposal's own prior component."""
-        refit = super().adapt(
+        """The default refit, keeping this proposal's prior component and bandwidth."""
+        mixture = MixtureProposal.from_cloud(
             key,
             z,
             log_weights,
-            fit,
             n_centers=n_centers,
-            defensive_fraction=defensive_fraction,
+            bandwidth=self.bandwidth,
+            periods=fit.periods(),
         )
-        return eqx.tree_at(lambda d: d.prior, refit, self.prior)
+        return DefensiveProposal(
+            mixture, defensive_fraction, prior=self.prior, bandwidth=self.bandwidth
+        )

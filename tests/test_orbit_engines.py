@@ -321,3 +321,33 @@ def test_any_epoch_and_few_epoch_agree_and_vmap_equals_the_loop():
     loop = [imp._run(f, key).log_weights for f in fits]
     np.testing.assert_allclose(batched, jnp.stack(loop), rtol=1e-9)
     assert np.all(np.isfinite(batched[:2]).any(-1)) and np.isnan(batched[2]).all()
+
+
+def test_any_epoch_refits_with_over_dispersed_kernels_in_every_round():
+    """The bandwidth of ``ShapePriorProposal`` reaches ``from_cloud`` in every round.
+
+    Truth source: the kernel covariance scales with the squared bandwidth, so a
+    bandwidth of 2 gives 4 times the covariance of 1 on the same cloud and key (rtol
+    1e-6, the diagonal jitter). The second refit goes through the adapted
+    ``DefensiveProposal``, not the shape proposal. Fails if: the factor is not passed to
+    ``from_cloud`` or is dropped after round one (the refit falls back to Silverman).
+    """
+
+    class _Fit:
+        def periods(self):
+            return (None, None, None)
+
+    z = jax.random.normal(KEY, (512, 3))
+    lw = jnp.zeros(512)
+    kw = {"n_centers": 32, "defensive_fraction": 0.1}
+    key = jax.random.key(1)
+    assert any_epoch().proposal.base.bandwidth == 2.0
+
+    def covariances(bandwidth):
+        first = ShapePriorProposal(bandwidth).adapt(key, z, lw, _Fit(), **kw)
+        second = first.adapt(key, z, lw, _Fit(), **kw)
+        return first.base.chols, second.base.chols
+
+    narrow, wide = covariances(1.0), covariances(2.0)
+    for n, w in zip(narrow, wide, strict=True):
+        np.testing.assert_allclose(w @ w.mT, 4.0 * (n @ n.mT), rtol=1e-6)

@@ -75,9 +75,19 @@ class ShapePriorProposal(AbstractDensityProposal):
     ``shape`` is exactly the three block coordinates (``Completion.from_fit`` refuses
     any other free entry).
 
+    Attributes:
+        bandwidth: Factor on the Silverman bandwidth of the refit kernels, applied in
+            every adaptation round (``MixtureProposal.from_cloud``). The default 2 makes
+            the kernels over-dispersed: the Silverman width fits the bulk of the cloud
+            and leaves the proposal lighter-tailed than the posterior where the centers
+            thin out (the ends of the period-eccentricity ridge, the edge of a mass
+            peak), which gives a heavy importance-weight tail.
+
     Fails if the draws and ``log_q`` disagree (the weights of a prior-only fit are not
     one).
     """
+
+    bandwidth: float = eqx.field(static=True, default=2.0)
 
     def log_prob(self, z, fit):
         """Log density of ``z (n, 3)`` in the stored coordinates."""
@@ -109,9 +119,16 @@ class ShapePriorProposal(AbstractDensityProposal):
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
         """Refit a mixture on the cloud, with this prior as the defensive component."""
         mixture = MixtureProposal.from_cloud(
-            key, z, log_weights, n_centers=n_centers, periods=fit.periods()
+            key,
+            z,
+            log_weights,
+            n_centers=n_centers,
+            bandwidth=self.bandwidth,
+            periods=fit.periods(),
         )
-        return DefensiveProposal(mixture, defensive_fraction, prior=self)
+        return DefensiveProposal(
+            mixture, defensive_fraction, prior=self, bandwidth=self.bandwidth
+        )
 
 
 def _pad(a):
