@@ -22,6 +22,7 @@ from photomancy.infer.backends.base import (
     import_extra,
 )
 from photomancy.infer.legacy_posterior import SamplePosterior
+from photomancy.infer.posterior import Posterior
 
 
 class NUTSBackend(LegacyBackend):
@@ -149,7 +150,7 @@ class NUTS(AbstractBackend):
     n_chains: int = eqx.field(static=True, default=4)
     thin: int = eqx.field(static=True, default=1)
     dense_mass_matrix: bool = eqx.field(static=True, default=True)
-    init: object = None
+    init: Posterior | dict | None = None
 
     def _run(self, fit, key):
         """Adapt and sample every chain; return flat draws with uniform weights."""

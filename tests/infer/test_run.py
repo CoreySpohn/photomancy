@@ -318,6 +318,116 @@ def test_a_stack_of_worlds_equals_the_per_world_loop():
         )
 
 
+def _stack(fits):
+    """Stack fits of one structure along a new leading world axis."""
+    static = eqx.partition(fits[0], eqx.is_array)[1]
+    arrays = [eqx.partition(f, eqx.is_array)[0] for f in fits]
+    return eqx.combine(jax.tree.map(lambda *a: jnp.stack(a), *arrays), static)
+
+
+_WORLD_BACKENDS = {
+    "nuts": NUTS(n_warmup=60, n_draws=40, n_chains=2),
+    "smc": SMC(n_particles=200, n_mcmc_steps=3),
+    "pathfinder": Pathfinder(n_draws=200),
+    "grid": Grid({KEY: midpoint(0.0, HIGH, 120)}),
+}
+
+
+@pytest.mark.parametrize("name", list(_WORLD_BACKENDS))
+def test_every_batching_backend_maps_over_two_worlds(name):
+    """``filter_vmap(run)`` over two stacked fits gives two posteriors of one type.
+
+    Truth source: each world's own fit: ``log_target`` is its density at the stored
+    draws and the posterior mean follows that world's data center (1.2 against 2.0).
+    Tolerance basis: shapes and the density identity are exact (rtol 1e-9); the means
+    differ by 0.8 between worlds, far above the sampler scatter, so each is compared to
+    its center within 0.25 (200 particles, 80 draws, quadrature exact).
+    Fails if: a backend closes over the fit instead of taking it as a traced argument,
+    mixes the worlds or breaks under a batch prefix.
+    """
+    centers = (1.2, 2.0)
+    fits = [_leaf_fit(c) for c in centers]
+    backend = _WORLD_BACKENDS[name]
+    keys = jax.random.split(jax.random.key(3), 2)
+    out = eqx.filter_vmap(lambda f, k: run(f, backend, k))(_stack(fits), keys)
+    n = out.log_weights.shape[-1]
+    assert out.log_weights.shape == (2, n) and out.log_evidence.shape == (2,)
+    assert out.samples[KEY].shape == (2, n, 1)
+    for i, (fit, center) in enumerate(zip(fits, centers, strict=True)):
+        np.testing.assert_allclose(
+            np.asarray(out.log_target[i]),
+            np.asarray(fit.log_density({KEY: out.samples[KEY][i]})),
+            rtol=1e-9,
+        )
+        w = np.exp(np.asarray(out.log_weights[i]))
+        mean = float(np.sum(w * np.asarray(out.samples[KEY][i])[:, 0]))
+        assert abs(mean - center) < 0.25
+
+
+class _NanAbove(_Gauss):
+    """The Gaussian term, NaN for radii above 2.2 (a failed evaluation)."""
+
+    def __call__(self, model):
+        r = model.planets[0].Rp_Rearth[0]
+        return jnp.where(r > 2.2, jnp.nan, super().__call__(model))
+
+
+def test_a_nan_term_refuses_the_slice_instead_of_zero_weight():
+    """NaN values of a term make the whole slice NaN, in weights and evidence.
+
+    Fails if: a backend or ``run`` maps NaN to a zero weight, which would return a
+    clean-looking posterior and a finite evidence from the draws that did not fail.
+    """
+    fit = Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_NanAbove(jnp.asarray(1.5)),))
+    start = {KEY: jnp.asarray([1.5])}
+    laplace = run(fit, Laplace(n_draws=4000, init=start), jax.random.key(0))
+    assert np.any(np.isnan(np.asarray(fit.log_density(laplace.samples))))
+    grid = run(fit, Grid({KEY: midpoint(0.0, HIGH, 200)}), jax.random.key(0))
+    for post in (laplace, grid):
+        assert np.all(np.isnan(np.asarray(post.log_weights)))
+        assert np.isnan(float(post.log_evidence))
+
+
+def _prior_only_orbit_fit():
+    return Fit(_scene(), {"dynamics.orbits": _block()}, ())
+
+
+@pytest.mark.medium
+def test_smc_prior_only_evidence_on_an_orbit_block_is_zero():
+    """A normalized prior with no terms has evidence exactly 1.
+
+    Truth source: the block's prior is a normalized density, so ``log Z = 0``.
+    Tolerance basis: the reviewer measured 0.0000 (rounded to 4 places) with 1000
+    particles; the bound 0.1 is about 20 times the SMC scatter of this smooth problem.
+    Fails if: the block's volume is not normalized or SMC mishandles the angles.
+    """
+    post = run(
+        _prior_only_orbit_fit(),
+        SMC(n_particles=1000, n_mcmc_steps=3),
+        jax.random.key(0),
+    )
+    assert abs(float(post.log_evidence)) < 0.1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="L1: orbit angle coordinates are plain reals with a periodic density, so a "
+    "proposal wider than one 2 pi cell inflates the importance evidence",
+)
+def test_laplace_prior_only_evidence_on_an_orbit_block_is_zero():
+    """The same prior-only evidence through ``Laplace`` (known defect, strict xfail).
+
+    Measured with ``min_eigenvalue=0.1``: log Z about +3.1 +- 0.3 against truth 0 with
+    a passing k-hat. Remove the marker when the block declares its periods.
+    """
+    post = run(
+        _prior_only_orbit_fit(),
+        Laplace(n_draws=2000, min_eigenvalue=0.1),
+        jax.random.key(0),
+    )
+    assert abs(float(post.log_evidence)) < 4 * float(post.log_evidence_se)
+
+
 def test_run_refuses_a_fit_built_without_x64():
     """Fit refuses float32 mode at construction, so ``run`` never sees one."""
     jax.config.update("jax_enable_x64", False)

@@ -21,6 +21,7 @@ from photomancy.infer.backends._flat import (
 )
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws, LegacyBackend
 from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.posterior import Posterior
 
 
 def _map_optimize(neg_logdensity, init, n_steps):
@@ -177,8 +178,14 @@ class Laplace(AbstractBackend):
 
     ``run(fit, Laplace(init=posterior), key)`` is the route to an evidence for a NUTS
     result. Angle coordinates of an orbit block are plain reals whose density repeats
-    every ``2 pi``; the estimate is the integral over the one copy the proposal covers,
-    so a posterior wider than a cell is not supported.
+    every ``2 pi`` and stored draws are not reduced to a cell. The importance evidence
+    on such a block is correct only when the proposal lies well inside one cell: a
+    proposal that spans more than a cell integrates the same mass several times and
+    inflates the evidence while the weight diagnostics still pass (a log evidence
+    off by about 3 with k-hat 0.8 was measured on a prior-only orbit fit), and the
+    default ``min_eigenvalue`` on a flat direction gives a proposal so wide that every
+    weight is ``-inf``. Use ``SMC`` for the evidence of such a fit until the block
+    declares its periods.
 
     Args:
         n_draws: Importance draws.
@@ -193,7 +200,7 @@ class Laplace(AbstractBackend):
     n_modes: int = eqx.field(static=True, default=1)
     n_steps: int = eqx.field(static=True, default=100)
     min_eigenvalue: float = 1e-10
-    init: object = None
+    init: Posterior | dict | None = None
 
     def _run(self, fit, key):
         """Fit the modes, then draw and weight from their mixture."""

@@ -11,14 +11,19 @@ __all__ = ["run"]
 
 
 def _normalized(log_weights):
-    """Normalized float64 log weights of one slice; NaN where there is no support."""
+    """Normalized float64 log weights of one slice.
+
+    A slice with no support (every weight ``-inf``) or with any NaN weight is all NaN:
+    a NaN target is a refusal, never a zero weight.
+    """
     log_weights = jnp.asarray(log_weights, jnp.float64)
-    shifted = jnp.where(jnp.isnan(log_weights), -jnp.inf, log_weights)
-    peak = jnp.max(shifted, axis=-1, keepdims=True)
-    no_support = ~jnp.isfinite(peak)
-    safe = jnp.where(no_support, 0.0, shifted - peak)
+    peak = jnp.max(log_weights, axis=-1, keepdims=True)
+    refused = jnp.any(jnp.isnan(log_weights), axis=-1, keepdims=True) | ~jnp.isfinite(
+        peak
+    )
+    safe = jnp.where(refused, 0.0, log_weights - peak)
     norm = safe - logsumexp(safe, axis=-1, keepdims=True)
-    return jnp.where(no_support, jnp.nan, norm)
+    return jnp.where(refused, jnp.nan, norm)
 
 
 def run(fit: Fit, backend: AbstractBackend, key) -> Posterior:
@@ -34,7 +39,8 @@ def run(fit: Fit, backend: AbstractBackend, key) -> Posterior:
     ``eqx.filter_vmap``; the stack of posteriors is the same type with a leading batch
     axis. Backends built on ``lax`` loops (``NUTS``, ``MCLMC``, ``SMC``, ``Laplace``,
     ``Pathfinder``, ``Grid``) map; a ``while_loop`` runs to the slowest slice. ``MAP``
-    (host-driven stages) and ``NestedSampling`` (jaxns) run one fit at a time.
+    (host-driven stages) and ``NestedSampling`` (jaxns, a host loop with the fit closed
+    over) cannot be mapped: they run one fit at a time.
 
     Args:
         fit: The fit to run.

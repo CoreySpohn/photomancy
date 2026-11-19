@@ -31,6 +31,7 @@ from photomancy.infer.backends.base import (
     LegacyBackend,
 )
 from photomancy.infer.legacy_posterior import PointPosterior
+from photomancy.infer.posterior import Posterior
 
 __all__ = [
     "MAP",
@@ -800,12 +801,12 @@ class MAP(AbstractBackend):
     metrics: dict | None = None
     callback: Callable | None = None
     callback_every: int | Callable = eqx.field(static=True, default=1)
-    init: object = None
+    init: Posterior | dict | None = None
 
     def _start(self, fit, key):
         if self.init is None:
             x = fit.sample_prior(key)
-        elif hasattr(self.init, "log_target"):
+        elif isinstance(self.init, Posterior):
             best = jnp.argmax(self.init.log_target)
             x = jax.tree.map(lambda a: a[best], self.init.samples)
         else:

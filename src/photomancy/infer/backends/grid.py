@@ -102,9 +102,7 @@ class Grid(AbstractBackend):
                 samples.setdefault(key_, {})[coord] = value
         log_target = fit.log_density(samples)
         log_weights = log_w + log_target
-        log_z = jax.scipy.special.logsumexp(
-            jnp.where(jnp.isnan(log_weights), -jnp.inf, log_weights)
-        )
+        log_z = jax.scipy.special.logsumexp(log_weights)
         return BackendDraws(
             samples=samples,
             log_weights=log_weights,

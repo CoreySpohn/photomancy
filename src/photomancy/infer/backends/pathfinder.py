@@ -31,6 +31,7 @@ from photomancy.infer.backends.base import (
 )
 from photomancy.infer.backends.laplace import LaplaceInfo
 from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.posterior import Posterior
 
 
 @eqx.filter_jit
@@ -125,8 +126,11 @@ class Pathfinder(AbstractBackend):
     by BlackJAX Pathfinder (a Gaussian from the L-BFGS trajectory, steadier than one
     Hessian when a mode is poorly conditioned) and weighted by its ELBO. The draws are
     importance weighted to the fit, so the evidence is the importance mean and the
-    proposal quality shows in the weights. The same remark on angle coordinates
-    applies.
+    proposal quality shows in the weights. Angle coordinates of an orbit block are
+    plain reals whose density repeats every ``2 pi``; as for
+    :class:`~photomancy.infer.backends.laplace.Laplace`, the importance evidence on such
+    a block is correct only when the proposal lies well inside one cell, and the weight
+    diagnostics do not catch the failure. Use ``SMC`` for such an evidence.
 
     Args:
         n_draws: Importance draws.
@@ -141,7 +145,7 @@ class Pathfinder(AbstractBackend):
     n_modes: int = eqx.field(static=True, default=1)
     maxiter: int = eqx.field(static=True, default=50)
     maxcor: int = eqx.field(static=True, default=10)
-    init: object = None
+    init: Posterior | dict | None = None
 
     def _run(self, fit, key):
         """Fit the paths, then draw and weight from their mixture."""

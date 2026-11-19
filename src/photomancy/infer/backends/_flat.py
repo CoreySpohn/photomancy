@@ -11,6 +11,9 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
+from photomancy.infer.evidence import importance_evidence
+from photomancy.infer.posterior import Posterior
+
 
 def draw_template(fit):
     """Zeros with the structure and shapes of one draw ``x`` of ``fit`` (float64)."""
@@ -52,7 +55,7 @@ def start_points(fit, init, key, n):
     """
     if init is None:
         u = fit.to_real(fit.sample_prior(key, (n,)))
-    elif hasattr(init, "log_weights"):
+    elif isinstance(init, Posterior):
         index = jax.random.categorical(key, init.log_weights, shape=(n,))
         u = fit.to_real(jax.tree.map(lambda a: a[index], init.samples))
     else:
@@ -60,22 +63,6 @@ def start_points(fit, init, key, n):
             jax.tree.map(lambda a: jnp.broadcast_to(a, (n, *a.shape)), init)
         )
     return jax.vmap(lambda one: ravel_pytree(one)[0])(u)
-
-
-def importance_evidence(log_weights):
-    """Return ``(log_evidence, standard_error)`` of the mean of unnormalized weights.
-
-    ``log Z = logsumexp(w) - log N`` for ``N`` iid proposal draws with importance
-    weights ``w``; the delta-method error of the log of the mean weight is
-    ``sqrt(sum(w_norm**2) - 1/N)`` with ``w_norm`` the normalized weights. It is the
-    independent-draw error and ignores the dependence of mixture components.
-    """
-    log_weights = jnp.where(jnp.isnan(log_weights), -jnp.inf, log_weights)
-    n = log_weights.shape[-1]
-    log_z = jax.scipy.special.logsumexp(log_weights) - jnp.log(n)
-    norm = jax.nn.softmax(log_weights)
-    se = jnp.sqrt(jnp.maximum(jnp.sum(norm**2) - 1.0 / n, 0.0))
-    return log_z, se
 
 
 class FlatDensity(eqx.Module):

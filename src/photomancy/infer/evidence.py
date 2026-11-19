@@ -1,8 +1,39 @@
-"""Calibrate Bayesian model evidence as a Gaussian detection significance."""
+"""Evidence estimates from importance weights, and a Bayes factor as a significance."""
 
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import log_ndtr, ndtri
+from jax.scipy.special import log_ndtr, logsumexp, ndtri
+
+__all__ = ["importance_evidence", "sigma_from_log_bayes_factor"]
+
+
+def importance_evidence(log_weights):
+    """Return ``(log_evidence, standard_error)`` of the mean of unnormalized weights.
+
+    For ``N`` independent proposal draws ``x_i ~ q`` with weights
+    ``w_i = p_bar(x_i) / q(x_i)`` (``p_bar`` the normalized prior times the normalized
+    terms), ``log Z = logsumexp(log w) - log N``. The standard error of the log is the
+    delta-method value ``sqrt(sum(u**2) - 1/N)`` with ``u`` the normalized weights.
+    Draws from a mixture proposal are still independent draws of the mixture, so with
+    the full mixture density in ``q`` the formula needs no dependence correction. It
+    does not hold for chain, sequential or nested-sampling clouds, whose draws are
+    dependent or whose weights are not importance ratios.
+
+    NaN propagates: one NaN weight makes both outputs NaN. A ``-inf`` weight is a
+    draw with zero weight and counts in ``N``. Reweighting a cloud that already carries
+    normalized weights ``w`` by a ratio ``r`` is ``importance_evidence(w + r)`` minus
+    ``importance_evidence(w)`` for the log evidence increment, the second term being
+    ``-log N``.
+
+    Args:
+        log_weights: Unnormalized log weights, draw axis last, one slice.
+    """
+    log_weights = jnp.asarray(log_weights)
+    n = log_weights.shape[-1]
+    log_z = logsumexp(log_weights) - jnp.log(n)
+    norm = jax.nn.softmax(log_weights)
+    se = jnp.sqrt(jnp.maximum(jnp.sum(norm**2) - 1.0 / n, 0.0))
+    return log_z, se
 
 
 def sigma_from_log_bayes_factor(log_bayes_factor):

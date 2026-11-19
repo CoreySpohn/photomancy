@@ -29,6 +29,7 @@ from photomancy.infer.backends.base import (
     import_extra,
 )
 from photomancy.infer.legacy_posterior import SamplePosterior
+from photomancy.infer.posterior import Posterior
 
 
 class MCLMCBackend(LegacyBackend):
@@ -168,7 +169,7 @@ class MCLMC(AbstractBackend):
     n_draws: int = eqx.field(static=True, default=1000)
     n_chains: int = eqx.field(static=True, default=4)
     thin: int = eqx.field(static=True, default=1)
-    init: object = None
+    init: Posterior | dict | None = None
 
     def _run(self, fit, key):
         """Tune and sample every chain; return flat draws with uniform weights."""

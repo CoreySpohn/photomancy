@@ -68,8 +68,11 @@ class AbstractBackend(eqx.Module):
     ``from_real``, ``sample_prior``, ``log_density``, ``model_at``) and never builds its
     own density or tests what kind of entry the fit holds.
 
-    Every backend passes the fit to its compiled region as an argument (``filter_jit``),
-    so large arrays inside the terms are traced inputs and not baked-in constants.
+    Every backend except ``NestedSampling`` passes the fit to its compiled region as an
+    argument (``filter_jit``), so large arrays inside the terms are traced inputs and
+    not baked-in constants. ``NestedSampling`` closes over the fit in a jaxns model,
+    runs one fit at a time and recompiles for a new fit; ``MAP`` is host driven and
+    also runs one fit at a time.
     """
 
     @abstractmethod
