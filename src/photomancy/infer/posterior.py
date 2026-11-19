@@ -448,9 +448,9 @@ class Posterior(eqx.Module):
         (pass ``max_khat=jnp.inf`` and gate on ``min_n_eff``) and a ``quadrature``
         cloud has no gate (see below). A ``MAP`` posterior has one draw, so any
         ``min_n_eff`` above 1 refuses it. NaN is propagated, never repaired. Stored
-        block angle coordinates are not reduced to a cell, so take no moment,
-        quantile or covariance of one; the swap itself is unaffected because the
-        priors and terms are periodic.
+        block angle coordinates lie in one cell, so a cloud near the cell edge is
+        split across it: take no plain moment, quantile or covariance of one; the swap
+        itself is unaffected because the priors and terms are periodic.
 
         Args:
             priors: Replacement entries, a subset of ``fit.free`` with the same kinds.
