@@ -575,7 +575,7 @@ def _require_slice(posterior, name):
         )
 
 
-def eig_contrastive(posterior, term, key, *, n_outer):
+def eig_contrastive(posterior, term, key, *, n_outer, batch_size=None):
     """Contrastive (prior-contrastive) expected information gain: a lower bound.
 
     Estimator: ``mean_k [log p(y_k | x_k) - log sum_m w_m p(y_k | x_m)]`` over
@@ -584,6 +584,11 @@ def eig_contrastive(posterior, term, key, *, n_outer):
     noise-contrastive bound). In expectation it is below the true gain and it cannot
     exceed ``log n_eff``; ``bias_scale`` is the leading-order gap. Cost: ``n_outer * N``
     evaluations of the term. Takes one slice (map worlds with ``eqx.filter_vmap``).
+
+    With ``batch_size`` the outer draws run one at a time and the stored draws are
+    built into models and scored ``batch_size`` at a time (a ``jax.lax.map`` chunk), so
+    memory is bounded by the chunk and not by ``N``; the estimate is the same to
+    rounding.
 
     Args:
         posterior: A :class:`~photomancy.infer.posterior.Posterior`.
@@ -594,6 +599,8 @@ def eig_contrastive(posterior, term, key, *, n_outer):
             draw replaces them with ``term.draw(key, model)``.
         key: PRNG key.
         n_outer: Static number of outer draws.
+        batch_size: Models built and scored at once (a ``jax.lax.map`` chunk), default
+            all at once with ``jax.vmap``.
 
     Returns:
         An :class:`EIGEstimate`.
@@ -603,14 +610,32 @@ def eig_contrastive(posterior, term, key, *, n_outer):
     log_weights = posterior.log_weights
     key_x, key_y = jax.random.split(key)
     idx = categorical_indices(log_weights, key_x, (n_outer,))
-    outer = jax.vmap(fit.model_at)(take_draws(posterior.samples, idx))
-    models = jax.vmap(fit.model_at)(posterior.samples)
+    outer = take_draws(posterior.samples, idx)
+    if batch_size is None:
+        models = jax.vmap(fit.model_at)(posterior.samples)
 
-    def one(key_k, model_k):
+        def score(drawn):
+            return jax.vmap(drawn)(models)
+
+    else:
+
+        def score(drawn):
+            return jax.lax.map(
+                lambda x: drawn(fit.model_at(x)),
+                posterior.samples,
+                batch_size=batch_size,
+            )
+
+    def one(key_k, x_k):
+        model_k = fit.model_at(x_k)
         drawn = term.draw(key_k, model_k)
-        return drawn(model_k), jax.vmap(drawn)(models)
+        return drawn(model_k), score(drawn)
 
-    log_joint, logg = jax.vmap(one)(jax.random.split(key_y, n_outer), outer)
+    keys = jax.random.split(key_y, n_outer)
+    if batch_size is None:
+        log_joint, logg = jax.vmap(one)(keys, outer)
+    else:
+        log_joint, logg = jax.lax.map(lambda args: one(*args), (keys, outer))
     log_marginal = logsumexp(logg + log_weights[None, :], axis=1)
     scaled = jnp.exp(logg - jnp.max(logg, axis=1, keepdims=True))
     w = jnp.exp(log_weights)[None, :]
@@ -623,7 +648,7 @@ def eig_contrastive(posterior, term, key, *, n_outer):
     )
 
 
-def eig_nested(posterior, term, key, *, n_outer, n_inner, min_n_eff):
+def eig_nested(posterior, term, key, *, n_outer, n_inner, min_n_eff, batch_size=None):
     """Nested Monte Carlo expected information gain: biased upward at ``O(1/n_inner)``.
 
     Estimator: ``mean_k [log p(y_k | x_k) - log mean_j p(y_k | x'_kj)]`` with outer
@@ -642,6 +667,9 @@ def eig_nested(posterior, term, key, *, n_outer, n_inner, min_n_eff):
     claim no longer holds, so the estimate is refused (NaN). It is refused the same way
     when the weights are NaN or the Kish size of the cloud is below ``min_n_eff``.
     Cost and memory: ``n_outer * n_inner`` models and densities. Takes one slice.
+    With ``batch_size`` the outer draws run one at a time and the inner models are
+    built and scored ``batch_size`` at a time (a ``jax.lax.map`` chunk), the same
+    estimate to rounding.
 
     Args:
         posterior: A :class:`~photomancy.infer.posterior.Posterior`.
@@ -650,6 +678,8 @@ def eig_nested(posterior, term, key, *, n_outer, n_inner, min_n_eff):
         n_outer: Static number of outer draws.
         n_inner: Static number of inner draws per outer draw.
         min_n_eff: Smallest acceptable Kish size of the cloud.
+        batch_size: Models built and scored at once (a ``jax.lax.map`` chunk), default
+            all at once with ``jax.vmap``.
 
     Returns:
         An :class:`EIGEstimate`; NaN ``eig`` and ``bias_scale`` on refusal.
@@ -660,22 +690,34 @@ def eig_nested(posterior, term, key, *, n_outer, n_inner, min_n_eff):
     n_draws = log_weights.shape[0]
     key_x, key_y, key_i = jax.random.split(key, 3)
     idx = categorical_indices(log_weights, key_x, (n_outer,))
-    outer = jax.vmap(fit.model_at)(take_draws(posterior.samples, idx))
+    outer = take_draws(posterior.samples, idx)
 
-    def one(key_k, key_j, index_k, model_k):
+    def one(key_k, key_j, index_k, x_k):
+        model_k = fit.model_at(x_k)
         drawn = term.draw(key_k, model_k)
         rest = jnp.where(jnp.arange(n_draws) == index_k, -jnp.inf, log_weights)
         rest = rest - logsumexp(rest)
-        inner = categorical_indices(rest, key_j, (n_inner,))
-        models = jax.vmap(fit.model_at)(take_draws(posterior.samples, inner))
-        return drawn(model_k), jax.vmap(drawn)(models), kish_ess(rest)
+        inner = take_draws(
+            posterior.samples, categorical_indices(rest, key_j, (n_inner,))
+        )
+        if batch_size is None:
+            scored = jax.vmap(drawn)(jax.vmap(fit.model_at)(inner))
+        else:
+            scored = jax.lax.map(
+                lambda x: drawn(fit.model_at(x)), inner, batch_size=batch_size
+            )
+        return drawn(model_k), scored, kish_ess(rest)
 
-    log_joint, logg, n_rest = jax.vmap(one)(
+    args = (
         jax.random.split(key_y, n_outer),
         jax.random.split(key_i, n_outer),
         idx,
         outer,
     )
+    if batch_size is None:
+        log_joint, logg, n_rest = jax.vmap(one)(*args)
+    else:
+        log_joint, logg, n_rest = jax.lax.map(lambda a: one(*a), args)
     log_marginal = logsumexp(logg, axis=1) - jnp.log(n_inner)
     scaled = jnp.exp(logg - jnp.max(logg, axis=1, keepdims=True))
     mean = jnp.mean(scaled, axis=1, keepdims=True)

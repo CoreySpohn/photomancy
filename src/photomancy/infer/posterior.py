@@ -6,8 +6,9 @@ weights, the fit's own log density at each draw, and the evidence and its standa
 where the backend has them. Every backend fills the same fields, so a consumer reads one
 layout whichever method ran.
 
-Operations. ``sample`` and ``resample`` draw from the cloud, ``with_priors`` and
-``append`` reweight it to a changed ``Fit`` without evaluating the old terms,
+Operations. ``sample`` and ``resample`` draw from the cloud, ``with_priors``,
+``append`` and ``replace_term`` reweight it to a changed ``Fit`` (``replace_term``
+evaluates the one old term it removes and no other),
 ``model`` and ``forecast`` read the stored draws through the fit. Each acts on one
 slice (one world) and raises on a batched posterior; map worlds with
 ``eqx.filter_vmap``. A refusal is a NaN slice, never a raise on a traced value.
@@ -31,6 +32,7 @@ import math
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from priorities import Mixture, MultivariateNormal
 
 from photomancy.infer.diagnostics import kish_ess, mc_se, pareto_khat, weighted_mean
@@ -250,6 +252,16 @@ class Posterior(eqx.Module):
     # ----- reweighting -----------------------------------------------------------
 
     def _check_gate(self, min_n_eff, max_khat):
+        for name, value in (("min_n_eff", min_n_eff), ("max_khat", max_khat)):
+            if (
+                value is not None
+                and not isinstance(value, jax.core.Tracer)
+                and bool(np.isnan(np.asarray(value)))
+            ):
+                raise ValueError(
+                    f"{name} is NaN, which would turn its test off or refuse every "
+                    "slice; use jnp.inf for max_khat (no limit) or 0 for min_n_eff"
+                )
         given = (min_n_eff is not None, max_khat is not None)
         if self.kind == "quadrature":
             if any(given):
@@ -283,7 +295,7 @@ class Posterior(eqx.Module):
             kind=self.kind,
         )
 
-    def with_priors(self, priors, *, min_n_eff, max_khat):
+    def with_priors(self, priors, *, min_n_eff, max_khat, batch_size=None):
         """Swap priors by importance reweighting; no term is evaluated.
 
         The new ``Fit`` comes from ``fit.with_priors(priors)`` (which refuses a
@@ -318,19 +330,39 @@ class Posterior(eqx.Module):
             min_n_eff: Smallest acceptable Kish size of the new weights, or ``None``
                 for a ``quadrature`` posterior (which has no gate).
             max_khat: Largest acceptable Pareto k-hat, or ``None`` for ``quadrature``.
+            batch_size: Draws whose priors are evaluated at once (a ``jax.lax.map``
+                chunk, the same values to rounding), default all at once.
 
         Raises:
-            ValueError: On the host, for a static fault in ``priors`` or gate
-                arguments that do not match ``kind``.
+            ValueError: On the host, for a static fault in ``priors``, a NaN
+                ``min_n_eff`` or ``max_khat``, or gate arguments that do not match
+                ``kind``.
         """
         self._require_slice("with_priors")
         new_fit = self.fit.with_priors(priors)
-        old = self.fit.log_prior(self.samples)
-        new = new_fit.log_prior(self.samples)
+        old = self.fit.log_prior(self.samples, batch_size=batch_size)
+        new = new_fit.log_prior(self.samples, batch_size=batch_size)
         ratio = jnp.where(jnp.isneginf(old), -jnp.inf, new - old)
         return self._reweighted(new_fit, ratio, min_n_eff, max_khat)
 
-    def append(self, term, *, min_n_eff, max_khat):
+    def _term_ratio(self, term, old, batch_size):
+        """Per-draw ``term(model) - old(model)`` (just ``term`` when ``old`` is None).
+
+        The one code path of ``append`` and ``replace_term``: each stored draw is built
+        into its model once and both terms read it.
+        """
+        fit = self.fit
+
+        def one(x):
+            model = fit.model_at(x)
+            ratio = jnp.asarray(term(model), jnp.float64)
+            return (
+                ratio if old is None else ratio - jnp.asarray(old(model), jnp.float64)
+            )
+
+        return fit._over_batch(one, self.samples, batch_size)
+
+    def append(self, term, *, min_n_eff, max_khat, batch_size=None):
         """Add one observation by importance reweighting; no old term is evaluated.
 
         The new ``Fit`` comes from ``fit.append(term)``. The term is evaluated at the
@@ -344,19 +376,55 @@ class Posterior(eqx.Module):
         never changed), (c) the held values and builds are the cloud's (the term is
         evaluated on ``fit.model_at``), and (d) the gate passes.
 
+        The gate arguments are required and keyword-only. A ``monte_carlo`` posterior
+        needs both; a ``quadrature`` posterior has no gate and needs both written out as
+        ``None``.
+
         Args:
             term: An :class:`~photomancy.infer.fit.AbstractTerm`, normalized.
             min_n_eff: As in :meth:`with_priors`.
             max_khat: As in :meth:`with_priors`.
+            batch_size: As in :meth:`with_priors`, for the term evaluations.
 
         Raises:
-            ValueError: On the host, for a term whose reads meet a free path or gate
-                arguments that do not match ``kind``.
+            ValueError: On the host, for a term whose reads meet a free path, a NaN
+                gate limit, or gate arguments that do not match ``kind``.
         """
         self._require_slice("append")
         new_fit = self.fit.append(term)
-        only = Fit(self.fit.model, self.fit.free, (term,))
-        ratio = jnp.asarray(only.log_likelihood(self.samples), jnp.float64)
+        ratio = self._term_ratio(term, None, batch_size)
+        return self._reweighted(new_fit, ratio, min_n_eff, max_khat)
+
+    def replace_term(self, index, term, *, min_n_eff, max_khat, batch_size=None):
+        """Swap one term by importance reweighting; every other term is untouched.
+
+        The new ``Fit`` comes from ``fit.replace_term(index, term)``. The weights gain
+        ``new(model) - old(model)`` at every stored draw, with ``old`` the term
+        ``fit.terms[index]``. The evidence, its standard error, ``log_target`` and the
+        gate are exactly those of :meth:`append`: the combined weights are gated by
+        ``min_n_eff`` and ``max_khat``, a NaN ratio refuses the slice, and the same
+        conditions (a) to (d) apply, with the datum replaced rather than added.
+
+        The use is a padded row: the old term holds the row as invalid padding and the
+        new term the same data with the row valid. The structure is unchanged, so a
+        stack of worlds does not recompile, and the result equals ``append`` of that
+        row on an unpadded fit. A draw where both terms are ``-inf`` gives a NaN ratio
+        and refuses the slice. ``index`` is a static Python integer.
+
+        Args:
+            index: Position of the term to replace in ``fit.terms``.
+            term: The replacement, an :class:`~photomancy.infer.fit.AbstractTerm`.
+            min_n_eff: As in :meth:`with_priors`.
+            max_khat: As in :meth:`with_priors`.
+            batch_size: As in :meth:`with_priors`, for the term evaluations.
+
+        Raises:
+            IndexError: For an ``index`` outside ``fit.terms``.
+            ValueError: As :meth:`append`.
+        """
+        self._require_slice("replace_term")
+        new_fit = self.fit.replace_term(index, term)
+        ratio = self._term_ratio(term, self.fit.terms[index], batch_size)
         return self._reweighted(new_fit, ratio, min_n_eff, max_khat)
 
     # ----- reading the draws through the fit -------------------------------------

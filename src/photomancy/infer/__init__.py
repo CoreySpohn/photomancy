@@ -69,6 +69,7 @@ from photomancy.infer.posterior_utils import project_samples, sample_capped
 from photomancy.infer.priors import IndependentPrior
 from photomancy.infer.run import run
 from photomancy.infer.terms import TermLogDensity
+from photomancy.infer.update import update
 
 __all__ = [
     "MAP",
@@ -121,6 +122,7 @@ __all__ = [
     "run",
     "sample_capped",
     "sigma_from_log_bayes_factor",
+    "update",
     "weighted_cov",
     "weighted_mean",
     "weighted_quantile",

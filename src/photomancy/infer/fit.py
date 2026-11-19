@@ -198,10 +198,20 @@ class Fit(eqx.Module):
             ]
         return ()
 
-    def _over_batch(self, fn, x):
-        for _ in range(self._batch_ndim(x)):
+    def _over_batch(self, fn, x, batch_size=None):
+        """Map ``fn`` over the batch axes of ``x``.
+
+        With ``batch_size`` the outermost axis runs as a ``jax.lax.map`` of that chunk
+        size (memory bounded by the chunk), the inner axes as ``vmap``.
+        """
+        ndim = self._batch_ndim(x)
+        if batch_size is None or ndim == 0:
+            for _ in range(ndim):
+                fn = jax.vmap(fn)
+            return fn(x)
+        for _ in range(ndim - 1):
             fn = jax.vmap(fn)
-        return fn(x)
+        return jax.lax.map(fn, x, batch_size=batch_size)
 
     # ----- the model at a draw ---------------------------------------------------
 
@@ -238,14 +248,16 @@ class Fit(eqx.Module):
     def _log_prior_one(self, x):
         return self._walk(x)[1]
 
-    def log_prior(self, x: dict) -> jax.Array:
+    def log_prior(self, x: dict, *, batch_size: int | None = None) -> jax.Array:
         """Return the normalized log prior of ``x`` against Lebesgue ``dx``.
 
         Leaf laws are summed over the axes of their leaf. Blocks follow on the running
         model, each ``log_prob`` read before that block's writes, so the blocks form a
-        chain of normalized conditionals.
+        chain of normalized conditionals. ``batch_size`` evaluates that many draws at
+        once (a ``jax.lax.map`` chunk over the leading axis), the same values to
+        rounding; the default maps every draw at once with ``jax.vmap``.
         """
-        return self._over_batch(self._log_prior_one, x)
+        return self._over_batch(self._log_prior_one, x, batch_size)
 
     @staticmethod
     def _terms_at(terms, model):
@@ -257,18 +269,21 @@ class Fit(eqx.Module):
     def _log_likelihood_one(self, x):
         return self._terms_at(self.terms, self.model_at(x))
 
-    def log_likelihood(self, x: dict) -> jax.Array:
-        """Return the sum of the terms at ``x``."""
-        return self._over_batch(self._log_likelihood_one, x)
+    def log_likelihood(self, x: dict, *, batch_size: int | None = None) -> jax.Array:
+        """Return the sum of the terms at ``x`` (``batch_size`` as in ``log_prior``)."""
+        return self._over_batch(self._log_likelihood_one, x, batch_size)
 
     def _log_density_one(self, x):
         model, prior = self._walk(x)
         total = prior + self._terms_at(self.terms, model)
         return jnp.where(jnp.isneginf(prior), -jnp.inf, total)
 
-    def log_density(self, x: dict) -> jax.Array:
-        """Return ``log_prior + log_likelihood`` (``-inf`` off the prior's support)."""
-        return self._over_batch(self._log_density_one, x)
+    def log_density(self, x: dict, *, batch_size: int | None = None) -> jax.Array:
+        """Return ``log_prior + log_likelihood`` (``-inf`` off the prior's support).
+
+        ``batch_size`` is as in :meth:`log_prior`.
+        """
+        return self._over_batch(self._log_density_one, x, batch_size)
 
     # ----- unconstrained coordinates ---------------------------------------------
 
@@ -400,6 +415,24 @@ class Fit(eqx.Module):
     def append(self, term: AbstractTerm) -> "Fit":
         """Return a fit with one more term; the free set is unchanged."""
         return Fit(self.model, self.free, (*self.terms, term))
+
+    def replace_term(self, index: int, term: AbstractTerm) -> "Fit":
+        """Return a fit with ``terms[index]`` replaced; the free set is unchanged.
+
+        The replacement may be any term whose reads pass the checks of ``Fit``. A stack
+        of worlds that must not recompile needs a replacement with the same pytree
+        structure as the old term (a padded row written in place).
+
+        Raises:
+            IndexError: When ``index`` is outside ``range(len(terms))`` (negative
+                indices are refused, so a stacked fit cannot shift a slot).
+        """
+        if not 0 <= index < len(self.terms):
+            raise IndexError(
+                f"replace_term index {index} outside range({len(self.terms)})"
+            )
+        terms = (*self.terms[:index], term, *self.terms[index + 1 :])
+        return Fit(self.model, self.free, terms)
 
     def digest(self) -> str:
         """Hash of the free keys, prior records, term kinds and model structure.
