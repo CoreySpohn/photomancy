@@ -243,19 +243,21 @@ integrands, with the wavelength quadrature carried by each rate record.
 
 ```python notest
 import coronagraphoto as cp
+from optixstuff import frames_for_time
 
 residuals = cp.ResidualFractions(
     speckle_residual_fraction=0.1, exozodi_residual_fraction=0.1
 )
-plan = cp.exposure_time(
+needed = cp.exposure_time(
     rates, detector, target_snr, frame_time_s=100.0, residuals=residuals
 )
-value = cp.snr(rates, detector, plan.time_s, frame_time_s=100.0, residuals=residuals)
+value = cp.snr(rates, detector, needed.time_s, frame_time_s=100.0, residuals=residuals)
+plan = frames_for_time(needed.time_s, 100.0)  # whole frames
 electrons = detector.electrons(rates)
-mean, variance = detector.mean_and_variance(electrons, plan.time_s)
+mean, variance = detector.mean_and_variance(electrons, plan)
 # For image integrands (one detector pixel per spatial sample):
 image_electrons = detector.electrons(image_rates)
-counts = detector.draw(key, image_electrons, plan.time_s)
+counts = detector.draw(key, image_electrons, plan)
 ```
 
 Construct `FrameSet` with a `Band` interval and an `Epoch` host value. Convert
