@@ -12,8 +12,8 @@ from photomancy import RelativeAstrometryTerm
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 from photomancy.orbit.init import find_init
 from photomancy.orbit.laplace import map_laplace_fit
+from photomancy.orbit.system_density import ScalarCoordinate
 from photomancy.priors import FactorizedOrbitPrior, orbit_log_prior
-from photomancy.system_density import ScalarCoordinate
 
 
 def _first_orbit(system):

@@ -13,7 +13,7 @@ from orbix.system import EccentricityVectorChart, FrameChart
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
 from system_helpers import BOUNDS, _floor, _new_term, _scene, ecc_law
 
-from photomancy import RadialVelocityTerm, ScalarCoordinate
+from photomancy import RadialVelocityTerm
 from photomancy.infer.backends import JaxnsBackend, build_scene_nested_model
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 from photomancy.orbit.nested import (
@@ -21,6 +21,7 @@ from photomancy.orbit.nested import (
     build_chart_nested_model,
     orbit_nested_sampling,
 )
+from photomancy.orbit.system_density import ScalarCoordinate
 from photomancy.priors import FactorizedOrbitPrior
 
 # jaxns requires x64; make the standalone file independent of other tests.

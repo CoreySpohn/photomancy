@@ -143,13 +143,14 @@ def test_chart_eig_and_mode_predictions():
     from orbix.system import EccentricityVectorChart
     from system_helpers import _data, _orbits, _scene
 
-    from photomancy import RelativeAstrometryTerm, ScalarCoordinate
+    from photomancy import RelativeAstrometryTerm
     from photomancy.orbit.diagnostics import (
         mode_observables,
         mode_summary,
         orbits_from_samples,
     )
     from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
+    from photomancy.orbit.system_density import ScalarCoordinate
 
     chart = EccentricityVectorChart()
     orbit = jax.tree.map(lambda x: x[1], _orbits(17.0))

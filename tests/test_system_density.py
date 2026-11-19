@@ -22,9 +22,10 @@ from skyscapes.scene.star import FlatStar
 from system_helpers import _floor, ecc_law
 from term_utils import both
 
-from photomancy import RelativeAstrometryTerm, SystemLogDensity
+from photomancy import RelativeAstrometryTerm
 from photomancy.measurements import RelativeAstromData
 from photomancy.orbit.nested import orbit_tempered_smc
+from photomancy.orbit.system_density import SystemLogDensity
 from photomancy.priors import orbit_log_prior
 
 # Frozen from the retired NumPyro joint (prior plus relative-astrometry likelihood)
@@ -370,7 +371,7 @@ def test_bare_system_matches_scene(fits):
 
 def test_tempering_split_shares_system_and_scalar_units():
     """The prior includes every Jacobian. Only the data score is tempered."""
-    from photomancy.system_density import ScalarCoordinate
+    from photomancy.orbit.system_density import ScalarCoordinate
 
     build = Mock(side_effect=lambda params, mass: mass + params["orbit"])
     term = Mock(side_effect=lambda model, jitter: (model / jitter, None))

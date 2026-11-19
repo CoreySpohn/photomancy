@@ -162,8 +162,8 @@ def test_joint_astrom_imaging_fit_recovers_period():
     from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
     from photomancy.orbit.init import find_init
     from photomancy.orbit.laplace import map_laplace_mixture_fit
+    from photomancy.orbit.system_density import ScalarCoordinate
     from photomancy.priors import FactorizedOrbitPrior
-    from photomancy.system_density import ScalarCoordinate
 
     chart = ClassicalChart()
     density = build_chart_logdensity(

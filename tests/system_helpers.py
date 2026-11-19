@@ -26,7 +26,7 @@ from photomancy.measurements import (
     RVData,
     StellarAstromData,
 )
-from photomancy.system_density import ScalarCoordinate
+from photomancy.orbit.system_density import ScalarCoordinate
 
 
 def ecc_law(name):

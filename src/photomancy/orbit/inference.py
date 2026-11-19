@@ -17,8 +17,8 @@ from orbix.system import (
     FrameChart,
 )
 
+from photomancy.orbit.system_density import SystemLogDensity
 from photomancy.priors import LOG_HAAR
-from photomancy.system_density import SystemLogDensity
 
 # Chart name that posteriors over the periapsis elements of
 # ``FrameOrbit.to_periapsis_elements`` (stacked as columns) declare.

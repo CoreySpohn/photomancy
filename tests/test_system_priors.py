@@ -23,18 +23,18 @@ from scipy import integrate, stats
 from skyscapes.scene import FlatStar, Scene
 from system_helpers import BOUNDS, _orbits, _scale_coordinates, _scene, ecc_law
 
-from photomancy import RadialVelocityTerm, SystemLogDensity
+from photomancy import RadialVelocityTerm
 from photomancy.measurements import RVData
 from photomancy.orbit.inference import (
     build_chart_logdensity,
     orbit_chart_log_volume,
 )
+from photomancy.orbit.system_density import ScalarCoordinate, SystemLogDensity
 from photomancy.priors import (
     LOG_HAAR,
     PopulationPrior,
     orbit_log_prior,
 )
-from photomancy.system_density import ScalarCoordinate
 
 ATOL = 1e-10
 
