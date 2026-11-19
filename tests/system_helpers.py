@@ -181,3 +181,15 @@ def _new_term(kind, max_n=4):
         Quadrature.build((Band(550.0, 650.0),)),
         (Transmission.from_band(Band(550.0, 650.0)),),
     )
+
+
+def rv_normalization(data):
+    """``0.5 sum_j log N_j`` over the populated instruments of ``RVData``.
+
+    The normalization of the flat-offset RV marginal, for references frozen before
+    the marginal was a normalized density.
+    """
+    counts = np.bincount(
+        np.asarray(data.inst_ids)[np.asarray(data.is_valid)], minlength=data.n_inst
+    )
+    return 0.5 * float(np.sum(np.log(counts[counts > 0])))

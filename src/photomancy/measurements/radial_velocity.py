@@ -72,9 +72,14 @@ def loglike_rv_marginalized(
     marginalization of zero-points gamma_j collapses to O(N) segment sums. This
     avoids sampling ``n_inst`` nuisance parameters. Each populated instrument
     removes one Gaussian dimension, so the normalization uses ``N_valid - J``.
-    Relative to retaining all ``N_valid`` dimensions, log evidence increases by
-    ``J / 2 * log(2 * pi)`` for a fixed set of populated instruments. The flat
-    offset measure is in m/s.
+
+    The result is a normalized density of the data modulo the offsets: over the
+    valid velocities of each instrument it integrates to 1 on the hyperplane
+    orthogonal to a common shift (Lebesgue measure in m/s there). The flat
+    integral over an offset gamma_j shifts the ``N_j`` velocities of instrument
+    ``j`` along ``(1, ..., 1)``, whose unit vector is that direction over
+    ``sqrt(N_j)``, so the marginal carries ``1 / sqrt(N_j)`` per instrument and the
+    returned value adds ``0.5 * sum_j log(N_j)`` over the populated instruments.
 
     Args:
         rv_obs: Observed RVs (m/s). Shape ``(N,)``.
@@ -105,6 +110,8 @@ def loglike_rv_marginalized(
     B = jax.ops.segment_sum(w * r, inst_ids, num_segments=n_inst)
     C = jax.ops.segment_sum(w * r**2, inst_ids, num_segments=n_inst)
 
+    counts = jax.ops.segment_sum(mask.astype(float), inst_ids, num_segments=n_inst)
+
     # Marginalized log-likelihood -- only count valid observations
     N_valid = jnp.sum(mask)
     J = jnp.sum(A > 0)
@@ -114,6 +121,7 @@ def loglike_rv_marginalized(
         + jnp.sum(jnp.log(A_safe))
         + jnp.sum(jnp.where(mask, jnp.log(var), 0.0))
         + (N_valid - J) * jnp.log(2.0 * jnp.pi)
+        - jnp.sum(jnp.log(jnp.where(counts > 0, counts, 1.0)))
     )
 
 

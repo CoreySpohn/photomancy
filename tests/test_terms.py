@@ -17,6 +17,7 @@ from kinematics import (
     predict_stellar_astrometry,
 )
 from optixstuff.spectral import Band, Quadrature, Transmission
+from scipy import integrate
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
@@ -39,6 +40,7 @@ from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.measurements import (
     PhotometryData,
     RelativeAstromData,
+    RVData,
     loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
@@ -647,6 +649,48 @@ def test_rv_default_jitter_and_selection():
         np.testing.assert_array_equal(a, b)
     with pytest.raises(ValueError, match="jitters"):
         RadialVelocityTerm(data, jitters=jnp.zeros(1))
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_rv_marginal_integrates_to_one_over_the_contrast():
+    """Truth source: the flat-offset marginal is a density of the data modulo a shift.
+
+    Two epochs of one instrument (errors 1.5 and 2.5 m/s, jitter 0.7 m/s) leave one
+    contrast direction, ``(1, -1) / sqrt(2)``; the likelihood is constant along the
+    shift ``(1, 1) / sqrt(2)``. Adaptive quadrature over the contrast, at an
+    arbitrary shift, must give 1 (tolerance 1e-9 against a quadrature error
+    estimate under 1e-10). A lone epoch of a second instrument removes no dimension
+    and adds nothing. Fails if: the ``0.5 sum_j log N_j`` normalization is missing
+    (the integral is ``1 / sqrt(2)``) or is taken over all valid epochs instead of
+    per instrument (``sqrt(3 / 2)``).
+    """
+    data = RVData.pad(
+        times=[0.0, 1.0, 2.0],
+        rv=[0.0, 0.0, 0.0],
+        rv_err=[1.5, 2.5, 1.0],
+        inst_ids=[0, 0, 1],
+        n_inst=2,
+    )
+    jitters = jnp.array([0.7, 0.3])
+    model = jnp.where(data.is_valid, 3.0, 0.0)
+
+    @jax.jit
+    def likelihood(s):
+        shift = 4.0 * jnp.array([1.0, 1.0]) / jnp.sqrt(2.0)
+        pair = shift + s * jnp.array([1.0, -1.0]) / jnp.sqrt(2.0)
+        rv = data.rv.at[:2].set(model[:2] + pair).at[2].set(-11.0)
+        return jnp.exp(
+            loglike_rv_marginalized(
+                rv, model, data.rv_err, data.inst_ids, 2, jitters, data.is_valid
+            )
+        )
+
+    area, error = integrate.quad(
+        lambda s: float(likelihood(s)), -np.inf, np.inf, epsabs=1e-13, epsrel=1e-13
+    )
+    print(f"RV contrast integral: {area:.12f} (quadrature error {error:.1e})")
+    assert error < 1e-10
+    np.testing.assert_allclose(area, 1.0, rtol=0, atol=1e-9)
 
 
 class _SamplingSystem(eqx.Module):

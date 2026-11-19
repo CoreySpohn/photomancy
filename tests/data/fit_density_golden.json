@@ -144,34 +144,34 @@
   ],
   "values": [
    {
-    "total": -690761.959116847,
+    "total": -690761.2659696664,
     "logprior": -9.327904088536375,
-    "loglike": -690752.6312127585
+    "loglike": -690751.9380655779
    },
    {
-    "total": -2172486.999550152,
+    "total": -2172486.3064029715,
     "logprior": -9.110073995319048,
-    "loglike": -2172477.889476157
+    "loglike": -2172477.196328976
    },
    {
-    "total": -519624.95162772224,
+    "total": -519624.2584805417,
     "logprior": -8.961038686893035,
-    "loglike": -519615.9905890353
+    "loglike": -519615.2974418548
    },
    {
-    "total": -1146338.701108804,
+    "total": -1146338.0079616234,
     "logprior": -9.488911384854283,
-    "loglike": -1146329.212197419
+    "loglike": -1146328.5190502384
    },
    {
-    "total": -142609.61859184492,
+    "total": -142608.92544466435,
     "logprior": -9.487995203242182,
-    "loglike": -142600.13059664168
+    "loglike": -142599.4374494611
    },
    {
-    "total": -764306.616547236,
+    "total": -764305.9234000554,
     "logprior": -9.627737273244989,
-    "loglike": -764296.9888099628
+    "loglike": -764296.2956627822
    }
   ]
  },
@@ -275,5 +275,5 @@
    }
   ]
  },
- "provenance": "SystemLogDensity on photomancy stack-v3 5d296a2 with orbix stack-v3 (values: total, logprior, loglike at the listed chart coordinates, plain angles in [0, 2 pi)); setups rebuilt in tests/infer/test_fit.py"
+ "provenance": "SystemLogDensity on photomancy stack-v3 5d296a2 with orbix stack-v3 (values: total, logprior, loglike at the listed chart coordinates, plain angles in [0, 2 pi)); setups rebuilt in tests/infer/test_fit.py. The radial-velocity values (g2) add 0.5 sum_j log N_j = log 2, the normalization of the flat-offset marginal over its two populated instruments of two epochs each."
 }

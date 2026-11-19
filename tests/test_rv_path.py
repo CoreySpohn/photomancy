@@ -143,7 +143,12 @@ def test_single_rv_observation_integrates_to_one():
 
 @pytest.mark.parametrize("n_inst", [2, 3])
 def test_rv_offset_marginalization_matches_quadrature(n_inst):
-    """Three observations match integrating both populated instrument offsets."""
+    """Three observations match integrating both populated instrument offsets.
+
+    The flat offset integral of instrument ``j`` runs along ``(1, ..., 1)``, which is
+    ``sqrt(N_j)`` times its unit vector, so the normalized marginal is the integral
+    times ``sqrt(N_j)``: ``sqrt(2)`` here (two epochs and one).
+    """
     import numpy as np
     from scipy.integrate import quad
 
@@ -167,6 +172,7 @@ def test_rv_offset_marginalization_matches_quadrature(n_inst):
             )
 
         integral *= quad(gaussian, -np.inf, np.inf, epsabs=1e-12, epsrel=1e-12)[0]
+        integral *= np.sqrt(np.sum(selected))
     result = loglike_rv_marginalized(
         jnp.asarray(obs),
         jnp.asarray(model),

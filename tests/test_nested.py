@@ -11,7 +11,7 @@ from jaxctx import ScopedDict
 from jaxctx import transform as transform_model
 from orbix.system import EccentricityVectorChart, FrameChart
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
-from system_helpers import BOUNDS, _floor, _new_term, _scene, ecc_law
+from system_helpers import BOUNDS, _floor, _new_term, _scene, ecc_law, rv_normalization
 from term_utils import sampled_jitter_rv
 
 from photomancy.infer.backends import JaxnsBackend, build_scene_nested_model
@@ -495,6 +495,8 @@ def test_chart_nested_cube_matches_frozen_reference(name):
     ) % 0.94 + 0.02
     actual, likelihood, joint, logdet = eqx.filter_jit(jax.vmap(compare))(points)
     expected, reference = (jnp.asarray(x) for x in _FROZEN_CUBE[name])
+    # The frozen likelihood predates the normalization of the flat-offset RV marginal.
+    reference = reference + rv_normalization(rv)
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
     tolerances = np.array(
         [_floor(*row) for row in zip(reference, likelihood, joint, logdet, strict=True)]

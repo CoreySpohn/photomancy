@@ -10,7 +10,15 @@ import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, System
 from skyscapes.scene import Scene
-from system_helpers import _data, _floor, _new_term, _orbits, _scale_coordinates, _scene
+from system_helpers import (
+    _data,
+    _floor,
+    _new_term,
+    _orbits,
+    _scale_coordinates,
+    _scene,
+    rv_normalization,
+)
 from term_utils import null_dmag_term, sampled_jitter_rv
 
 from photomancy.measurements import (
@@ -180,6 +188,9 @@ def test_all_channels_and_reference_measure(data):
     )
     orbits = _orbits(mass)
     factors, total, common = (jnp.asarray(x) for x in (_FACTORS, _TOTAL, _COMMON))
+    # The frozen RV factors predate the normalization of the flat-offset marginal.
+    norm = rv_normalization(data.rv)
+    factors, total, common = factors.at[:, 0].add(norm), total + norm, common + norm
     assert np.ptp(factors[:, CHANNELS.index("null")]) > 1e-3
     physical = dict(
         mass_Mearth=mass, radius_AU=radius, albedo=albedo, jitter_m_per_s=jitter
@@ -303,7 +314,8 @@ def test_independent_pair_scores(two_planets):
         rv = RadialVelocityTerm(data.rv, jitters=jitter)
         return jnp.stack([rv(pairs), *(term(pairs) for term in others)])
 
-    scores, expected = compare(data, pairs), jnp.asarray(_PAIR_FACTORS)
+    scores = compare(data, pairs)
+    expected = jnp.asarray(_PAIR_FACTORS).at[0].add(rv_normalization(data.rv))
     for name, score, target in zip(DYNAMICAL, scores, expected, strict=True):
         _check_scores(f"independent {name}", score, target, [target])
 
