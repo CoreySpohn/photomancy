@@ -142,12 +142,66 @@ def test_sample_and_resample_mark_a_slice_with_no_support():
     good = _gaussian_cloud(1.0, n=64)
     bad = eqx.tree_at(lambda p: p.log_weights, good, jnp.full(64, jnp.nan, jnp.float64))
     stack = jax.tree.map(lambda a, b: jnp.stack([a, b]), good, bad)
-    draws = stack.sample(jax.random.key(0), (5,))[KEY]
+    key = jax.random.key(0)
+    draws = eqx.filter_vmap(lambda p: p.sample(key, (5,)))(stack)[KEY]
     assert draws.shape == (2, 5, 1)
     assert np.all(np.isfinite(draws[0])) and np.all(np.isnan(draws[1]))
-    out = stack.resample(jax.random.key(0), 8)
+    out = eqx.filter_vmap(lambda p: p.resample(key, 8))(stack)
     assert np.all(np.isfinite(out.log_weights[0]))
     assert np.all(np.isnan(out.log_weights[1]))
+
+
+def _fields(out):
+    """The draws and numbers of an operation's result (the fit is not compared)."""
+    if not isinstance(out, Posterior):
+        return out
+    return (
+        out.samples,
+        out.log_weights,
+        out.log_target,
+        out.log_evidence,
+        out.log_evidence_se,
+    )
+
+
+@pytest.mark.medium(reason="four operations compile twice each, 6 s cold")
+def test_every_operation_equals_the_per_world_loop_under_filter_vmap():
+    """``sample``, ``resample``, ``with_priors`` and ``append`` map over worlds.
+
+    Two worlds with different clouds and priors are stacked; each operation under
+    ``eqx.filter_vmap`` equals the loop over worlds, and a batched posterior called
+    directly raises.
+    Truth source: the same operation on each unstacked world.
+    Tolerance basis: exact (same arithmetic per slice; rtol 1e-12).
+    Fails if: an operation carries its own batch handling that differs from the map
+    (the stacked ``with_priors`` and ``append`` raised a broadcast error).
+    """
+    worlds = [
+        _gaussian_cloud(1.2, prior_sd=sd, n=512, seed=i)
+        for i, sd in enumerate((1.0, 1.1))
+    ]
+    stack = jax.tree.map(lambda a, b: jnp.stack([a, b]), *worlds)
+    key = jax.random.key(3)
+    role = {KEY: Normal(0.0, 1.3)}
+    extra = _Gauss(jnp.asarray(0.4))
+    operations = {
+        "sample": lambda p: p.sample(key, (7,)),
+        "resample": lambda p: p.resample(key, 100),
+        "with_priors": lambda p: p.with_priors(role, min_n_eff=1.0, max_khat=jnp.inf),
+        "append": lambda p: p.append(extra, min_n_eff=1.0, max_khat=jnp.inf),
+    }
+    for name, op in operations.items():
+        mapped = eqx.filter_vmap(op)(stack)
+        for i, world in enumerate(worlds):
+            alone = op(world)
+            for got, want in zip(
+                jax.tree.leaves(_fields(mapped)),
+                jax.tree.leaves(_fields(alone)),
+                strict=True,
+            ):
+                np.testing.assert_allclose(got[i], want, rtol=1e-12, err_msg=name)
+        with pytest.raises(ValueError, match="filter_vmap"):
+            op(stack)
 
 
 # ----- prior swap ----------------------------------------------------------------
@@ -176,6 +230,23 @@ def test_prior_swap_agrees_with_direct_sampling_and_the_exact_evidence(cloud):
     assert abs(m1 - m2) < 1e-2 and abs(s1 - s2) < 1e-2
     assert swapped.fit.free[KEY].low == 1.0
     assert cloud.fit.free[KEY].low == 0.0
+
+
+def test_an_identity_swap_leaves_the_evidence_and_its_error_unchanged(cloud):
+    """A prior swapped for itself changes neither ``log_evidence`` nor its error.
+
+    Truth source: the increment of an identity swap is exactly zero with zero error,
+    so both outputs equal the input.
+    Tolerance basis: exact (rtol 1e-12).
+    Fails if: the error of the combined weights is added to the old error (the old
+    error is then counted twice and grows by a factor of sqrt 2).
+    """
+    assert float(cloud.log_evidence_se) > 0.0
+    same = cloud.with_priors(
+        {KEY: cloud.fit.free[KEY]}, min_n_eff=1.0, max_khat=jnp.inf
+    )
+    np.testing.assert_allclose(same.log_evidence, cloud.log_evidence, rtol=1e-12)
+    np.testing.assert_allclose(same.log_evidence_se, cloud.log_evidence_se, rtol=1e-12)
 
 
 def test_a_swap_to_a_narrow_prior_is_refused_by_the_size_gate(cloud):

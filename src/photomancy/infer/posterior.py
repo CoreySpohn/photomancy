@@ -8,9 +8,9 @@ layout whichever method ran.
 
 Operations. ``sample`` and ``resample`` draw from the cloud, ``with_priors`` and
 ``append`` reweight it to a changed ``Fit`` without evaluating the old terms,
-``model`` and ``forecast`` read the stored draws through the fit. Each acts on the
-last axis of ``log_weights`` and works under ``jax.vmap`` over a batch prefix; a
-refusal is a NaN slice, never a raise on a traced value.
+``model`` and ``forecast`` read the stored draws through the fit. Each acts on one
+slice (one world) and raises on a batched posterior; map worlds with
+``eqx.filter_vmap``. A refusal is a NaN slice, never a raise on a traced value.
 
 Stored block coordinates are not reduced to a cell: the angle coordinates of an orbit
 chart (``W_rad``, ``w_rad``, ``M0_rad``) are plain reals whose density repeats every
@@ -21,8 +21,9 @@ unless the proposal sits well inside one cell; ``SMC`` evidence is not affected.
 
 Layout. The draw axis is flat and in stored order (chains are concatenated, never an
 axis). Leading axes are batch axes: a stack of worlds is the same type with a longer
-prefix, produced by mapping ``run`` over a stacked fit with ``eqx.filter_vmap``. Shape
-checks read only the trailing axes of ``log_weights`` and the batch prefix they define.
+prefix, produced by mapping ``run`` over a stacked fit with ``eqx.filter_vmap``, and
+every operation is mapped over it the same way. Shape checks read only the trailing
+axes of ``log_weights`` and the batch prefix they define.
 """
 
 import math
@@ -32,10 +33,14 @@ import jax
 import jax.numpy as jnp
 from priorities import Mixture, MultivariateNormal
 
-from photomancy.infer.diagnostics import kish_ess, pareto_khat
+from photomancy.infer.diagnostics import kish_ess, mc_se, pareto_khat, weighted_mean
 from photomancy.infer.evidence import importance_evidence
 from photomancy.infer.fit import Fit
-from photomancy.infer.particles import systematic_indices
+from photomancy.infer.particles import (
+    categorical_indices,
+    systematic_indices,
+    take_draws,
+)
 
 __all__ = ["Forecast", "Posterior", "cluster_to_mixture", "ravel_samples"]
 
@@ -66,30 +71,13 @@ class Forecast(eqx.Module):
         return jax.tree.map(jnp.add, self.noise_variance, self.spread_variance)
 
 
-def _map_slices(fn, ndim, *args):
-    """Map ``fn`` over ``ndim`` leading batch axes of every argument."""
-    for _ in range(ndim):
-        fn = jax.vmap(fn)
-    return fn(*args)
-
-
-def _draw_gather(samples, idx, batch_ndim):
-    """Take draws ``idx`` ``(*batch, S)`` along the draw axis of every leaf."""
-
-    def take(leaf):
-        trailing = jnp.ndim(leaf) - batch_ndim - 1
-        index = jnp.reshape(idx, (*jnp.shape(idx), *(1,) * trailing))
-        return jnp.take_along_axis(leaf, index, axis=batch_ndim)
-
-    return jax.tree.map(take, samples)
-
-
 def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
     """Reweight one slice by ``log_ratio`` and gate on the combined weights.
 
     Returns the new normalized log weights (all NaN on refusal), the log evidence
-    increment (NaN on refusal) and the standard error of the new evidence estimate
-    from :func:`~photomancy.infer.evidence.importance_evidence`.
+    increment and the standard error of that increment (both NaN on refusal). The
+    increment is the self-normalized mean of the ratio under the old weights, so its
+    error is the delta-method error of that mean; it is zero for a ratio of one.
     """
     lw = jnp.asarray(log_weights, jnp.float64)
     ratio = jnp.asarray(log_ratio, jnp.float64)
@@ -97,11 +85,14 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
     bad = jnp.any(jnp.isnan(lw)) | jnp.any(jnp.isnan(ratio))
     bad = bad | jnp.any(jnp.isposinf(ratio) & live)
     combined = jnp.where(live, lw + ratio, -jnp.inf)
-    log_z_new, se_new = importance_evidence(combined)
+    log_z_new, _ = importance_evidence(combined)
     log_z_old, _ = importance_evidence(lw)
     log_total = log_z_new + jnp.log(lw.shape[-1])
     no_support = ~jnp.isfinite(log_total)
     new = jnp.where(bad | no_support, -jnp.inf, combined - log_total)
+    top = jnp.max(jnp.where(live, ratio, -jnp.inf))
+    scaled = jnp.exp(ratio - jnp.where(jnp.isfinite(top), top, 0.0))
+    increment_se = mc_se(lw, scaled) / weighted_mean(lw, scaled)
     n_eff = kish_ess(new)
     khat = pareto_khat(new)
     khat_fails = jnp.isfinite(max_khat) & ~(khat <= max_khat)
@@ -110,7 +101,7 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
     return (
         jnp.where(refuse, nan, new),
         jnp.where(refuse, nan, log_z_new - log_z_old),
-        jnp.where(refuse, nan, se_new),
+        jnp.where(refuse, nan, increment_se),
     )
 
 
@@ -209,39 +200,22 @@ class Posterior(eqx.Module):
         the draw count): duplicates occur, and for a
         correlated cloud (MCMC chains) the draws bootstrap the chain. Use
         :meth:`resample` to build a new fixed-size cloud. A slice with no support
-        returns NaN draws. Correct under ``jax.vmap`` over keys.
+        returns NaN draws. Takes one slice; map worlds with ``eqx.filter_vmap``.
 
         Args:
             key: PRNG key.
             sample_shape: Static shape of the draws.
 
         Returns:
-            Entry dict, leaves ``(*batch, *sample_shape, *leaf_shape)``.
+            Entry dict, leaves ``(*sample_shape, *leaf_shape)``.
         """
+        self._require_slice("sample")
         sample_shape = tuple(sample_shape)
-        batch = jnp.shape(self.log_weights)[:-1]
-        n_batch = len(batch)
         lw = jnp.asarray(self.log_weights)
-        none = jnp.any(jnp.isnan(lw), axis=-1)
-        safe = jnp.where(none[..., None], -math.log(lw.shape[-1]), lw)
-        count = math.prod(sample_shape)
-        u = jax.random.uniform(key, (*batch, count), jnp.float64)
-
-        def invert(log_w, uniform):
-            cdf = jnp.cumsum(jnp.exp(log_w))
-            hit = jnp.searchsorted(cdf / cdf[-1], uniform, side="right")
-            return jnp.clip(hit, 0, log_w.shape[0] - 1)
-
-        idx = _map_slices(invert, n_batch, safe, u)
-        out = _draw_gather(self.samples, idx, n_batch)
-
-        def shape_leaf(leaf):
-            tail = jnp.shape(leaf)[n_batch + 1 :]
-            leaf = jnp.reshape(leaf, (*batch, *sample_shape, *tail))
-            mask = jnp.reshape(none, (*batch, *(1,) * (jnp.ndim(leaf) - n_batch)))
-            return jnp.where(mask, jnp.nan, leaf)
-
-        return jax.tree.map(shape_leaf, out)
+        none = jnp.any(jnp.isnan(lw))
+        idx = categorical_indices(lw, key, sample_shape)
+        out = take_draws(self.samples, idx)
+        return jax.tree.map(lambda leaf: jnp.where(none, jnp.nan, leaf), out)
 
     def resample(self, key, n=None):
         """Return a cloud of ``n`` systematically resampled draws with uniform weights.
@@ -255,22 +229,17 @@ class Posterior(eqx.Module):
             key: PRNG key.
             n: Static number of draws, default the stored count.
         """
-        batch = jnp.shape(self.log_weights)[:-1]
-        size = jnp.shape(self.log_weights)[-1] if n is None else int(n)
+        self._require_slice("resample")
         lw = jnp.asarray(self.log_weights)
-        none = jnp.any(jnp.isnan(lw), axis=-1)
-        safe = jnp.where(none[..., None], -math.log(lw.shape[-1]), lw)
-        keys = (
-            key if not batch else jax.random.split(key, math.prod(batch)).reshape(batch)
-        )
-        idx = _map_slices(
-            lambda k, w: systematic_indices(k, w, size), len(batch), keys, safe
-        )
-        weights = jnp.where(none[..., None], jnp.nan, -math.log(size))
+        size = lw.shape[-1] if n is None else int(n)
+        none = jnp.any(jnp.isnan(lw))
+        safe = jnp.where(none, -math.log(lw.shape[-1]), lw)
+        idx = systematic_indices(key, safe, size)
+        weights = jnp.full(size, jnp.where(none, jnp.nan, -math.log(size)))
         return Posterior(
-            samples=_draw_gather(self.samples, idx, len(batch)),
-            log_weights=jnp.broadcast_to(weights, (*batch, size)).astype(jnp.float64),
-            log_target=jnp.take_along_axis(self.log_target, idx, axis=-1),
+            samples=take_draws(self.samples, idx),
+            log_weights=weights.astype(jnp.float64),
+            log_target=jnp.take(self.log_target, idx, axis=0),
             log_evidence=self.log_evidence,
             log_evidence_se=self.log_evidence_se,
             fit=self.fit,
@@ -297,15 +266,11 @@ class Posterior(eqx.Module):
         quadrature = self.kind == "quadrature"
         lo = 0.0 if quadrature else min_n_eff
         hi = jnp.inf if quadrature else max_khat
-        ndim = self._batch_ndim()
-        new_lw, increment, increment_se = _map_slices(
-            lambda w, r: _reweight_slice(w, r, lo, hi),
-            ndim,
-            self.log_weights,
-            log_ratio,
+        new_lw, increment, increment_se = _reweight_slice(
+            self.log_weights, log_ratio, lo, hi
         )
         if quadrature:
-            refused = jnp.any(jnp.isnan(new_lw), axis=-1)
+            refused = jnp.any(jnp.isnan(new_lw))
             increment_se = jnp.where(refused, jnp.nan, 0.0)
         return Posterior(
             samples=self.samples,
@@ -324,10 +289,10 @@ class Posterior(eqx.Module):
         The new ``Fit`` comes from ``fit.with_priors(priors)`` (which refuses a
         changed free set and a block with another map). Weights become
         ``log_weights + log pi_new - log pi_old`` and ``log_target`` follows; the
-        evidence gains ``log sum w pi_new / pi_old`` and its standard error is
-        recomputed: :func:`~photomancy.infer.evidence.importance_evidence` of the
-        combined weights, with the old error added in quadrature (an upper bound).
-        Exact in expectation only for normalized priors.
+        evidence gains ``log sum w pi_new / pi_old``. Its standard error is the old
+        error and the delta-method error of that self-normalized mean under the old
+        weights, added in quadrature, so an identity swap leaves both unchanged. Exact
+        in expectation only for normalized priors.
 
         The gate runs on the combined reweighted weights (``log_weights`` plus the
         log ratio), never the ratio alone, so it also re-gates the input cloud's own
@@ -358,6 +323,7 @@ class Posterior(eqx.Module):
             ValueError: On the host, for a static fault in ``priors`` or gate
                 arguments that do not match ``kind``.
         """
+        self._require_slice("with_priors")
         new_fit = self.fit.with_priors(priors)
         old = self.fit.log_prior(self.samples)
         new = new_fit.log_prior(self.samples)
@@ -369,8 +335,8 @@ class Posterior(eqx.Module):
 
         The new ``Fit`` comes from ``fit.append(term)``. The term is evaluated at the
         model of every stored draw, weights gain ``+ term``, ``log_target`` follows and
-        the evidence gains ``log sum w exp(term)``, with the standard error recomputed
-        as in :meth:`with_priors`. The gate is the same, on the combined weights.
+        the evidence gains ``log sum w exp(term)``, with the standard error updated as
+        in :meth:`with_priors`. The gate is the same, on the combined weights.
 
         The result is consistent with bias of order ``1 / N_eff``, not exact, and it
         holds only when (a) the new datum is conditionally independent of the old given
@@ -387,6 +353,7 @@ class Posterior(eqx.Module):
             ValueError: On the host, for a term whose reads meet a free path or gate
                 arguments that do not match ``kind``.
         """
+        self._require_slice("append")
         new_fit = self.fit.append(term)
         only = Fit(self.fit.model, self.fit.free, (term,))
         ratio = jnp.asarray(only.log_likelihood(self.samples), jnp.float64)

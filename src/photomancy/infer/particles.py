@@ -1,9 +1,11 @@
 """Systematic resampling for JAX particle clouds."""
 
+import math
+
 import jax
 import jax.numpy as jnp
 
-__all__ = ["systematic_indices"]
+__all__ = ["categorical_indices", "systematic_indices", "take_draws"]
 
 
 def systematic_indices(key, log_weights, n):
@@ -18,3 +20,24 @@ def systematic_indices(key, log_weights, n):
     # Rounding to one would let a trailing zero-weight bin receive a draw.
     grid = jnp.minimum(grid, jnp.nextafter(jnp.asarray(1.0, grid.dtype), 0.0))
     return jnp.clip(jnp.searchsorted(cdf, grid, side="right"), 0, cdf.shape[0] - 1)
+
+
+def categorical_indices(log_weights, key, shape=()):
+    """Draw indices of one slice with replacement, inverse CDF on the weights.
+
+    ``log_weights`` is ``(N,)`` and normalized; memory is linear in ``N``. A slice
+    with a NaN weight is drawn uniformly (the caller marks it). Returns ``shape``.
+    """
+    lw = jnp.asarray(log_weights)
+    n = lw.shape[-1]
+    safe = jnp.where(jnp.any(jnp.isnan(lw)), -math.log(n), lw)
+    shape = tuple(shape)
+    u = jax.random.uniform(key, (math.prod(shape),), jnp.float64)
+    cdf = jnp.cumsum(jnp.exp(safe))
+    hit = jnp.searchsorted(cdf / cdf[-1], u, side="right")
+    return jnp.reshape(jnp.clip(hit, 0, n - 1), shape)
+
+
+def take_draws(samples, idx):
+    """Take the draws ``idx`` along the leading (draw) axis of every leaf."""
+    return jax.tree.map(lambda leaf: jnp.take(leaf, idx, axis=0), samples)
