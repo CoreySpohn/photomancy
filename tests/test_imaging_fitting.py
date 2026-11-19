@@ -156,7 +156,7 @@ def test_joint_astrom_imaging_fit_recovers_period():
 
     from orbix.system import ClassicalChart
     from priorities import LogUniform
-    from test_system_priors import BOUNDS, _scene
+    from system_helpers import BOUNDS, _scene
 
     from photomancy import DMagTerm, RelativeAstrometryTerm
     from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity

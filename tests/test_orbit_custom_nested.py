@@ -10,8 +10,8 @@ from hwoutils.constants import Msun2kg
 from jaxctx import ScopedDict
 from orbix.system import EccentricityVectorChart
 from priorities import LogUniform, Uniform
+from system_helpers import BOUNDS, _scene
 from test_nested import _scene_orbit
-from test_system_priors import BOUNDS, _scene
 
 from photomancy import ScalarCoordinate
 from photomancy.infer.backends import NUTSBackend

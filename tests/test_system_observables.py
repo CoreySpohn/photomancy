@@ -10,10 +10,8 @@ import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, System
 from skyscapes.scene import Scene
+from system_helpers import _data, _floor, _new_term, _orbits, _scale_coordinates, _scene
 from term_utils import null_dmag_term
-from test_system_density import _floor
-from test_system_priors import _orbits, _scale_coordinates, _scene
-from test_terms import _data, _new_term
 
 from photomancy.measurements import (
     DMagTerm,

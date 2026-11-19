@@ -9,12 +9,9 @@ import tensorflow_probability.substrates.jax as tfp
 from hwoutils.constants import Msun2kg
 from jaxctx import ScopedDict
 from jaxctx import transform as transform_model
-from orbit_fit import ecc_law
 from orbix.system import EccentricityVectorChart, FrameChart
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
-from test_system_density import _floor
-from test_system_priors import BOUNDS, _scene
-from test_terms import _new_term
+from system_helpers import BOUNDS, _floor, _new_term, _scene, ecc_law
 
 from photomancy import RadialVelocityTerm, ScalarCoordinate
 from photomancy.infer.backends import JaxnsBackend, build_scene_nested_model

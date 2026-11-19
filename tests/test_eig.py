@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
 from kinematics import predict_relative_astrometry
-from orbit_fit import chart_problem, classical_coordinates, ecc_law, scale_problem
+from orbit_fit import chart_problem, scale_problem
 from orbix.equations import period_a, period_to_sma
+from system_helpers import classical_coordinates, ecc_law
 
 from photomancy import RelativeAstrometryTerm
 from photomancy.infer.legacy_posterior import MixturePosterior
@@ -140,8 +141,7 @@ def test_orbit_eig_uses_current_contrast_curve_on_repeat_call(imaging_problem):
 def test_chart_eig_and_mode_predictions():
     """Fails if candidate scoring drops a photometric scale or swaps mode/epoch axes."""
     from orbix.system import EccentricityVectorChart
-    from test_system_priors import _orbits, _scene
-    from test_terms import _data
+    from system_helpers import _data, _orbits, _scene
 
     from photomancy import RelativeAstrometryTerm, ScalarCoordinate
     from photomancy.orbit.diagnostics import (

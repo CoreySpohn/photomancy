@@ -10,12 +10,7 @@ jax.config.update("jax_enable_x64", True)
 from hwoutils.constants import G  # noqa: E402
 from hwoutils.epoch import Epoch  # noqa: E402
 from kinematics import predict_relative_astrometry  # noqa: E402
-from orbit_fit import (  # noqa: E402
-    _first_orbit,
-    chart_problem,
-    classical_coordinates,
-    ecc_law,
-)
+from orbit_fit import _first_orbit, chart_problem  # noqa: E402
 from orbix.equations import period_a, period_to_sma  # noqa: E402
 from orbix.system import (  # noqa: E402
     Body,
@@ -24,6 +19,7 @@ from orbix.system import (  # noqa: E402
     SkyFrame,
     System,
 )
+from system_helpers import classical_coordinates, ecc_law  # noqa: E402
 
 from photomancy.infer.legacy_posterior import MixturePosterior  # noqa: E402
 from photomancy.measurements import RelativeAstromData  # noqa: E402

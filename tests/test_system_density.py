@@ -13,13 +13,13 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg
 from hwoutils.epoch import Epoch
-from orbit_fit import ecc_law
 from orbix.equations import period_to_sma
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, SkyFrame, System
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
+from system_helpers import _floor, ecc_law
 from term_utils import both
 
 from photomancy import RelativeAstrometryTerm, SystemLogDensity
@@ -126,13 +126,6 @@ _FROZEN = {
         ],
     ),
 }
-
-
-def _floor(*terms):
-    """Float64 accumulation floor specified for comparisons of log densities."""
-    return max(
-        1e-10, 64 * np.finfo(float).eps * sum(np.sum(1 + np.abs(t)) for t in terms)
-    )
 
 
 def _prior(system):

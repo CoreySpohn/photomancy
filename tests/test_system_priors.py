@@ -11,23 +11,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import G, Mearth2kg, Msun2kg, Rearth2AU, two_pi
+from hwoutils.constants import Msun2kg, two_pi
 from hwoutils.epoch import Epoch
-from orbit_fit import ecc_law
-from orbix.equations import period_to_sma
 from orbix.system import (
-    Body,
     CartesianChart,
     ClassicalChart,
     EccentricityVectorChart,
     FrameChart,
-    SkyFrame,
-    System,
 )
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
 from scipy import integrate, stats
-from skyscapes.physical_model import LambertianPhysicalModel
-from skyscapes.scene import FlatStar, Planet, Scene
+from skyscapes.scene import FlatStar, Scene
+from system_helpers import BOUNDS, _orbits, _scale_coordinates, _scene, ecc_law
 
 from photomancy import RadialVelocityTerm, SystemLogDensity
 from photomancy.measurements import RVData
@@ -44,34 +39,12 @@ from photomancy.priors import (
 from photomancy.system_density import ScalarCoordinate
 
 ATOL = 1e-10
-BOUNDS = {
-    "mass_Mearth": (0.01, 1e4),
-    "radius_AU": (1e-5, 10**-2.5),
-    "albedo": (0.01, 1.0),
-}
 
 
 def _check(label, actual, expected):
     error = np.max(np.abs(np.asarray(actual) - np.asarray(expected)))
     print(f"{label}: max_error={error:.4g} atol={ATOL:g}")
     np.testing.assert_allclose(actual, expected, rtol=0, atol=ATOL)
-
-
-def _orbits(mass_Mearth=0.0):
-    mass_kg = Msun2kg + Mearth2kg * mass_Mearth
-    period_d = jnp.array([75.0, 320.0, 1130.0, 3800.0])
-    x = jnp.stack(
-        [
-            jnp.log(period_to_sma(period_d, mass_kg)),
-            jnp.array([-3.1, -1.6, -0.2, 1.4]),
-            jnp.array([1.0, 0.2, -0.4, -1.2]),
-            jnp.array([0.2, 1.7, 3.4, 5.6]),
-            jnp.array([0.6, 2.1, 3.1, 4.4]),
-            jnp.array([0.7, 1.6, 4.2, 5.7]),
-        ],
-        axis=-1,
-    )
-    return ClassicalChart().to_orbit(x, mu_AU3_per_d2=G * mass_kg)
 
 
 # Frozen eccentricity-site log densities of the retired NumPyro laws at _orbits().e.
@@ -294,34 +267,6 @@ def test_frame_gauge_integral():
             epsrel=1e-12,
         )
         _check(f"Frame gauge sd={sd}", area / (8 * np.pi**2), 1.0)
-
-
-def _scene(orbit, *, mass_Mearth, radius_AU, albedo):
-    dynamics = System(
-        Body(1.0),
-        Body(jnp.atleast_1d(mass_Mearth * Mearth2kg / Msun2kg)),
-        jax.tree.map(lambda x: x[None], orbit),
-        SkyFrame(10.0, Epoch()),
-    )
-    return Scene(
-        FlatStar(1.0),
-        (
-            Planet(
-                Rp_Rearth=jnp.atleast_1d(radius_AU / Rearth2AU),
-                physical_model=LambertianPhysicalModel(Ag=jnp.atleast_1d(albedo)),
-            ),
-        ),
-        dynamics,
-    )
-
-
-def _scale_coordinates(jitter_scale):
-    """Physical measures for the three body scales and instrument jitters."""
-    scalars = {
-        name: ScalarCoordinate(LogUniform(*bounds)) for name, bounds in BOUNDS.items()
-    }
-    scalars["jitter_m_per_s"] = ScalarCoordinate(HalfNormal(jitter_scale))
-    return scalars
 
 
 @pytest.mark.medium

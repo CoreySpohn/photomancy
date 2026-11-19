@@ -6,7 +6,8 @@ import numpy as np
 import pytest
 from hwoutils.constants import Msun2kg
 from kinematics import predict_photometry, predict_relative_astrometry
-from orbit_fit import classical_coordinates, scale_problem
+from orbit_fit import scale_problem
+from system_helpers import classical_coordinates
 from term_utils import null_dmag_term
 
 from photomancy.measurements import (

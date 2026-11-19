@@ -13,9 +13,9 @@ import pytest
 from hwoutils.constants import G
 from hwoutils.epoch import Epoch
 from kinematics import predict_relative_astrometry
-from orbit_fit import ecc_law
 from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_anomaly_tp, mean_motion
+from system_helpers import ecc_law
 
 from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.measurements import RelativeAstromData

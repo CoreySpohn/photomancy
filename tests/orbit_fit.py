@@ -5,8 +5,8 @@ import jax.numpy as jnp
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from orbix.system import Body, ClassicalChart, SkyFrame, System
-from priorities import LogUniform, Uniform
-from skyscapes.population import kipping_eccentricity, rayleigh_eccentricity
+from priorities import LogUniform
+from system_helpers import ecc_law
 
 from photomancy import RelativeAstrometryTerm
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
@@ -16,37 +16,8 @@ from photomancy.priors import FactorizedOrbitPrior, orbit_log_prior
 from photomancy.system_density import ScalarCoordinate
 
 
-def ecc_law(name):
-    """The named eccentricity distribution, built on demand so it follows x64."""
-    return {
-        "disk": lambda: Uniform(0.0, 1.0),
-        "kipping13": kipping_eccentricity,
-        "rayleigh": lambda: rayleigh_eccentricity(0.3, 1.0),
-        "vaneylen19": lambda: rayleigh_eccentricity(0.049, 1.0),
-    }[name]()
-
-
 def _first_orbit(system):
     return jax.tree.map(lambda leaf: leaf[0], system.orbits)
-
-
-def classical_coordinates(a, e, cos_i, W, w, tp, period_d):
-    """``ClassicalChart`` coordinates at day zero of classical elements.
-
-    ``a`` in AU, angles in radians, periapsis time ``tp`` and ``period_d`` in days:
-    ``(ln a, logit e, atanh cos i, W, w, M0)`` with ``M0 = n (0 - tp)``.
-    """
-    mean_anomaly = (2 * jnp.pi / period_d) * (0.0 - tp)
-    return jnp.stack(
-        [
-            jnp.log(a),
-            jnp.log(e) - jnp.log1p(-e),
-            jnp.arctanh(cos_i),
-            jnp.asarray(W) + 0.0,
-            jnp.asarray(w) + 0.0,
-            mean_anomaly % (2 * jnp.pi),
-        ]
-    )
 
 
 def chart_problem(

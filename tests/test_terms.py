@@ -21,6 +21,7 @@ from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
+from system_helpers import _TIMES, _data, _new_term
 from term_utils import both
 
 from photomancy import (
@@ -28,7 +29,6 @@ from photomancy import (
     ProperMotionAnomalyTerm,
     RadialVelocityTerm,
     RelativeAstrometryTerm,
-    StellarAstrometryTerm,
 )
 from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
 from photomancy.infer import (
@@ -38,10 +38,7 @@ from photomancy.infer import (
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.measurements import (
     PhotometryData,
-    PMAnomalyData,
     RelativeAstromData,
-    RVData,
-    StellarAstromData,
     loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
@@ -52,7 +49,6 @@ from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
 
 # a [AU], e, node [rad], inclination [rad], periapsis [rad], M0 [rad], t0 [day].
 _ELEMENTS = np.array([1.7, 0.31, 1.1, 0.8, 0.6, 0.4, 24.0])
-_TIMES = np.array([31.0, 120.0, 290.0, 470.0])
 
 
 class _Holder(eqx.Module):
@@ -87,18 +83,6 @@ def _system(elements=_ELEMENTS, mass=_MASS, *, epoch=_EPOCH):
         epoch_d=epoch_d,
         epoch=epoch,
         order=(0,),
-    )
-
-
-def _data(max_n=None):
-    """Nonzero residuals and unequal correlated errors exercise every element."""
-    return RelativeAstromData.from_sep_pa(
-        times=_TIMES,
-        sep=[0.13, 0.11, 0.09, 0.15],
-        sep_err=[0.004] * 4,
-        pa_deg=[45.0, 120.0, 210.0, 310.0],
-        pa_err_deg=[1.0] * 4,
-        max_n=max_n,
     )
 
 
@@ -446,57 +430,6 @@ def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
     expected = loglike_pm_anomaly(expected_prediction, data)
     np.testing.assert_allclose(prediction, expected_prediction, rtol=1e-12, atol=0)
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
-
-
-def _new_term(kind, max_n=4):
-    """Small observations with residuals and nontrivial covariance/instruments."""
-    if kind == "stellar":
-        return StellarAstrometryTerm(
-            StellarAstromData.pad(
-                times=_TIMES,
-                ra=[1e-4, -2e-4, 3e-4, 2e-4],
-                dec=[-1e-4, 1e-4, 2e-4, -2e-4],
-                ra_err=[5e-5] * 4,
-                dec_err=[8e-5] * 4,
-                corr=[0.2, -0.3, 0.1, 0.0],
-                max_n=max_n,
-            )
-        )
-    if kind == "rv":
-        return RadialVelocityTerm(
-            RVData.pad(
-                times=_TIMES,
-                rv=[2.0, -4.0, 8.0, 1.0],
-                rv_err=[1.5] * 4,
-                inst_ids=[0, 1, 0, 1],
-                n_inst=3,
-                max_n=max_n,
-            ),
-            jitters=jnp.array([0.5, 0.8, 1.0]),
-        )
-    if kind == "pma":
-        return ProperMotionAnomalyTerm(
-            PMAnomalyData(
-                t_hip=jnp.array(0.0),
-                t_gaia=jnp.array(9000.0),
-                gaia_window=jnp.array(1023.0),
-                pm_anomaly=jnp.array([2e-7, -3e-7]),
-                pm_anomaly_cov=jnp.array([[4e-14, 1e-14], [1e-14, 9e-14]]),
-                is_valid=jnp.array(True),
-            )
-        )
-    return PhotometryTerm(
-        PhotometryData.from_dmag(
-            times=_TIMES,
-            dmag=[25.0, 25.2, 24.5, 26.0],
-            dmag_err=[0.2] * 4,
-            band_id=[0] * 4,
-            is_upper_limit=[False, True, False, True],
-            max_n=max_n,
-        ),
-        Quadrature.build((Band(550.0, 650.0),)),
-        (Transmission.from_band(Band(550.0, 650.0)),),
-    )
 
 
 @eqx.filter_jit
