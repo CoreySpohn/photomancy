@@ -3,7 +3,7 @@
 Unlike the MAP / MCMC backends, nested sampling needs a proper, sampleable PRIOR (it
 integrates over the prior to get the evidence). So this backend consumes a jaxns
 ``Model`` (a prior model that realizes its priors and returns the log-likelihood), not
-a flat ``logdensity`` -- the same divergence ``SMCBackend`` has. Build the model for a
+a flat ``logdensity``. Build the model for a
 scene fit with ``build_scene_nested_model``. The headline output is the evidence
 (``log Z``), which turns a posterior into model comparison / detection (a Bayes factor
 between two scenes).
@@ -53,7 +53,7 @@ def jaxns_prior(prior, *, name):
     if not prior.has_icdf:
         raise ValueError(
             "Nested sampling needs a prior with an inverse CDF; a mixture has "
-            "none. Use a gradient or sample backend (Laplace, NUTS, SMC) instead."
+            "none. Use a gradient or sample backend (Laplace, NUTS) instead."
         )
     JaxctxPrior = import_extra("jaxctx.priors", "jaxns").AbstractPrior
 
@@ -141,7 +141,7 @@ class JaxnsBackend(LegacyBackend):
             for ``D`` parameters. Cost scales with the parameter count, so jaxns suits
             low-dimensional model comparison.
 
-    Note: like NUTS / SMC, jaxns jits the model internally, so a Module forward with a
+    Note: like NUTS, jaxns jits the model internally, so a Module forward with a
     large array (e.g. a coronagraph PSF datacube) would bake it as a constant. Threading
     big-array forwards is the same ``filter_jit`` / partition TODO as the BlackJAX
     backends.

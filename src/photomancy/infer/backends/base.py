@@ -11,7 +11,7 @@ def import_extra(module, extra):
     """Import a sampler library that photomancy installs only as an extra.
 
     Args:
-        module: Dotted module name, for example ``"blackjax.smc.resampling"``.
+        module: Dotted module name, for example ``"blackjax.util"``.
         extra: The photomancy extra that provides it (``"blackjax"`` or ``"jaxns"``).
 
     Returns:
@@ -105,7 +105,7 @@ class LegacyBackend(eqx.Module):
     Module, its array leaves (e.g. a forward's PSF datacube) thread as traced inputs
     as long as the backend's compiled region receives the logdensity as a
     ``filter_jit`` argument. Every backend does this -- ``LaplaceBackend`` via the
-    ``filter_jit``'d ``laplace_fit``, and the BlackJAX samplers (NUTS, SMC) by
+    ``filter_jit``'d ``laplace_fit``, and the BlackJAX samplers (NUTS) by
     ``filter_jit``-wrapping ``run`` -- so a large coronagraph/IFS forward stays an
     input buffer instead of being baked into the kernel as a constant. A new backend
     should do the same.

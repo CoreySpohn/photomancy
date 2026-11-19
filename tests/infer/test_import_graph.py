@@ -98,6 +98,10 @@ def test_scan_catches_function_level_and_relative_imports(tmp_path, monkeypatch)
 
 # Names removed from the package with no replacement under the same name.
 DELETED = (
+    "SMC",
+    "SMCInfo",
+    "SMCBackend",
+    "photomancy.infer.backends.smc",
     "OrbitUpdater",
     "UpdaterBelief",
     "UpdaterRecord",

@@ -30,7 +30,6 @@ from photomancy.infer import (
     MAP,
     MCLMC,
     NUTS,
-    SMC,
     AbstractTerm,
     AdaptiveImportance,
     Fit,
@@ -244,22 +243,6 @@ def test_mclmc_recovers_the_mean():
     assert abs(ag.mean() - 0.55) < 0.05
 
 
-def test_smc_recovers_the_evidence():
-    """Tempered SMC gives the evidence within its run-to-run scatter."""
-    fit = _leaf_fit()
-    runs = [
-        run(fit, SMC(n_particles=2000, n_mcmc_steps=5), jax.random.key(k))
-        for k in range(4)
-    ]
-    for post in runs:
-        _check_contract(post, fit, 2000)
-        assert bool(post.info.reached)
-    z = np.array([float(p.log_evidence) for p in runs])
-    sd = max(z.std(ddof=1), 0.01)
-    assert abs(z.mean() - _exact_log_z()) < 4 * sd / 2.0 + 0.02
-    assert abs(_moments(runs[0])[0] - 1.5) < 0.05
-
-
 def test_pathfinder_importance_weights_target_the_fit():
     """Pathfinder's mixture proposal is corrected to the fit's density."""
     fit = _leaf_fit()
@@ -339,7 +322,6 @@ def _stack(fits):
 
 _WORLD_BACKENDS = {
     "nuts": NUTS(n_warmup=60, n_draws=40, n_chains=2),
-    "smc": SMC(n_particles=200, n_mcmc_steps=3),
     "pathfinder": Pathfinder(n_draws=200),
     "laplace": Laplace(n_draws=200),
     "importance": Importance(PriorProposal(), n_draws=200),
@@ -412,23 +394,6 @@ def test_a_nan_term_refuses_the_slice_instead_of_zero_weight():
 
 def _prior_only_orbit_fit():
     return Fit(_scene(), {"dynamics.orbits": _block()}, ())
-
-
-@pytest.mark.medium
-def test_smc_prior_only_evidence_on_an_orbit_block_is_zero():
-    """A normalized prior with no terms has evidence exactly 1.
-
-    Truth source: the block's prior is a normalized density, so ``log Z = 0``.
-    Tolerance basis: the reviewer measured 0.0000 (rounded to 4 places) with 1000
-    particles; the bound 0.1 is about 20 times the SMC scatter of this smooth problem.
-    Fails if: the block's volume is not normalized or SMC mishandles the angles.
-    """
-    post = run(
-        _prior_only_orbit_fit(),
-        SMC(n_particles=1000, n_mcmc_steps=3),
-        jax.random.key(0),
-    )
-    assert abs(float(post.log_evidence)) < 0.1
 
 
 @pytest.mark.medium(reason="eight 4000-draw runs of one compiled Laplace, 25 s cold")
@@ -625,7 +590,7 @@ def _unravel_leaf(fit):
 
 @pytest.mark.parametrize(
     "backend",
-    [NUTS(n_warmup=30, n_draws=20, n_chains=2), SMC(n_particles=100, n_mcmc_steps=2)],
+    [NUTS(n_warmup=30, n_draws=20, n_chains=2)],
 )
 def test_stored_angles_lie_in_one_cell(backend):
     """Sampled orbit angles are stored reduced to ``[0, 2 pi)`` for every sampler.

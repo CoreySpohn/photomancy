@@ -5,7 +5,7 @@ size, and a diagonal mass matrix, then the chain runs through
 ``run_inference_algorithm`` (a single ``lax.scan``, O(1) compile regardless of chain
 length). MCLMC is a gradient-based sampler that is often cheaper per effective sample
 than NUTS in high dimension. Like NUTS, the draws are equally weighted and carry no
-evidence estimate (``evidence`` is ``NaN``); use the SMC or nested backend when you
+evidence estimate (``evidence`` is ``NaN``); use the nested backend when you
 need ``log Z``.
 
 ``run`` is ``filter_jit``-wrapped, so when ``logdensity`` is a ``SceneLogDensity``

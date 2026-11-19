@@ -3,7 +3,7 @@
 Window adaptation tunes the step size and mass matrix, then the chain runs through
 ``run_inference_algorithm`` (a single ``lax.scan``, O(1) compile regardless of
 chain length). The draws are equally weighted and carry no evidence estimate
-(``evidence`` is ``NaN``); use the SMC backend when you need ``log Z``.
+(``evidence`` is ``NaN``); use the nested backend when you need ``log Z``.
 
 ``run`` is ``filter_jit``-wrapped, so when ``logdensity`` is a ``SceneLogDensity``
 Module its forward's array leaves (e.g. a coronagraph PSF datacube) thread as traced
@@ -132,8 +132,9 @@ class NUTS(AbstractBackend):
     Chains start at prior draws (or at ``init``), adapt a step size and mass matrix
     during warmup, then sample. The draws are equally weighted, stored chain by chain
     on one flat draw axis, and carry no evidence: ``log_evidence`` is NaN (use
-    ``Laplace(init=posterior)`` or ``SMC`` for an evidence). Angle coordinates of an
-    orbit block are plain reals, so a chain may wander across copies of the same cell.
+    ``Laplace(init=posterior)`` or ``NestedSampling`` for an evidence). Angle
+    coordinates of an orbit block are plain reals, so a chain may wander across copies
+    of the same cell.
 
     Args:
         n_warmup: Window-adaptation steps per chain.

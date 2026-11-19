@@ -18,7 +18,7 @@ chart (``W_rad``, ``w_rad``, ``M0_rad``) are plain reals whose density repeats e
 ``2 pi``, so a sampler can wander across cells. Take no moment, quantile or covariance
 of such a coordinate (read the orbit through ``model`` instead). For the same reason
 the importance evidence of ``Laplace`` and ``Pathfinder`` on such a block is wrong
-unless the proposal sits well inside one cell; ``SMC`` evidence is not affected.
+unless the proposal sits well inside one cell.
 
 Layout. The draw axis is flat and in stored order (chains are concatenated, never an
 axis). Leading axes are batch axes: a stack of worlds is the same type with a longer

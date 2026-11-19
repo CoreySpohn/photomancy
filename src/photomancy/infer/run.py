@@ -43,7 +43,7 @@ def run(
 
     The function is traceable. A stack of worlds is a stacked ``Fit`` mapped with
     ``eqx.filter_vmap``; the stack of posteriors is the same type with a leading batch
-    axis. Backends built on ``lax`` loops (``NUTS``, ``MCLMC``, ``SMC``, ``Laplace``,
+    axis. Backends built on ``lax`` loops (``NUTS``, ``MCLMC``, ``Laplace``,
     ``Pathfinder``, ``Grid``) map; a ``while_loop`` runs to the slowest slice. ``MAP``
     (host-driven stages) and ``NestedSampling`` (jaxns, a host loop with the fit closed
     over) cannot be mapped: they run one fit at a time.
