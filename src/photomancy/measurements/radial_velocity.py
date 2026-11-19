@@ -141,12 +141,8 @@ class RadialVelocityTerm(AbstractTerm):
         if self.jitters is not None and jnp.shape(self.jitters) != (self.data.n_inst,):
             raise ValueError("jitters must have shape (data.n_inst,)")
 
-    def _jitters(self, model, jitter_m_per_s):
-        if jitter_m_per_s is not None:
-            if self.jitters is not None or self.jitter_path is not None:
-                raise ValueError("Choose fixed or sampled RV jitter")
-            jitters = jitter_m_per_s
-        elif self.jitter_path is not None:
+    def _jitters(self, model):
+        if self.jitter_path is not None:
             jitters = resolve(model, self.jitter_path)
         elif self.jitters is not None:
             jitters = self.jitters
@@ -156,7 +152,7 @@ class RadialVelocityTerm(AbstractTerm):
             raise ValueError("jitters must have shape (data.n_inst,)")
         return jitters
 
-    def _score(self, model, jitter_m_per_s=None):
+    def _score(self, model):
         valid = self.data.is_valid
         data = RVData(
             times=jnp.where(valid, self.data.times, 0.0),
@@ -180,24 +176,20 @@ class RadialVelocityTerm(AbstractTerm):
             data.rv_err,
             data.inst_ids,
             data.n_inst,
-            self._jitters(model, jitter_m_per_s),
+            self._jitters(model),
             valid,
         )
         return value, prediction
 
-    def __call__(self, model, *, jitter_m_per_s=None):
-        """Score RVs with fixed or sampled per-instrument jitter (m/s).
-
-        The keyword is for a caller that samples the jitter as its own coordinate; a
-        ``Fit`` calls with the model alone, and reads ``jitters`` or ``jitter_path``.
-        """
-        return self._score(model, jitter_m_per_s)[0]
+    def __call__(self, model):
+        """Score RVs with the jitter of ``jitters`` or ``jitter_path`` (m/s)."""
+        return self._score(model)[0]
 
     def predict(self, model):
         """Return the stellar radial velocity at each epoch (m/s), invalid rows zero."""
         return self._score(model)[1]
 
-    def draw(self, key, model, *, jitter_m_per_s=None) -> Self:
+    def draw(self, key, model) -> Self:
         """Draw Gaussian RV noise with zero instrument offsets.
 
         The score marginalizes offsets against a flat measure and is therefore
@@ -208,7 +200,7 @@ class RadialVelocityTerm(AbstractTerm):
         data = self.data
         valid = data.is_valid
         ids = jnp.where(valid, data.inst_ids, 0)
-        jitter = self._jitters(model, jitter_m_per_s)
+        jitter = self._jitters(model)
         sigma = jnp.sqrt(jnp.where(valid, data.rv_err, 1.0) ** 2 + jitter[ids] ** 2)
         draw = self.predict(model) + sigma * jax.random.normal(
             key, data.rv.shape, dtype=jnp.float64

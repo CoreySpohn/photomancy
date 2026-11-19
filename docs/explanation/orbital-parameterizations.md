@@ -71,10 +71,9 @@ takes the built system (or scene) and returns `(log_likelihood, aux)`, with no
 prior terms. Planet scales are explicit independent scalar coordinates:
 
 - `scalars={name: ScalarCoordinate(prior)}`: a sampled radius (`radius_AU`),
-  albedo (`albedo`), mass (`mass_Mearth`) or jitter (`jitter_m_per_s`). The
-  default is logarithmic; `ScalarCoordinate(prior, logarithmic=False)` samples the
-  value itself. The prior is a `priorities` distribution or a callable returning the log
-  density; a distribution with an inverse CDF (`LogUniform`, `HalfNormal`) also supports
+  albedo (`albedo`) or mass (`mass_Mearth`). The default is logarithmic;
+  `ScalarCoordinate(prior, logarithmic=False)` samples the value itself. The prior is
+  a `priorities` distribution or a callable returning the log density; a distribution with an inverse CDF (`LogUniform`, `HalfNormal`) also supports
   nested sampling.
 - `body_inputs=("radius_AU", "albedo")`: scalars passed to the scene builder.
 - `term_inputs={0: ("radius_AU", "albedo")}`: scalars passed as keyword

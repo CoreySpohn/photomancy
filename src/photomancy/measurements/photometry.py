@@ -685,37 +685,29 @@ class DMagTerm(AbstractTerm):
         if self.area_AU2 is not None and self.area_path is not None:
             raise ValueError("Choose a fixed area_AU2 or an area_path, not both")
 
-    def _area(self, model, area_AU2):
-        if area_AU2 is not None:
-            if self.area_AU2 is not None or self.area_path is not None:
-                raise ValueError("Choose fixed or sampled photometric area")
-            return area_AU2
+    def _area(self, model):
         if self.area_path is not None:
             return resolve(model, self.area_path)
         return self.area_AU2
 
-    def _prediction(self, model, area_AU2):
+    def _prediction(self, model):
         valid = self.data.is_valid
         prediction = system_separation_dmag(
             resolve(model, self.system_path),
             jnp.where(valid, self.data.epochs, 0.0),
-            area_AU2=self._area(model, area_AU2),
+            area_AU2=self._area(model),
         )
         return tuple(jnp.where(valid, x, 0.0) for x in prediction)
 
-    def __call__(self, model, *, area_AU2=None):
-        """Return the combined dMag and null log likelihood.
+    def __call__(self, model):
+        """Return the combined dMag and null log likelihood."""
+        return loglike_imaging(*self._prediction(model), self.data)
 
-        The ``area_AU2`` keyword is for a caller that samples the area as its own
-        coordinate; a ``Fit`` calls with the model alone.
-        """
-        return loglike_imaging(*self._prediction(model, area_AU2), self.data)
-
-    def predict(self, model, *, area_AU2=None):
+    def predict(self, model):
         """Return (separation in arcsec, dMag) at each epoch, zero on padded rows."""
-        return self._prediction(model, area_AU2)
+        return self._prediction(model)
 
-    def draw(self, key, model, *, area_AU2=None) -> Self:
+    def draw(self, key, model) -> Self:
         """Copy with Gaussian dMag draws at the epochs of the data.
 
         A null epoch has no dMag to draw: the outcome of a planned observation is a
@@ -734,7 +726,7 @@ class DMagTerm(AbstractTerm):
         )
         mask = data.is_valid & data.is_detected
         sigma = jnp.where(mask, data.dmag_err, 1.0)
-        dmag = self.predict(model, area_AU2=area_AU2)[1]
+        dmag = self.predict(model)[1]
         draw = dmag + sigma * jax.random.normal(key, dmag.shape, dtype=jnp.float64)
         sampled = eqx.tree_at(
             lambda d: d.dmag_obs, data, jnp.where(mask, draw, data.dmag_obs)

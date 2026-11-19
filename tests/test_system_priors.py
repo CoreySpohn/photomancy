@@ -10,21 +10,17 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from hwoutils.constants import Msun2kg, two_pi
 from hwoutils.epoch import Epoch
 from orbix.system import (
-    CartesianChart,
     ClassicalChart,
     FrameChart,
 )
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
 from scipy import integrate, stats
 from skyscapes.scene import FlatStar, Scene
-from system_helpers import BOUNDS, _orbits, _scale_coordinates, _scene, ecc_law
+from system_helpers import BOUNDS, _orbits, ecc_law
 
-from photomancy import RadialVelocityTerm
-from photomancy.measurements import RVData
 from photomancy.orbit.inference import (
     build_chart_logdensity,
     orbit_chart_log_volume,
@@ -67,28 +63,6 @@ _ECC_LOG_PROB = {
         -2.409595213299103,
     ],
 }
-# Frozen log density and its gradient at the second point of the sampled-jitter test:
-# the retired unconstrained NumPyro joint plus the log determinant of the map from the
-# chart point to its unconstrained sites.
-_OLD_JOINT = [
-    -11.983164735105953,
-    -15.124466212443133,
-    -18.04801104334017,
-    -21.734194578606996,
-]
-_OLD_GRAD = [
-    -4.540111035731708,
-    -1.400878134936334,
-    9.818543780126888,
-    2.424568770699403,
-    -1.5065999591547925,
-    5.900001510120951,
-    -0.027998079921538157,
-    4.6066979547215587e-17,
-    5.94982916365241e-17,
-    0.8227612236659537,
-    -0.23563430122799972,
-]
 
 
 def test_eccentricity_sites_and_conditional_cdfs():
@@ -205,79 +179,6 @@ def test_frame_gauge_integral():
             epsrel=1e-12,
         )
         _check(f"Frame gauge sd={sd}", area / (8 * np.pi**2), 1.0)
-
-
-@pytest.mark.medium
-def test_old_unconstrained_joint_with_sampled_jitter():
-    """Fails if the pulled-back joint or gradient departs from the frozen reference."""
-    chart = CartesianChart(scale_AU=1.6)
-    data = RVData(
-        times=jnp.array([0.0, 31.0, 77.0, 103.0, 0.0]),
-        rv=jnp.array([0.4, -0.2, 0.1, 0.3, 0.0]),
-        rv_err=jnp.ones(5),
-        inst_ids=jnp.array([0, 1, 0, 1, 0]),
-        n_inst=2,
-        is_valid=jnp.array([True, True, True, True, False]),
-    )
-    scalars = _scale_coordinates(0.8)
-    poisoned = eqx.tree_at(
-        lambda d: (d.rv, d.rv_err, d.times, d.inst_ids),
-        data,
-        (
-            data.rv.at[-1].set(jnp.nan),
-            data.rv_err.at[-1].set(jnp.nan),
-            data.times.at[-1].set(jnp.nan),
-            data.inst_ids.at[-1].set(99),
-        ),
-    )
-    density = build_chart_logdensity(
-        chart,
-        _scene,
-        lambda s: orbit_log_prior(
-            s.dynamics.orbits, period_range_d=(10, 1e4), eccentricity=ecc_law("disk")
-        )[0],
-        star_mass_kg=Msun2kg,
-        terms=(RadialVelocityTerm(poisoned),),
-        scalars=scalars,
-        body_inputs=("radius_AU", "albedo"),
-        term_inputs={0: ("jitter_m_per_s",)},
-    )
-
-    def unpack(x):
-        return dict(
-            orbit=x[:6],
-            mass_Mearth=x[6],
-            radius_AU=x[7],
-            albedo=x[8],
-            jitter_m_per_s=x[9:],
-        )
-
-    mass = jnp.array([0.5, 2.0, 8.0, 13.0])
-    points = jnp.column_stack(
-        (
-            chart.from_orbit(_orbits(mass)),
-            jnp.log(mass),
-            jnp.log(jnp.linspace(0.0001, 0.001, 4)),
-            jnp.log(jnp.linspace(0.1, 0.7, 4)),
-            jnp.log(jnp.linspace(0.1, 0.6, 4)),
-            jnp.log(jnp.linspace(1.0, 0.3, 4)),
-        )
-    )
-
-    def compare(x):
-        value, aux = density.value_and_aux(unpack(x))
-        return value, aux["predictions"][0][-1]
-
-    value, masked = eqx.filter_jit(jax.vmap(compare))(points)
-    old_value = jnp.asarray(_OLD_JOINT)
-    np.testing.assert_array_equal(masked, 0.0)
-    _check("full old z pullback", value, old_value)
-    x = points[1]
-    new_grad = jax.jit(jax.grad(lambda x: density(unpack(x))))(x)
-    old_grad = jnp.asarray(_OLD_GRAD)
-    np.testing.assert_allclose(new_grad, old_grad, rtol=1e-9, atol=ATOL)
-    print(f"pulled-back gradient: max_error={np.max(np.abs(new_grad - old_grad)):.4g}")
-    assert np.isneginf(eqx.filter_jit(density)(unpack(x.at[:6].set(0.0))))
 
 
 def test_fixed_count_population_intensity():

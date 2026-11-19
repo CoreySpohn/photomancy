@@ -11,7 +11,7 @@ from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, System
 from skyscapes.scene import Scene
 from system_helpers import _data, _floor, _new_term, _orbits, _scale_coordinates, _scene
-from term_utils import null_dmag_term
+from term_utils import null_dmag_term, sampled_jitter_rv
 
 from photomancy.measurements import (
     DMagTerm,
@@ -172,7 +172,8 @@ def test_all_channels_and_reference_measure(data):
         return -(residual**2), residual
 
     terms = (
-        *_dynamical_terms(data),
+        sampled_jitter_rv(data.rv),
+        *_dynamical_terms(data)[1:],
         null_dmag_term(data.null),
         DMagTerm(data.imaging),
         custom_term,
@@ -298,10 +299,9 @@ def test_independent_pair_scores(two_planets):
 
     @eqx.filter_jit
     def compare(data, pairs):
-        rv, *others = _dynamical_terms(data)
-        return jnp.stack(
-            [rv(pairs, jitter_m_per_s=jitter), *(term(pairs) for term in others)]
-        )
+        _, *others = _dynamical_terms(data)
+        rv = RadialVelocityTerm(data.rv, jitters=jitter)
+        return jnp.stack([rv(pairs), *(term(pairs) for term in others)])
 
     scores, expected = compare(data, pairs), jnp.asarray(_PAIR_FACTORS)
     for name, score, target in zip(DYNAMICAL, scores, expected, strict=True):
@@ -363,7 +363,7 @@ def test_jacobi_predictions(two_planets):
     )  # arcsec, resolved physics change
     for term in (null_dmag_term(data.null), DMagTerm(data.imaging)):
         with pytest.raises(ValueError, match=r"(?i)multi-planet"):
-            term(jacobi, area_AU2=1e-8)
+            DMagTerm(term.data, area_AU2=1e-8)(jacobi)
 
 
 def test_radiative_padding_and_dark_limit(data):
@@ -378,8 +378,8 @@ def test_radiative_padding_and_dark_limit(data):
     log_area = jnp.log(0.32 * 0.00012**2)
 
     def score(log_area, term):
-        area = jnp.exp(log_area)
-        return term(model, area_AU2=area), term.predict(model, area_AU2=area)
+        term = DMagTerm(term.data, area_AU2=jnp.exp(log_area))
+        return term(model), term.predict(model)
 
     evaluate = eqx.filter_jit(jax.value_and_grad(score, has_aux=True))
     for term in (DMagTerm(data.imaging), null_dmag_term(data.null)):
@@ -404,5 +404,5 @@ def test_radiative_padding_and_dark_limit(data):
         (value, prediction), gradient = evaluate(log_area, masked)
         np.testing.assert_array_equal(jnp.stack(prediction), 0.0)
         np.testing.assert_array_equal([value, gradient], 0.0)
-        _, dark_dmag = term.predict(model, area_AU2=0.0)
+        _, dark_dmag = DMagTerm(term.data, area_AU2=0.0).predict(model)
         np.testing.assert_allclose(dark_dmag[:-1], 750.0, rtol=0, atol=1e-12)

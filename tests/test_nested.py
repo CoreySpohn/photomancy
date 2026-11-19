@@ -12,8 +12,8 @@ from jaxctx import transform as transform_model
 from orbix.system import EccentricityVectorChart, FrameChart
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
 from system_helpers import BOUNDS, _floor, _new_term, _scene, ecc_law
+from term_utils import sampled_jitter_rv
 
-from photomancy import RadialVelocityTerm
 from photomancy.infer.backends import JaxnsBackend, build_scene_nested_model
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 from photomancy.orbit.nested import (
@@ -150,7 +150,7 @@ def _nested_problem(chart, ecc_prior, rv=None, e_max=1.0):
         _scene,
         prior,
         star_mass_kg=Msun2kg,
-        terms=() if rv is None else (RadialVelocityTerm(rv),),
+        terms=() if rv is None else (sampled_jitter_rv(rv),),
         scalars=scalars,
         body_inputs=("radius_AU", "albedo"),
         term_inputs={} if rv is None else {0: ("jitter_m_per_s",)},
