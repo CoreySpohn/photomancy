@@ -207,7 +207,7 @@ def test_unproposed_free_entries_are_refused_by_name():
     with pytest.raises(ValueError, match=r"planets\[0\]\.Rp_Rearth"):
         ScaleRotateProposal().sample(jax.random.key(0), build_fit(), 4)
     with pytest.raises(ValueError, match=r"dynamics\.orbits\[0\]\.sheet"):
-        bare.append(sheet_sum(report_term(leaf=None)))
+        bare.append_term(sheet_sum(report_term(leaf=None)))
 
 
 @pytest.mark.medium(reason="compiles one screened completion on the report fit, 15 s")
