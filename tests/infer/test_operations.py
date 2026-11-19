@@ -19,6 +19,7 @@ from test_run import HIGH, KEY, WIDTH, _Gauss, _leaf_fit
 
 from photomancy.infer import (
     SMC,
+    AbstractTerm,
     Fit,
     Grid,
     Laplace,
@@ -453,6 +454,22 @@ class _Toy(eqx.Module):
     theta: jax.Array
 
 
+class _Channel(AbstractTerm):
+    """``y = theta + sigma * noise``: a normalized Gaussian observation of ``theta``."""
+
+    y: jax.Array
+    sigma: float = eqx.field(static=True)
+    reads = ()
+
+    def __call__(self, model):
+        return norm.logpdf(self.y, model.theta, self.sigma)
+
+    def draw(self, key, model):
+        return eqx.tree_at(
+            lambda t: t.y, self, model.theta + self.sigma * jax.random.normal(key)
+        )
+
+
 def _gaussian_channel(n=2048, sigma=0.7, seed=0):
     """A prior cloud of a scalar read through ``y = theta + sigma * noise``.
 
@@ -471,14 +488,8 @@ def _gaussian_channel(n=2048, sigma=0.7, seed=0):
         info=None,
         kind="monte_carlo",
     )
-
-    def log_obs(y, model):
-        return norm.logpdf(y, model.theta, sigma)
-
-    def draw(key, model):
-        return model.theta + sigma * jax.random.normal(key)
-
-    return post, log_obs, draw, 0.5 * math.log1p(1.0 / sigma**2)
+    term = _Channel(jnp.zeros(()), sigma)
+    return post, term, 0.5 * math.log1p(1.0 / sigma**2)
 
 
 @pytest.mark.medium
@@ -489,21 +500,26 @@ def test_nested_eig_bias_falls_with_the_inner_size_and_matches_its_scale():
     ``0.5 log(1 + 1 / sigma^2)``, 0.5561 nats at sigma 0.7 (a posterior that is the
     prior cloud and a normalized Gaussian observation density).
     Tolerance basis: spike over four seeds of the cloud and outer draws (4000 outer
-    draws, Monte Carlo error about 0.01 nat): bias 0.60 to 0.68 at ``n_inner`` 2,
-    0.11 to 0.13 at 8, 0.02 to 0.04 at 32, 0.00 to 0.03 at 128, against scales 0.12,
-    0.07, 0.022 and 0.006. The scale is leading order, so it is compared to the bias
-    within a factor of 2.5 from ``n_inner`` 8 up and its ratio between inner sizes
-    to the expected 4 within 2.5 to 5.
-    Fails if: the inner mean includes the diagonal, the inner draws share the outer
-    draw, or the bias scale is not the explicit variance sum.
+    draws, Monte Carlo error about 0.01 nat) with the leave-one-out inner set: bias
+    0.59 to 0.69 at ``n_inner`` 2, 0.11 to 0.15 at 8, 0.017 to 0.056 at 32, -0.01 to
+    0.03 at 128, against scales 0.12, 0.07, 0.022 and 0.006. The scale is leading
+    order, so it is compared to the bias within a factor of 3 from ``n_inner`` 8 up
+    (the measured bias to scale ratio is 0.8 to 2.6 over the four seeds) and its ratio
+    between inner sizes to the expected 4 within 2.5 to 5.
+    Fails if: the inner draws share the outer draw, or the bias scale is not the
+    explicit variance sum.
     """
-    post, log_obs, draw, truth = _gaussian_channel()
+    post, term, truth = _gaussian_channel()
     biases, scales = [], []
     for n_inner in (2, 8, 32, 128):
         est = eig_nested(
-            post, log_obs, draw, jax.random.key(7), 4000, n_inner, False, 100.0
+            post,
+            term,
+            jax.random.key(7),
+            n_outer=4000,
+            n_inner=n_inner,
+            min_n_eff=100.0,
         )
-        assert est.estimator == "nested" and est.bias == "upward"
         biases.append(float(est.eig) - truth)
         scales.append(float(est.bias_scale))
     assert all(b > -0.03 for b in biases)
@@ -511,7 +527,7 @@ def test_nested_eig_bias_falls_with_the_inner_size_and_matches_its_scale():
     assert abs(biases[3]) < 0.05
     assert scales[0] > scales[1] > scales[2] > scales[3] > 0
     for bias, scale in zip(biases[1:3], scales[1:3], strict=True):
-        assert scale / 2.5 < bias < 2.5 * scale
+        assert scale / 3 < bias < 3 * scale
     assert 2.5 < scales[1] / scales[2] < 5.0 and 2.5 < scales[2] / scales[3] < 5.0
 
 
@@ -526,29 +542,69 @@ def test_contrastive_eig_is_a_lower_bound_capped_at_log_n_eff():
     Fails if: the inner sum drops the diagonal (the estimate then exceeds the truth) or
     the weights are not applied.
     """
-    post, log_obs, draw, truth = _gaussian_channel()
-    est = eig_contrastive(post, log_obs, draw, jax.random.key(8), n_outer=4000)
-    assert est.estimator == "contrastive" and est.bias == "downward"
+    post, term, truth = _gaussian_channel()
+    est = eig_contrastive(post, term, jax.random.key(8), n_outer=4000)
     assert truth - 0.1 < float(est.eig) < truth + 0.04
     assert 0 < float(est.bias_scale) < 0.01
-    tiny, log_obs, draw, _ = _gaussian_channel(n=16, sigma=0.05)
-    capped = eig_contrastive(tiny, log_obs, draw, jax.random.key(9), n_outer=2000)
+    tiny, term, _ = _gaussian_channel(n=16, sigma=0.05)
+    capped = eig_contrastive(tiny, term, jax.random.key(9), n_outer=2000)
     assert 1.5 < float(capped.eig) <= math.log(16.0) + 1e-9
     assert float(capped.bias_scale) > 0.1 > float(est.bias_scale)
 
 
-def test_nested_eig_gates_on_the_cloud_size_and_with_the_diagonal_is_a_bound():
-    """A small Kish size returns NaN; the diagonal form lands below the open form."""
-    post, log_obs, draw, truth = _gaussian_channel(n=512)
+def test_nested_eig_gates_on_the_cloud_size():
+    """A Kish size below ``min_n_eff`` returns NaN; one at the floor does not."""
+    post, term, _ = _gaussian_channel(n=512)
     refused = eig_nested(
-        post, log_obs, draw, jax.random.key(1), 100, 8, False, 10_000.0
+        post, term, jax.random.key(1), n_outer=100, n_inner=8, min_n_eff=10_000.0
     )
     assert np.isnan(float(refused.eig)) and np.isnan(float(refused.bias_scale))
-    up = eig_nested(post, log_obs, draw, jax.random.key(2), 3000, 4, False, 1.0)
-    down = eig_nested(post, log_obs, draw, jax.random.key(2), 3000, 4, True, 1.0)
-    assert down.bias == "downward"
-    assert float(down.eig) < truth + 0.03 < float(up.eig) + 0.03
-    assert float(down.eig) < float(up.eig)
+    kept = eig_nested(
+        post, term, jax.random.key(1), n_outer=100, n_inner=8, min_n_eff=500.0
+    )
+    assert np.isfinite(float(kept.eig))
+
+
+@pytest.mark.parametrize(
+    ("n", "n_inner"), [(256, 256), (256, 1024), (64, 1024)], ids=str
+)
+def test_nested_eig_refuses_an_inner_set_larger_than_the_cloud(n, n_inner):
+    """``n_inner`` above the Kish size of the cloud without the outer draw is NaN.
+
+    Truth source: with the outer index removed a uniform cloud of ``n`` has Kish size
+    ``n - 1``, so ``n_inner >= n`` makes the inner set the cloud itself and the
+    estimator the contrastive bound (measured on a Gaussian channel: estimate minus
+    truth -0.0065 at 256/256, -0.0073 at 256/1024, -0.144 at 64/1024, each against a
+    much smaller reported bias scale).
+    Fails if: the inner set may reach the cloud size and the result still claims an
+    upward bias.
+    """
+    post, term, _ = _gaussian_channel(n=n)
+    est = eig_nested(
+        post, term, jax.random.key(0), n_outer=50, n_inner=n_inner, min_n_eff=1.0
+    )
+    assert np.isnan(float(est.eig)) and np.isnan(float(est.bias_scale))
+
+
+def test_nested_eig_inner_draws_exclude_the_outer_draw():
+    """With a sharp channel the inner set never contains the outer draw's own point.
+
+    Truth source: ``sigma = 0.01`` on a 64-draw cloud makes ``p(y_k | x_m)`` negligible
+    for ``m != k``. Excluding the outer index leaves a leave-one-out marginal that is
+    tiny and an estimate of about 206 nats (spike, seed 0). If the outer draw could
+    enter the inner set (probability ``1 - (63/64)^32 = 0.4`` per outer draw at
+    ``n_inner`` 32) its marginal would be ``p(y_k | x_k) / 32`` in those draws and the
+    mean would fall to about 0.6 of that, near 124.
+    Tolerance basis: threshold 180, 26 nats under the spike value and 56 above the
+    contaminated value (the Monte Carlo error of the mean over 400 outer draws is
+    about 8).
+    Fails if: ``eig_nested`` draws the inner set from the whole cloud.
+    """
+    post, term, _ = _gaussian_channel(n=64, sigma=0.01)
+    est = eig_nested(
+        post, term, jax.random.key(0), n_outer=400, n_inner=32, min_n_eff=1.0
+    )
+    assert float(est.eig) > 180.0
 
 
 def test_a_prior_swap_on_an_orbit_block_keeps_log_target_equal_to_the_density():
