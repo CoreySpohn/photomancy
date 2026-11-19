@@ -71,10 +71,6 @@ class AbstractTerm(eqx.Module):
         """Return the prediction of ``model`` for this term's data, where it has one."""
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
 
-    def value_and_prediction(self, model):
-        """Return ``(log likelihood, prediction)``; override to share one render."""
-        return self(model), self.predict(model)
-
 
 def _sum_leaf(value, leaf_ndim, dist):
     """Sum an elementwise log density over the leaf axes it keeps."""

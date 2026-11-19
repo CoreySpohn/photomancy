@@ -88,7 +88,7 @@ class ExposureTerm(AbstractTerm):
             model.instrument, model.nuisance[self.nuisance_index], model.scene
         )
 
-    def value_and_prediction(self, model):
+    def _value_and_prediction(self, model):
         """Return the log-likelihood and the image, rendering once."""
         image = self.predict(model)
         return self.likelihood(image), image
@@ -124,3 +124,6 @@ class ExposureLogDensity(TermLogDensity):
 
     terms: tuple[ExposureTerm, ...]
     prior: Callable | None = None
+
+    def _results(self, params):
+        return [term._value_and_prediction(params) for term in self.terms]

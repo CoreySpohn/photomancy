@@ -37,9 +37,12 @@ class TermLogDensity(AbstractLogDensity):
         if len(self.terms) == 0:
             raise ValueError(f"an {type(self).__name__} needs at least one term")
 
+    def _results(self, params):
+        return [(term(params), term.predict(params)) for term in self.terms]
+
     def value_and_aux(self, params):
         """Return ``(log_density, predictions)`` with one prediction per term."""
-        results = [term.value_and_prediction(params) for term in self.terms]
+        results = self._results(params)
         total = results[0][0]
         for value, _ in results[1:]:
             total = total + value
