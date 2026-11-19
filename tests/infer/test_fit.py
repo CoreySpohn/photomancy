@@ -373,6 +373,24 @@ def test_refuses_a_changed_free_set():
     assert fit.with_priors({"dynamics.orbits": _block(law)}).digest() != fit.digest()
 
 
+def test_refuses_a_term_that_is_not_an_abstract_term():
+    """A term on the old protocol cannot enter a fit: TypeError names the index."""
+    from photomancy.system_terms import NullTerm
+
+    with pytest.raises(TypeError, match=r"terms\[1\] is a NullTerm"):
+        _simple_fit(terms=(_ReadsNothing(), NullTerm(None)))
+
+
+class _ReadsNothing(AbstractTerm):
+    reads = ()
+
+    def __call__(self, model):
+        return jnp.zeros(())
+
+    def draw(self, key, model):
+        return self
+
+
 def test_refuses_without_x64():
     """Construction on the host refuses when float64 is off."""
     jax.config.update("jax_enable_x64", False)
@@ -457,6 +475,54 @@ def test_density_is_normalized_prior_draws_agree():
     assert resolve(cloud, "dynamics.orbits").a_AU.shape == (4, 2, 1)
     off = fit.log_density({**one, "planets[0].Rp_Rearth": jnp.array([0.1])})
     assert off == -jnp.inf
+
+
+def test_prior_draws_do_not_depend_on_the_insertion_order_of_free():
+    """A pytree round trip sorts the free keys; the draws must not change."""
+    free = {
+        "planets[0].physical_model.Ag": Uniform(0.05, 0.9),
+        "dynamics.frame.dist_pc": Uniform(5.0, 15.0),
+        "planets[0].Rp_Rearth": LogUniform(0.5, 4.0),
+    }
+    fit = Fit(_scene(), free)
+    leaves, treedef = jax.tree.flatten(fit)
+    crossed = jax.tree.unflatten(treedef, leaves)
+    assert list(crossed.free) != list(fit.free)
+    key = jax.random.key(11)
+    for name, value in fit.sample_prior(key, (3,)).items():
+        np.testing.assert_array_equal(value, crossed.sample_prior(key, (3,))[name])
+
+
+def test_from_real_volume_has_the_batch_shape_for_a_block_only_fit():
+    """A fit with only block entries still returns one volume per draw."""
+    fit = Fit(_scene(), {"dynamics.orbits": _block()})
+    u = fit.sample_prior(jax.random.key(0), (3,))
+    _, volume = fit.from_real(fit.to_real(u))
+    assert volume.shape == (3,)
+
+
+def test_the_block_chain_is_traced_once_per_density():
+    """log_density runs each block's forward once per density."""
+    calls = []
+
+    class Counting(OrbitBlock):
+        def forward(self, x, model):
+            calls.append(1)
+            return super().forward(x, model)
+
+    block = Counting(
+        ClassicalChart(),
+        OrbitLaw(
+            period_d=LogUniform(*PERIOD_RANGE), eccentricity=kipping_eccentricity()
+        ),
+        rows=(0,),
+        system="dynamics",
+    )
+    fit = Fit(_scene(), {"dynamics.orbits": block}, (_relative(),))
+    x = fit.sample_prior(jax.random.key(0))
+    calls.clear()
+    fit.log_density(x)
+    assert len(calls) == 1
 
 
 # ----- an orbit fit through a block on a real Scene ------------------------------

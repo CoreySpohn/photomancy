@@ -97,7 +97,8 @@ class Fit(eqx.Module):
 
         Raises:
             RuntimeError: When ``jax_enable_x64`` is off.
-            TypeError: For an entry that is neither a distribution nor a block.
+            TypeError: For an entry that is neither a distribution nor a block, or a
+                term that is not an :class:`AbstractTerm`.
             ValueError: For an unknown path, a leaf law that does not fit its leaf, two
                 writers of one path, a block cycle, or a free path or block write that
                 meets a term's ``reads``.
@@ -125,7 +126,11 @@ class Fit(eqx.Module):
             for path in (*block.reads, *block.writes):
                 self._require_path(path, f"block {key!r}")
         written = [*leaf_paths, *(w for b in blocks.values() for w in b.writes)]
-        for term in self.terms:
+        for i, term in enumerate(self.terms):
+            if not isinstance(term, AbstractTerm):
+                raise TypeError(
+                    f"terms[{i}] is a {type(term).__name__}; expected an AbstractTerm"
+                )
             for read in term.reads:
                 self._require_path(read, f"{type(term).__name__}.reads")
                 for path in written:
@@ -183,6 +188,16 @@ class Fit(eqx.Module):
             return jnp.ndim(x[key]) - jnp.ndim(resolve(self.model, key))
         return 0
 
+    def _batch_shape(self, x):
+        """Shape of the leading batch axes of an entry dict."""
+        for key, entry in self.free.items():
+            if isinstance(entry, AbstractBlock):
+                return jnp.shape(next(iter(x[key].values())))[:-1]
+            return jnp.shape(x[key])[
+                : jnp.ndim(x[key]) - jnp.ndim(resolve(self.model, key))
+            ]
+        return ()
+
     def _over_batch(self, fn, x):
         for _ in range(self._batch_ndim(x)):
             fn = jax.vmap(fn)
@@ -195,18 +210,12 @@ class Fit(eqx.Module):
             model = assign(model, path, x[path])
         return model
 
-    def model_at(self, x: dict) -> eqx.Module:
-        """Return the model of one draw ``x``: leaf laws first, then blocks in order."""
-        model = self._assign_leaf_laws(x, self.model)
-        blocks = self.blocks
-        for key in self.block_order:
-            for path, value in blocks[key].forward(x[key], model).items():
-                model = assign(model, path, value)
-        return model
+    def _walk(self, x):
+        """Walk the block chain once: return the model of ``x`` and its log prior.
 
-    # ----- density ---------------------------------------------------------------
-
-    def _log_prior_one(self, x):
+        Leaf laws are assigned first and scored, then each block in order scores its
+        ``log_prob`` on the running model before its writes are applied.
+        """
         model = self._assign_leaf_laws(x, self.model)
         total = jnp.zeros(())
         for path, dist in self.leaf_laws.items():
@@ -218,7 +227,16 @@ class Fit(eqx.Module):
             total = total + block.log_prob(x[key], model)
             for path, value in block.forward(x[key], model).items():
                 model = assign(model, path, value)
-        return total
+        return model, total
+
+    def model_at(self, x: dict) -> eqx.Module:
+        """Return the model of one draw ``x``: leaf laws first, then blocks in order."""
+        return self._walk(x)[0]
+
+    # ----- density ---------------------------------------------------------------
+
+    def _log_prior_one(self, x):
+        return self._walk(x)[1]
 
     def log_prior(self, x: dict) -> jax.Array:
         """Return the normalized log prior of ``x`` against Lebesgue ``dx``.
@@ -229,20 +247,23 @@ class Fit(eqx.Module):
         """
         return self._over_batch(self._log_prior_one, x)
 
-    def _log_likelihood_one(self, x):
-        model = self.model_at(x)
+    @staticmethod
+    def _terms_at(terms, model):
         total = jnp.zeros(())
-        for term in self.terms:
+        for term in terms:
             total = total + term(model)
         return total
+
+    def _log_likelihood_one(self, x):
+        return self._terms_at(self.terms, self.model_at(x))
 
     def log_likelihood(self, x: dict) -> jax.Array:
         """Return the sum of the terms at ``x``."""
         return self._over_batch(self._log_likelihood_one, x)
 
     def _log_density_one(self, x):
-        prior = self._log_prior_one(x)
-        total = prior + self._log_likelihood_one(x)
+        model, prior = self._walk(x)
+        total = prior + self._terms_at(self.terms, model)
         return jnp.where(jnp.isneginf(prior), -jnp.inf, total)
 
     def log_density(self, x: dict) -> jax.Array:
@@ -278,7 +299,7 @@ class Fit(eqx.Module):
                 volume = volume + _sum_leaf(vol, ndim, entry)
             else:
                 x[key] = u[key]
-        return x, volume
+        return x, jnp.broadcast_to(volume, self._batch_shape(u))
 
     def real_log_prob(self, u: dict) -> jax.Array:
         """Return the density in ``u``: the density of ``from_real(u)`` plus volume."""
@@ -289,7 +310,7 @@ class Fit(eqx.Module):
 
     def _sample_prior_one(self, key):
         keys = jax.random.split(key, len(self.free))
-        subkeys = dict(zip(self.free, keys, strict=True))
+        subkeys = dict(zip(sorted(self.free), keys, strict=True))
         x = {}
         for path, dist in self.leaf_laws.items():
             shape = jnp.shape(resolve(self.model, path))
@@ -313,6 +334,39 @@ class Fit(eqx.Module):
         n = int(np.prod(sample_shape, dtype=int))
         flat = jax.vmap(self._sample_prior_one)(jax.random.split(key, n))
         return jax.tree.map(lambda a: a.reshape(*sample_shape, *a.shape[1:]), flat)
+
+    # ----- unit cube -------------------------------------------------------------
+
+    def unit_template(self) -> dict:
+        """Zeros of one unit-cube draw: each entry has the shape of its model leaf.
+
+        Raises:
+            ValueError: For a block entry (a block has no unit-cube map yet) or a leaf
+                law with no inverse CDF (a mixture).
+        """
+        out = {}
+        for key, entry in self.free.items():
+            if not isinstance(entry, AbstractDistribution):
+                raise ValueError(
+                    f"block {key!r} has no unit-cube map; nested sampling needs "
+                    "leaf laws with an inverse CDF"
+                )
+            if not entry.has_icdf:
+                raise ValueError(
+                    f"law at {key!r} ({type(entry).__name__}) has no inverse CDF"
+                )
+            out[key] = jnp.zeros(jnp.shape(resolve(self.model, key)))
+        return out
+
+    def from_unit(self, u: dict) -> dict:
+        """Map unit-cube coordinates to entries through each leaf law's inverse CDF.
+
+        Args:
+            u: One draw, each entry shaped like :meth:`unit_template`, values in
+                ``(0, 1)``.
+        """
+        self.unit_template()
+        return {key: entry.icdf(u[key]) for key, entry in self.free.items()}
 
     # ----- edits -----------------------------------------------------------------
 
