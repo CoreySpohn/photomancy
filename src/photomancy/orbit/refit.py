@@ -63,7 +63,7 @@ from photomancy.orbit.updater import (
     _linear_gaussian,
     _rest_log_prior,
 )
-from photomancy.priors import orbit_log_prior
+from photomancy.priors import LOG_HAAR, orbit_log_prior
 from photomancy.report import ReportLaw, ReportPrediction
 
 ELEMENT_NAMES = (
@@ -182,6 +182,7 @@ class PhysicalPriorTarget(ThieleInnesTarget):
             density
             + log_mass
             + ThieleInnesChart().log_volume(x)
+            + LOG_HAAR
             + log_jacobian
             + jnp.log(2.0)
         )

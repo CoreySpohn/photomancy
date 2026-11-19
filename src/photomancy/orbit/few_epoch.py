@@ -57,6 +57,7 @@ from orbix.system import (
 from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import TI_CHART_PARAM_NAMES
+from photomancy.priors import LOG_HAAR
 
 MU_SUN = G * Msun2kg  # AU^3 / day^2
 
@@ -237,7 +238,7 @@ def chart_log_prior(model, x):
 
 def _chart_parts(model, x, orbit, ok, ln_jac, ln_like):
     """Mask invalid lanes to a zero contribution and report the sheet."""
-    ln_prior = chart_log_prior(model, x) + _TI_CHART.log_volume(x)
+    ln_prior = chart_log_prior(model, x) + _TI_CHART.log_volume(x) + LOG_HAAR
     return (
         x,
         jnp.where(ok, ln_prior, -jnp.inf),

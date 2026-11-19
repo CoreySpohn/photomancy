@@ -17,6 +17,7 @@ from orbix.system import (
     FrameChart,
 )
 
+from photomancy.priors import LOG_HAAR
 from photomancy.system_density import SystemLogDensity
 
 # Chart name that posteriors over the periapsis elements of
@@ -25,26 +26,18 @@ ORBIT_ROWS_CHART = "OrbitRows"
 
 
 def orbit_chart_log_volume(chart, coords):
-    """Normalized chart pullback of e de d(cos i) dW dw dM dln(a/AU).
+    """Chart pullback of e de d(cos i) dW dw dM dln(a/AU) with unnormalized Haar.
 
-    Use one angular cell for the classical and eccentricity-vector charts.
-    Both Frame lifts integrate to the unnormalized Haar volume 8*pi^2.
-    The Cartesian determinant restores the constant omitted by orbix.
+    The chart volumes are exact against normalized Haar orientation, so adding
+    the log total Haar measure 8*pi^2 gives the density in one angular cell.
+    The classical and eccentricity-vector charts are restricted to that cell.
     """
-    volume = chart.log_volume(coords)
+    volume = chart.log_volume(coords) + LOG_HAAR
     if isinstance(chart, CartesianChart):
         nonradial = jnp.any(jnp.cross(coords[..., :3], coords[..., 3:]) != 0, axis=-1)
-        return jnp.where(nonradial, volume + math.log(16), -jnp.inf)
+        return jnp.where(nonradial, volume, -jnp.inf)
     if isinstance(chart, FrameChart):
-        sd = chart.gauge_sd
-        if sd is not None:
-            if sd <= 0 or not math.isfinite(sd):
-                raise ValueError("Frame gauge_sd must be positive and finite")
-            # Integral over S^3 and the positive truncated Gaussian radius.
-            positive_fraction = 0.5 * math.erfc(-1 / (math.sqrt(2) * sd))
-            radial_integral = sd * math.sqrt(two_pi) * positive_fraction
-            return volume + math.log(4 / radial_integral)
-        return volume + math.log(8 * math.pi**2)
+        return volume
     if isinstance(chart, ClassicalChart):
         angles, low = coords[..., 3:], 0.0
     elif isinstance(chart, EccentricityVectorChart):

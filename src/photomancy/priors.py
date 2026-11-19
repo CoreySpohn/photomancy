@@ -22,6 +22,12 @@ from hwoutils.constants import two_pi
 from priorities import AbstractDistribution, LogUniform
 from skyscapes.population import kipping_eccentricity
 
+# Log total Haar measure of the orientation angles (cos i, W, u0). The orbix chart
+# volumes are exact against normalized Haar; the densities in this package are
+# against the unnormalized reference measure of ``orbit_log_prior``, so a chart
+# volume enters them as ``chart.log_volume(x) + LOG_HAAR``.
+LOG_HAAR = math.log(8 * math.pi**2)
+
 
 def orbit_log_prior(orbit, *, period_range_d=(1.0, 100000.0), eccentricity=None):
     """One-planet density against e de d(cos i) dW dw dM dln(a/AU).

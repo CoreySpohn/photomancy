@@ -40,6 +40,8 @@ from orbix.system import (
 )
 from orbix.system.linear import fit_linear_map
 
+from photomancy.priors import LOG_HAAR
+
 _TI_CHART = ThieleInnesChart()
 
 TI_CHART_PARAM_NAMES = ("ln_n", "ux", "uy", "A", "B", "F", "G")
@@ -133,7 +135,7 @@ def thiele_innes_fit(data, dist_pc, ln_n, ex, ey, epoch_d=0.0):
         orbits=orbits,
         branches=line_of_sight_branch(orbits),
         implied_mu_AU3_per_d2=_TI_CHART.implied_mu(x),
-        log_volume=_TI_CHART.log_volume(x),
+        log_volume=_TI_CHART.log_volume(x) + LOG_HAAR,
         sky_block=block,
         covariance=covariance,
         rank=rank,
