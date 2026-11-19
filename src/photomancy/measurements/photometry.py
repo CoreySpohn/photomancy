@@ -716,11 +716,22 @@ class DMagTerm(AbstractTerm):
         return self._prediction(model, area_AU2)
 
     def draw(self, key, model, *, area_AU2=None) -> Self:
-        """Copy with Gaussian dMag draws at the detected epochs.
+        """Copy with Gaussian dMag draws at the epochs of the data.
 
-        Null epochs are conditioning data and keep their contrast curves unchanged.
+        A null epoch has no dMag to draw: the outcome of a planned observation is a
+        detection or a non-detection, and the predictive for that outcome carries the
+        probability of detection, which this term does not. A term with a valid null
+        row refuses (:class:`~photomancy.measurements.ReportTerm` is the predictive
+        for a detection outcome), so a planned non-detection never reports an
+        information gain of exactly zero.
         """
         data = self.data
+        data = eqx.error_if(
+            data,
+            jnp.any(data.is_valid & ~data.is_detected),
+            "DMagTerm.draw: a null epoch has no dMag to draw; use ReportTerm for the "
+            "predictive of a detection outcome",
+        )
         mask = data.is_valid & data.is_detected
         sigma = jnp.where(mask, data.dmag_err, 1.0)
         dmag = self.predict(model, area_AU2=area_AU2)[1]
