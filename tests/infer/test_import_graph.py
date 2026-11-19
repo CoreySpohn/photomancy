@@ -178,7 +178,6 @@ DELETED = (
     "photomancy.orbit.refit",
     "photomancy.orbit.updater",
     "photomancy.orbit.ofti",
-    "photomancy.orbit.few_epoch",
     "photomancy.orbit.grid_search",
     "photomancy.orbit.nested",
     "photomancy.orbit.quasi_random",
@@ -205,6 +204,13 @@ DELETED = (
     "ReportLaw",
     "ReportTable",
     "TabulatedReportPredictor",
+    "ThetaPrior",
+    "theta_idx",
+    "theta_periods",
+    "c_idx",
+    "n_constants",
+    "n_proposals",
+    "posterior_physical",
 )
 
 

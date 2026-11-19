@@ -21,7 +21,7 @@ def _samples(n=200, seed=3):
     """A physical-sample dict with a deterministic ll_total leak included."""
     rng = np.random.default_rng(seed)
     return {
-        "T": 900.0 + 40.0 * rng.standard_normal(n),
+        "period_d": 900.0 + 40.0 * rng.standard_normal(n),
         "e": np.clip(0.3 + 0.05 * rng.standard_normal(n), 0.0, 1.0),
         "cos_i": np.clip(0.4 + 0.1 * rng.standard_normal(n), -1.0, 1.0),
         "ll_total": rng.standard_normal(n),
@@ -38,7 +38,7 @@ def test_plot_corner_samples_door_excludes_ll_total():
     assert isinstance(result, ep.MosaicResult)
     assert result.axes.shape == (3, 3)
     labels = [result.axes[2, j].get_xlabel() for j in range(3)]
-    assert labels == ["T [days]", "e", "cos i"]
+    assert labels == ["P [days]", "e", "cos i"]
 
 
 @pytest.mark.medium(
@@ -58,7 +58,7 @@ def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
     from system_helpers import _orbits, _scene
 
     from photomancy.infer import Fit, Posterior
-    from photomancy.orbit import posterior_physical
+    from photomancy.orbit import classical_elements
     from photomancy.viz import plot_corner
 
     model = _scene(
@@ -85,11 +85,11 @@ def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
     )
     orbit = resolve(posterior.model(1), "dynamics.orbits")
     expected = {
-        "T": orbit.period_d[0],
+        "period_d": orbit.period_d[0],
         "e": orbit.e[0],
         "cos_i": jnp.cos(orbit.to_classical()["i_rad"][0]),
     }
-    physical = posterior_physical(
+    physical = classical_elements(
         posterior, jax.random.key(1), 16, orbit_path="dynamics.orbits"
     )
     for name, value in expected.items():
@@ -99,7 +99,7 @@ def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
         key=jax.random.key(1),
         n=16,
         orbit_path="dynamics.orbits",
-        params=["T", "e", "cos_i"],
+        params=["period_d", "e", "cos_i"],
     )
     assert result.axes.shape == (3, 3)
     with pytest.raises(TypeError, match="orbit_path"):
@@ -110,7 +110,7 @@ def test_plot_corner_ranges_pin_the_grid():
     """A range pins its column x-limits and off-diagonal row y-limits."""
     from photomancy.viz import plot_corner
 
-    ranges = {"T": (600.0, 1600.0), "e": (0.0, 1.0)}
+    ranges = {"period_d": (600.0, 1600.0), "e": (0.0, 1.0)}
     result = plot_corner(_samples(), ranges=ranges)
     assert result.axes[0, 0].get_xlim() == (600.0, 1600.0)
     assert result.axes[2, 0].get_xlim() == (600.0, 1600.0)
@@ -125,7 +125,7 @@ def test_plot_corner_overlay_names_and_ranges():
     result = plot_corner_overlay(
         [_samples(seed=3), _samples(seed=4)],
         names=["run a", "run b"],
-        ranges={"T": (600.0, 1600.0)},
+        ranges={"period_d": (600.0, 1600.0)},
     )
     assert result.axes.shape == (3, 3)
     assert result.axes[2, 0].get_xlim() == (600.0, 1600.0)

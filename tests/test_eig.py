@@ -202,7 +202,7 @@ def test_modes_of_a_run_score_every_candidate():
     from photomancy.infer import run
     from photomancy.orbit.backends import few_epoch
 
-    posterior = run(_fit(_term(n_rows=1)), few_epoch(n_proposals=2**12), KEY)
+    posterior = run(_fit(_term(n_rows=1)), few_epoch(n_draws=2**12), KEY)
     assert np.isneginf(np.asarray(posterior.log_weights)).any()
     epochs = jnp.linspace(0.0, 2000.0, 12)
     result = evaluate_orbit_candidates(

@@ -53,13 +53,6 @@ def _astrometry(system, t, planet):
     return RelativeAstrometryTerm(row).predict(system)[:, 0]
 
 
-def _photometry(system, t, albedo_area_AU2):
-    sep, dmag = system_separation_dmag(
-        system, jnp.atleast_1d(t), albedo_area_AU2=albedo_area_AU2
-    )
-    return jnp.stack((sep[0], dmag[0]))
-
-
 def _modes(posterior, n_modes, key):
     """Cluster the draws into ``n_modes`` Gaussian modes over the flat entries."""
     mixture = cluster_to_mixture(posterior, n_modes, key)
@@ -131,7 +124,9 @@ def evaluate_orbit_candidates(
     def photometry(z, t):
         model = posterior.fit.model_at(unravel(z))
         area = None if area_path is None else resolve(model, area_path)
-        return _photometry(resolve(model, system_path), t, area)
+        system, t = resolve(model, system_path), jnp.atleast_1d(t)
+        sep, dmag = system_separation_dmag(system, t, albedo_area_AU2=area)
+        return jnp.stack((sep[0], dmag[0]))
 
     detectable = None
     detectable_args = ()

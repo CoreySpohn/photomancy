@@ -1,8 +1,9 @@
 """Orbit proposals for a Thiele-Innes fit: the block's own law, and scale and rotate.
 
-``ThetaPrior`` draws the three nonlinear block coordinates ``(ln n, ux, uy)`` from the
-block's own period and eccentricity laws (the base of a completed proposal). The
-eccentricity is drawn by inverting a table of the law's distribution function.
+``ShapePriorProposal`` draws the orbit shape, the three nonlinear block coordinates
+``(ln n, ux, uy)``, from the block's own period and eccentricity laws (the base of a
+completed proposal). The eccentricity is drawn by inverting a table of the law's
+distribution function.
 
 ``ScaleRotateProposal`` draws an orbit shape from the block's own law and fixes the
 size and the node so that the orbit passes through a sky position drawn from the error
@@ -30,7 +31,7 @@ from photomancy.infer import (
 from photomancy.measurements import RelativeAstrometryTerm
 from photomancy.orbit.completion import _block_of, _flat_layout
 
-__all__ = ["ScaleRotateProposal", "ThetaPrior"]
+__all__ = ["ScaleRotateProposal", "ShapePriorProposal"]
 
 _TABLE = 2**13
 
@@ -64,14 +65,14 @@ def log_density_e(e, table):
     return jnp.log(jnp.maximum(mass, 0.0)) - jnp.log(grid[k + 1] - grid[k])
 
 
-class ThetaPrior(AbstractDensityProposal):
+class ShapePriorProposal(AbstractDensityProposal):
     """The block's own law of ``(ln n, ux, uy)`` as a proposal over those coordinates.
 
     ``ln n`` is uniform on the period bounds, the eccentricity has the law's marginal
     (a table of its distribution function, so ``log_q`` is the density of the draws
     exactly) and the eccentricity angle is uniform, all in the stored coordinates of the
     Thiele-Innes block. It is given a :class:`Completion` in place of the fit, whose
-    ``theta`` is exactly the three block coordinates (``Completion.from_fit`` refuses
+    ``shape`` is exactly the three block coordinates (``Completion.from_fit`` refuses
     any other free entry).
 
     Fails if the draws and ``log_q`` disagree (the weights of a prior-only fit are not
@@ -100,9 +101,8 @@ class ThetaPrior(AbstractDensityProposal):
         ang = two_pi * jax.random.uniform(k_a, (n,))
         evec = jnp.stack([e * jnp.cos(ang), e * jnp.sin(ang)], -1)
         x = jnp.concatenate([ln_n[:, None], disk_to_plane(evec)], -1)
-        y = block.chart.unconstrain(
-            jnp.concatenate([x, _pad(x)], -1), block.chart_support(fit.model)
-        )
+        support = block.chart_support(fit.model)
+        y = block.chart.unconstrain(jnp.concatenate([x, _pad(x)], -1), support)
         z = y[:, :3]
         return z, self.log_prob(z, fit)
 
@@ -142,7 +142,7 @@ class ScaleRotateProposal(AbstractDensityProposal):
     Valid for a fit whose only free entry is one ``ThieleInnesBlock`` and whose terms
     include one ``RelativeAstrometryTerm``. A fit with any other free entry (the planet
     radius of a report fit, say) is refused by name: draw it with
-    :func:`~photomancy.orbit.backends.collapsed`, which completes a proposed leaf.
+    :func:`~photomancy.orbit.backends.any_epoch`, which completes a proposed leaf.
     Reference: Blunt et al. (2017), AJ 153, 229.
 
     Fails if the Jacobian is wrong: the evidence of a fit with no terms is not zero.
@@ -164,7 +164,7 @@ class ScaleRotateProposal(AbstractDensityProposal):
         if others:
             raise ValueError(
                 f"ScaleRotateProposal draws only the orbit block {key!r}; the free "
-                f"entries {others} need a proposal that completes them (collapsed)"
+                f"entries {others} need a proposal that completes them (any_epoch)"
             )
         terms = [t for t in fit.terms if isinstance(t, RelativeAstrometryTerm)]
         if len(terms) != 1:

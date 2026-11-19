@@ -21,13 +21,13 @@ from skyscapes.population import kipping_eccentricity
 
 from photomancy.infer import AbstractTerm, Fit, Importance, run
 from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
-from photomancy.orbit.backends import collapsed, few_epoch
+from photomancy.orbit.backends import any_epoch, few_epoch
 from photomancy.orbit.completion import (
     CompletedProposal,
     Completion,
     _log_reference,
 )
-from photomancy.orbit.proposals import ScaleRotateProposal, ThetaPrior
+from photomancy.orbit.proposals import ScaleRotateProposal, ShapePriorProposal
 
 jax.config.update("jax_enable_x64", True)
 
@@ -94,9 +94,9 @@ def test_completion_identity_pins_the_linear_form(fit):
     """
     comp = Completion.from_fit(fit)
     x = fit.sample_prior(jax.random.key(0), (3,))
-    theta, c = comp.split(_flat(fit, x))
+    shape, c = comp.split(_flat(fit, x))
     for i in range(3):
-        mean, chol, log_z = comp.conditional(theta[i])
+        mean, chol, log_z = comp.conditional(shape[i])
         diff = chol.T @ (c[i] - mean)
         log_cond = (
             -0.5 * jnp.sum(diff**2)
@@ -111,27 +111,27 @@ def test_completion_identity_pins_the_linear_form(fit):
     assert float(comp.scale_AU) == pytest.approx(10.0 * 0.15, rel=1e-6)
 
 
-def _unscreened(comp, theta, key, n_constants):
+def _unscreened(comp, shape, key, n_pool):
     """The estimator with no screen, every constant scored: ``(z_kept, lw)``.
 
     The completion of a fit with no term left to score must equal it draw for draw.
     """
-    mean, chol, log_z = comp.conditional(theta)
+    mean, chol, log_z = comp.conditional(shape)
     k_draw, k_keep = jax.random.split(key)
-    eps = jax.random.normal(k_draw, (n_constants, 4))
+    eps = jax.random.normal(k_draw, (n_pool, 4))
     c = mean + jax.scipy.linalg.solve_triangular(chol.T, eps.T, lower=False).T
-    z = comp.join(theta, c)
+    z = comp.join(shape, c)
     x, volume = comp.fit_rest.from_flat(z)
     rest = comp.fit_rest.log_density(x) + volume - _log_reference(c, comp.scale_AU)
-    keep = jnp.argmax(rest + jax.random.gumbel(k_keep, (n_constants,)))
-    return z[keep], log_z + jax.scipy.special.logsumexp(rest) - jnp.log(n_constants)
+    keep = jnp.argmax(rest + jax.random.gumbel(k_keep, (n_pool,)))
+    return z[keep], log_z + jax.scipy.special.logsumexp(rest) - jnp.log(n_pool)
 
 
 @pytest.mark.medium(reason="compiles the completed sample once, 15 s cold")
 def test_completed_weight_is_the_generic_weight(fit):
     """Fails if a completed weight or its reported density is not the generic one.
 
-    The log weight of a kept draw is ``log Z + log mean rest - log q(theta)``, and the
+    The log weight of a kept draw is ``log Z + log mean rest - log q(shape)``, and the
     density ``weigh`` reports from the form equals the fit's own density at the draw,
     so the generic importance weight ``fit.log_density + volume - log_q`` and the
     completed estimate agree. With no term left to score the default pool is 8 and the
@@ -140,16 +140,16 @@ def test_completed_weight_is_the_generic_weight(fit):
     astrometry-only path.
     """
     comp = Completion.from_fit(fit)
-    proposal = CompletedProposal(ThetaPrior())
+    proposal = CompletedProposal(ShapePriorProposal())
     z, log_w, log_target = eqx.filter_jit(proposal.weigh)(jax.random.key(0), fit, 32)
     x, _ = fit.from_flat(z)
     np.testing.assert_allclose(log_target, fit.log_density(x), rtol=1e-9)
     k_base, k_c = jax.random.split(jax.random.key(0))
-    theta, log_q_theta = ThetaPrior().sample(k_base, comp, 32)
-    z_c, lw, _ = comp.complete(k_c, theta, 8, 4)
-    np.testing.assert_allclose(log_w, lw - log_q_theta, rtol=1e-9)
+    shape, log_q_shape = ShapePriorProposal().sample(k_base, comp, 32)
+    z_c, lw, _ = comp.complete(k_c, shape, 8, 4)
+    np.testing.assert_allclose(log_w, lw - log_q_shape, rtol=1e-9)
     keys = jax.random.split(k_c, 32)
-    z_ref, lw_ref = jax.vmap(lambda t, k: _unscreened(comp, t, k, 8))(theta, keys)
+    z_ref, lw_ref = jax.vmap(lambda t, k: _unscreened(comp, t, k, 8))(shape, keys)
     np.testing.assert_allclose(lw, lw_ref, rtol=1e-12, atol=0)
     np.testing.assert_allclose(z_c, z_ref, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(z, z_ref, rtol=1e-12, atol=1e-12)
@@ -167,12 +167,12 @@ class _MassTerm(AbstractTerm):
         raise NotImplementedError
 
 
-@pytest.mark.medium(reason="2000 keys at four thetas on one compiled stage, 12 s cold")
+@pytest.mark.medium(reason="2000 keys at four shapes on one compiled stage, 12 s cold")
 def test_the_screened_weight_is_unbiased(fit):
-    """Fails if the screen biases the marginal weight of ``theta``.
+    """Fails if the screen biases the marginal weight of ``shape``.
 
     A term with no linear form (a Gaussian on the star mass, which the constants and
-    the period fix) is left to score. At the four prior thetas with the most live
+    the period fix) is left to score. At the four prior shapes with the most live
     constants, the mean of ``exp(lw)`` over 2000 keys at a pool of 8 with 2 scored
     equals the unscreened estimate (16 keys of 4096 constants) within 4 combined
     standard errors (N = 2000 for a 4 SE near 0.05 of the mean at the weight spread
@@ -180,17 +180,17 @@ def test_the_screened_weight_is_unbiased(fit):
     """
     fit = Fit(fit.model, fit.free, (*fit.terms, _MassTerm()))
     comp = Completion.from_fit(fit)
-    # the four prior thetas whose pools are most alive, and one with a dead pool
-    theta, _ = ThetaPrior().sample(jax.random.key(1), comp, 400)
+    # the four prior shapes whose pools are most alive, and one with a dead pool
+    shape, _ = ShapePriorProposal().sample(jax.random.key(1), comp, 400)
     live = jax.vmap(lambda t: jnp.mean(jnp.isfinite(comp._constants(t, KEY, 64)[2])))(
-        theta
+        shape
     )
     order = np.argsort(-np.asarray(live))
-    theta = theta[np.concatenate([order[:4], order[-1:]])]
+    shape = shape[np.concatenate([order[:4], order[-1:]])]
     keys = jax.random.split(jax.random.key(2), 2000)
-    lw = eqx.filter_jit(jax.vmap(lambda k: comp.complete(k, theta, 8, 2)[1]))(keys)
+    lw = eqx.filter_jit(jax.vmap(lambda k: comp.complete(k, shape, 8, 2)[1]))(keys)
     one = jax.vmap(lambda t, k: _unscreened(comp, t, k, 4096)[1], (0, None))
-    ref = eqx.filter_jit(jax.vmap(one, (None, 0)))(theta, keys[:16])
+    ref = eqx.filter_jit(jax.vmap(one, (None, 0)))(shape, keys[:16])
     lw, ref = np.asarray(lw), np.asarray(ref)
     assert not np.any(np.isnan(lw))
     live = np.isfinite(ref[0])
@@ -219,17 +219,17 @@ class _NanTerm(AbstractTerm):
         raise NotImplementedError
 
 
-@pytest.mark.medium(reason="one small collapsed run on the scoring path, 10 s cold")
+@pytest.mark.medium(reason="one small any_epoch run on the scoring path, 10 s cold")
 def test_a_nan_score_refuses_the_slice(fit):
     """Fails if a NaN term at a live draw is read as a zero weight.
 
     The term is NaN at scattered draws: at this key some scored draws are NaN while
     every kept draw is finite, so only the score can carry the NaN to the weights.
-    The run of ``collapsed`` must be a refused slice (every weight and the evidence
+    The run of ``any_epoch`` must be a refused slice (every weight and the evidence
     NaN), never a finite cloud that dropped the broken draws as zero weights.
     """
     broken = Fit(fit.model, fit.free, (*fit.terms, _NanTerm()))
-    post = run(broken, collapsed(n_round=2**12, n_rounds=2, n_centers=64), KEY)
+    post = run(broken, any_epoch(n_draws=2**12, n_rounds=2, n_centers=64), KEY)
     assert np.all(np.isnan(np.asarray(post.log_weights)))
     assert np.isnan(float(post.log_evidence))
 
@@ -274,7 +274,7 @@ def test_scale_rotate_density_is_normalized_and_matches_the_draws():
     )
     assert 0 < inside.sum() < n
     assert np.all(np.isnan(np.asarray(z)[~inside][:, :3]))
-    draws = few_epoch(n_proposals=n)._run(fit, jax.random.key(0))
+    draws = few_epoch(n_draws=n)._run(fit, jax.random.key(0))
     np.testing.assert_array_equal(np.isneginf(draws.log_weights), ~inside)
     assert np.isfinite(float(draws.log_evidence))
     p_draws = inside.mean()
@@ -288,24 +288,24 @@ def test_scale_rotate_density_is_normalized_and_matches_the_draws():
 
 
 @pytest.mark.medium(reason="both backends and one vmapped run, 21 s cold")
-def test_collapsed_and_few_epoch_agree_and_vmap_equals_the_loop():
+def test_any_epoch_and_few_epoch_agree_and_vmap_equals_the_loop():
     """Fails if the engines disagree on the evidence of one row, or vmap differs.
 
     With one anchor row the scale-and-rotate weights are constant, so ``few_epoch`` is
-    exact; ``collapsed`` must agree within 4 combined SE. The log weights of the
+    exact; ``any_epoch`` must agree within 4 combined SE. The log weights of the
     completed run over three worlds under ``filter_vmap`` equal the per-world loop at
     rtol 1e-9 (shared key). The third world has no valid row, so no data scale: its
     slice is refused (NaN weights) in both, and the other two keep live weights.
     """
     fit = _fit(_term(n_rows=1))
-    exact = few_epoch(n_proposals=2**12)._run(fit, jax.random.key(0))
-    adaptive = collapsed(n_round=2**12, n_rounds=2, n_centers=64)._run(
+    exact = few_epoch(n_draws=2**12)._run(fit, jax.random.key(0))
+    adaptive = any_epoch(n_draws=2**12, n_rounds=2, n_centers=64)._run(
         fit, jax.random.key(0)
     )
     gap = abs(float(exact.log_evidence) - float(adaptive.log_evidence))
     assert gap < 4 * float(adaptive.log_evidence_se) + 1e-6
 
-    imp = Importance(CompletedProposal(ThetaPrior()), 256)
+    imp = Importance(CompletedProposal(ShapePriorProposal()), 256)
     empty = eqx.tree_at(lambda t: t.data.is_valid, _term(), jnp.zeros(4, bool))
     fits = [_fit(_term(shift=0.0)), _fit(_term(shift=0.01)), _fit(empty)]
     dyn, static = eqx.partition(fits, eqx.is_array)

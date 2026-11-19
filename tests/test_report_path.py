@@ -1,4 +1,4 @@
-"""The report path of the collapsed engine: a free planet radius and ``ReportTerm``.
+"""The report path of the general orbit engine: a free planet radius and ``ReportTerm``.
 
 One report fit is shared: a Thiele-Innes block on a one-planet Lambertian scene, the
 planet radius free (the photometric leaf), two relative astrometry rows, and a report of
@@ -33,7 +33,7 @@ from photomancy import (
 from photomancy.infer import Fit, Importance
 from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
 from photomancy.orbit.completion import CompletedProposal, Completion
-from photomancy.orbit.proposals import ScaleRotateProposal, ThetaPrior
+from photomancy.orbit.proposals import ScaleRotateProposal, ShapePriorProposal
 from photomancy.orbit.sheets import SheetSum
 
 jax.config.update("jax_enable_x64", True)
@@ -212,11 +212,11 @@ def test_unproposed_free_entries_are_refused_by_name():
 
 @pytest.mark.medium(reason="compiles one screened completion on the report fit, 15 s")
 def test_a_pool_with_no_live_constant_weighs_zero_without_nan(fit):
-    """Fails if a ``theta`` whose pool lies outside the prior gets a weight or a NaN.
+    """Fails if a ``shape`` whose pool lies outside the prior gets a weight or a NaN.
 
     At a 4,900 d period the constants that fit the two rows imply a star mass far
     below the law's window, so no pool member is live: the weight is ``-inf`` and the
-    kept draw and its density are free of NaN. A ``theta`` at the true period beside it
+    kept draw and its density are free of NaN. A ``shape`` at the true period beside it
     keeps a finite weight, so the guard cannot pass by killing everything.
     """
     comp = Completion.from_fit(fit)
@@ -227,8 +227,8 @@ def test_a_pool_with_no_live_constant_weighs_zero_without_nan(fit):
             [np.log(2 * np.pi / 372.0), 0.05, 0.05, 0.0, 0.0, 0.0, 0.0],
         ]
     )
-    theta = block.chart.unconstrain(x, block.chart_support(model))[:, :3]
-    z, lw, log_density = eqx.filter_jit(comp.complete)(jax.random.key(0), theta, 32, 4)
+    shape = block.chart.unconstrain(x, block.chart_support(model))[:, :3]
+    z, lw, log_density = eqx.filter_jit(comp.complete)(jax.random.key(0), shape, 32, 4)
     assert float(lw[0]) == -np.inf
     assert np.isfinite(float(lw[1]))
     assert not np.any(np.isnan(np.asarray(z)))
@@ -243,7 +243,7 @@ def test_the_report_run_under_vmap_equals_the_loop():
     screened stage, leaves and both sheets) under ``filter_vmap`` equals the loop at
     rtol 1e-9 with a shared key.
     """
-    imp = Importance(CompletedProposal(ThetaPrior()), 64)
+    imp = Importance(CompletedProposal(ShapePriorProposal()), 64)
     fits = [build_fit(report_term(rows(REP_COUNTS * s))) for s in (1.0, 0.9)]
     dyn, static = eqx.partition(fits, eqx.is_array)
     stacked = jax.tree.map(lambda *a: jnp.stack(a), *dyn)
@@ -252,7 +252,7 @@ def test_the_report_run_under_vmap_equals_the_loop():
         lambda d: imp._run(eqx.combine(d, static[0]), key).log_weights
     )(stacked)
     loop = jnp.stack([imp._run(f, key).log_weights for f in fits])
-    # most prior thetas have no live constant; enough keep a weight to compare
+    # most prior shapes have no live constant; enough keep a weight to compare
     assert np.sum(np.isfinite(np.asarray(loop))) >= 8
     np.testing.assert_allclose(batched, loop, rtol=1e-9)
 

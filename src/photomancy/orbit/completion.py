@@ -1,29 +1,29 @@
 """Completion of the four sky constants of a Thiele-Innes orbit fit.
 
 Relative astrometry is exactly Gaussian in the four sky constants ``c = (A, B, F, G)``
-of one orbit row at fixed nonlinear shape ``theta`` (``ln n`` and the eccentricity
-plane of the block). A completed proposal draws ``theta`` from a base proposal and the
+of one orbit row at a fixed nonlinear orbit shape (``ln n`` and the eccentricity plane
+of the block). A completed proposal draws ``shape`` from a base proposal and the
 constants from their Gaussian conditional, which removes four of the seven orbit
 dimensions from the search.
 
-``Completion`` splits the flat vector three ways: ``theta``, the constants, and the
+``Completion`` splits the flat vector three ways: ``shape``, the constants, and the
 conditional leaves (a free leaf that a term proposes, an
 :class:`~photomancy.infer.AbstractConditionalTerm` such as the report term's planet
 radius). It holds the fit without the linear terms and the reference scale, and answers
-:meth:`Completion.conditional`. ``CompletedProposal`` turns a proposal over ``theta``
+:meth:`Completion.conditional`. ``CompletedProposal`` turns a proposal over ``shape``
 into a properly weighted proposal over the whole vector (it has no density; the class
-states the estimator). The base proposal over ``theta`` is
-:class:`~photomancy.orbit.proposals.ThetaPrior`, the block's own law, or a refit of it.
+states the estimator). The base proposal over ``shape`` is the block's own law,
+:class:`~photomancy.orbit.proposals.ShapePriorProposal`, or a refit of it.
 
 With ``g = N(0, scale_AU^2 I)`` the reference prior of the constants and
-``f = fit_rest.density * volume / g``, the fit density at ``(theta, c, t)`` is
-``f * Z(theta) * N(c | m, P^-1)``, so the mean of ``f`` over constants drawn from
+``f = fit_rest.density * volume / g``, the fit density at ``(shape, c, t)`` is
+``f * Z(shape) * N(c | m, P^-1)``, so the mean of ``f`` over constants drawn from
 ``N(m, P^-1)`` (and leaves drawn from their proposal, over its density) estimates the
-marginal density of ``theta`` without bias. The constants are drawn as a pool screened
+marginal density of ``shape`` without bias. The constants are drawn as a pool screened
 by the prior of the fit alone, which costs no term evaluation, and only a few of them,
 resampled by the screen, are scored by the terms.
 
-A proposed leaf comes from ``q(t | theta, c)``, the term's record (a Gaussian mixture,
+A proposed leaf comes from ``q(t | shape, c)``, the term's record (a Gaussian mixture,
 each component widened by ``leaf_widen`` and truncated to the leaf law's support, mixed
 with a uniform share ``leaf_uniform`` of that support, all of it when the term has no
 peak). The record is approximate, so the score carries the exact fit density over the
@@ -93,11 +93,11 @@ class Completion(eqx.Module):
     """The three-way split of a Thiele-Innes fit and the proposal stages it completes.
 
     Build it with :meth:`from_fit`. Every entry of the flat unconstrained vector is in
-    exactly one of three groups: ``theta``, the orbit coordinates of the block that a
-    proposal over ``theta`` covers (``ln n`` and the eccentricity plane); the four sky
+    exactly one of three groups: ``shape``, the orbit coordinates of the block that a
+    proposal over ``shape`` covers (``ln n`` and the eccentricity plane); the four sky
     constants, completed from the linear form; and the conditional leaves, each drawn
     from the record of the term that proposes it. A completion is also what a proposal
-    over ``theta`` is given in place of the fit: it answers ``periods()``, ``block``
+    over ``shape`` is given in place of the fit: it answers ``periods()``, ``block``
     and ``model``.
 
     Attributes:
@@ -105,9 +105,9 @@ class Completion(eqx.Module):
         terms: The linear terms (``AbstractLinearTerm``) whose forms are concatenated.
         scale_AU: Standard deviation of the reference Gaussian on the constants.
         block_key: Key of the block in ``fit.free``.
-        theta_idx: Flat indices of ``theta``.
-        c_idx: Flat indices of the constants, in the order ``A, B, F, G``.
-        theta_periods: Period of each ``theta`` entry (``None`` if none).
+        shape_idx: Flat indices of ``shape``.
+        constants_idx: Flat indices of the constants, in the order ``A, B, F, G``.
+        shape_periods: Period of each ``shape`` entry (``None`` if none).
         dim: Length of the flat vector.
         leaf_terms: Indices in ``fit_rest.terms`` of the terms that propose a free
             leaf (an :class:`AbstractConditionalTerm` whose ``leaf_path`` is free).
@@ -121,9 +121,9 @@ class Completion(eqx.Module):
     terms: tuple[AbstractLinearTerm, ...]
     scale_AU: jax.Array
     block_key: str = eqx.field(static=True)
-    theta_idx: tuple = eqx.field(static=True)
-    c_idx: tuple = eqx.field(static=True)
-    theta_periods: tuple = eqx.field(static=True)
+    shape_idx: tuple = eqx.field(static=True)
+    constants_idx: tuple = eqx.field(static=True)
+    shape_periods: tuple = eqx.field(static=True)
     dim: int = eqx.field(static=True)
     leaf_terms: tuple = eqx.field(static=True, default=())
     leaf_paths: tuple = eqx.field(static=True, default=())
@@ -164,17 +164,14 @@ class Completion(eqx.Module):
                     f"term system_path {term.system_path!r} does not resolve to the "
                     f"system {block.system!r} of the orbit block {key!r}"
                 )
-        rest = Fit(
-            fit.model,
-            fit.free,
-            tuple(t for t in fit.terms if not isinstance(t, AbstractLinearTerm)),
-        )
+        rest = tuple(t for t in fit.terms if not isinstance(t, AbstractLinearTerm))
+        rest = Fit(fit.model, fit.free, rest)
         names, sizes = _flat_layout(fit)
         edges = np.concatenate([[0], np.cumsum(sizes)])
         missing = [c for c in CONSTANTS if (key, c) not in names]
         if missing:
             raise ValueError(f"the block does not expose the constants {missing}")
-        c_idx = tuple(int(edges[names.index((key, c))]) for c in CONSTANTS)
+        constants_idx = tuple(int(edges[names.index((key, c))]) for c in CONSTANTS)
         leaf_terms, leaf_paths, leaf_idx = [], [], []
         for i, term in enumerate(rest.terms):
             path = term.leaf_path if isinstance(term, AbstractConditionalTerm) else None
@@ -188,10 +185,10 @@ class Completion(eqx.Module):
             leaf_terms.append(i)
             leaf_paths.append(path)
             leaf_idx.append(int(edges[at]))
-        theta_idx, orphans = [], []
+        shape_idx, orphans = [], []
         for (owner, name), at, size in zip(names, edges[:-1], sizes, strict=True):
             if owner == key and name not in CONSTANTS:
-                theta_idx.extend(range(int(at), int(at) + size))
+                shape_idx.extend(range(int(at), int(at) + size))
             elif owner != key and owner not in leaf_paths:
                 orphans.append(owner)
         if orphans:
@@ -200,16 +197,16 @@ class Completion(eqx.Module):
                 f"of the block {key!r} nor leaves a term proposes "
                 "(AbstractConditionalTerm.leaf_path); a completion cannot draw them"
             )
-        theta_idx, periods = tuple(theta_idx), fit.periods()
+        shape_idx, periods = tuple(shape_idx), fit.periods()
         scale = _data_scale_AU(linear, target) if scale_AU is None else scale_AU
         return cls(
             fit_rest=rest,
             terms=linear,
             scale_AU=jnp.asarray(scale),
             block_key=key,
-            theta_idx=theta_idx,
-            c_idx=c_idx,
-            theta_periods=tuple(periods[i] for i in theta_idx),
+            shape_idx=shape_idx,
+            constants_idx=constants_idx,
+            shape_periods=tuple(periods[i] for i in shape_idx),
             dim=int(edges[-1]),
             leaf_terms=tuple(leaf_terms),
             leaf_paths=tuple(leaf_paths),
@@ -229,25 +226,26 @@ class Completion(eqx.Module):
         return self.fit_rest.model
 
     def periods(self):
-        """Periods of the ``theta`` entries (what a proposal over ``theta`` reads)."""
-        return self.theta_periods
+        """Periods of the ``shape`` entries (what a proposal over ``shape`` reads)."""
+        return self.shape_periods
 
     def split(self, z):
-        """Return ``(theta, constants)`` of flat vectors ``z (..., d)``.
+        """Return ``(shape, constants)`` of flat vectors ``z (..., d)``.
 
         The proposed leaves belong to neither.
         """
-        return z[..., jnp.asarray(self.theta_idx)], z[..., jnp.asarray(self.c_idx)]
+        idx = jnp.asarray(self.shape_idx), jnp.asarray(self.constants_idx)
+        return z[..., idx[0]], z[..., idx[1]]
 
-    def join(self, theta, constants):
-        """Flat vectors from ``theta (..., dt)`` and ``constants (..., 4)``.
+    def join(self, shape, constants):
+        """Flat vectors from ``shape (..., dt)`` and ``constants (..., 4)``.
 
         The proposed leaves are zero (a valid real value of any leaf law).
         """
-        batch = jnp.broadcast_shapes(theta.shape[:-1], constants.shape[:-1])
+        batch = jnp.broadcast_shapes(shape.shape[:-1], constants.shape[:-1])
         z = jnp.zeros((*batch, self.dim))
-        z = z.at[..., jnp.asarray(self.theta_idx)].set(theta)
-        return z.at[..., jnp.asarray(self.c_idx)].set(constants)
+        z = z.at[..., jnp.asarray(self.shape_idx)].set(shape)
+        return z.at[..., jnp.asarray(self.constants_idx)].set(constants)
 
     def _draw_leaves(self, key, z):
         """Draw the proposed leaves of ``z (n, d)``; return ``(z, log_q)``.
@@ -279,9 +277,9 @@ class Completion(eqx.Module):
             z = z.at[:, index].set(real[:, 0])
         return z, log_q
 
-    def _form(self, theta):
-        """The concatenated linear form at the orbit shape of ``theta``."""
-        z0 = self.join(theta, jnp.asarray(_PLACEHOLDER))
+    def _form(self, shape):
+        """The concatenated linear form at the orbit shape ``shape``."""
+        z0 = self.join(shape, jnp.asarray(_PLACEHOLDER))
         x, _ = self.fit_rest.from_flat(z0[None])
         model = self.fit_rest.model_at(jax.tree.map(lambda a: a[0], x))
         row = self.block.rows[0]
@@ -290,8 +288,8 @@ class Completion(eqx.Module):
             *(jnp.concatenate([getattr(f, n) for f in forms]) for n in _FIELDS)
         )
 
-    def conditional(self, theta):
-        """Gaussian conditional of the constants given one ``theta (dt,)``.
+    def conditional(self, shape):
+        """Gaussian conditional of the constants given one ``shape (dt,)``.
 
         Returns:
             ``(mean (4,), chol (4, 4), log_marginal)``: ``chol`` is the lower Cholesky
@@ -299,48 +297,46 @@ class Completion(eqx.Module):
             and ``log_marginal`` the density of the data with the constants integrated
             out against ``N(0, scale_AU^2 I)``, in the units of the data.
         """
-        form = self._form(theta)
+        form = self._form(shape)
         return linear_gaussian_conditional(
             form.design, form.target, form.precision, 1.0 / self.scale_AU**2
         )
 
-    def _constants(self, theta, key, n_constants):
-        """Pool of constants at one ``theta``.
+    def _constants(self, shape, key, n_pool):
+        """Pool of constants at one ``shape``.
 
         Returns ``(c, z, log_s, log_z, mean, chol, volume)``. ``log_s`` is the screen:
         the prior of the fit alone (every proposed leaf at its placeholder, no term
         evaluated) plus the volume over the reference Gaussian, ``-inf`` wherever it is
         not finite; ``volume`` is the log volume of each pool member's map.
         """
-        mean, chol, log_z = self.conditional(theta)
-        eps = jax.random.normal(key, (n_constants, 4))
+        mean, chol, log_z = self.conditional(shape)
+        eps = jax.random.normal(key, (n_pool, 4))
         c = mean + solve_triangular(chol.T, eps.T, lower=False).T
-        z = self.join(theta, c)
+        z = self.join(shape, c)
         x, volume = self.fit_rest.from_flat(z)
         log_s = self.fit_rest.log_prior(x) + volume - _log_reference(c, self.scale_AU)
         log_s = jnp.where(jnp.isfinite(log_s), log_s, -jnp.inf)
         return c, z, log_s, log_z, mean, chol, volume
 
-    def _one(self, theta, key, n_constants, n_scored):
-        """Weight and kept draw of one ``theta``: ``(z_kept, lw, log_target_kept)``.
+    def _one(self, shape, key, n_pool, n_scored):
+        """Weight and kept draw of one ``shape``: ``(z_kept, lw, log_target_kept)``.
 
-        The pool of ``n_constants`` constants is screened by the prior; ``n_scored`` of
+        The pool of ``n_pool`` constants is screened by the prior; ``n_scored`` of
         them, resampled systematically by the screen, get their leaves drawn and the
         terms evaluated (see :class:`CompletedProposal`). With no term left to score
         the screen is the whole density and nothing is resampled.
         """
         k_draw, k_keep = jax.random.split(key)
-        c, z, log_s, log_z, mean, chol, volume = self._constants(
-            theta, k_draw, n_constants
-        )
+        c, z, log_s, log_z, mean, chol, volume = self._constants(shape, k_draw, n_pool)
         total = logsumexp(log_s)
-        lw = log_z + total - jnp.log(n_constants)
+        lw = log_z + total - jnp.log(n_pool)
         if not self.fit_rest.terms:
-            keep = jnp.argmax(log_s + jax.random.gumbel(k_keep, (n_constants,)))
+            keep = jnp.argmax(log_s + jax.random.gumbel(k_keep, (n_pool,)))
             log_form = log_z + _log_conditional(c[keep], mean, chol)
             return z[keep], lw, log_form + log_s[keep] - volume[keep]
         alive = jnp.isfinite(total)
-        normalized = jnp.where(alive, log_s - total, -jnp.log(n_constants))
+        normalized = jnp.where(alive, log_s - total, -jnp.log(n_pool))
         idx = systematic_indices(jax.random.fold_in(key, 2), normalized, n_scored)
         c, z = c[idx], z[idx]
         log_q_leaf = jnp.zeros(n_scored)
@@ -358,18 +354,18 @@ class Completion(eqx.Module):
         log_target = jnp.where(alive, log_form + target[keep] - volume[keep], -jnp.inf)
         return z[keep], lw, log_target
 
-    def complete(self, key, theta, n_constants, n_scored):
-        """Complete ``theta (n, dt)``: return ``(z (n, d), lw (n,), log_target (n,))``.
+    def complete(self, key, shapes, n_pool, n_scored):
+        """Complete ``shapes (n, dt)``: return ``(z (n, d), lw (n,), log_target (n,))``.
 
-        ``lw`` is the log marginal weight of each ``theta``; ``log_target`` is
+        ``lw`` is the log marginal weight of each shape; ``log_target`` is
         ``fit.log_density`` at the kept draw, from the form, and ``-inf`` where ``lw``
         is. ``n_scored`` is not read when the fit has no term left to score.
         """
-        keys = jax.random.split(key, theta.shape[0])
+        keys = jax.random.split(key, shapes.shape[0])
         return jax.lax.map(
-            lambda a: self._one(*a, n_constants, n_scored),
-            (theta, keys),
-            batch_size=min(_BATCH, theta.shape[0]),
+            lambda a: self._one(*a, n_pool, n_scored),
+            (shapes, keys),
+            batch_size=min(_BATCH, shapes.shape[0]),
         )
 
 
@@ -408,48 +404,50 @@ def _data_scale_AU(terms, system):
 
 
 class CompletedProposal(AbstractProposal):
-    """Draw ``theta`` from ``base`` and complete the constants and the proposed leaves.
+    """Draw ``shape`` from ``base`` and complete the constants and the proposed leaves.
 
-    At one ``theta``, with ``Z``, ``m`` and ``P`` the marginal and the conditional of
+    A collapsed, or Rao-Blackwellized, proposal: the linear constants are drawn from
+    their exact conditional, so the search is over the orbit shape alone.
+    At one ``shape``, with ``Z``, ``m`` and ``P`` the marginal and the conditional of
     the linear form and ``g`` the reference Gaussian of the constants:
 
-    1. a pool ``c_1 .. c_M`` (``M = n_constants``) is drawn from ``N(m, P^-1)``;
-    2. the screen ``s_j = prior(theta, c_j) * volume / g(c_j)`` is the prior of the fit
+    1. a pool ``c_1 .. c_M`` (``M = n_pool``) is drawn from ``N(m, P^-1)``;
+    2. the screen ``s_j = prior(shape, c_j) * volume / g(c_j)`` is the prior of the fit
        alone, every proposed leaf at its placeholder, and no term is evaluated;
        ``S = sum_j s_j``;
     3. ``K = n_scored`` indices ``I_k`` are resampled systematically on ``s``;
     4. each gets its leaves ``t_k`` from the proposing terms' records
-       ``q(t | theta, c_{I_k})`` and the score
-       ``r_k = f(theta, c_{I_k}, t_k) / (q(t_k) * s_{I_k})``, with ``f`` the density of
+       ``q(t | shape, c_{I_k})`` and the score
+       ``r_k = f(shape, c_{I_k}, t_k) / (q(t_k) * s_{I_k})``, with ``f`` the density of
        the fit without its linear terms, times the volume, over ``g``;
     5. the weight is ``W = Z * (S / M) * mean_k r_k`` and one ``k`` is kept with
        probability proportional to ``r_k``.
 
     Systematic resampling gives pool member ``j`` an expected count ``K s_j / S``, so
     ``E[W | pool] = Z * mean_j F(c_j)`` with ``F(c)`` the integral of ``f`` over the
-    leaves: ``W`` is an unbiased estimate of the marginal density of ``theta`` and the
+    leaves: ``W`` is an unbiased estimate of the marginal density of ``shape`` and the
     kept draw with weight ``W`` is properly weighted. The screen and the leaf records
     are proposals, never targets: they change the variance of the weights, never their
-    mean, and need only be positive wherever ``f`` is. A ``theta`` whose pool has no
+    mean, and need only be positive wherever ``f`` is. A ``shape`` whose pool has no
     draw inside the prior gets ``W = 0`` (``-inf``). A NaN score (a NaN term or record
     at a live draw) is an error, not a zero: it reaches ``W``, and the importance
     backend returns a NaN slice. With no term left to score,
     ``r_k = 1``: ``W = Z * S / M`` and the kept draw is picked on ``s``.
 
     ``weigh`` returns the flat vector of the kept draw, the log weight
-    ``log W - log q(theta)`` and the fit's density at the kept draw from the form. No
+    ``log W - log q(shape)`` and the fit's density at the kept draw from the form. No
     density exists at ``z`` (it is not an ``AbstractDensityProposal``):
     ``AdaptiveImportance`` refits on the weights of the fit's own density and the refit
-    is over ``theta`` only.
+    is over ``shape`` only.
 
     Attributes:
-        base: Proposal over ``theta`` (it is given the :class:`Completion`, which
-            answers ``periods()``, ``block`` and ``model``); :class:`ThetaPrior` or a
-            refit of it.
-        n_constants: Size of the pool of constants per ``theta``; ``None`` takes 8
+        base: Proposal over ``shape`` (it is given the :class:`Completion`, which
+            answers ``periods()``, ``block`` and ``model``); a
+            :class:`ShapePriorProposal` or a refit of it.
+        n_pool: Size of the pool of constants per ``shape``; ``None`` takes 8
             when the fit has no term left to score and 32 otherwise.
         n_scored: Pool members, resampled by the screen, that get leaf draws and term
-            evaluations per ``theta``; not read when no term is left to score.
+            evaluations per ``shape``; not read when no term is left to score.
         scale_AU: Scale of the reference Gaussian on the constants; ``None`` takes the
             largest projected separation of the valid rows (see
             :meth:`Completion.from_fit`).
@@ -459,7 +457,7 @@ class CompletedProposal(AbstractProposal):
     """
 
     base: AbstractDensityProposal
-    n_constants: int | None = eqx.field(static=True, default=None, kw_only=True)
+    n_pool: int | None = eqx.field(static=True, default=None, kw_only=True)
     n_scored: int = eqx.field(static=True, default=4, kw_only=True)
     scale_AU: jax.Array | None = eqx.field(
         default=None,
@@ -483,23 +481,23 @@ class CompletedProposal(AbstractProposal):
         The completion evaluates in its own batches, so ``batch_size`` is not read.
         """
         completion = self._completion(fit)
-        n_constants = self.n_constants
-        if n_constants is None:
-            n_constants = 32 if completion.fit_rest.terms else 8
+        n_pool = self.n_pool
+        if n_pool is None:
+            n_pool = 32 if completion.fit_rest.terms else 8
         k_base, k_c = jax.random.split(key)
-        theta, log_q = self.base.sample(k_base, completion, n)
-        z, lw, log_target = completion.complete(k_c, theta, n_constants, self.n_scored)
+        shapes, log_q = self.base.sample(k_base, completion, n)
+        z, lw, log_target = completion.complete(k_c, shapes, n_pool, self.n_scored)
         # a world with no valid astrometric row has no scale: refuse its slice
         lw = jnp.where(jnp.isnan(completion.scale_AU), jnp.nan, lw)
         return z, lw - log_q, log_target
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
-        """Refit the base over ``theta`` of the weighted cloud."""
+        """Refit the base over the orbit shapes of the weighted cloud."""
         completion = self._completion(fit)
-        theta, _ = completion.split(z)
+        shapes, _ = completion.split(z)
         base = self.base.adapt(
             key,
-            theta,
+            shapes,
             log_weights,
             completion,
             n_centers=n_centers,
