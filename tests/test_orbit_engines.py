@@ -5,6 +5,8 @@ shared by every test; the structures compiled are the completed sample, the vmap
 completed run and the two backends.
 """
 
+from typing import ClassVar
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -17,7 +19,7 @@ from orbix.system.core import Body, SkyFrame
 from priorities import LogUniform, Uniform
 from skyscapes.population import kipping_eccentricity
 
-from photomancy.infer import Fit, Importance
+from photomancy.infer import AbstractTerm, Fit, Importance
 from photomancy.infer.backends._flat import draw_template
 from photomancy.measurements import RelativeAstromData, RelativeAstrometryTerm
 from photomancy.orbit.backends import collapsed, few_epoch
@@ -32,6 +34,7 @@ from photomancy.orbit.proposals import ScaleRotateProposal
 jax.config.update("jax_enable_x64", True)
 
 TIMES = np.array([31.0, 120.0, 290.0, 470.0])
+KEY = jax.random.key(0)
 
 
 def _system():
@@ -110,12 +113,33 @@ def test_completion_identity_pins_the_linear_form(fit):
     assert float(comp.scale_AU) == pytest.approx(10.0 * 0.15, rel=1e-6)
 
 
+def _unscreened(comp, theta, key, n_constants):
+    """The estimator with no screen, every constant scored: ``(z_kept, lw)``.
+
+    The completion of a fit with no term left to score must equal it draw for draw.
+    """
+    mean, chol, log_z = comp.conditional(theta)
+    k_draw, k_keep = jax.random.split(key)
+    eps = jax.random.normal(k_draw, (n_constants, 4))
+    c = mean + jax.scipy.linalg.solve_triangular(chol.T, eps.T, lower=False).T
+    z = comp.join(theta, c)
+    _, unravel = ravel_pytree(comp.fit_rest.to_real(draw_template(comp.fit_rest)))
+    x, volume = comp.fit_rest.from_real(jax.vmap(unravel)(z))
+    rest = comp.fit_rest.log_density(x) + volume - _log_reference(c, comp.scale_AU)
+    keep = jnp.argmax(rest + jax.random.gumbel(k_keep, (n_constants,)))
+    return z[keep], log_z + jax.scipy.special.logsumexp(rest) - jnp.log(n_constants)
+
+
 @pytest.mark.medium(reason="compiles the completed sample once, 15 s cold")
 def test_completed_weight_is_the_generic_weight(fit):
     """Fails if ``log_q`` of a completed draw is not the one that gives its weight.
 
     ``fit.log_density - log_q`` of the kept draw equals ``log Z + log mean rest -
     log q(theta)``, so the generic importance path and the completed estimate agree.
+    With no term left to score the default pool is 8 and the completion is the
+    unscreened estimator draw for draw (same key): weights and kept draws to 1e-12
+    (compiled against eager rounding), so the screen cannot change the astrometry-only
+    path.
     """
     comp = Completion.from_fit(fit)
     proposal = CompletedProposal(ThetaPrior())
@@ -124,9 +148,65 @@ def test_completed_weight_is_the_generic_weight(fit):
     x, _ = fit.from_real(jax.vmap(unravel)(z))
     generic = fit.log_density(x) - log_q
     k_base, k_c = jax.random.split(jax.random.key(0))
-    theta, log_q_theta = ThetaPrior().sample(k_base, comp.view, 32)
-    _, lw, _ = comp.complete(k_c, theta, 8)
+    theta, log_q_theta = ThetaPrior().sample(k_base, comp, 32)
+    z_c, lw, _ = comp.complete(k_c, theta, 8, 4)
     np.testing.assert_allclose(generic, lw - log_q_theta, rtol=1e-9)
+    keys = jax.random.split(k_c, 32)
+    z_ref, lw_ref = jax.vmap(lambda t, k: _unscreened(comp, t, k, 8))(theta, keys)
+    np.testing.assert_allclose(lw, lw_ref, rtol=1e-12, atol=0)
+    np.testing.assert_allclose(z_c, z_ref, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(z, z_ref, rtol=1e-12, atol=1e-12)
+
+
+class _MassTerm(AbstractTerm):
+    """A Gaussian on the star mass: no linear form, so the completion screens for it."""
+
+    reads: ClassVar[tuple[str, ...]] = ()
+
+    def __call__(self, model):
+        return -0.5 * ((model.star.mass_Msun - 1.02) / 0.03) ** 2
+
+    def draw(self, key, model):
+        raise NotImplementedError
+
+
+@pytest.mark.medium(reason="2000 keys at four thetas on one compiled stage, 12 s cold")
+def test_the_screened_weight_is_unbiased(fit):
+    """Fails if the screen biases the marginal weight of ``theta``.
+
+    A term with no linear form (a Gaussian on the star mass, which the constants and
+    the period fix) is left to score. At the four prior thetas with the most live
+    constants, the mean of ``exp(lw)`` over 2000 keys at a pool of 8 with 2 scored
+    equals the unscreened estimate (16 keys of 4096 constants) within 4 combined
+    standard errors (N = 2000 for a 4 SE near 0.05 of the mean at the weight spread
+    here). A pool with no live member weighs zero, never NaN.
+    """
+    fit = Fit(fit.model, fit.free, (*fit.terms, _MassTerm()))
+    comp = Completion.from_fit(fit)
+    # the four prior thetas whose pools are most alive, and one with a dead pool
+    theta, _ = ThetaPrior().sample(jax.random.key(1), comp, 400)
+    live = jax.vmap(lambda t: jnp.mean(jnp.isfinite(comp._constants(t, KEY, 64)[2])))(
+        theta
+    )
+    order = np.argsort(-np.asarray(live))
+    theta = theta[np.concatenate([order[:4], order[-1:]])]
+    keys = jax.random.split(jax.random.key(2), 2000)
+    lw = eqx.filter_jit(jax.vmap(lambda k: comp.complete(k, theta, 8, 2)[1]))(keys)
+    one = jax.vmap(lambda t, k: _unscreened(comp, t, k, 4096)[1], (0, None))
+    ref = eqx.filter_jit(jax.vmap(one, (None, 0)))(theta, keys[:16])
+    lw, ref = np.asarray(lw), np.asarray(ref)
+    assert not np.any(np.isnan(lw))
+    live = np.isfinite(ref[0])
+    assert live.sum() == 4
+    assert np.all(np.isneginf(lw[:, ~live]))
+    top = ref[:, live].max(0)
+    w_ref = np.exp(ref[:, live] - top)
+    ratio = np.exp(lw[:, live] - top) / w_ref.mean(0)
+    se = np.hypot(
+        ratio.std(0, ddof=1) / np.sqrt(len(keys)),
+        w_ref.std(0, ddof=1) / np.sqrt(len(w_ref)) / w_ref.mean(0),
+    )
+    assert np.all(np.abs(ratio.mean(0) - 1.0) < 4.0 * se)
 
 
 def test_completion_refuses_a_term_on_another_system():
