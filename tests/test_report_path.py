@@ -2,8 +2,9 @@
 
 One report fit is shared: a Thiele-Innes block on a one-planet Lambertian scene, the
 planet radius free (the photometric leaf), two relative astrometry rows, and a report of
-two detections and a null with two padded rows, its leaf proposal and two-sheet sum on.
-The compiled structures are the fit density, one completion and the vmapped run.
+two detections and a null with two padded rows, its leaf proposal on, inside a
+``SheetSum`` of the orbit row. The compiled structures are the fit density, one
+completion and the vmapped run.
 """
 
 import json
@@ -35,6 +36,7 @@ from photomancy.infer.backends._flat import draw_template
 from photomancy.measurements import RelativeAstromData, RelativeAstrometryTerm
 from photomancy.orbit.completion import CompletedProposal, Completion, ThetaPrior
 from photomancy.orbit.proposals import ScaleRotateProposal
+from photomancy.orbit.sheets import SheetSum
 
 jax.config.update("jax_enable_x64", True)
 
@@ -127,20 +129,27 @@ def rows(
     )
 
 
-def report_term(report_rows=None, *, leaf=LEAF, sheets=True, leaf_exponent=2.0):
-    """The report term, with the leaf proposal and the two-sheet sum on by default."""
+def report_term(report_rows=None, *, leaf=LEAF, leaf_exponent=2.0):
+    """The report term, with the leaf proposal on by default."""
     return ReportTerm(
         ReportLaw(threshold=THRESHOLD),
         rows() if report_rows is None else report_rows,
         TabulatedReportPredictor(table(), 0),
         leaf_path=leaf,
-        orbit_path=ORBITS if sheets else None,
         leaf_exponent=leaf_exponent,
     )
 
 
+def sheet_sum(term):
+    """``term`` summed over the two sheets of the orbit row."""
+    return SheetSum((term,), ORBITS, 0)
+
+
 def build_fit(term=None):
-    """Orbit block, free radius (log uniform over a factor 3), astrometry and report."""
+    """Orbit block, free radius (log uniform over a factor 3), astrometry and report.
+
+    The report term is held in the ``SheetSum`` of the orbit row.
+    """
     law = OrbitLaw(
         period_d=LogUniform(50.0, 5000.0), eccentricity=kipping_eccentricity(0.9)
     )
@@ -160,7 +169,7 @@ def build_fit(term=None):
         LEAF: LogUniform(float(np.exp(-0.5625)), float(np.exp(0.5625))),
     }
     term = report_term() if term is None else term
-    return Fit(scene(), free, (RelativeAstrometryTerm(records), term))
+    return Fit(scene(), free, (RelativeAstrometryTerm(records), sheet_sum(term)))
 
 
 @pytest.fixture(scope="module")
@@ -190,13 +199,17 @@ def test_unproposed_free_entries_are_refused_by_name():
     """Fails if a free leaf no term proposes is drawn, or few_epoch takes a free leaf.
 
     A completion has no way to draw such a leaf, and scale-and-rotate draws only the
-    orbit block; both refusals name the leaf.
+    orbit block; both refusals name the leaf. Fails also if a second ``SheetSum`` over
+    the orbit row is accepted (a product of two sheet sums); the refusal names the
+    sheet.
     """
     bare = build_fit(report_term(leaf=None))
     with pytest.raises(ValueError, match=r"planets\[0\]\.Rp_Rearth"):
         Completion.from_fit(bare)
     with pytest.raises(ValueError, match=r"planets\[0\]\.Rp_Rearth"):
         ScaleRotateProposal().sample(jax.random.key(0), build_fit(), 4)
+    with pytest.raises(ValueError, match=r"dynamics\.orbits\[0\]\.sheet"):
+        bare.append(sheet_sum(report_term(leaf=None)))
 
 
 @pytest.mark.medium(reason="compiles one screened completion on the report fit, 15 s")
@@ -267,7 +280,7 @@ def _scores(fit, both, one, z, astro=None):
         x, _ = fit.from_real(unravel(zi))
         model = fit.model_at(x)
         record = both.leaf_conditional(model)
-        pair = (model, both._reflected(model))
+        pair = (model, both.reflected(model))
         sheets = jnp.stack(
             [one(m) + (0.0 if astro is None else astro(m)) for m in pair]
         )
@@ -279,7 +292,7 @@ def _scores(fit, both, one, z, astro=None):
 @pytest.mark.medium(reason="one compiled scorer for three reports at six draws, 9 s")
 @pytest.mark.parametrize("name", list(REPORTS))
 def test_report_term_matches_the_stored_golden(fit, name):
-    """Fails if the report law, the sheet reflection or the leaf record drifts.
+    """Fails if the report law, the sheet sum, its reflection or the leaf record drifts.
 
     Values at six stored draws (two from the prior, four from the posterior) of four
     reports: the fixture (two detections, a null, two padded rows), a detection under
@@ -287,7 +300,7 @@ def test_report_term_matches_the_stored_golden(fit, name):
     has no peak), and the fixture with real detection positions. The stored sheets of
     the fixture agree with the previous report scorer to 4e-5 nat above -150 nat (it
     interpolates a different table). Checks, at rtol 1e-10 (compiled against the
-    eager values stored): the two-sheet value, each sheet alone, the record; for the
+    eager values stored): the ``SheetSum`` value, each sheet alone, the record; for the
     report with positions, the counts-only sheets plus ``RelativeAstrometryTerm`` on
     ``rows.astrometry()`` against the stored values of the term that also scored the
     position; and exactly: the two-sheet value is ``logaddexp`` of the sheets minus
@@ -297,7 +310,8 @@ def test_report_term_matches_the_stored_golden(fit, name):
     want = golden["reports"][name]
     z = jnp.asarray(golden["z"])
     kw = REPORTS[name]
-    both, one = report_term(rows(**kw)), report_term(rows(**kw), sheets=False)
+    one = report_term(rows(**kw))
+    both = sheet_sum(one)
     two, sheets, mean, sd, log_pi = _scores(fit, both, one, z)
     np.testing.assert_allclose(two, want["two_sheet"], rtol=1e-10)
     np.testing.assert_allclose(sheets, want["sheets"], rtol=1e-10)
@@ -305,7 +319,7 @@ def test_report_term_matches_the_stored_golden(fit, name):
     np.testing.assert_allclose(sd, want["sd"], rtol=1e-10)
     np.testing.assert_allclose(log_pi, want["log_pi"], rtol=1e-10)
     if name == "positions":
-        astro = RelativeAstrometryTerm(both.rows.astrometry())
+        astro = RelativeAstrometryTerm(one.rows.astrometry())
         joint = _scores(fit, both, one, z, astro)[1]
         np.testing.assert_allclose(joint, want["with_positions"], rtol=1e-10)
     summed = np.logaddexp(sheets[:, 0], sheets[:, 1]) - np.log(2.0)
@@ -313,8 +327,10 @@ def test_report_term_matches_the_stored_golden(fit, name):
     counts = np.where(REP_VALID, kw.get("counts", REP_COUNTS), 999.0)
     epochs = np.where(REP_VALID, REP_EPOCHS, 12345.0)
     detected = np.where(REP_VALID, kw.get("detected", REP_DETECTED), True)
-    garbage = report_term(
-        rows(counts, detected, epochs=epochs, positions=kw.get("positions", False))
+    garbage = sheet_sum(
+        report_term(
+            rows(counts, detected, epochs=epochs, positions=kw.get("positions", False))
+        )
     )
     np.testing.assert_array_equal(_scores(fit, garbage, one, z)[0], two)
     if name == "censored":

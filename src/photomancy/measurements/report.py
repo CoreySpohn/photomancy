@@ -17,11 +17,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.epoch import Epoch
-from hwoutils.model_paths import assign, resolve
+from hwoutils.model_paths import resolve
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Transmission
-from orbix.system.rotation import from_basis, rotate
 
 from photomancy.infer.fit import AbstractConditionalTerm, LeafConditional
 from photomancy.measurements._observables import (
@@ -296,23 +295,6 @@ def _prediction_rows(rows):
     )
 
 
-def _reflect_row(orbits, row):
-    """The stacked ``orbits`` with row ``row`` reflected through the sky plane.
-
-    The reflected orbit has the same sky track and the opposite line-of-sight sign: its
-    in-plane axes are the reflections of the original ones and its plane normal follows
-    from them, so a sky-only measurement cannot tell the two apart and a phase-dependent
-    one can.
-    """
-    flip = jnp.asarray([1.0, 1.0, -1.0])
-    f = rotate(orbits.quat, jnp.asarray([1.0, 0.0, 0.0])) * flip
-    g = rotate(orbits.quat, jnp.asarray([0.0, 1.0, 0.0])) * flip
-    quat = from_basis(f, g, jnp.cross(f, g))
-    return eqx.tree_at(
-        lambda o: o.quat, orbits, orbits.quat.at[..., row, :].set(quat[..., row, :])
-    )
-
-
 def _scale_fit(counts, limit, rows, law):
     """Detections as a Gaussian in the log of a common counts scale.
 
@@ -359,13 +341,9 @@ class ReportTerm(AbstractConditionalTerm):
     position errors.
 
     The term is the exact likelihood at the model: it reads the planet's photometric
-    leaf from the model and holds no integral over it. With ``orbit_path`` it also sums
-    the two line-of-sight sheets of the planet's orbit, ``logaddexp(L_plus, L_minus) -
-    log 2``, which is the likelihood of a sheet-summed Thiele-Innes block (a model
-    holds the orbit on one sheet; the other is its reflection through the sky plane).
-    The sum is over the whole report, so a row added later enters through
-    ``replace_term`` of the term holding every row, not through ``append`` of a second
-    term (a product of two sheet sums is not the sheet sum of the product).
+    leaf from the model and holds no integral over it. The counts depend on the phase,
+    so on a Thiele-Innes block, whose model holds the orbit on one line-of-sight sheet,
+    the term belongs inside a :class:`~photomancy.orbit.SheetSum` of that orbit row.
 
     ``leaf_conditional`` offers a proposal density for the photometric leaf from the
     detections (see :class:`~photomancy.infer.LeafConditional`); it never enters the
@@ -374,8 +352,6 @@ class ReportTerm(AbstractConditionalTerm):
     Attributes:
         leaf_path: Path of the positive photometric leaf (a radius, say), or ``None``
             when the term offers no leaf proposal.
-        orbit_path: Path of the stacked orbits whose sheet is summed, or ``None`` for
-            no sum. Needs a tabulated predictor (its ``planet`` is the row reflected).
         leaf_exponent: Power of the leaf in the expected counts (2 for a radius). It
             shapes the proposal only; the likelihood reads the model.
     """
@@ -387,12 +363,11 @@ class ReportTerm(AbstractConditionalTerm):
         default=None, converter=lambda x: None if x is None else _float64(x)
     )
     leaf_path: str | None = eqx.field(static=True, default=None)
-    orbit_path: str | None = eqx.field(static=True, default=None)
     leaf_exponent: float = eqx.field(static=True, default=2.0)
     reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
-        """Require row diffraction scales for an exact predictor, and a planet row."""
+        """Require row diffraction scales for an exact predictor."""
         if not isinstance(self.predictor, TabulatedReportPredictor):
             if (
                 self.lod_arcsec is None
@@ -400,11 +375,6 @@ class ReportTerm(AbstractConditionalTerm):
             ):
                 raise ValueError(
                     "a non-tabulated predictor needs lod_arcsec with shape (R,)"
-                )
-            if self.orbit_path is not None:
-                raise ValueError(
-                    "orbit_path needs a tabulated predictor, whose planet is the "
-                    "orbit row summed over its two sheets"
                 )
         if not self.leaf_exponent > 0:
             raise ValueError("leaf_exponent must be positive")
@@ -436,36 +406,17 @@ class ReportTerm(AbstractConditionalTerm):
         value = jnp.where(outcome_nan, jnp.nan, value)
         return jnp.where(rows.is_valid, value, 0.0), prediction
 
-    def _reflected(self, model):
-        """The model with the planet's orbit reflected through the sky plane."""
-        orbits = resolve(model, self.orbit_path)
-        return assign(
-            model, self.orbit_path, _reflect_row(orbits, self.predictor.planet)
-        )
-
-    def _sheet_total(self, model):
+    def __call__(self, model) -> jax.Array:
+        """Sum valid null log probabilities and detection counts log densities."""
         return jnp.sum(self._row_density(model, self.rows)[0])
 
-    def __call__(self, model) -> jax.Array:
-        """Sum valid null log probabilities and detection counts log densities.
-
-        With ``orbit_path`` the value is the log of the mean of the two sheets'
-        likelihoods.
-        """
-        total = self._sheet_total(model)
-        if self.orbit_path is None:
-            return total
-        return jnp.logaddexp(
-            total, self._sheet_total(self._reflected(model))
-        ) - jnp.log(2.0)
-
     def leaf_conditional(self, model) -> LeafConditional:
-        """A Gaussian mixture proposal for the photometric leaf, one component a sheet.
+        """A Gaussian proposal for the photometric leaf, as a one-component mixture.
 
-        Each sheet's detections are Gaussian in the log of the counts scale
+        The detections are Gaussian in the log of the counts scale
         (:func:`_scale_fit`); the component is that Gaussian in ``ln(leaf)``, with its
         own mass (the Gaussian integral of the likelihood) as the log weight. A report
-        with no detection has no peak: every log mass is ``-inf``.
+        with no detection has no peak: the log mass is ``-inf``.
 
         Raises:
             ValueError: With no ``leaf_path``, or a leaf that is not a single value.
@@ -475,29 +426,21 @@ class ReportTerm(AbstractConditionalTerm):
         leaf = jnp.asarray(resolve(model, self.leaf_path))
         if leaf.size != 1:
             raise ValueError(f"leaf {self.leaf_path!r} must hold a single value")
-        models = [model] if self.orbit_path is None else [model, self._reflected(model)]
         clean = _prediction_rows(self.rows)
-        means, sds, log_pis = [], [], []
-        for sheet in models:
-            prediction = self.predictor(sheet, clean)
-            has, t_hat, sd, chi2, log_norm, on_region = _scale_fit(
-                prediction.counts, clean.limit_counts, self.rows, self.law
-            )
-            ok = has & on_region
-            means.append(jnp.log(jnp.reshape(leaf, ())) + t_hat / self.leaf_exponent)
-            sds.append(sd / self.leaf_exponent)
-            log_pis.append(
-                jnp.where(
-                    ok,
-                    log_norm - 0.5 * chi2 + 0.5 * jnp.log(2.0 * jnp.pi) + jnp.log(sd),
-                    -jnp.inf,
-                )
-            )
+        prediction = self.predictor(model, clean)
+        has, t_hat, sd, chi2, log_norm, on_region = _scale_fit(
+            prediction.counts, clean.limit_counts, self.rows, self.law
+        )
+        log_pi = jnp.where(
+            has & on_region,
+            log_norm - 0.5 * chi2 + 0.5 * jnp.log(2.0 * jnp.pi) + jnp.log(sd),
+            -jnp.inf,
+        )
         return LeafConditional(
             self.leaf_path,
-            jnp.stack(means),
-            jnp.stack(sds),
-            jnp.stack(log_pis),
+            (jnp.log(jnp.reshape(leaf, ())) + t_hat / self.leaf_exponent)[None],
+            (sd / self.leaf_exponent)[None],
+            log_pi[None],
             jnp.asarray(-jnp.inf),
             jnp.asarray(jnp.inf),
         )
@@ -576,7 +519,6 @@ class ReportTerm(AbstractConditionalTerm):
             self.rows,
             TabulatedReportPredictor(table, planet),
             leaf_path=self.leaf_path,
-            orbit_path=self.orbit_path,
             leaf_exponent=self.leaf_exponent,
         )
 

@@ -29,7 +29,7 @@ owns the orbits.
 
 import hashlib
 from abc import abstractmethod
-from typing import Self
+from typing import ClassVar, Self
 
 import equinox as eqx
 import jax
@@ -59,12 +59,20 @@ class AbstractTerm(eqx.Module):
     ``fit.model``, as a property that returns the build's own tuple. A term with no
     build declares ``reads: ClassVar[tuple[str, ...]] = ()``.
 
+    A term that sums over a latent inside itself (a discrete label of the model that
+    is not a free entry, such as the line-of-sight sheet of an orbit row) names it in
+    ``marginalizes``. Two terms that each sum over one latent would be a product of two
+    sums, not the sum of the product, so ``Fit`` refuses them.
+
     Attributes:
         reads: Model paths a held build cached. ``Fit`` refuses a free path or block
             write that meets one, because the likelihood would no longer see the change.
+        marginalizes: Names of the latents the term sums over inside itself; empty by
+            default.
     """
 
     reads: eqx.AbstractVar[tuple[str, ...]]
+    marginalizes: ClassVar[tuple[str, ...]] = ()
 
     @abstractmethod
     def __call__(self, model) -> jax.Array:
@@ -197,8 +205,9 @@ class Fit(eqx.Module):
             TypeError: For an entry that is neither a distribution nor a block, or a
                 term that is not an :class:`AbstractTerm`.
             ValueError: For an unknown path, a leaf law that does not fit its leaf, two
-                writers of one path, a block cycle, or a free path or block write that
-                meets a term's ``reads``.
+                writers of one path, a block cycle, a free path or block write that
+                meets a term's ``reads``, or two terms that marginalize the same latent
+                (``AbstractTerm.marginalizes``), named in the message.
         """
         if not jax.config.jax_enable_x64:
             raise RuntimeError(
@@ -223,11 +232,19 @@ class Fit(eqx.Module):
             for path in (*block.reads, *block.writes):
                 self._require_path(path, f"block {key!r}")
         written = [*leaf_paths, *(w for b in blocks.values() for w in b.writes)]
+        summed = {}
         for i, term in enumerate(self.terms):
             if not isinstance(term, AbstractTerm):
                 raise TypeError(
                     f"terms[{i}] is a {type(term).__name__}; expected an AbstractTerm"
                 )
+            for latent in term.marginalizes:
+                if latent in summed:
+                    raise ValueError(
+                        f"terms[{summed[latent]}] and terms[{i}] both marginalize "
+                        f"{latent!r}; hold the terms that see it in one sum"
+                    )
+                summed[latent] = i
             for read in term.reads:
                 self._require_path(read, f"{type(term).__name__}.reads")
                 for path in written:
