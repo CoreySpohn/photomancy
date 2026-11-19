@@ -27,6 +27,7 @@ __all__ = [
     "mc_se",
     "normalize_log_weights",
     "pareto_khat",
+    "ratio_mc_se",
     "weighted_cov",
     "weighted_mean",
     "weighted_quantile",
@@ -289,54 +290,68 @@ def weighted_quantile(log_weights, values, q):
     return _over_batch(_quantile, log_weights, values, q=q)
 
 
-def _mc_se(log_weights, values, g, *, r_eff):
+def _scale_by_r_eff(var, r_eff):
+    return var if r_eff is None else var / r_eff
+
+
+def _mc_se(log_weights, values, r_eff=None):
     weights, no_support, values = _prepare(log_weights, values)
     expanded = _event_shape_mask(weights, values)
-    if g is None:
-        mean = _mean(log_weights, values)
-        centered = jnp.where(expanded > 0, values - mean, 0.0)
-        var = jnp.sum((expanded * centered) ** 2, axis=0)
-        bad = no_support
-    else:
-        g = jnp.broadcast_to(jnp.asarray(g, dtype=weights.dtype), weights.shape)
-        den = weights @ g
-        bad = no_support | ~(den > 0)
-        safe = jnp.where(bad, 1.0, den)
-        q = jnp.sum(jnp.where(expanded > 0, expanded * values, 0.0), axis=0) / safe
-        gx = g.reshape(g.shape + (1,) * (values.ndim - 1))
-        resid = jnp.where(expanded > 0, values - q * gx, 0.0)
-        var = jnp.sum((expanded * resid) ** 2, axis=0) / safe**2
-    if r_eff is not None:
-        var = var / r_eff
+    mean = _mean(log_weights, values)
+    centered = jnp.where(expanded > 0, values - mean, 0.0)
+    var = _scale_by_r_eff(jnp.sum((expanded * centered) ** 2, axis=0), r_eff)
+    return jnp.where(no_support, jnp.nan, jnp.sqrt(var))
+
+
+def _ratio_mc_se(log_weights, numerator, denominator, r_eff=None):
+    weights, no_support, numerator = _prepare(log_weights, numerator)
+    expanded = _event_shape_mask(weights, numerator)
+    g = jnp.broadcast_to(jnp.asarray(denominator, dtype=weights.dtype), weights.shape)
+    den = weights @ g
+    bad = no_support | ~(den > 0)
+    safe = jnp.where(bad, 1.0, den)
+    q = jnp.sum(jnp.where(expanded > 0, expanded * numerator, 0.0), axis=0) / safe
+    gx = g.reshape(g.shape + (1,) * (numerator.ndim - 1))
+    resid = jnp.where(expanded > 0, numerator - q * gx, 0.0)
+    var = jnp.sum((expanded * resid) ** 2, axis=0) / safe**2
+    var = _scale_by_r_eff(var, r_eff)
     return jnp.where(bad, jnp.where(no_support, jnp.nan, jnp.inf), jnp.sqrt(var))
 
 
-def mc_se(log_weights, values, *, g=None, r_eff=None):
+def _over_batch_r_eff(fn, log_weights, *values, r_eff):
+    """``_over_batch`` with an optional ``r_eff`` that is scalar or batch shaped."""
+    if r_eff is None:
+        return _over_batch(fn, log_weights, *values)
+    log_weights = jnp.asarray(log_weights)
+    r_eff = jnp.broadcast_to(jnp.asarray(r_eff), log_weights.shape[:-1])
+    return _over_batch(fn, log_weights, *values, r_eff)
+
+
+def mc_se(log_weights, values, *, r_eff=None):
     """Return the Monte Carlo standard error of a weighted mean of ``values``.
 
-    Without ``g``: the delta-method error of a self-normalized importance
-    estimate for iid draws, ``sqrt(sum w^2 (f - mean)^2)`` with normalized
-    weights ``w``. With ``g`` (per-draw probability of a condition, shape
-    ``(*batch, S)``, ``values`` then the joint ``h`` of condition and value):
-    the ratio estimator ``q = sum w h / sum w g`` has error
-    ``sqrt(sum w^2 (h - q g)^2) / sum w g``, and the result is ``inf`` when the
-    condition has zero weight (``sum w g = 0``). With ``r_eff=None`` the result
-    is the iid error and it understates the error of correlated (MCMC) draws;
-    a given ``r_eff`` (effective draws over total draws, scalar or with the
-    batch shape) divides the variance by ``r_eff``. The result has shape
-    ``(*batch, *event)``; a slice without support gives NaN.
+    The delta-method error of a self-normalized importance estimate for iid
+    draws, ``sqrt(sum w^2 (f - mean)^2)`` with normalized weights ``w``. With
+    ``r_eff=None`` the result is the iid error and it understates the error of
+    correlated (MCMC) draws; a given ``r_eff`` (effective draws over total
+    draws, scalar or with the batch shape) divides the variance by ``r_eff``.
+    The result has shape ``(*batch, *event)``; a slice without support gives NaN.
     """
-    batch_r = r_eff is not None and jnp.asarray(r_eff).ndim > 0
+    return _over_batch_r_eff(_mc_se, log_weights, values, r_eff=r_eff)
 
-    def one(lw, v, gg, rr):
-        return _mc_se(lw, v, gg, r_eff=rr if r_eff is not None else None)
 
-    r = jnp.asarray(r_eff) if r_eff is not None else jnp.zeros(())
-    g_arr = None if g is None else jnp.asarray(g)
+def ratio_mc_se(log_weights, numerator, denominator, *, r_eff=None):
+    """Return the Monte Carlo standard error of a weighted ratio estimate.
+
+    For a conditional mean ``q = sum w h / sum w g``, with ``g`` the per-draw
+    probability of a condition (shape ``(*batch, S)``) and ``h`` the joint of
+    condition and value (``numerator``, shape ``(*batch, S, *event)``), the
+    error is ``sqrt(sum w^2 (h - q g)^2) / sum w g``. The result is ``inf`` when
+    the condition has zero weight (``sum w g = 0``) and NaN for a slice without
+    support. ``r_eff`` is as in :func:`mc_se`.
+    """
     log_weights = jnp.asarray(log_weights)
-    fn = one
-    nb = log_weights.ndim - 1
-    in_axes = (0, 0, None if g is None else 0, 0 if batch_r else None)
-    for _ in range(nb):
-        fn = jax.vmap(fn, in_axes=in_axes)
-    return fn(log_weights, jnp.asarray(values), g_arr, r)
+    denominator = jnp.broadcast_to(jnp.asarray(denominator), log_weights.shape)
+    return _over_batch_r_eff(
+        _ratio_mc_se, log_weights, numerator, denominator, r_eff=r_eff
+    )

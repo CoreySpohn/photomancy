@@ -11,6 +11,7 @@ from photomancy.infer import (
     mc_se,
     normalize_log_weights,
     pareto_khat,
+    ratio_mc_se,
     weighted_cov,
     weighted_mean,
     weighted_quantile,
@@ -175,8 +176,8 @@ def test_no_support_gives_nan_and_zero_weight_values_are_ignored():
     assert weighted_mean(log_w, poisoned) == 2.0
 
 
-def test_mc_se_ratio_estimator_matches_stand_in_form():
-    """With g, the error is the ratio-estimator form and inf without condition mass."""
+def test_ratio_mc_se_matches_stand_in_form():
+    """The error is the ratio-estimator form and inf without condition mass."""
     rng = np.random.default_rng(8)
     n = 400
     log_w = rng.normal(size=n)
@@ -187,17 +188,17 @@ def test_mc_se_ratio_estimator_matches_stand_in_form():
     den = w @ g
     q = (w @ h) / den
     want = np.sqrt(np.sum(w**2 * (h - q * g) ** 2)) / den
-    got = mc_se(jnp.asarray(log_w), jnp.asarray(h), g=jnp.asarray(g))
+    got = ratio_mc_se(jnp.asarray(log_w), jnp.asarray(h), jnp.asarray(g))
     np.testing.assert_allclose(got, want, rtol=1e-12)
     np.testing.assert_allclose(
-        mc_se(jnp.asarray(log_w), jnp.asarray(h), g=jnp.asarray(g), r_eff=0.5),
+        ratio_mc_se(jnp.asarray(log_w), jnp.asarray(h), jnp.asarray(g), r_eff=0.5),
         want * np.sqrt(2),
         rtol=1e-12,
     )
-    assert jnp.isinf(mc_se(jnp.asarray(log_w), jnp.asarray(h), g=jnp.zeros(n)))
+    assert jnp.isinf(ratio_mc_se(jnp.asarray(log_w), jnp.asarray(h), jnp.zeros(n)))
     lw2 = jnp.stack([jnp.asarray(log_w)] * 2)
-    both = mc_se(
-        lw2, jnp.stack([jnp.asarray(h)] * 2), g=jnp.stack([jnp.asarray(g)] * 2)
+    both = ratio_mc_se(
+        lw2, jnp.stack([jnp.asarray(h)] * 2), jnp.stack([jnp.asarray(g)] * 2)
     )
     np.testing.assert_allclose(both, [want, want], rtol=1e-12)
 
