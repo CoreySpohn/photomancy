@@ -45,8 +45,10 @@ def update(
     is refitted by ``run(new_fit, backend, key)`` and every other slice keeps the
     reweighted cloud. There is no second criterion.
 
-    The result has ``info=None`` (the refit's diagnostics are not kept, so both
-    outcomes have one structure). The refit must return the cloud's own layout: the
+    The result carries ``info``, the :class:`~photomancy.infer.posterior.ReweightInfo`
+    of the gate, read before any refit: ``refused`` true means the refit ran. Both
+    outcomes return that same reading (the refit's own diagnostics are not kept, so
+    both have one structure). The refit must return the cloud's own layout: the
     same draw count, sample shapes and dtypes and the same ``kind``; a backend that
     does not raises ``ValueError`` on the host when traced. Its draw count is the
     backend's, so build it with the posterior's size.
@@ -72,7 +74,8 @@ def update(
             ``jax.lax.map`` chunk).
 
     Returns:
-        A :class:`~photomancy.infer.posterior.Posterior` over the new fit.
+        A :class:`~photomancy.infer.posterior.Posterior` over the new fit, whose
+        ``info`` is the gate's :class:`~photomancy.infer.posterior.ReweightInfo`.
 
     Raises:
         ValueError: On the host, as :meth:`Posterior.append_term`, or for a refit whose
@@ -87,6 +90,7 @@ def update(
             index, term, min_n_eff=min_n_eff, max_khat=max_khat, batch_size=batch_size
         )
     refused = jnp.any(jnp.isnan(moved.log_weights))
+    info = moved.info
     kept = _dynamic(moved)
 
     def refit():
@@ -115,6 +119,6 @@ def update(
         log_evidence=evidence,
         log_evidence_se=evidence_se,
         fit=moved.fit,
-        info=None,
+        info=info,
         kind=moved.kind,
     )

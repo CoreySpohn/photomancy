@@ -46,7 +46,13 @@ from photomancy.infer.particles import (
     take_draws,
 )
 
-__all__ = ["Forecast", "Posterior", "cluster_to_mixture", "ravel_samples"]
+__all__ = [
+    "Forecast",
+    "Posterior",
+    "ReweightInfo",
+    "cluster_to_mixture",
+    "ravel_samples",
+]
 
 _KINDS = ("monte_carlo", "quadrature")
 
@@ -75,11 +81,33 @@ class Forecast(eqx.Module):
         return jax.tree.map(jnp.add, self.noise_variance, self.spread_variance)
 
 
+class ReweightInfo(eqx.Module):
+    """The gate reading of a reweight, one value per slice.
+
+    ``Posterior.with_priors``, ``append_term`` and ``replace_term`` return it in
+    ``info``, and :func:`~photomancy.infer.update` passes it through whether or not it
+    refits. The reading is taken on the combined weights before the gate decides, so a
+    refused slice still says why. A ``quadrature`` posterior has no gate: ``n_eff`` and
+    ``khat`` are NaN and ``refused`` is false.
+
+    Attributes:
+        n_eff: Kish effective sample size of the combined weights.
+        khat: Pareto k-hat of the combined weights.
+        refused: The gate's decision: true when the slice was refused (its weights
+            and evidence are NaN). After ``update``, true means the refit ran.
+    """
+
+    n_eff: jax.Array
+    khat: jax.Array
+    refused: jax.Array
+
+
 def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
     """Reweight one slice by ``log_ratio`` and gate on the combined weights.
 
     Returns the new normalized log weights (all NaN on refusal), the log evidence
-    increment and the standard error of that increment (both NaN on refusal). The
+    increment and the standard error of that increment (both NaN on refusal), and the
+    :class:`ReweightInfo` of the gate. The
     increment is the self-normalized mean of the ratio under the old weights, so its
     error is the delta-method error of that mean; it is zero for a ratio of one. A draw
     with zero old weight (dead, with NaN coordinates after a support swap) cannot
@@ -108,6 +136,7 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
         jnp.where(refuse, nan, new),
         jnp.where(refuse, nan, log_z_new - log_z_old),
         jnp.where(refuse, nan, increment_se),
+        ReweightInfo(n_eff, khat, refuse),
     )
 
 
@@ -356,12 +385,14 @@ class Posterior(eqx.Module):
         quadrature = self.kind == "quadrature"
         lo = 0.0 if quadrature else min_n_eff
         hi = jnp.inf if quadrature else max_khat
-        new_lw, increment, increment_se = _reweight_slice(
+        new_lw, increment, increment_se, info = _reweight_slice(
             self.log_weights, log_ratio, lo, hi
         )
         if quadrature:
             refused = jnp.any(jnp.isnan(new_lw))
             increment_se = jnp.where(refused, jnp.nan, 0.0)
+            nan = jnp.asarray(jnp.nan, jnp.float64)
+            info = ReweightInfo(nan, nan, jnp.asarray(False))
         target_ratio = log_ratio if log_target_ratio is None else log_target_ratio
         return Posterior(
             samples=self.samples if samples is None else samples,
@@ -370,7 +401,7 @@ class Posterior(eqx.Module):
             log_evidence=self.log_evidence + increment,
             log_evidence_se=jnp.sqrt(self.log_evidence_se**2 + increment_se**2),
             fit=new_fit,
-            info=None,
+            info=info,
             kind=self.kind,
         )
 
@@ -394,7 +425,9 @@ class Posterior(eqx.Module):
         world with ``jnp.isnan``. ``max_khat=jnp.inf`` skips the k-hat test and
         ``min_n_eff=0`` the size test. Clouds under about 25 draws always fail a
         k-hat gate (fewer than five tail draws). The size is the plain Kish size:
-        multiply by a chain efficiency yourself for correlated draws.
+        multiply by a chain efficiency yourself for correlated draws. The reading of
+        the gate (that Kish size, that k-hat and the decision) comes back in ``info``
+        as a :class:`ReweightInfo`, for a refused slice too.
 
         A block whose new law moves the bounds its map carries (an orbit law with other
         size or eccentricity bounds) is another map, so the stored coordinates change
@@ -494,7 +527,8 @@ class Posterior(eqx.Module):
         The new ``Fit`` comes from ``fit.append_term(term)``. The term is evaluated at
         the model of every stored draw, weights gain ``+ term``, ``log_target`` follows
         and the evidence gains ``log sum w exp(term)``, with the standard error updated
-        as in :meth:`with_priors`. The gate is the same, on the combined weights.
+        as in :meth:`with_priors`. The gate is the same, on the combined weights, and
+        its reading is returned in ``info``.
 
         The result is consistent with bias of order ``1 / N_eff``, not exact, and it
         holds only when (a) the new datum is conditionally independent of the old given
@@ -526,10 +560,11 @@ class Posterior(eqx.Module):
 
         The new ``Fit`` comes from ``fit.replace_term(index, term)``. The weights gain
         ``new(model) - old(model)`` at every stored draw, with ``old`` the term
-        ``fit.terms[index]``. The evidence, its standard error, ``log_target`` and the
-        gate are exactly those of :meth:`append_term`: the combined weights are gated by
-        ``min_n_eff`` and ``max_khat``, a NaN ratio refuses the slice, and the same
-        conditions (a) to (d) apply, with the datum replaced rather than added.
+        ``fit.terms[index]``. The evidence, its standard error, ``log_target``, the
+        gate and ``info`` are exactly those of :meth:`append_term`: the combined
+        weights are gated by ``min_n_eff`` and ``max_khat``, a NaN ratio refuses the
+        slice, and the same conditions (a) to (d) apply, with the datum replaced rather
+        than added.
 
         The use is a padded row: the old term holds the row as invalid padding and the
         new term the same data with the row valid. The structure is unchanged, so a
