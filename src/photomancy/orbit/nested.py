@@ -13,18 +13,14 @@ from hwoutils.constants import G, Mearth2kg, two_pi
 from jax.scipy.special import ndtr, ndtri
 from orbix.equations import period_to_sma
 from orbix.system import FrameChart, FrameOrbit
+from priorities import AbstractDistribution, Uniform
 
 from photomancy.infer.backends.base import import_extra
 from photomancy.infer.backends.nested import jaxns_prior
 from photomancy.infer.backends.smc import SMCBackend
 from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.inference import ChartOrbitProblem
-from photomancy.priors import (
-    FactorizedOrbitPrior,
-    HalfNormalPrior,
-    LogUniformPrior,
-    Uniform,
-)
+from photomancy.priors import FactorizedOrbitPrior
 
 
 class OrbitNestedPosterior(SamplePosterior):
@@ -63,9 +59,15 @@ class OrbitPriorTransform(eqx.Module):
         if not isinstance(density.prior, FactorizedOrbitPrior):
             raise ValueError("OrbitPriorTransform requires a FactorizedOrbitPrior.")
         for name, coordinate in density.scalars.items():
-            if not isinstance(coordinate.prior, (LogUniformPrior, HalfNormalPrior)):
+            distribution = coordinate.prior
+            if not (
+                isinstance(distribution, AbstractDistribution)
+                and distribution.has_icdf
+                and not distribution.event_dim
+            ):
                 raise ValueError(
-                    f"Scalar {name!r} requires a prior with supported quantiles."
+                    f"Scalar {name!r} needs an elementwise distribution with an "
+                    "inverse CDF."
                 )
 
     @property

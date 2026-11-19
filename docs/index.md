@@ -41,7 +41,7 @@ from photomancy import LaplaceBackend, build_scene_logdensity
 
 # forward:    scene -> predicted data
 # likelihood: predicted -> scalar log-likelihood
-# prior:      an AbstractPrior over the fitted leaves
+# prior:      a priorities distribution over the fitted leaves
 logdensity, z0, unravel = build_scene_logdensity(
     scene, forward_model=forward, likelihood=likelihood, prior=prior
 )

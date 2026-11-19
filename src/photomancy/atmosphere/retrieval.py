@@ -22,7 +22,7 @@ def build_retrieval_logdensity(
         noise_sigma: Per-wavelength Gaussian noise sigma (scalar or broadcastable).
         forward: ``pm -> spectrum`` (from ``contrast_forward``, or a coronagraph / IFS
             forward).
-        prior: Optional ``AbstractPrior`` (e.g.
+        prior: Optional distribution over z (e.g.
             :func:`~photomancy.atmosphere.default_abundance_prior`) or ``pm -> scalar``
             callable; ``None`` is flat (improper).
 

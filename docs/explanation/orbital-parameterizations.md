@@ -55,10 +55,9 @@ flat vector expected by MAP, Laplace, NUTS, MCLMC, and Pathfinder. Pass
 accepts the problem directly as `map_laplace_fit(problem, start)`.
 
 For normalized prior draws, use {py:class}`~photomancy.priors.FactorizedOrbitPrior`
-and give each independent scalar coordinate a
-{py:class}`~photomancy.priors.LogUniformPrior` or
-{py:class}`~photomancy.priors.HalfNormalPrior`. The sampled companion mass enters
-the two-body orbit in both the prior transform and likelihood.
+and give each independent scalar coordinate an elementwise distribution from `priorities`
+with an inverse CDF, such as `LogUniform(low, high)` or `HalfNormal(scale)`. The sampled
+companion mass enters the two-body orbit in both the prior transform and likelihood.
 `orbit_tempered_smc(problem, SMCBackend(), n_particles=128, key=key)` draws initial
 particles from this prior and tempers the data terms.
 `orbit_nested_sampling(problem, key=key)` integrates those terms over the same
@@ -74,8 +73,9 @@ prior terms. Planet scales are explicit independent scalar coordinates:
 - `scalars={name: ScalarCoordinate(prior)}`: a sampled radius (`radius_AU`),
   albedo (`albedo`), mass (`mass_Mearth`) or jitter (`jitter_m_per_s`). The
   default is logarithmic; `ScalarCoordinate(prior, logarithmic=False)` samples the
-  value itself. A {py:class}`~photomancy.priors.LogUniformPrior` or
-  {py:class}`~photomancy.priors.HalfNormalPrior` also supports nested sampling.
+  value itself. The prior is a `priorities` distribution or a callable returning the log
+  density; a distribution with an inverse CDF (`LogUniform`, `HalfNormal`) also supports
+  nested sampling.
 - `body_inputs=("radius_AU", "albedo")`: scalars passed to the scene builder.
 - `term_inputs={0: ("radius_AU", "albedo")}`: scalars passed as keyword
   arguments to the term at that index, so a callable

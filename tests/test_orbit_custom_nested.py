@@ -9,6 +9,7 @@ import pytest
 from hwoutils.constants import Msun2kg
 from jaxctx import ScopedDict
 from orbix.system import EccentricityVectorChart
+from priorities import LogUniform
 from test_nested import _scene_orbit
 from test_system_priors import BOUNDS, _scene
 
@@ -17,7 +18,7 @@ from photomancy.infer.backends import NUTSBackend
 from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 from photomancy.orbit.nested import OrbitPriorTransform, orbit_nested_sampling
-from photomancy.priors import FactorizedOrbitPrior, LogUniformPrior
+from photomancy.priors import FactorizedOrbitPrior
 
 jax.config.update("jax_enable_x64", True)
 
@@ -42,8 +43,7 @@ def _problem(sigma):
     """Sampleable chart problem with the custom Gaussian term on the two scales."""
     prior = FactorizedOrbitPrior(_scene_orbit, (10.0, 10000.0), "disk", 1.0)
     scalars = {
-        name: ScalarCoordinate(LogUniformPrior(bounds))
-        for name, bounds in BOUNDS.items()
+        name: ScalarCoordinate(LogUniform(*bounds)) for name, bounds in BOUNDS.items()
     }
     chart = EccentricityVectorChart()
     density = build_chart_logdensity(

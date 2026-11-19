@@ -136,24 +136,24 @@ def test_cluster_to_mixture_recovers_two_clusters():
     assert jnp.allclose(jnp.exp(mix.log_weights), jnp.array([0.5, 0.5]), atol=0.1)
 
 
-def test_gaussian_posterior_to_prior_is_matching_jointprior():
-    """GaussianPosterior.to_prior() is a JointPrior with the same MVN density."""
-    from photomancy.priors import JointPrior
+def test_gaussian_posterior_to_prior_is_matching_mvn():
+    """GaussianPosterior.to_prior() is a MultivariateNormal of the same density."""
+    from priorities import MultivariateNormal
 
     mean = jnp.array([1.0, -2.0])
     cov = jnp.array([[2.0, 0.5], [0.5, 1.0]])
     post = GaussianPosterior(mean=mean, cov=cov, evidence=jnp.asarray(-3.0))
 
     prior = post.to_prior()
-    assert isinstance(prior, JointPrior)
+    assert isinstance(prior, MultivariateNormal)
     z = jnp.array([0.5, -1.0])
     # The posterior-as-prior carries the full covariance: same density.
     assert jnp.allclose(prior.log_prob(z), post.log_prob(z), atol=1e-4)
 
 
 def test_mixture_posterior_to_prior_preserves_modes():
-    """MixturePosterior.to_prior() is a MixturePrior with matching density."""
-    from photomancy.priors import MixturePrior
+    """MixturePosterior.to_prior() is a Mixture with matching density."""
+    from priorities import Mixture
 
     means = jnp.array([[0.0, 0.0], [4.0, -3.0]])
     covs = jnp.stack([jnp.eye(2), 0.5 * jnp.eye(2)])
@@ -161,15 +161,15 @@ def test_mixture_posterior_to_prior_preserves_modes():
     post = MixturePosterior(means=means, covs=covs, log_evidences=log_ev)
 
     prior = post.to_prior()
-    assert isinstance(prior, MixturePrior)
-    assert prior.ndim == 2
+    assert isinstance(prior, Mixture)
+    assert not prior.has_icdf
     z = jnp.array([0.5, -0.5])
     assert jnp.allclose(prior.log_prob(z), post.log_prob(z), atol=1e-4)
 
 
 def test_sample_posterior_to_prior_via_clustering():
-    """cluster_to_mixture(samples, k).to_prior() yields a k-mode MixturePrior."""
-    from photomancy.priors import MixturePrior
+    """cluster_to_mixture(samples, k).to_prior() yields a k-mode Mixture."""
+    from priorities import Mixture
 
     k0, k1 = jax.random.split(jax.random.key(3))
     a = jax.random.normal(k0, (300, 2)) * 0.2
@@ -180,9 +180,9 @@ def test_sample_posterior_to_prior_via_clustering():
     )
 
     prior = cluster_to_mixture(post, 2, key=jax.random.key(4)).to_prior()
-    assert isinstance(prior, MixturePrior)
+    assert isinstance(prior, Mixture)
     # the two clusters survive as two modes with ~equal weight
-    centers = jnp.sort(prior.means[:, 0])
+    centers = jnp.sort(prior.components.loc[:, 0])
     assert jnp.allclose(centers, jnp.array([0.0, 6.0]), atol=0.5)
     w = jax.nn.softmax(prior.log_weights)
     assert jnp.allclose(jnp.sort(w), jnp.array([0.5, 0.5]), atol=0.1)

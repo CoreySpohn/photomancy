@@ -39,6 +39,7 @@ self-version constraint on shallow VCS checkouts.
 | orbix | >=3.0.0 | 2.0.1.dev17+g2f9f366a6 | runtime |
 | packaging | >=24.2 | 24.2 | test |
 | pre-commit | >=3.6 | 3.6.0 | dev |
+| priorities | none | not run at the floor | runtime |
 | pytest | >=7.3.2 | 7.3.2 | test |
 | pytest-fail-slow | >=0.1.0 | 0.1.0 | test |
 | pytest-markdown-docs | >=0.5.0 | 0.5.0 | test |

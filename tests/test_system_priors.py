@@ -23,6 +23,7 @@ from orbix.system import (
     SkyFrame,
     System,
 )
+from priorities import HalfNormal, LogUniform
 from scipy import integrate, stats
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Scene
@@ -36,8 +37,6 @@ from photomancy.orbit.inference import (
 from photomancy.orbit.updater import FixedMassTarget
 from photomancy.priors import (
     PopulationPrior,
-    half_normal_log_prior,
-    log_uniform_prior,
     orbit_log_prior,
 )
 from photomancy.system_density import ScalarCoordinate
@@ -159,7 +158,7 @@ def test_eccentricity_sites_and_conditional_cdfs():
 def test_scalar_cdfs_and_support():
     """Integrate in physical units; check a partial CDF as well as total mass."""
     for name, (lo, hi) in BOUNDS.items():
-        law = jax.jit(partial(log_uniform_prior, bounds=(lo, hi)))
+        law = jax.jit(lambda x, lo=lo, hi=hi: LogUniform(lo, hi).log_prob(x))
         for end in (np.sqrt(lo * hi), hi):
             area, _ = integrate.quad(
                 lambda x, law=law: np.exp(law(x)), lo, end, epsabs=1e-12, epsrel=1e-12
@@ -169,14 +168,14 @@ def test_scalar_cdfs_and_support():
     sigma = 0.8
     for end in (0.37, np.inf):
         area, _ = integrate.quad(
-            lambda x: np.exp(half_normal_log_prior(x, scale=sigma)),
+            lambda x: np.exp(HalfNormal(sigma).log_prob(x)),
             0,
             end,
             epsabs=1e-12,
             epsrel=1e-12,
         )
         _check("jitter CDF", area, stats.halfnorm.cdf(end, scale=sigma))
-    assert np.isneginf(half_normal_log_prior(-0.1, scale=sigma))
+    assert np.isneginf(HalfNormal(sigma).log_prob(-0.1))
 
 
 def test_independent_nuisance_inputs():
@@ -189,7 +188,7 @@ def test_independent_nuisance_inputs():
         return -jnp.log(sigma), sigma
 
     offset_prior = jax.scipy.stats.norm.logpdf
-    sigma_prior = partial(half_normal_log_prior, scale=1.5)
+    sigma_prior = HalfNormal(1.5)
     density = SystemLogDensity(
         lambda p: p["signal"],
         (residual, noise),
@@ -307,12 +306,9 @@ def _scene(orbit, *, mass_Mearth, radius_AU, albedo):
 def _scale_coordinates(jitter_scale):
     """Physical measures for the three body scales and instrument jitters."""
     scalars = {
-        name: ScalarCoordinate(partial(log_uniform_prior, bounds=bounds))
-        for name, bounds in BOUNDS.items()
+        name: ScalarCoordinate(LogUniform(*bounds)) for name, bounds in BOUNDS.items()
     }
-    scalars["jitter_m_per_s"] = ScalarCoordinate(
-        partial(half_normal_log_prior, scale=jitter_scale)
-    )
+    scalars["jitter_m_per_s"] = ScalarCoordinate(HalfNormal(jitter_scale))
     return scalars
 
 

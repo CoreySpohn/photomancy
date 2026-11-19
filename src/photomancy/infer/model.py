@@ -14,8 +14,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
+from priorities import AbstractDistribution
 
-from photomancy.priors import AbstractPrior
+from photomancy.infer.priors import IndependentPrior, flat_prior
 
 
 class AbstractLogDensity(eqx.Module):
@@ -59,18 +60,19 @@ class SceneLogDensity(AbstractLogDensity):
 
     forward_model: Callable
     likelihood: Callable
-    prior: Callable | AbstractPrior
+    prior: Callable | IndependentPrior = eqx.field(converter=flat_prior)
     static: Any
     unravel: Callable = eqx.field(static=True)
 
     def __call__(self, z):
         """Score a flat position ``z``: ``prior + likelihood(forward(scene))``.
 
-        An :class:`~photomancy.priors.AbstractPrior` is scored in z-space
+        A distribution over ``z`` (a ``priorities`` distribution or an
+        :class:`~photomancy.infer.priors.IndependentPrior`) is scored in z-space
         (``prior.log_prob(z)``); a plain callable is scored on the recombined scene.
         """
         scene = eqx.combine(self.unravel(z), self.static)
-        if isinstance(self.prior, AbstractPrior):
+        if isinstance(self.prior, IndependentPrior):
             log_prior = self.prior.log_prob(z)
         else:
             log_prior = self.prior(scene)
@@ -81,7 +83,7 @@ def build_scene_logdensity(
     scene,
     forward_model: Callable,
     likelihood: Callable,
-    prior: Callable | AbstractPrior,
+    prior: Callable | IndependentPrior | AbstractDistribution,
     filter_spec: Callable = eqx.is_inexact_array,
 ):
     """Build a flat-position logdensity over a scene Module's differentiable leaves.
@@ -96,8 +98,9 @@ def build_scene_logdensity(
         scene: An ``eqx.Module`` whose inexact-array leaves are the parameters.
         forward_model: Maps the (recombined) scene to predicted data.
         likelihood: Maps predicted data to a scalar log-likelihood.
-        prior: Either an :class:`~photomancy.priors.AbstractPrior` (scored in z-space
-            as ``prior.log_prob(z)``) or a callable mapping the scene to a scalar
+        prior: Either a distribution over ``z`` (a ``priorities`` distribution or an
+            :class:`~photomancy.infer.priors.IndependentPrior`, scored in z-space as
+            ``prior.log_prob(z)``) or a callable mapping the scene to a scalar
             log-prior.
         filter_spec: Partition filter selecting the differentiable leaves
             (default: ``eqx.is_inexact_array``).
@@ -127,7 +130,7 @@ def build_gaussian_fit(
     fit_leaves: Callable,
     noise_sigma,
     forward: Callable,
-    prior: Callable | AbstractPrior | None = None,
+    prior: Callable | IndependentPrior | AbstractDistribution | None = None,
     likelihood: Callable | None = None,
     mask=None,
 ):
@@ -145,8 +148,9 @@ def build_gaussian_fit(
         fit_leaves: ``scene -> list[leaf]`` selecting the leaves to fit.
         noise_sigma: Per-element Gaussian noise sigma (scalar or broadcastable).
         forward: ``scene -> predicted`` (the injected, swappable physics).
-        prior: Optional prior forwarded to :func:`build_scene_logdensity` -- an
-            ``AbstractPrior`` (scored in z-space) or a ``scene -> scalar`` callable.
+        prior: Optional prior forwarded to :func:`build_scene_logdensity` -- a
+            distribution over ``z`` (scored in z-space) or a ``scene -> scalar``
+            callable.
             ``None`` is flat (improper).
         likelihood: Optional likelihood builder ``(data, sigma, mask=None) ->
             (predicted -> scalar)``, for example

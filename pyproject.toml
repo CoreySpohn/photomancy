@@ -29,6 +29,7 @@ dependencies = [
     "optixstuff>=5.0.0",
     # >=3.0.0: raw positions and velocities use (east, north, away).
     "orbix>=4.1.0",
+    "priorities",
     # >=2.1.0: scene states and the disk chart use the same (east, north) sky
     # chart as orbix 3, so an older skyscapes must not install beside photomancy.
     "skyscapes>=4.0.0",
@@ -165,6 +166,10 @@ DEP002 = [
     "jaxlib",  # JAX loads its compiled backend; retain the explicit version floor.
     "skyscapes",  # Disk and atmosphere fits consume user-supplied skyscapes models.
     "coronalyze",  # The imaging extra supplies user-defined detection forwards.
+    # The sampler extras are imported by name when a backend runs.
+    "blackjax",
+    "jaxctx",
+    "jaxns",
 ]
 
 [tool.ty.environment]

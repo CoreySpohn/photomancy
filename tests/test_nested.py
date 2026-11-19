@@ -10,6 +10,7 @@ from hwoutils.constants import Msun2kg
 from jaxctx import ScopedDict
 from jaxctx import transform as transform_model
 from orbix.system import EccentricityVectorChart, FrameChart
+from priorities import HalfNormal, LogUniform
 from test_system_density import _floor
 from test_system_priors import BOUNDS, _scene
 from test_terms import _new_term
@@ -22,7 +23,7 @@ from photomancy.orbit.nested import (
     build_chart_nested_model,
     orbit_nested_sampling,
 )
-from photomancy.priors import FactorizedOrbitPrior, HalfNormalPrior, LogUniformPrior
+from photomancy.priors import FactorizedOrbitPrior
 
 # jaxns requires x64; make the standalone file independent of other tests.
 jax.config.update("jax_enable_x64", True)
@@ -59,8 +60,8 @@ def test_jaxns_recovers_analytic_evidence():
 
 @pytest.mark.slow
 def test_build_scene_nested_model_recovers_and_gives_evidence():
-    """Scene adapter: a photomancy AbstractPrior over z; recovers truth + log Z."""
-    from photomancy.priors import Uniform
+    """Scene adapter: a distribution over z; recovers truth + log Z."""
+    from priorities import Uniform
 
     truth = jnp.array([0.3, -0.4])
     sigma = 0.05
@@ -76,7 +77,7 @@ def test_build_scene_nested_model_recovers_and_gives_evidence():
     def fit_leaves(s):
         return [s.theta]
 
-    prior = Uniform(low=-jnp.ones(2), high=jnp.ones(2))  # Uniform(-1, 1) over z
+    prior = Uniform(-jnp.ones(2), jnp.ones(2))  # Uniform(-1, 1) over z
     model, unravel = build_scene_nested_model(
         scene, forward, likelihood, fit_leaves=fit_leaves, prior=prior
     )
@@ -94,13 +95,13 @@ def test_build_scene_nested_model_recovers_and_gives_evidence():
 
 @pytest.mark.slow
 def test_jaxns_prior_adapter_recovers_analytic_evidence_tfp_free():
-    """A photomancy Normal prior, via the _JaxnsPrior adapter, recovers log Z (no tfp).
+    """A ``priorities`` Normal prior, through the adapter, recovers log Z (no tfp).
 
     The conjugate-Gaussian check of test_jaxns_recovers_analytic_evidence, but the prior
-    is our own ``photomancy.priors.Normal`` wrapped by the adapter inside
+    is a ``priorities.Normal`` wrapped by the adapter inside
     ``build_scene_nested_model`` -- so the whole prior path is tfp-free.
     """
-    from photomancy.priors import Normal
+    from priorities import Normal
 
     data, lik_s, pri_s = 2.0, 0.5, 1.0
     log2pi = jnp.log(2.0 * jnp.pi)
@@ -136,14 +137,11 @@ def _scene_orbit(scene):
 def _nested_problem(chart, ecc_prior, rv=None, e_max=1.0):
     prior = FactorizedOrbitPrior(_scene_orbit, (10.0, 10000.0), ecc_prior, e_max)
     scalars = {
-        name: ScalarCoordinate(LogUniformPrior(bounds))
-        for name, bounds in BOUNDS.items()
+        name: ScalarCoordinate(LogUniform(*bounds)) for name, bounds in BOUNDS.items()
     }
     template = dict.fromkeys(scalars, 0.0)
     if rv is not None:
-        scalars["jitter_m_per_s"] = ScalarCoordinate(
-            HalfNormalPrior(0.8), logarithmic=False
-        )
+        scalars["jitter_m_per_s"] = ScalarCoordinate(HalfNormal(0.8), logarithmic=False)
         template["jitter_m_per_s"] = jnp.zeros(rv.n_inst)
     density = build_chart_logdensity(
         chart,

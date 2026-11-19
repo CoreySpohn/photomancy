@@ -8,8 +8,9 @@ fittable target there).
 """
 
 import jax.numpy as jnp
+from priorities import Uniform
 
-from photomancy.priors import Uniform
+from photomancy.infer.priors import IndependentPrior
 
 
 def abundance_fit_leaves(pm):
@@ -20,7 +21,7 @@ def abundance_fit_leaves(pm):
 def default_abundance_prior(
     pm, *, fit_leaves=abundance_fit_leaves, log_mmr_range=(-12.0, 0.0)
 ):
-    """An uninformative ``Uniform`` over the fitted log10 mass-mixing-ratio leaves.
+    """An uninformative uniform prior over the fitted log10 mass-mixing-ratio leaves.
 
     Every abundance scalar gets ``Uniform(log_mmr_range)``, so the prior aligns to
     the fit's z automatically (no per-leaf ordering needed). This is the honest
@@ -33,8 +34,9 @@ def default_abundance_prior(
         log_mmr_range: ``(low, high)`` bounds on each ``log10`` mass-mixing-ratio.
 
     Returns:
-        A :class:`~photomancy.priors.Uniform` over the raveled abundance leaves.
+        An :class:`~photomancy.infer.priors.IndependentPrior` holding one
+        ``priorities.Uniform`` over the raveled abundance leaves.
     """
     ndim = sum(int(jnp.size(leaf)) for leaf in fit_leaves(pm))
     low, high = log_mmr_range
-    return Uniform(low=jnp.full((ndim,), low), high=jnp.full((ndim,), high))
+    return IndependentPrior((Uniform(jnp.full((ndim,), low), jnp.full((ndim,), high)),))

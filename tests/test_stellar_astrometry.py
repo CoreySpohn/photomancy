@@ -20,6 +20,7 @@ from kinematics import (  # noqa: E402
     predict_relative_astrometry,
     predict_stellar_astrometry,
 )
+from priorities import Uniform  # noqa: E402
 
 from photomancy import LaplaceBackend, build_scene_logdensity  # noqa: E402
 from photomancy.orbit import (  # noqa: E402
@@ -28,7 +29,6 @@ from photomancy.orbit import (  # noqa: E402
     loglike_stellar_astrom,
 )
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
-from photomancy.priors import Uniform  # noqa: E402
 
 MSUN_KG = 1.989e30
 DIST_PC = 10.0
@@ -156,8 +156,8 @@ def test_mass_is_identifiable_from_reflex():
         return -0.5 * jnp.sum(((pred - obs) / err) ** 2)
 
     prior = Uniform(
-        low=jnp.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0]),
-        high=jnp.array([10.0, 0.9, 1.0, 2 * np.pi, 2 * np.pi, P_days, 4.0]),
+        jnp.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0]),
+        jnp.array([10.0, 0.9, 1.0, 2 * np.pi, 2 * np.pi, P_days, 4.0]),
     )
     init = _Orbit(
         a=jnp.array(5.5),

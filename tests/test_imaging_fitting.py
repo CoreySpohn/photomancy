@@ -157,13 +157,14 @@ def test_joint_astrom_imaging_fit_recovers_period():
     )
 
     from orbix.system import ClassicalChart
+    from priorities import LogUniform
     from test_system_priors import BOUNDS, _scene
 
     from photomancy import ImagingTerm, RelativeAstrometryTerm
     from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
     from photomancy.orbit.init import find_init
     from photomancy.orbit.laplace import map_laplace_mixture_fit
-    from photomancy.priors import FactorizedOrbitPrior, LogUniformPrior
+    from photomancy.priors import FactorizedOrbitPrior
     from photomancy.system_density import ScalarCoordinate
 
     chart = ClassicalChart()
@@ -177,7 +178,7 @@ def test_joint_astrom_imaging_fit_recovers_period():
         star_mass_kg=msun,
         terms=(RelativeAstrometryTerm(astrom), ImagingTerm(img)),
         scalars={
-            name: ScalarCoordinate(LogUniformPrior(bounds))
+            name: ScalarCoordinate(LogUniform(*bounds))
             for name, bounds in BOUNDS.items()
         },
         body_inputs=("radius_AU", "albedo"),

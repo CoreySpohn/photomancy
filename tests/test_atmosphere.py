@@ -7,6 +7,7 @@ is tested without a HITRAN download; the real ExoJAX retrieval lives in the demo
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
+from priorities import Uniform
 
 from photomancy.atmosphere import (
     abundance_fit_leaves,
@@ -15,7 +16,6 @@ from photomancy.atmosphere import (
     default_abundance_prior,
 )
 from photomancy.infer.backends import LaplaceBackend
-from photomancy.priors import Uniform
 
 _WL = jnp.linspace(0.0, 1.0, 24)
 _B0 = jnp.exp(-((_WL - 0.3) ** 2) / 0.01)
@@ -60,10 +60,11 @@ def test_abundance_fit_leaves_selects_log_mmr():
 def test_default_abundance_prior_is_uniform_over_range():
     """default_abundance_prior is a Uniform of the right ndim over the log-MMR box."""
     prior = default_abundance_prior(_atmo(-0.7, -1.6), log_mmr_range=(-12.0, 0.0))
-    assert isinstance(prior, Uniform)
+    (distribution,) = prior.distributions
+    assert isinstance(distribution, Uniform)
     assert prior.ndim == 2
-    assert jnp.allclose(prior.low, -12.0)
-    assert jnp.allclose(prior.high, 0.0)
+    assert jnp.allclose(distribution.low, -12.0)
+    assert jnp.allclose(distribution.high, 0.0)
 
 
 def test_build_retrieval_logdensity_recovers_abundances():

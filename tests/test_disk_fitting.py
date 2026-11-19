@@ -147,7 +147,7 @@ def test_forward_is_swappable(make_system):
 def test_default_disk_prior_aligns_and_centers_on_system(make_system):
     """default_disk_prior pairs with disk_fit_leaves: aligned z, centered on system."""
     from photomancy.disk import default_disk_prior, disk_fit_leaves
-    from photomancy.priors import IndependentPrior
+    from photomancy.infer.priors import IndependentPrior
 
     system = make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
     forward = radiance_forward(WL, TIME, grid=GRID)
@@ -167,7 +167,7 @@ def test_default_disk_prior_aligns_and_centers_on_system(make_system):
     assert jnp.isfinite(logdensity(z0))
 
     # centered on the system: each component's median recovers the current value.
-    median = prior.forward(jnp.full(6, 0.5))
+    median = prior.icdf(jnp.full(6, 0.5))
     assert jnp.allclose(median, z0, rtol=1e-5)
     # weakly informative: log_prob is higher at the truth than far from it.
     assert prior.log_prob(z0) > prior.log_prob(z0 + 30.0)

@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import equinox as eqx
 import jax.numpy as jnp
+from priorities import AbstractDistribution
 
 from photomancy.infer.model import AbstractLogDensity
 
@@ -13,13 +14,20 @@ __all__ = ["ScalarCoordinate", "SystemLogDensity"]
 class ScalarCoordinate(eqx.Module):
     """Independent scalar(s) in physical units or their natural logarithm.
 
-    The prior callable returns log density against the physical differential.
-    Supply None when a joint system prior already includes this differential
-    (e.g. a population prior per Earth mass).
+    The prior is a ``priorities`` distribution or a callable; either gives the log
+    density against the physical differential. Nested sampling and prior draws
+    need a distribution with an inverse CDF. Supply None when a joint system prior
+    already includes this differential (e.g. a population prior per Earth mass).
     """
 
-    prior: Callable | None
+    prior: AbstractDistribution | Callable | None
     logarithmic: bool = True
+
+    def log_prior(self, value):
+        """Elementwise log density of the physical value(s)."""
+        if isinstance(self.prior, AbstractDistribution):
+            return self.prior.log_prob(value)
+        return self.prior(value)
 
     def physical(self, x):
         """Decode sampler coordinates, elementwise for per-instrument arrays."""
@@ -95,7 +103,7 @@ class SystemLogDensity(AbstractLogDensity):
 
     def _logprior(self, params, system, physical):
         scalar_prior = sum(
-            jnp.sum(coord.prior(physical[name]))
+            jnp.sum(coord.log_prior(physical[name]))
             for name, coord in self.scalars.items()
             if coord.prior is not None
         )

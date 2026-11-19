@@ -91,9 +91,9 @@ Likelihood
    the same physics can be reused with different noise assumptions.
 
 Prior
-   $p(z)$. What is known about the parameters before the data. photomancy ships its own
-   small prior layer of {py:obj}`~photomancy.priors.AbstractPrior` objects over the fitted
-   leaves, and any
+   $p(z)$. What is known about the parameters before the data. A prior over the
+   fitted leaves is a distribution from the `priorities` library or an
+   {py:obj}`~photomancy.infer.priors.IndependentPrior` of several, and any
    {term}`posterior` can become the next prior through `to_prior`, which is how beliefs carry
    forward across observations.
 

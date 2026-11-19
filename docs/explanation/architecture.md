@@ -62,8 +62,8 @@ flowchart TB
 
 The engine layer is the {py:mod}`photomancy.infer` subpackage and knows no astrophysics.
 {py:mod}`~photomancy.infer.model` assembles the
-logdensity, {py:mod}`~photomancy.priors` provides an owned family of distributions over
-the flat parameter vector, {py:mod}`~photomancy.infer.backends` run inference,
+logdensity, {py:mod}`~photomancy.infer.priors` lays distributions from the `priorities`
+library over the flat parameter vector, {py:mod}`~photomancy.infer.backends` run inference,
 {py:mod}`~photomancy.infer.posterior` and {py:mod}`~photomancy.infer.posterior_utils` carry and
 manipulate the result behind one interface, and {py:mod}`~photomancy.infer.eig` scores candidate
 observations as expected information gain about a declared quantity of interest, from
@@ -208,10 +208,11 @@ One posterior interface serves every backend. Backends are interchangeable behin
 and results are interchangeable behind the `Posterior` interface, which makes the
 backend menu composable.
 
-The prior layer is owned and tensorflow-probability free. Each distribution photomancy
-needs has a closed-form inverse cumulative distribution function, so the prior family is a
-few lines per distribution and serves the gradient, sample, and unit-cube needs of every
-backend from one definition.
+The prior layer is tensorflow-probability free. Generic distributions come from the
+`priorities` library, where each has a closed-form inverse cumulative distribution function,
+so one definition serves the gradient, sample, and unit-cube needs of every backend. The
+orbit priors, with their named eccentricity distributions, stay in
+{py:mod}`photomancy.priors`.
 
 Domains compose on the generic engine rather than forming parallel stacks. When a domain
 grows its own copy of the inference machinery, that copy drifts from the engine and the

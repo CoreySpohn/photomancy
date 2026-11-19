@@ -16,6 +16,7 @@ from jax.flatten_util import ravel_pytree
 
 from photomancy.infer.backends.base import AbstractBackend, import_extra
 from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.priors import flat_prior
 
 # jaxns is an optional extra and is imported inside the functions below: importing it
 # enables JAX x64 globally as a side effect and pulls in tensorflow-probability
@@ -24,20 +25,30 @@ from photomancy.infer.posterior import SamplePosterior
 
 
 def jaxns_prior(prior, *, name):
-    """Wrap a photomancy ``AbstractPrior`` as a jaxns-realizable prior named ``name``.
+    """Wrap a prior over z as a jaxns-realizable prior named ``name``.
 
     jaxns 3 realizes priors through the jaxctx ``AbstractPrior`` interface, which asks
     for ``_forward`` (unit-cube -> X), ``_inverse``, ``_log_prob``, plus shape / dtype
-    hooks -- exactly what a photomancy ``AbstractPrior`` provides over z. The class is
-    defined here so jaxns (and jaxctx) stay lazy-imported.
+    hooks: the ``icdf``, ``cdf`` and ``log_prob`` of a prior over z. The
+    class is defined here so jaxns (and jaxctx) stay lazy-imported.
 
     Args:
-        prior: A :class:`~photomancy.priors.AbstractPrior` with ``ndim`` components.
+        prior: A ``priorities`` distribution over z or an
+            :class:`~photomancy.infer.priors.IndependentPrior`, with an inverse CDF.
         name: Variable name; the posterior samples are keyed by it.
 
     Returns:
         A jaxctx prior; call ``.realise()`` on it inside a jaxns prior model.
+
+    Raises:
+        ValueError: If the prior has no inverse CDF (for example a mixture).
     """
+    prior = flat_prior(prior)
+    if not prior.has_icdf:
+        raise ValueError(
+            "Nested sampling needs a prior with an inverse CDF; a mixture has "
+            "none. Use a gradient or sample backend (Laplace, NUTS, SMC) instead."
+        )
     JaxctxPrior = import_extra("jaxctx.priors", "jaxns").AbstractPrior
 
     class _JaxnsPrior(JaxctxPrior):
@@ -55,10 +66,10 @@ def jaxns_prior(prior, *, name):
             return (self.prior.ndim,)
 
         def _forward(self, U):
-            return self.prior.forward(U)
+            return self.prior.icdf(U)
 
         def _inverse(self, X):
-            return self.prior.inverse(X)
+            return self.prior.cdf(X)
 
         def _log_prob(self, X):
             return self.prior.log_prob(X)
@@ -67,14 +78,15 @@ def jaxns_prior(prior, *, name):
 
 
 def build_scene_nested_model(scene, forward, likelihood, *, fit_leaves, prior):
-    """Build a jaxns ``Model`` for a scene fit from a photomancy ``AbstractPrior``.
+    """Build a jaxns ``Model`` for a scene fit from a prior over z.
 
     The nested-sampling parallel of ``build_scene_logdensity`` -- it produces a jaxns
     ``Model`` (a sampleable prior + a likelihood) rather than a flat logdensity, because
-    nested sampling integrates over the prior. ``prior`` is an
-    :class:`~photomancy.priors.AbstractPrior` over the raveled fitted leaves (the same
-    z-space as ``build_scene_logdensity``), realized in jaxns through a thin adapter --
-    so the prior path involves no tensorflow-probability of our own.
+    nested sampling integrates over the prior. ``prior`` is a ``priorities``
+    distribution or an :class:`~photomancy.infer.priors.IndependentPrior` over the
+    raveled fitted leaves (the same z-space as ``build_scene_logdensity``), realized
+    in jaxns through a thin adapter, so the prior path involves no
+    tensorflow-probability of our own.
 
     Args:
         scene: The scene ``eqx.Module`` (its selected leaves are the parameters).
@@ -82,8 +94,8 @@ def build_scene_nested_model(scene, forward, likelihood, *, fit_leaves, prior):
         likelihood: ``predicted -> scalar`` log-likelihood (the observed data is closed
             over by the caller). NOTE: likelihood only -- jaxns adds the prior.
         fit_leaves: ``scene -> list[leaf]`` selecting the fitted leaves.
-        prior: An :class:`~photomancy.priors.AbstractPrior` over the raveled fitted
-            leaves; ``prior.ndim`` must equal the number of raveled scalars.
+        prior: A distribution over the raveled fitted leaves with an inverse CDF; its
+            length must equal the number of raveled scalars.
 
     Returns:
         ``(model, unravel)``: the jaxns ``Model``, and ``unravel`` mapping a posterior

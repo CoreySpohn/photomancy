@@ -15,8 +15,7 @@ from equinox import AbstractVar
 from hwoutils.epoch import Epoch
 from jax.scipy.special import logsumexp
 from jax.scipy.stats import multivariate_normal
-
-from photomancy.priors import JointPrior, MixturePrior
+from priorities import Mixture, MultivariateNormal
 
 
 class AbstractPosterior(eqx.Module):
@@ -65,12 +64,12 @@ class AbstractPosterior(eqx.Module):
         raise NotImplementedError
 
     def to_prior(self):
-        """Convert this posterior into an ``AbstractPrior`` over the same z-space.
+        """Convert this posterior into a ``priorities`` distribution over z.
 
         The exact "this fit's posterior becomes the next fit's prior" conversion for
         sequential Bayesian updating, implemented where it is closed-form:
-        :class:`GaussianPosterior` -> MVN :class:`~photomancy.priors.JointPrior` and
-        :class:`MixturePosterior` -> :class:`~photomancy.priors.MixturePrior`. A
+        :class:`GaussianPosterior` -> ``priorities.MultivariateNormal`` and
+        :class:`MixturePosterior` -> a ``priorities.Mixture`` of them. A
         weighted-sample posterior has no exact prior -- cluster it first with
         :func:`cluster_to_mixture` and call ``to_prior`` on the resulting mixture.
         """
@@ -105,8 +104,8 @@ class GaussianPosterior(AbstractPosterior):
         return multivariate_normal.logpdf(z, self.mean, self.cov)
 
     def to_prior(self):
-        """Exact MVN ``JointPrior`` over z -- this fit's posterior as the next prior."""
-        return JointPrior(mean=self.mean, cholesky=jnp.linalg.cholesky(self.cov))
+        """Exact ``MultivariateNormal`` over z: this posterior as the next prior."""
+        return MultivariateNormal(self.mean, jnp.linalg.cholesky(self.cov))
 
 
 class PointPosterior(AbstractPosterior):
@@ -203,11 +202,13 @@ class MixturePosterior(AbstractPosterior):
         )
 
     def to_prior(self):
-        """Exact ``MixturePrior`` over z -- carries the modes into the next prior."""
-        choleskys = jax.vmap(jnp.linalg.cholesky)(self.covs)
-        return MixturePrior(
-            means=self.means, choleskys=choleskys, log_weights=self.log_evidences
-        )
+        """Exact ``Mixture`` over z: carries the modes into the next prior.
+
+        The mixture has no inverse CDF, so it serves the gradient and sample
+        backends (Laplace, NUTS, SMC) and not nested sampling.
+        """
+        choleskys = jnp.linalg.cholesky(self.covs)
+        return Mixture(self.log_evidences, MultivariateNormal(self.means, choleskys))
 
 
 class SamplePosterior(AbstractPosterior):

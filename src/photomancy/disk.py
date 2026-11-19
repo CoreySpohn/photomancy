@@ -11,9 +11,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
+from priorities import LogNormal, Normal
 
 from photomancy.infer.model import build_gaussian_fit
-from photomancy.priors import IndependentPrior, LogNormal, Normal
+from photomancy.infer.priors import IndependentPrior
 
 
 def radiance_forward(wavelength_nm, time_d, *, grid):
@@ -61,8 +62,8 @@ def build_disk_logdensity(
         noise_sigma: Per-pixel Gaussian noise sigma (scalar).
         forward: ``system -> predicted image`` -- the swappable seam.
         prior: Optional prior, forwarded to ``build_scene_logdensity`` -- either a
-            ``photomancy.priors.AbstractPrior`` (scored in z-space) or a
-            ``system -> scalar`` callable. ``None`` is flat (improper).
+            distribution over z (from ``priorities``, or an ``IndependentPrior``) or
+            a ``system -> scalar`` callable. ``None`` is flat (improper).
 
     Returns:
         ``(logdensity, z0, unravel)`` from ``build_scene_logdensity``: ``logdensity(z)``
@@ -140,9 +141,7 @@ def default_disk_prior(system):
         kind, scale = _DISK_PRIOR_SPECS[int(spec_z[j])]
         value = z0[j]
         if kind == "lognormal":
-            components.append(
-                LogNormal(loc=jnp.log(value)[None], scale=jnp.asarray([scale]))
-            )
+            components.append(LogNormal(jnp.log(value)[None], jnp.asarray([scale])))
         else:
-            components.append(Normal(loc=value[None], scale=jnp.asarray([scale])))
+            components.append(Normal(value[None], jnp.asarray([scale])))
     return IndependentPrior(tuple(components))

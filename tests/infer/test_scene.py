@@ -87,8 +87,9 @@ def test_forward_module_arrays_are_traced_not_baked():
 
 def test_build_gaussian_fit_selects_leaves_and_bakes_gaussian_likelihood():
     """build_gaussian_fit masks fit_leaves + bakes a Gaussian data likelihood."""
+    from priorities import Normal
+
     from photomancy.infer.model import build_gaussian_fit
-    from photomancy.priors import Normal
 
     obs = jnp.array([1.0, 2.0, 3.0])
     scene = _ToyScene(mu=jnp.zeros(3), label="t")
@@ -106,21 +107,21 @@ def test_build_gaussian_fit_selects_leaves_and_bakes_gaussian_likelihood():
     # flat prior: the Gaussian likelihood peaks at the data
     assert ld(obs) > ld(jnp.zeros(3))
     assert jnp.allclose(unravel(obs).mu, obs)
-    # an AbstractPrior threads through: a tight prior at 0 penalizes the data point
+    # a distribution over z threads through: a tight prior at 0 penalizes the data point
     ld2, _, _ = build_gaussian_fit(
         scene,
         obs,
         fit_leaves=fit_leaves,
         noise_sigma=0.1,
         forward=forward,
-        prior=Normal(loc=jnp.zeros(3), scale=jnp.full(3, 0.1)),
+        prior=Normal(jnp.zeros(3), jnp.full(3, 0.1)),
     )
     assert float(ld2(obs)) < float(ld(obs))
 
 
-def test_scene_logdensity_accepts_abstract_prior_over_z():
-    """An AbstractPrior is scored in z-space (prior.log_prob(z)), not as a callable."""
-    from photomancy.priors import Normal
+def test_scene_logdensity_accepts_distribution_over_z():
+    """A distribution over z is scored as prior.log_prob(z), not as a callable."""
+    from priorities import Normal
 
     obs = 2.0
 

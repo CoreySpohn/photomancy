@@ -1,4 +1,4 @@
-"""Integration: one AbstractPrior across backends, and posterior-as-prior updating.
+"""Integration: one prior over z across backends, and posterior-as-prior updating.
 
 These exercise the P1 payoff: one photomancy prior drives both the Laplace
 (``log_prob``) and jaxns (``_JaxnsPrior``) paths, and a Gaussian posterior folds into
@@ -9,6 +9,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from priorities import Normal
 
 from photomancy.infer.backends import (
     JaxnsBackend,
@@ -16,7 +17,7 @@ from photomancy.infer.backends import (
     build_scene_nested_model,
 )
 from photomancy.infer.model import build_scene_logdensity
-from photomancy.priors import IndependentPrior, Normal
+from photomancy.infer.priors import IndependentPrior
 
 jax.config.update("jax_enable_x64", True)
 
@@ -39,7 +40,7 @@ def test_same_prior_drives_laplace_and_jaxns_consistently():
     def likelihood(pred):
         return -0.5 * jnp.sum(((pred - data) / sigma) ** 2)
 
-    prior = IndependentPrior((Normal(loc=jnp.zeros(1), scale=jnp.full((1,), 5.0)),))
+    prior = IndependentPrior((Normal(jnp.zeros(1), jnp.full((1,), 5.0)),))
 
     # Laplace path: the prior is folded in as log_prob(z).
     logdensity, z0, _ = build_scene_logdensity(scene, forward, likelihood, prior)
@@ -73,7 +74,7 @@ def test_sequential_updating_tightens_posterior():
 
         return likelihood
 
-    broad = IndependentPrior((Normal(loc=jnp.zeros(1), scale=jnp.full((1,), 5.0)),))
+    broad = IndependentPrior((Normal(jnp.zeros(1), jnp.full((1,), 5.0)),))
 
     def fit(prior, data):
         ld, z0, _ = build_scene_logdensity(scene, forward, lik(data), prior)
@@ -94,7 +95,7 @@ def test_sequential_updating_tightens_posterior():
 
 
 def test_mixture_prior_from_samples_drives_a_scene_fit():
-    """A bimodal SamplePosterior -> to_prior() -> MixturePrior drives a scene fit."""
+    """A bimodal SamplePosterior -> to_prior() -> Mixture drives a scene fit."""
     from photomancy.infer.posterior import SamplePosterior, cluster_to_mixture
 
     k0, k1 = jax.random.split(jax.random.key(7))

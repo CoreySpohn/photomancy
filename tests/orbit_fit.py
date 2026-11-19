@@ -5,12 +5,13 @@ import jax.numpy as jnp
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from orbix.system import Body, ClassicalChart, SkyFrame, System
+from priorities import LogUniform
 
 from photomancy import RelativeAstrometryTerm
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 from photomancy.orbit.init import find_init
 from photomancy.orbit.laplace import map_laplace_fit
-from photomancy.priors import FactorizedOrbitPrior, LogUniformPrior, orbit_log_prior
+from photomancy.priors import FactorizedOrbitPrior, orbit_log_prior
 from photomancy.system_density import ScalarCoordinate
 
 
@@ -133,7 +134,7 @@ def mass_problem(
         FactorizedOrbitPrior(_first_orbit, period_range_d, ecc_prior),
         star_mass_kg=star_mass_kg,
         terms=tuple(terms),
-        scalars={"mass_Mearth": ScalarCoordinate(LogUniformPrior(mass_bounds))},
+        scalars={"mass_Mearth": ScalarCoordinate(LogUniform(*mass_bounds))},
     )
     position = {"orbit": orbit_coordinates, "mass_Mearth": jnp.log(mass_Mearth)}
     return ChartOrbitProblem(density, position)
@@ -166,13 +167,9 @@ def scale_problem(
     position is ``{"orbit": ..., "radius_AU": ln radius, "albedo": ln albedo}``
     (with the reference radius and albedo at the geometric means of the bounds).
     """
-    from functools import partial
-
     from hwoutils.constants import Rearth2AU
     from skyscapes.physical_model import LambertianPhysicalModel
     from skyscapes.scene import FlatStar, Planet, Scene
-
-    from photomancy.priors import log_uniform_prior
 
     chart = ClassicalChart() if chart is None else chart
     frame = SkyFrame(dist_pc, Epoch())
@@ -201,12 +198,8 @@ def scale_problem(
         star_mass_kg=star_mass_kg,
         terms=tuple(terms),
         scalars={
-            "radius_AU": ScalarCoordinate(
-                partial(log_uniform_prior, bounds=radius_bounds)
-            ),
-            "albedo": ScalarCoordinate(
-                partial(log_uniform_prior, bounds=albedo_bounds)
-            ),
+            "radius_AU": ScalarCoordinate(LogUniform(*radius_bounds)),
+            "albedo": ScalarCoordinate(LogUniform(*albedo_bounds)),
         },
         body_inputs=("radius_AU", "albedo"),
         term_inputs=term_inputs or {},

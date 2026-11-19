@@ -20,10 +20,10 @@ from kinematics import (  # noqa: E402
     predict_relative_astrometry,
 )
 from orbix.equations.orbit import period_a, period_to_sma  # noqa: E402
+from priorities import Uniform  # noqa: E402
 
 from photomancy import LaplaceBackend, build_scene_logdensity  # noqa: E402
 from photomancy.orbit import PMAnomalyData, loglike_pm_anomaly  # noqa: E402
-from photomancy.priors import Uniform  # noqa: E402
 
 MSUN_KG = 1.989e30
 DIST_PC = 10.0
@@ -166,8 +166,8 @@ def test_joint_relative_astrom_and_pma_recovers_mass():
         )
 
     prior = Uniform(
-        low=jnp.array([3.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]),
-        high=jnp.array([4.0, 0.9, 1.0, TWO_PI, TWO_PI, TWO_PI, 4.0]),
+        jnp.array([3.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]),
+        jnp.array([4.0, 0.9, 1.0, TWO_PI, TWO_PI, TWO_PI, 4.0]),
     )
     init = _Sys(
         logP=jnp.array(np.log10(P_TRUE)),

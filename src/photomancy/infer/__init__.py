@@ -37,6 +37,7 @@ from photomancy.infer.posterior import (
     SamplePosterior,
 )
 from photomancy.infer.posterior_utils import project_samples, sample_capped
+from photomancy.infer.priors import IndependentPrior
 from photomancy.infer.terms import AbstractTerm, TermLogDensity
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "AbstractPosterior",
     "AbstractTerm",
     "GaussianPosterior",
+    "IndependentPrior",
     "JaxnsBackend",
     "LaplaceBackend",
     "LaplaceMixtureBackend",
