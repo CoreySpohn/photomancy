@@ -14,11 +14,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.epoch import Epoch
+from hwoutils.model_paths import assign, resolve
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Transmission
+from orbix.system.rotation import from_basis, rotate
 
-from photomancy.infer.fit import AbstractTerm
+from photomancy.infer.fit import AbstractConditionalTerm, LeafConditional
 from photomancy.measurements._observables import (
     _band_contrasts,
     _relative_positions,
@@ -270,13 +272,82 @@ def _prediction_rows(rows):
     )
 
 
-class ReportTerm(AbstractTerm):
+def _reflect_row(orbits, row):
+    """The stacked ``orbits`` with row ``row`` reflected through the sky plane.
+
+    The reflected orbit has the same sky track and the opposite line-of-sight sign: its
+    in-plane axes are the reflections of the original ones and its plane normal follows
+    from them, so a sky-only measurement cannot tell the two apart and a phase-dependent
+    one can.
+    """
+    flip = jnp.asarray([1.0, 1.0, -1.0])
+    f = rotate(orbits.quat, jnp.asarray([1.0, 0.0, 0.0])) * flip
+    g = rotate(orbits.quat, jnp.asarray([0.0, 1.0, 0.0])) * flip
+    quat = from_basis(f, g, jnp.cross(f, g))
+    return eqx.tree_at(
+        lambda o: o.quat, orbits, orbits.quat.at[..., row, :].set(quat[..., row, :])
+    )
+
+
+def _scale_fit(counts, limit, rows, law):
+    """Detections as a Gaussian in the log of a common counts scale.
+
+    ``counts`` are the expected planet counts of every row at the model as it is. With
+    the detection variance fixed at ``limit^2`` plus the measured counts, the detected
+    rows are linear in a multiplier ``exp(t)`` of ``counts``, so their log likelihood
+    is Gaussian in ``t`` about ``t_hat`` with standard deviation ``sd``, up to
+    ``-chi2 / 2`` and ``log_norm``. ``has`` is False when no valid row is a detection
+    (no peak), and ``on_region`` is False when a detection lies below the threshold.
+
+    Returns:
+        ``(has, t_hat, sd, chi2, log_norm, on_region)``.
+    """
+    det = rows.is_valid & rows.is_detected
+    measured = jnp.where(det, rows.counts, 0.0)
+    var = limit**2 + measured
+    g = jnp.where(det, counts, 0.0)
+    s_gg = jnp.sum(jnp.where(det, g**2 / var, 0.0))
+    s_cg = jnp.sum(jnp.where(det, measured * g / var, 0.0))
+    s_cc = jnp.sum(jnp.where(det, measured**2 / var, 0.0))
+    has = (s_cg > 0.0) & (s_gg > 0.0)
+    safe_gg = jnp.where(has, s_gg, 1.0)
+    safe_cg = jnp.where(has, s_cg, 1.0)
+    t_hat = jnp.log(safe_cg / safe_gg)
+    sd = jnp.sqrt(safe_gg) / safe_cg
+    chi2 = s_cc - jnp.where(has, s_cg**2 / safe_gg, 0.0)
+    log_norm = jnp.sum(jnp.where(det, -0.5 * jnp.log(2.0 * jnp.pi * var), 0.0))
+    on_region = jnp.all(~det | (rows.counts >= law.detection_limit(limit)))
+    return has, t_hat, sd, chi2, log_norm, on_region
+
+
+class ReportTerm(AbstractConditionalTerm):
     """An exact or tabulated joint report law on the same observed rows.
 
     For a tabulated predictor, diffraction scales always come from
     ``predictor.table.lod_arcsec[rows.mode]``. For any other predictor,
     ``lod_arcsec`` is required and has shape (R,). It is used only for sampling;
     scoring always uses the errors and correlation stored in each observed row.
+
+    The term is the exact likelihood at the model: it reads the planet's photometric
+    leaf from the model and holds no integral over it. With ``orbit_path`` it also sums
+    the two line-of-sight sheets of the planet's orbit, ``logaddexp(L_plus, L_minus) -
+    log 2``, which is the likelihood of a sheet-summed Thiele-Innes block (a model
+    holds the orbit on one sheet; the other is its reflection through the sky plane).
+    The sum is over the whole report, so a row added later enters through
+    ``replace_term`` of the term holding every row, not through ``append`` of a second
+    term (a product of two sheet sums is not the sheet sum of the product).
+
+    ``leaf_conditional`` offers a proposal density for the photometric leaf from the
+    detections (see :class:`~photomancy.infer.LeafConditional`); it never enters the
+    likelihood.
+
+    Attributes:
+        leaf_path: Path of the positive photometric leaf (a radius, say), or ``None``
+            when the term offers no leaf proposal.
+        orbit_path: Path of the stacked orbits whose sheet is summed, or ``None`` for
+            no sum. Needs a tabulated predictor (its ``planet`` is the row reflected).
+        leaf_exponent: Power of the leaf in the expected counts (2 for a radius). It
+            shapes the proposal only; the likelihood reads the model.
     """
 
     law: ReportLaw
@@ -285,10 +356,13 @@ class ReportTerm(AbstractTerm):
     lod_arcsec: jax.Array | None = eqx.field(
         default=None, converter=lambda x: None if x is None else _float64(x)
     )
+    leaf_path: str | None = eqx.field(static=True, default=None)
+    orbit_path: str | None = eqx.field(static=True, default=None)
+    leaf_exponent: float = eqx.field(static=True, default=2.0)
     reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
-        """Require row diffraction scales for an exact predictor."""
+        """Require row diffraction scales for an exact predictor, and a planet row."""
         if not isinstance(self.predictor, TabulatedReportPredictor):
             if (
                 self.lod_arcsec is None
@@ -297,6 +371,13 @@ class ReportTerm(AbstractTerm):
                 raise ValueError(
                     "a non-tabulated predictor needs lod_arcsec with shape (R,)"
                 )
+            if self.orbit_path is not None:
+                raise ValueError(
+                    "orbit_path needs a tabulated predictor, whose planet is the "
+                    "orbit row summed over its two sheets"
+                )
+        if not self.leaf_exponent > 0:
+            raise ValueError("leaf_exponent must be positive")
 
     def _row_density(self, model, rows):
         clean = _prediction_rows(rows)
@@ -348,9 +429,71 @@ class ReportTerm(AbstractTerm):
         value = jnp.where(outcome_nan, jnp.nan, value)
         return jnp.where(rows.is_valid, value, 0.0), prediction
 
-    def __call__(self, model) -> jax.Array:
-        """Sum valid null log probabilities and detection joint log densities."""
+    def _reflected(self, model):
+        """The model with the planet's orbit reflected through the sky plane."""
+        orbits = resolve(model, self.orbit_path)
+        return assign(
+            model, self.orbit_path, _reflect_row(orbits, self.predictor.planet)
+        )
+
+    def _sheet_total(self, model):
         return jnp.sum(self._row_density(model, self.rows)[0])
+
+    def __call__(self, model) -> jax.Array:
+        """Sum valid null log probabilities and detection joint log densities.
+
+        With ``orbit_path`` the value is the log of the mean of the two sheets'
+        likelihoods.
+        """
+        total = self._sheet_total(model)
+        if self.orbit_path is None:
+            return total
+        return jnp.logaddexp(
+            total, self._sheet_total(self._reflected(model))
+        ) - jnp.log(2.0)
+
+    def leaf_conditional(self, model) -> LeafConditional:
+        """A Gaussian mixture proposal for the photometric leaf, one component a sheet.
+
+        Each sheet's detections are Gaussian in the log of the counts scale
+        (:func:`_scale_fit`); the component is that Gaussian in ``ln(leaf)``, with its
+        own mass (the Gaussian integral of the likelihood) as the log weight. A report
+        with no detection has no peak: every log mass is ``-inf``.
+
+        Raises:
+            ValueError: With no ``leaf_path``, or a leaf that is not a single value.
+        """
+        if self.leaf_path is None:
+            raise ValueError("this ReportTerm has no leaf_path to propose")
+        leaf = jnp.asarray(resolve(model, self.leaf_path))
+        if leaf.size != 1:
+            raise ValueError(f"leaf {self.leaf_path!r} must hold a single value")
+        models = [model] if self.orbit_path is None else [model, self._reflected(model)]
+        clean = _prediction_rows(self.rows)
+        means, sds, log_pis = [], [], []
+        for sheet in models:
+            prediction = self.predictor(sheet, clean)
+            has, t_hat, sd, chi2, log_norm, on_region = _scale_fit(
+                prediction.counts, clean.limit_counts, self.rows, self.law
+            )
+            ok = has & on_region
+            means.append(jnp.log(jnp.reshape(leaf, ())) + t_hat / self.leaf_exponent)
+            sds.append(sd / self.leaf_exponent)
+            log_pis.append(
+                jnp.where(
+                    ok,
+                    log_norm - 0.5 * chi2 + 0.5 * jnp.log(2.0 * jnp.pi) + jnp.log(sd),
+                    -jnp.inf,
+                )
+            )
+        return LeafConditional(
+            self.leaf_path,
+            jnp.stack(means),
+            jnp.stack(sds),
+            jnp.stack(log_pis),
+            jnp.asarray(-jnp.inf),
+            jnp.asarray(jnp.inf),
+        )
 
     def predict(self, model) -> ReportPrediction:
         """Return the predictor's report for every row."""
@@ -421,7 +564,14 @@ class ReportTerm(AbstractTerm):
 
     def surrogate(self, table, planet) -> Self:
         """Copy with a tabulated predictor and its diffraction scales."""
-        return ReportTerm(self.law, self.rows, TabulatedReportPredictor(table, planet))
+        return ReportTerm(
+            self.law,
+            self.rows,
+            TabulatedReportPredictor(table, planet),
+            leaf_path=self.leaf_path,
+            orbit_path=self.orbit_path,
+            leaf_exponent=self.leaf_exponent,
+        )
 
     def residual(self, model, other) -> jax.Array:
         """Per-row log p(this) - log p(other), both scored on this term's rows."""

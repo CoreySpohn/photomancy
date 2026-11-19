@@ -9,10 +9,12 @@ weights have a finite mean. ``AdaptiveImportance`` is population Monte Carlo: it
 tempers the target, refits a Gaussian mixture on each round's weighted cloud and
 draws the returned cloud from the last proposal.
 
-A draw in a zero-density region of the fit has weight zero. A NaN target or proposal
-density is an error: the weights of the slice become NaN and ``run`` returns a NaN
-slice, which the operations of a ``Posterior`` refuse. So does an
-``AdaptiveImportance`` ladder that did not reach temperature one (see its docstring).
+A draw in a zero-density region of the fit has weight zero, and so has a draw the
+proposal marks dead with ``log_q = +inf`` (its coordinates may be NaN and are not
+read). Any other NaN target or proposal density is an error: the weights of the slice
+become NaN and ``run`` returns a NaN slice, which the operations of a ``Posterior``
+refuse. So does an ``AdaptiveImportance`` ladder that did not reach temperature one
+(see its docstring).
 """
 
 import equinox as eqx
@@ -71,12 +73,15 @@ def _weigh(fit, proposal, key, n, batch_size):
     """Draw ``n`` points; return ``(x, log_target, log_weights)`` of the fit's density.
 
     ``log_weights = log_target + volume - log_q``, the density in the flat vector over
-    the proposal density. A zero-density point (``-inf`` target) keeps weight zero.
+    the proposal density. A zero-density point (``-inf`` target) keeps weight zero, and
+    a dead draw (``log_q = +inf``) gets weight zero and a ``-inf`` target.
     """
     z, log_q = proposal.sample(key, fit, n)
     x, volume = _stored(fit, z)
     log_target = fit.log_density(x, batch_size=batch_size)
-    return x, log_target, log_target + volume - log_q
+    dead = jnp.isposinf(log_q)
+    log_target = jnp.where(dead, -jnp.inf, log_target)
+    return x, log_target, jnp.where(dead, -jnp.inf, log_target + volume - log_q)
 
 
 class Importance(AbstractBackend):

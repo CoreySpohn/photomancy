@@ -48,12 +48,15 @@ class ScaleRotateProposal(AbstractDensityProposal):
     + log_volume + log |dx/dy|``
 
     (the factor 2 is the two line-of-sight sheets that map to one chart point). A draw
-    with a period outside the law's bounds has zero target density; it is returned at a
-    fixed interior point with ``log_q = +inf`` (weight zero), so the proposal mass is
-    below one and the weights stay unbiased.
+    with a period outside the law's bounds has zero target density; it is returned as a
+    NaN draw with ``log_q = +inf``, which an importance backend weights zero, so the
+    proposal mass is below one and the weights stay unbiased.
 
     Valid for a fit whose only free entry is one ``ThieleInnesBlock`` and whose terms
-    include one ``RelativeAstrometryTerm``. Reference: Blunt et al. (2017), AJ 153, 229.
+    include one ``RelativeAstrometryTerm``. A fit with any other free entry (the planet
+    radius of a report fit, say) is refused by name: draw it with
+    :func:`~photomancy.orbit.backends.collapsed`, which completes a proposed leaf.
+    Reference: Blunt et al. (2017), AJ 153, 229.
 
     Fails if the Jacobian is wrong: the evidence of a fit with no terms is not zero.
 
@@ -67,12 +70,15 @@ class ScaleRotateProposal(AbstractDensityProposal):
     def _setup(self, fit):
         """Block, term row data, flat positions of the block coordinates and sizes."""
         key, block = _block_of(fit)
-        terms = [t for t in fit.terms if isinstance(t, RelativeAstrometryTerm)]
-        if len(fit.free) != 1 or len(terms) != 1:
+        others = sorted(k for k in fit.free if k != key)
+        if others:
             raise ValueError(
-                "ScaleRotateProposal needs one orbit block as the only free entry "
-                "and one RelativeAstrometryTerm"
+                f"ScaleRotateProposal draws only the orbit block {key!r}; the free "
+                f"entries {others} need a proposal that completes them (collapsed)"
             )
+        terms = [t for t in fit.terms if isinstance(t, RelativeAstrometryTerm)]
+        if len(terms) != 1:
+            raise ValueError("ScaleRotateProposal needs one RelativeAstrometryTerm")
         data = terms[0].data
         row = jnp.argmax(data.is_valid) if self.anchor is None else self.anchor
         names, sizes = _flat_layout(fit)
@@ -153,8 +159,7 @@ class ScaleRotateProposal(AbstractDensityProposal):
         support = block.chart_support(fit.model)
         lo, hi = support["ln_size"]
         inside = (x[:, 0] > lo) & (x[:, 0] < hi)
-        x = x.at[:, 0].set(jnp.clip(x[:, 0], lo, hi))
-        y = block.chart.unconstrain(x, support)
+        y = jnp.where(inside[:, None], block.chart.unconstrain(x, support), jnp.nan)
         xc, log_jac = block_coordinates(block, fit.model, y)
         log_q = self._density(
             block, data, row, e, t, mass, enclosed, xc, log_jac, table
