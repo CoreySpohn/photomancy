@@ -7,6 +7,28 @@ fixed-T precomputed ``for_retrieval`` and the live-recompute ``from_default_setu
 both expose ``contrast_cube`` -- so swapping the strategy never touches the fit.
 """
 
+import equinox as eqx
+import jax.numpy as jnp
+
+__all__ = ["contrast_forward"]
+
+
+class _ContrastForward(eqx.Module):
+    """``pm -> reflected-light contrast spectrum`` at a fixed observing geometry."""
+
+    phase_angle_rad: jnp.ndarray
+    dist_AU: jnp.ndarray
+    wavelengths_nm: jnp.ndarray
+    Rp_Rearth: jnp.ndarray
+
+    def __call__(self, pm):
+        return pm.contrast_cube(
+            phase_angle_rad=self.phase_angle_rad,
+            star_planet_distance_AU=self.dist_AU,
+            wavelengths_nm=self.wavelengths_nm,
+            Rp_Rearth=self.Rp_Rearth,
+        )[:, 0, 0]
+
 
 def contrast_forward(*, phase_angle_rad, dist_AU, wavelengths_nm, Rp_Rearth):
     """Build the atmosphere forward: ``pm -> reflected-light contrast spectrum``.
@@ -22,15 +44,11 @@ def contrast_forward(*, phase_angle_rad, dist_AU, wavelengths_nm, Rp_Rearth):
         Rp_Rearth: Planet radii in Earth radii, shape ``(K,)``.
 
     Returns:
-        ``forward(pm) -> spectrum`` of shape ``(n_wavelengths,)``.
+        An ``eqx.Module`` ``forward(pm) -> spectrum`` of shape ``(n_wavelengths,)``.
     """
-
-    def forward(pm):
-        return pm.contrast_cube(
-            phase_angle_rad=phase_angle_rad,
-            star_planet_distance_AU=dist_AU,
-            wavelengths_nm=wavelengths_nm,
-            Rp_Rearth=Rp_Rearth,
-        )[:, 0, 0]
-
-    return forward
+    return _ContrastForward(
+        jnp.asarray(phase_angle_rad),
+        jnp.asarray(dist_AU),
+        jnp.asarray(wavelengths_nm),
+        jnp.asarray(Rp_Rearth),
+    )
