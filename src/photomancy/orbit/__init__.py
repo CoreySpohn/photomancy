@@ -13,6 +13,7 @@ from photomancy.orbit.diagnostics import (
     mode_scalars,
     mode_summary,
     orbits_from_samples,
+    posterior_physical,
     sample_physical,
 )
 from photomancy.orbit.eig import (
@@ -99,6 +100,7 @@ __all__ = [
     "orbit_nested_sampling",
     "orbit_tempered_smc",
     "orbits_from_samples",
+    "posterior_physical",
     "sample_physical",
     "thiele_innes_fit",
     "thiele_innes_grid_search",
