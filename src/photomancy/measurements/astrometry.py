@@ -25,27 +25,23 @@ from photomancy.measurements._observables import (
     _relative_positions,
     _stellar_reflex,
 )
-from photomancy.measurements._padding import (
-    MAX_REL_ASTROM,
-    MAX_STELLAR_ASTROM,
-    _pad_1d,
-    _valid_mask,
-)
+from photomancy.measurements._padding import MAX_REL_ASTROM, _pad_1d, _valid_mask
 
 __all__ = [
-    "RelativeAstromData",
+    "AstrometryData",
     "RelativeAstrometryTerm",
-    "StellarAstromData",
     "StellarAstrometryTerm",
     "loglike_relative_astrom",
     "loglike_stellar_astrom",
 ]
 
 
-class RelativeAstromData(eqx.Module):
-    """Relative astrometry observations.
+class AstrometryData(eqx.Module):
+    """East/north astrometry in arcsec: a planet relative to its star, or the star.
 
-    Positions are measured in arcseconds relative to the host star.
+    The relative term reads each row as the offset of planet ``planet_id`` from the
+    host star; the stellar term reads each row as the reflex offset of the star about
+    the system barycenter (one body, so ``planet_id`` is not read).
 
     Args:
         times: Observation epochs (days). Shape ``(N,)``.
@@ -107,10 +103,21 @@ class RelativeAstromData(eqx.Module):
 
     @classmethod
     def pad(
-        cls, *, times, ra, dec, ra_err, dec_err, corr, planet_id, max_n=MAX_REL_ASTROM
+        cls,
+        *,
+        times,
+        ra,
+        dec,
+        ra_err,
+        dec_err,
+        corr,
+        planet_id=None,
+        max_n=MAX_REL_ASTROM,
     ):
-        """Create a padded RelativeAstromData with ``is_valid`` mask."""
+        """Pad to ``max_n`` with an ``is_valid`` mask; ``planet_id`` defaults to 0."""
         n = jnp.asarray(times).shape[0]
+        if planet_id is None:
+            planet_id = jnp.zeros(n, dtype=int)
         return cls(
             times=_pad_1d(times, max_n),
             ra=_pad_1d(ra, max_n),
@@ -133,60 +140,6 @@ class RelativeAstromData(eqx.Module):
             dec_err=jnp.ones(max_n),
             corr=jnp.zeros(max_n),
             planet_id=jnp.zeros(max_n, dtype=int),
-            is_valid=jnp.zeros(max_n, dtype=bool),
-        )
-
-
-class StellarAstromData(eqx.Module):
-    """Stellar-reflex astrometry observations.
-
-    The measured RA/DEC offsets of the *star* about the system barycenter (its
-    reflex wobble), in arcseconds. One position per epoch; for a multi-planet
-    system the model sums the per-planet reflex contributions. Unlike
-    :class:`RelativeAstromData` there is no ``planet_id`` (the star is one body).
-
-    Args:
-        times: Observation epochs (days). Shape ``(N,)``.
-        ra: Stellar reflex RA offset (arcsec). Shape ``(N,)``.
-        dec: Stellar reflex DEC offset (arcsec). Shape ``(N,)``.
-        ra_err: RA uncertainty (arcsec). Shape ``(N,)``.
-        dec_err: DEC uncertainty (arcsec). Shape ``(N,)``.
-        corr: RA/DEC correlation coefficient. Shape ``(N,)``.
-        is_valid: Boolean validity mask. Shape ``(N,)``.
-    """
-
-    times: jnp.ndarray
-    ra: jnp.ndarray
-    dec: jnp.ndarray
-    ra_err: jnp.ndarray
-    dec_err: jnp.ndarray
-    corr: jnp.ndarray
-    is_valid: jnp.ndarray
-
-    @classmethod
-    def pad(cls, *, times, ra, dec, ra_err, dec_err, corr, max_n=MAX_STELLAR_ASTROM):
-        """Create a padded StellarAstromData with ``is_valid`` mask."""
-        n = jnp.asarray(times).shape[0]
-        return cls(
-            times=_pad_1d(times, max_n),
-            ra=_pad_1d(ra, max_n),
-            dec=_pad_1d(dec, max_n),
-            ra_err=_pad_1d(ra_err, max_n, fill=1.0),
-            dec_err=_pad_1d(dec_err, max_n, fill=1.0),
-            corr=_pad_1d(corr, max_n),
-            is_valid=_valid_mask(n, max_n),
-        )
-
-    @classmethod
-    def zeros(cls, max_n=MAX_STELLAR_ASTROM):
-        """Create an all-invalid placeholder (for model tracing)."""
-        return cls(
-            times=jnp.zeros(max_n),
-            ra=jnp.zeros(max_n),
-            dec=jnp.zeros(max_n),
-            ra_err=jnp.ones(max_n),
-            dec_err=jnp.ones(max_n),
-            corr=jnp.zeros(max_n),
             is_valid=jnp.zeros(max_n, dtype=bool),
         )
 
@@ -227,7 +180,7 @@ def loglike_relative_astrom(ra_pred, dec_pred, data):
     Args:
         ra_pred: Predicted RA offsets (arcsec). Shape ``(N,)``.
         dec_pred: Predicted DEC offsets (arcsec). Shape ``(N,)``.
-        data: A :class:`RelativeAstromData` instance.
+        data: A :class:`AstrometryData` instance.
 
     Returns:
         Scalar log-likelihood value.
@@ -245,7 +198,7 @@ def loglike_stellar_astrom(ra_pred, dec_pred, data):
     Args:
         ra_pred: Predicted stellar RA offsets (arcsec). Shape ``(N,)``.
         dec_pred: Predicted stellar DEC offsets (arcsec). Shape ``(N,)``.
-        data: A :class:`~photomancy.measurements.astrometry.StellarAstromData` instance.
+        data: A :class:`AstrometryData` instance.
 
     Returns:
         Scalar log-likelihood value.
@@ -310,7 +263,7 @@ class RelativeAstrometryTerm(AbstractLinearTerm):
     Predictions have shape ``(2, T)``; invalid rows are returned as zeros.
     """
 
-    data: RelativeAstromData
+    data: AstrometryData
     system_path: str = eqx.field(static=True, default="")
     reads: ClassVar[tuple[str, ...]] = ()
 
@@ -318,7 +271,7 @@ class RelativeAstrometryTerm(AbstractLinearTerm):
         valid = self.data.is_valid
         # Sanitize before propagation and division: masking a NaN result alone
         # does not prevent NaN derivatives from flowing through its operands.
-        data = RelativeAstromData(
+        data = AstrometryData(
             times=jnp.where(valid, self.data.times, 0.0),
             ra=jnp.where(valid, self.data.ra, 0.0),
             dec=jnp.where(valid, self.data.dec, 0.0),
@@ -390,19 +343,20 @@ class StellarAstrometryTerm(AbstractTerm):
     Invalid rows are sanitized before prediction and returned as zeros.
     """
 
-    data: StellarAstromData
+    data: AstrometryData
     system_path: str = eqx.field(static=True, default="")
     reads: ClassVar[tuple[str, ...]] = ()
 
     def _score(self, model):
         valid = self.data.is_valid
-        data = StellarAstromData(
+        data = AstrometryData(
             times=jnp.where(valid, self.data.times, 0.0),
             ra=jnp.where(valid, self.data.ra, 0.0),
             dec=jnp.where(valid, self.data.dec, 0.0),
             ra_err=jnp.where(valid, self.data.ra_err, 1.0),
             dec_err=jnp.where(valid, self.data.dec_err, 1.0),
             corr=jnp.where(valid, self.data.corr, 0.0),
+            planet_id=self.data.planet_id,
             is_valid=valid,
         )
         system = resolve(model, self.system_path)

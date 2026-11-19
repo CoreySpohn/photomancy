@@ -34,11 +34,10 @@ from photomancy import (
 )
 from photomancy.infer import AbstractTerm, Fit
 from photomancy.measurements import (
+    AstrometryData,
     PhotometryData,
-    PMAnomalyData,
-    RelativeAstromData,
-    RVData,
-    StellarAstromData,
+    ProperMotionAnomalyData,
+    RadialVelocityData,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -56,7 +55,7 @@ EARTH_MASS_MSUN = Mearth2kg / Msun2kg
 
 def _relative():
     return RelativeAstrometryTerm(
-        RelativeAstromData.from_sep_pa(
+        AstrometryData.from_sep_pa(
             times=TIMES,
             sep=[0.13, 0.11, 0.09, 0.15],
             sep_err=[0.004] * 4,
@@ -69,7 +68,7 @@ def _relative():
 
 def _stellar():
     return StellarAstrometryTerm(
-        StellarAstromData.pad(
+        AstrometryData.pad(
             times=TIMES,
             ra=[1e-4, -2e-4, 3e-4, 2e-4],
             dec=[-1e-4, 1e-4, 2e-4, -2e-4],
@@ -83,7 +82,7 @@ def _stellar():
 
 def _rv():
     return RadialVelocityTerm(
-        RVData.pad(
+        RadialVelocityData.pad(
             times=TIMES,
             rv=[2.0, -4.0, 8.0, 1.0],
             rv_err=[1.5] * 4,
@@ -97,7 +96,7 @@ def _rv():
 
 def _pma():
     return ProperMotionAnomalyTerm(
-        PMAnomalyData(
+        ProperMotionAnomalyData(
             t_hip=jnp.array(0.0),
             t_gaia=jnp.array(9000.0),
             gaia_window=jnp.array(1023.0),
@@ -616,7 +615,7 @@ def test_orbit_fit_recovers_the_truth_on_a_scene():
     truth = scene.dynamics.orbits
     times = jnp.array(TIMES)
     east, north = scene.positions(times)[:, 0, jnp.arange(4)]
-    data = RelativeAstromData.pad(
+    data = AstrometryData.pad(
         times=times,
         ra=east,
         dec=north,

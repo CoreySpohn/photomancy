@@ -27,7 +27,7 @@ from photomancy.measurements._observables import (
     _band_contrasts,
     _relative_positions,
 )
-from photomancy.measurements.astrometry import RelativeAstromData
+from photomancy.measurements.astrometry import AstrometryData
 
 __all__ = [
     "AbstractReportPredictor",
@@ -150,7 +150,7 @@ class ReportRows(eqx.Module):
             rows.corr,
         )
 
-    def astrometry(self, planet: int = 0) -> RelativeAstromData:
+    def astrometry(self, planet: int = 0) -> AstrometryData:
         """The positions of the detected rows, as relative astrometry data.
 
         ``ReportTerm`` scores the counts; a ``RelativeAstrometryTerm`` on these data
@@ -159,7 +159,7 @@ class ReportRows(eqx.Module):
         Args:
             planet: Index of the planet the rows report (the predictor's ``planet``).
         """
-        return RelativeAstromData(
+        return AstrometryData(
             times=self.time_d,
             ra=self.ra,
             dec=self.dec,

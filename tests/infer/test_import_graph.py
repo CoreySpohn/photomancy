@@ -198,6 +198,10 @@ DELETED = (
     "ImagingData",
     "loglike_imaging",
     "area_AU2",
+    "RelativeAstromData",
+    "StellarAstromData",
+    "RVData",
+    "PMAnomalyData",
 )
 
 

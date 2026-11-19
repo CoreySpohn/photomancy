@@ -33,7 +33,7 @@ from photomancy import (
 )
 from photomancy.infer import Fit, Importance
 from photomancy.infer.backends._flat import draw_template
-from photomancy.measurements import RelativeAstromData, RelativeAstrometryTerm
+from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
 from photomancy.orbit.completion import CompletedProposal, Completion, ThetaPrior
 from photomancy.orbit.proposals import ScaleRotateProposal
 from photomancy.orbit.sheets import SheetSum
@@ -154,7 +154,7 @@ def build_fit(term=None):
         period_d=LogUniform(50.0, 5000.0), eccentricity=kipping_eccentricity(0.9)
     )
     block = ThieleInnesBlock(law, LogUniform(0.9, 1.1), rows=(0,), system="dynamics")
-    records = RelativeAstromData(
+    records = AstrometryData(
         times=jnp.asarray(REC_TIMES),
         ra=jnp.asarray(REC_RA),
         dec=jnp.asarray(REC_DEC),

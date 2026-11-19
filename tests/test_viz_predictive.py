@@ -24,12 +24,12 @@ def _close_figures():
 
 def test_plot_rv_converts_au_per_day_to_m_per_s():
     """Curves convert to m/s; pad rows are never drawn."""
-    from photomancy.measurements import RVData
+    from photomancy.measurements import RadialVelocityData
     from photomancy.viz import plot_rv
 
     t = np.linspace(0.0, 300.0, 50)
     rv = 1.0e-6 * np.sin(2.0 * np.pi * t / 150.0)
-    data = RVData.pad(
+    data = RadialVelocityData.pad(
         times=jnp.array([10.0, 90.0, 200.0]),
         rv=jnp.array([1.0e-6, -0.5e-6, 0.2e-6]) * (AU2m / d2s),
         rv_err=jnp.array([1.0e-7, 1.0e-7, 1.0e-7]) * (AU2m / d2s),
@@ -146,10 +146,10 @@ def test_plot_detectability_inverts_idempotently():
 
 def test_plot_rv_preserves_observed_m_per_s():
     """Observed m/s velocities and uncertainties are drawn without conversion."""
-    from photomancy.measurements import RVData
+    from photomancy.measurements import RadialVelocityData
     from photomancy.viz import plot_rv
 
-    data = RVData.pad(
+    data = RadialVelocityData.pad(
         times=jnp.array([10.0, 20.0]),
         rv=jnp.array([8.0, -3.0]),
         rv_err=jnp.array([0.5, 0.7]),

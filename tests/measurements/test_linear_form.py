@@ -21,9 +21,8 @@ from orbix.system.core import Body, SkyFrame
 
 from photomancy.infer import AbstractLinearTerm, AbstractTerm, Fit, LinearForm
 from photomancy.measurements import (
-    RelativeAstromData,
+    AstrometryData,
     RelativeAstrometryTerm,
-    StellarAstromData,
     StellarAstrometryTerm,
 )
 
@@ -49,7 +48,7 @@ def _system(k=1):
 
 
 def _relative_data(planet_id):
-    return RelativeAstromData.pad(
+    return AstrometryData.pad(
         times=TIMES,
         ra=[0.10, -0.05, 0.12, 0.2, -0.1],
         dec=[0.02, 0.11, -0.07, 0.15, 0.05],
@@ -159,7 +158,7 @@ def test_the_linear_capability_is_a_type_and_the_stellar_term_does_not_have_it()
     """
     relative = RelativeAstrometryTerm(_relative_data([0] * 5))
     stellar = StellarAstrometryTerm(
-        StellarAstromData.pad(
+        AstrometryData.pad(
             times=TIMES,
             ra=[1e-4] * 5,
             dec=[1e-4] * 5,

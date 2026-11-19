@@ -12,8 +12,8 @@ from kinematics import (
 from orbix.kepler import Halley, kepler
 
 from photomancy.measurements import (
-    RelativeAstromData,
-    RVData,
+    AstrometryData,
+    RadialVelocityData,
     loglike_relative_astrom,
     loglike_rv_marginalized,
 )
@@ -154,8 +154,8 @@ class TestDataContainers:
     """Tests for data container construction and properties."""
 
     def test_rvdata_construction(self):
-        """RVData should store fields correctly."""
-        data = RVData(
+        """RadialVelocityData should store fields correctly."""
+        data = RadialVelocityData(
             times=jnp.array([0.0, 1.0, 2.0]),
             rv=jnp.array([1.0, 2.0, 3.0]),
             rv_err=jnp.array([0.1, 0.1, 0.1]),
@@ -441,7 +441,7 @@ class TestLoglikeAstrom:
 
     def test_perfect_match(self):
         """Zero residuals should give the maximum likelihood."""
-        data = RelativeAstromData(
+        data = AstrometryData(
             times=jnp.array([0.0]),
             ra=jnp.array([0.1]),
             dec=jnp.array([0.2]),
@@ -456,7 +456,7 @@ class TestLoglikeAstrom:
 
     def test_worse_with_residual(self):
         """Larger residuals should give lower likelihood."""
-        data = RelativeAstromData(
+        data = AstrometryData(
             times=jnp.array([0.0]),
             ra=jnp.array([0.1]),
             dec=jnp.array([0.2]),
@@ -472,7 +472,7 @@ class TestLoglikeAstrom:
 
     def test_uncorrelated_reduces_to_chi2(self):
         """With rho=0, should reduce to independent Gaussian in RA and DEC."""
-        data = RelativeAstromData(
+        data = AstrometryData(
             times=jnp.array([0.0]),
             ra=jnp.array([1.0]),
             dec=jnp.array([2.0]),
@@ -495,7 +495,7 @@ class TestLoglikeAstrom:
 
     def test_differentiable(self):
         """Should be differentiable w.r.t. predictions."""
-        data = RelativeAstromData(
+        data = AstrometryData(
             times=jnp.array([0.0]),
             ra=jnp.array([0.1]),
             dec=jnp.array([0.2]),

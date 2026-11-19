@@ -53,7 +53,7 @@ from orbix.system.observables import distance_AU, phase_angle_rad, separation_ar
 from skyscapes.physical_model import LambertianPhysicalModel
 
 from photomancy import viz
-from photomancy.measurements import DMagData, RVData
+from photomancy.measurements import DMagData, RadialVelocityData
 from photomancy.orbit import orbits_from_samples
 
 hwostyle.use("dark")
@@ -185,7 +185,7 @@ result = viz.plot_corner_overlay(
 Radial-velocity curves, converted from the library's native AU/day to the m/s a
 reader expects. A `(T,)` array draws one curve and a `(K, T)` array draws a fan
 of posterior-predictive draws, which is how a posterior is usually shown
-against its data. Passing an `RVData` adds its valid prefix as errorbars,
+against its data. Passing a `RadialVelocityData` adds its valid prefix as errorbars,
 converted the same way, so the two can never drift apart in units.
 
 ```{code-cell} ipython3
@@ -225,7 +225,7 @@ rv_truth = np.asarray(
 rv_obs = rv_truth + (rv_err_m_s / AU_PER_D_TO_M_PER_S) * rng.standard_normal(
     t_obs.size
 )
-rv_data = RVData.pad(
+rv_data = RadialVelocityData.pad(
     times=jnp.asarray(t_obs),
     rv=jnp.asarray(rv_obs),
     rv_err=jnp.full(t_obs.size, rv_err_m_s / AU_PER_D_TO_M_PER_S),

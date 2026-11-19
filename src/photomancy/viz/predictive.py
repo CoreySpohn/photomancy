@@ -49,13 +49,13 @@ def plot_rv(
     """Radial-velocity curves in m/s, from the library's native AU/day.
 
     Orbit velocities are AU/day; this panel converts curves to m/s.
-    ``RVData`` observations and uncertainties are already in m/s.
+    ``RadialVelocityData`` observations and uncertainties are already in m/s.
 
     Args:
         t_d: Times in days, shape ``(T,)``.
         rv_AU_per_d: Predicted curves in AU/day, ``(T,)`` or ``(K, T)`` --
             a fan of posterior-predictive draws enters as the batch.
-        data: Optional ``RVData``; its valid prefix is drawn as errorbars,
+        data: Optional ``RadialVelocityData``; its valid prefix is drawn as errorbars,
             already in m/s.
         ax: Axes to draw into. None creates a new figure.
         line_kw: Extra kwargs for each curve's ``ax.plot``, applied last.

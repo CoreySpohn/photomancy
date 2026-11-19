@@ -17,7 +17,7 @@ from orbix.system import System
 from photomancy.infer import cluster_to_mixture, ravel_samples
 from photomancy.infer.eig import evaluate_candidates
 from photomancy.measurements import (
-    RelativeAstromData,
+    AstrometryData,
     RelativeAstrometryTerm,
     interpolate_contrast_curve,
     system_separation_dmag,
@@ -40,7 +40,7 @@ def _astrometry(system, t, planet):
     if not 0 <= planet < count:
         raise ValueError(f"Planet index {planet} outside system of {count} planets")
     one = jnp.ones(1)
-    row = RelativeAstromData(
+    row = AstrometryData(
         times=jnp.atleast_1d(t),
         ra=0.0 * one,
         dec=0.0 * one,

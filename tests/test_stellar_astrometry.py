@@ -24,8 +24,7 @@ from priorities import Uniform  # noqa: E402
 
 from photomancy.infer import LaplaceBackend, build_scene_logdensity  # noqa: E402
 from photomancy.measurements import (  # noqa: E402
-    RelativeAstromData,
-    StellarAstromData,
+    AstrometryData,
     loglike_relative_astrom,
     loglike_stellar_astrom,
 )
@@ -72,20 +71,19 @@ def test_stellar_and_relative_likelihoods_share_form():
     n = 5
     ra_pred = jnp.linspace(-0.1, 0.1, n)
     dec_pred = jnp.linspace(0.05, -0.05, n)
-    common = dict(
+    data = AstrometryData(
         times=jnp.arange(n, dtype=float),
         ra=ra_pred + 1e-3,
         dec=dec_pred - 1e-3,
         ra_err=jnp.full(n, 2e-3),
         dec_err=jnp.full(n, 2e-3),
         corr=jnp.zeros(n),
+        planet_id=jnp.zeros(n, dtype=int),
         is_valid=jnp.ones(n, dtype=bool),
     )
-    stellar = StellarAstromData(**common)
-    relative = RelativeAstromData(planet_id=jnp.zeros(n, dtype=int), **common)
 
-    ll_stellar = loglike_stellar_astrom(ra_pred, dec_pred, stellar)
-    ll_relative = loglike_relative_astrom(ra_pred, dec_pred, relative)
+    ll_stellar = loglike_stellar_astrom(ra_pred, dec_pred, data)
+    ll_relative = loglike_relative_astrom(ra_pred, dec_pred, data)
     assert jnp.allclose(ll_stellar, ll_relative)
 
 

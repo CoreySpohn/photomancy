@@ -21,15 +21,14 @@ from system_helpers import (
 from term_utils import sampled_jitter_rv
 
 from photomancy.measurements import (
+    AstrometryData,
     DMagData,
     DMagTerm,
-    PMAnomalyData,
+    ProperMotionAnomalyData,
     ProperMotionAnomalyTerm,
+    RadialVelocityData,
     RadialVelocityTerm,
-    RelativeAstromData,
     RelativeAstrometryTerm,
-    RVData,
-    StellarAstromData,
     StellarAstrometryTerm,
 )
 
@@ -94,10 +93,10 @@ _PAIR_FACTORS = [
 class Measurements(eqx.Module):
     """One container for every channel's data."""
 
-    rv: RVData
-    relative_astrom: RelativeAstromData
-    stellar_astrom: StellarAstromData
-    pm_anomaly: PMAnomalyData
+    rv: RadialVelocityData
+    relative_astrom: AstrometryData
+    stellar_astrom: AstrometryData
+    pm_anomaly: ProperMotionAnomalyData
     null: DMagData
     imaging: DMagData
 

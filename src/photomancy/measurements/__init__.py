@@ -14,9 +14,8 @@ from photomancy.measurements._padding import (
     MAX_STELLAR_ASTROM,
 )
 from photomancy.measurements.astrometry import (
-    RelativeAstromData,
+    AstrometryData,
     RelativeAstrometryTerm,
-    StellarAstromData,
     StellarAstrometryTerm,
     loglike_relative_astrom,
     loglike_stellar_astrom,
@@ -33,13 +32,13 @@ from photomancy.measurements.photometry import (
     system_separation_dmag,
 )
 from photomancy.measurements.proper_motion import (
-    PMAnomalyData,
+    ProperMotionAnomalyData,
     ProperMotionAnomalyTerm,
     loglike_pm_anomaly,
 )
 from photomancy.measurements.radial_velocity import (
+    RadialVelocityData,
     RadialVelocityTerm,
-    RVData,
     loglike_rv_marginalized,
 )
 from photomancy.measurements.report import (
@@ -60,22 +59,21 @@ __all__ = [
     "MAX_RV",
     "MAX_STELLAR_ASTROM",
     "AbstractReportPredictor",
+    "AstrometryData",
     "DMagData",
     "DMagTerm",
-    "PMAnomalyData",
     "PhotometryData",
     "PhotometryTerm",
+    "ProperMotionAnomalyData",
     "ProperMotionAnomalyTerm",
-    "RVData",
+    "RadialVelocityData",
     "RadialVelocityTerm",
-    "RelativeAstromData",
     "RelativeAstrometryTerm",
     "ReportLaw",
     "ReportPrediction",
     "ReportRows",
     "ReportTable",
     "ReportTerm",
-    "StellarAstromData",
     "StellarAstrometryTerm",
     "TabulatedReportPredictor",
     "TargetData",
