@@ -22,6 +22,7 @@ from photomancy.infer.backends._flat import draw_template
 from photomancy.measurements import RelativeAstromData, RelativeAstrometryTerm
 from photomancy.orbit.backends import collapsed, few_epoch
 from photomancy.orbit.completion import (
+    CdfMixture,
     CompletedProposal,
     Completion,
     ThetaPrior,
@@ -108,6 +109,24 @@ def test_completion_identity_pins_the_linear_form(fit):
             float(rest + log_z + log_cond), float(fit.log_density(xi)), rtol=1e-9
         )
     assert float(comp.scale_AU) == pytest.approx(10.0 * 0.15, rel=1e-6)
+
+
+def test_cdf_mixture_picks_follow_the_weights_and_skip_zero_weight():
+    """Fails if the inverse-CDF pick is biased or draws a zero-weight component.
+
+    Shares 0.2, 0.5, 0.3 with zero-weight components between and after them; N = 8192
+    (4 sigma of 0.02 on the largest variance).
+    """
+    pi = np.array([0.2, 0.0, 0.5, 0.3, 0.0])
+    with np.errstate(divide="ignore"):
+        log_pi = jnp.log(jnp.asarray(pi))
+    mixture = CdfMixture(jnp.zeros((5, 2)), jnp.eye(2), log_pi)
+    n = 8192
+    share = (
+        np.bincount(np.asarray(mixture._pick(jax.random.key(0), n)), minlength=5) / n
+    )
+    assert share[1] == 0.0 and share[4] == 0.0
+    assert np.all(np.abs(share - pi) <= 4.0 * np.sqrt(pi * (1.0 - pi) / n) + 1e-12)
 
 
 @pytest.mark.medium(reason="compiles the completed sample once, 15 s cold")

@@ -369,11 +369,15 @@ class MixtureProposal(AbstractProposal):
 
         return _blockwise(block, z, shifts.shape[0] * k)
 
+    def _pick(self, key, n):
+        """Component index of each of ``n`` draws (a subclass may pick faster)."""
+        return jax.random.categorical(key, self.log_pi, shape=(n,))
+
     def sample(self, key, fit, n):
         """Draw ``n`` points, reduce them to the cell and return the wrapped density."""
         periods = fit.periods()
         k_comp, k_eps = jax.random.split(key)
-        comp = jax.random.categorical(k_comp, self.log_pi, shape=(n,))
+        comp = self._pick(k_comp, n)
         eps = jax.random.normal(k_eps, (n, self.dim), jnp.float64)
         chol = self.chols[jnp.where(self.chols.shape[0] == 1, 0, comp)]
         z = self._reduced_means(periods)[comp] + jnp.einsum("nij,nj->ni", chol, eps)

@@ -376,6 +376,40 @@ def _pad(a):
     return jnp.zeros((*a.shape[:-1], 4))
 
 
+class CdfMixture(MixtureProposal):
+    """A mixture that picks components by inverse CDF.
+
+    ``jax.random.categorical`` draws ``n * K`` Gumbel variates for ``n`` picks among
+    ``K`` components, which at ``K = 256`` costs more than the rest of an engine round.
+    The inverse CDF takes one uniform per draw; a component of zero weight is never
+    chosen. The density is that of ``MixtureProposal``.
+
+    Fails if the picks are biased: component shares differ from the weights.
+    """
+
+    def _pick(self, key, n):
+        """Component indices by ``searchsorted`` of uniforms on the weight CDF."""
+        cdf = jnp.cumsum(jnp.exp(self.log_pi))
+        u = jax.random.uniform(key, (n,), dtype=cdf.dtype)
+        return jnp.minimum(jnp.searchsorted(cdf, u, side="right"), cdf.shape[0] - 1)
+
+    @classmethod
+    def of(cls, mixture):
+        """The same mixture as a :class:`CdfMixture`."""
+        covs = jnp.einsum("kij,klj->kil", mixture.chols, mixture.chols)
+        return cls(mixture.means, covs, mixture.log_pi, n_images=mixture.n_images)
+
+
+def _fast_picks(proposal):
+    """``proposal`` with the mixture of a defensive refit picking by inverse CDF."""
+    if (
+        isinstance(proposal, DefensiveProposal)
+        and type(proposal.base) is MixtureProposal
+    ):
+        return eqx.tree_at(lambda d: d.base, proposal, CdfMixture.of(proposal.base))
+    return proposal
+
+
 class CompletedProposal(AbstractProposal):
     """Draw ``theta`` from ``base`` and complete the four sky constants.
 
@@ -431,4 +465,4 @@ class CompletedProposal(AbstractProposal):
             n_centers=n_centers,
             defensive=defensive,
         )
-        return eqx.tree_at(lambda p: p.base, self, base)
+        return eqx.tree_at(lambda p: p.base, self, _fast_picks(base))
