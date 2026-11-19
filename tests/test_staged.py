@@ -1,5 +1,7 @@
 """Staged MAP backend: groups, rescaled transforms and the staged fit loop."""
 
+from typing import ClassVar
+
 import equinox as eqx
 import ineedvalidation as vv
 import jax
@@ -7,18 +9,19 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+from priorities import Normal
 
-from photomancy.infer.backends.base import LegacyBackend
 from photomancy.infer.backends.staged import (
+    MAP,
     UNLABELED,
     EarlyStopping,
     FitStage,
-    MAPBackend,
     group_labels,
     map_fit,
     rescaled_transform,
 )
-from photomancy.infer.legacy_posterior import PointPosterior
+from photomancy.infer.fit import AbstractTerm, Fit
+from photomancy.infer.run import run
 
 
 class _Tree(eqx.Module):
@@ -593,33 +596,127 @@ def test_one_compile_per_stage_configuration_and_fresh_transforms():
     assert count(cont) == 4 and count(restarted) == 1
 
 
-@vv.case("scene-fits", "code-verification", basis="exact-algebra")
-def test_map_backend_returns_a_point_posterior_through_the_backend_protocol():
-    """``MAPBackend.run`` equals ``map_fit`` and returns a density-free point estimate.
+class _Bowl(eqx.Module):
+    """Model of the ``MAP`` stage-view tests: a vector ``x`` and a scalar ``y``."""
 
-    Truth source: ``sgd(1.0)`` on ``0.5 (x - t)^2`` lands on ``t`` in one step, where
-    the log-density is exactly 0.
-    Tolerance basis: exact-algebra (bitwise).
-    Fails if: ``run`` fits a different problem than ``fit``, the log density is
-    evaluated before instead of after the fit, or the point posterior claims an
-    evidence or a sample it cannot have.
-    """
-    init, ld = _q_init(), _PreStepAux(jnp.asarray([1.0, 2.0]))
-    backend = MAPBackend(
-        labels=group_labels(init, _Q_GROUPS),
-        transforms={"x": optax.sgd(1.0)},
-        stages=(FitStage(2, ("x",)),),
+    x: jax.Array
+    y: jax.Array
+
+
+class _BowlTerm(AbstractTerm):
+    """Log likelihood ``-0.5 |x - target|^2``; the prediction is ``x``."""
+
+    target: jax.Array
+    reads: ClassVar[tuple[str, ...]] = ()
+
+    def __call__(self, model):
+        return -0.5 * jnp.sum((model.x - self.target) ** 2)
+
+    def draw(self, key, model):
+        return self
+
+    def predict(self, model):
+        return model.x
+
+
+def _bowl_fit(terms=None):
+    model = _Bowl(x=jnp.asarray([8.0, -4.0]), y=jnp.asarray(0.0))
+    terms = terms or (
+        _BowlTerm(jnp.asarray([1.0, 2.0])),
+        _BowlTerm(jnp.asarray([3.0, 0.0])),
     )
-    assert isinstance(backend, LegacyBackend)
-    post = backend.run(ld, init)
-    assert isinstance(post, PointPosterior)
-    np.testing.assert_array_equal(post.params.x, [1.0, 2.0])
-    assert post.log_density == 0.0
-    assert np.isnan(post.evidence)
-    with pytest.raises(NotImplementedError):
-        post.sample(jax.random.PRNGKey(0), 3)
-    with pytest.raises(NotImplementedError):
-        post.log_prob(jnp.zeros(2))
+    free = {
+        "x": Normal(jnp.zeros(2), 1e3 * jnp.ones(2)),
+        "y": Normal(jnp.asarray(0.0), jnp.asarray(1e3)),
+    }
+    return Fit(model, free, terms)
+
+
+_BOWL_X0 = {"x": jnp.asarray([8.0, -4.0]), "y": jnp.asarray(0.0)}
+_BOWL_LABELS = {"x": "x", "y": ""}
+
+
+def _bowl_backend(stage):
+    return MAP(
+        labels=_BOWL_LABELS,
+        transforms={"x": optax.sgd(0.1)},
+        stages=(stage,),
+        init=_BOWL_X0,
+    )
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_map_stage_fit_view_equals_a_hand_restriction():
+    """A stage ``Fit`` over one term runs the fit that holds only that term.
+
+    Truth source: the same staged run on a ``Fit`` built with the one term, with no
+    stage override.
+    Tolerance basis: exact-algebra (rtol 1e-12; the same density, the same steps).
+    Fails if: the view is ignored (the run scores both terms), the view loses its
+    prior, or the wrapped view changes the objective.
+    """
+    fit = _bowl_fit()
+    view = Fit(fit.model, fit.free, fit.terms[:1])
+    key = jax.random.key(0)
+    viewed = run(fit, _bowl_backend(FitStage(20, ("x",), logdensity=view)), key)
+    alone = run(view, _bowl_backend(FitStage(20, ("x",))), key)
+    full = run(fit, _bowl_backend(FitStage(20, ("x",))), key)
+    np.testing.assert_allclose(
+        viewed.samples["x"][0], alone.samples["x"][0], rtol=1e-12
+    )
+    assert not np.allclose(viewed.samples["x"][0], full.samples["x"][0], rtol=1e-3)
+    via_prepare = run(
+        fit,
+        _bowl_backend(FitStage(20, ("x",), prepare=lambda params: view)),
+        key,
+    )
+    np.testing.assert_allclose(
+        via_prepare.samples["x"][0], alone.samples["x"][0], rtol=1e-12
+    )
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_map_refuses_a_stage_fit_with_a_different_free_set():
+    """A stage ``Fit`` whose free entries differ from the run fit raises on the host.
+
+    Truth source: the free dicts written in the test.
+    Tolerance basis: exact-algebra (an exception).
+    Fails if: the stage view is accepted with a different parameter set (the
+    optimizer would score a dict that misses an entry), for ``logdensity`` or for the
+    result of ``prepare``.
+    """
+    fit = _bowl_fit()
+    other = Fit(fit.model, {"x": fit.free["x"]}, fit.terms[:1])
+    key = jax.random.key(0)
+    with pytest.raises(ValueError, match="free entries"):
+        run(fit, _bowl_backend(FitStage(2, ("x",), logdensity=other)), key)
+    with pytest.raises(ValueError, match="free entries"):
+        run(fit, _bowl_backend(FitStage(2, ("x",), prepare=lambda p: other)), key)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_map_closed_form_receives_the_pre_step_predictions():
+    """``closed_form`` gets ``aux = (term predictions,)`` from before the step.
+
+    Truth source: the start ``x = (8, -4)``; after one step the closed form sets
+    ``y`` to the sum of the pre-step prediction, which is 4 exactly (the post-update
+    ``x`` would give a different number).
+    Tolerance basis: exact-algebra (bitwise).
+    Fails if: the prediction is taken after the update, is missing, or is passed in
+    another order.
+    """
+    fit = _bowl_fit((_BowlTerm(jnp.asarray([1.0, 2.0])),))
+
+    def closed_form(u, aux):
+        return {**u, "y": jnp.sum(aux[0])}
+
+    post = run(
+        fit,
+        _bowl_backend(FitStage(1, ("x",), closed_form=closed_form)),
+        jax.random.key(0),
+    )
+    assert float(post.samples["y"][0]) == 4.0
+    assert not np.allclose(post.samples["x"][0], [8.0, -4.0])
 
 
 _ROT = np.linalg.qr(np.random.default_rng(7).standard_normal((5, 5)))[0]
