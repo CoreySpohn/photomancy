@@ -6,8 +6,8 @@ constants analytically, so the search is over three coordinates.
 """
 
 from photomancy.infer import AdaptiveImportance, Importance
-from photomancy.orbit.completion import CompletedProposal, ThetaPrior
-from photomancy.orbit.proposals import ScaleRotateProposal
+from photomancy.orbit.completion import CompletedProposal
+from photomancy.orbit.proposals import ScaleRotateProposal, ThetaPrior
 
 __all__ = ["collapsed", "few_epoch"]
 

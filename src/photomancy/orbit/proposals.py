@@ -1,4 +1,8 @@
-"""Orbit proposals for a Thiele-Innes fit: scale and rotate onto one astrometric row.
+"""Orbit proposals for a Thiele-Innes fit: the block's own law, and scale and rotate.
+
+``ThetaPrior`` draws the three nonlinear block coordinates ``(ln n, ux, uy)`` from the
+block's own period and eccentricity laws (the base of a completed proposal). The
+eccentricity is drawn by inverting a table of the law's distribution function.
 
 ``ScaleRotateProposal`` draws an orbit shape from the block's own law and fixes the
 size and the node so that the orbit passes through a sky position drawn from the error
@@ -15,22 +19,104 @@ import jax.numpy as jnp
 from hwoutils.constants import two_pi
 from hwoutils.model_paths import resolve
 from orbix.system import ClassicalChart
+from orbix.system.charts import disk_to_plane
 from orbix.system.core import GM_SUN_AU3_PER_D2
 
-from photomancy.infer import AbstractDensityProposal
-from photomancy.measurements import RelativeAstrometryTerm
-from photomancy.orbit.completion import (
-    _block_of,
-    _flat_layout,
-    block_coordinates,
-    draw_eccentricity,
-    eccentricity_table,
-    log_density_e,
+from photomancy.infer import (
+    AbstractDensityProposal,
+    DefensiveProposal,
+    MixtureProposal,
 )
+from photomancy.measurements import RelativeAstrometryTerm
+from photomancy.orbit.completion import _block_of, _flat_layout
 
-__all__ = ["ScaleRotateProposal"]
+__all__ = ["ScaleRotateProposal", "ThetaPrior"]
+
+_TABLE = 2**13
 
 _CLASSICAL = ClassicalChart()
+
+
+def eccentricity_table(block):
+    """``(grid, cdf)``: the block law's eccentricity distribution function on a grid.
+
+    The inverse of this table (``jnp.interp(u, cdf, grid)``) is the eccentricity sampler
+    of the orbit proposals; its density is piecewise constant, :func:`log_density_e`.
+    The law's own inverse distribution function iterates a root find that costs seconds
+    per ``2**17`` draws, the distribution function costs a millisecond.
+    """
+    low, high = block.law.support()["e"]
+    grid = jnp.linspace(low, high, _TABLE + 1)
+    return grid, block.law.eccentricity.cdf(grid)
+
+
+def draw_eccentricity(key, table, n):
+    """``n`` eccentricities from the table of :func:`eccentricity_table`."""
+    grid, cdf = table
+    return jnp.interp(jax.random.uniform(key, (n,)), cdf, grid)
+
+
+def log_density_e(e, table):
+    """Log density of :func:`draw_eccentricity` at ``e`` (zero outside the table)."""
+    grid, cdf = table
+    k = jnp.clip(jnp.searchsorted(grid, e) - 1, 0, _TABLE - 1)
+    mass = cdf[k + 1] - cdf[k]
+    return jnp.log(jnp.maximum(mass, 0.0)) - jnp.log(grid[k + 1] - grid[k])
+
+
+class ThetaPrior(AbstractDensityProposal):
+    """The block's own law of ``(ln n, ux, uy)`` as a proposal over those coordinates.
+
+    ``ln n`` is uniform on the period bounds, the eccentricity has the law's marginal
+    (a table of its distribution function, so ``log_q`` is the density of the draws
+    exactly) and the eccentricity angle is uniform, all in the stored coordinates of the
+    Thiele-Innes block. It is given a :class:`Completion` in place of the fit, whose
+    ``theta`` is exactly the three block coordinates (``Completion.from_fit`` refuses
+    any other free entry).
+
+    Fails if the draws and ``log_q`` disagree (the weights of a prior-only fit are not
+    one).
+    """
+
+    def log_prob(self, z, fit):
+        """Log density of ``z (n, 3)`` in the stored coordinates."""
+        block = fit.block
+        y = jnp.concatenate([z, _pad(z)], -1)
+        x, log_jac = block.chart.constrain(y, block.chart_support(fit.model))
+        lo, hi = block.chart_support(fit.model)["ln_size"]
+        r2 = x[:, 1] ** 2 + x[:, 2] ** 2
+        e = jnp.sqrt(r2 / (1.0 + r2))
+        log_pe = log_density_e(e, eccentricity_table(block))
+        log_x = -jnp.log(hi - lo) + log_pe - jnp.log(two_pi * e) - 2.0 * jnp.log1p(r2)
+        return log_x + log_jac
+
+    def sample(self, key, fit, n):
+        """Draw ``n`` points; return ``(z, log_q)``."""
+        block = fit.block
+        k_n, k_e, k_a = jax.random.split(key, 3)
+        lo, hi = block.chart_support(fit.model)["ln_size"]
+        ln_n = lo + (hi - lo) * jax.random.uniform(k_n, (n,))
+        e = draw_eccentricity(k_e, eccentricity_table(block), n)
+        ang = two_pi * jax.random.uniform(k_a, (n,))
+        evec = jnp.stack([e * jnp.cos(ang), e * jnp.sin(ang)], -1)
+        x = jnp.concatenate([ln_n[:, None], disk_to_plane(evec)], -1)
+        y = block.chart.unconstrain(
+            jnp.concatenate([x, _pad(x)], -1), block.chart_support(fit.model)
+        )
+        z = y[:, :3]
+        return z, self.log_prob(z, fit)
+
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+        """Refit a mixture on the cloud, with this prior as the defensive component."""
+        mixture = MixtureProposal.from_cloud(
+            key, z, log_weights, n_centers=n_centers, periods=fit.periods()
+        )
+        return DefensiveProposal(mixture, defensive, prior=self)
+
+
+def _pad(a):
+    """Zeros for the four sky constants, matching the batch of ``a``."""
+    return jnp.zeros((*a.shape[:-1], 4))
 
 
 class ScaleRotateProposal(AbstractDensityProposal):
@@ -48,9 +134,10 @@ class ScaleRotateProposal(AbstractDensityProposal):
     + log_volume + log |dx/dy|``
 
     (the factor 2 is the two line-of-sight sheets that map to one chart point). A draw
-    with a period outside the law's bounds has zero target density; it is returned as a
-    NaN draw with ``log_q = +inf``, which an importance backend weights zero, so the
-    proposal mass is below one and the weights stay unbiased.
+    with a period outside the law's bounds has zero target density; it is a dead draw,
+    NaN with ``log_q = -inf`` from ``sample`` (``log_prob`` is ``-inf`` there) and log
+    weight ``-inf`` from ``weigh``, so the proposal mass is below one and the weights
+    stay unbiased.
 
     Valid for a fit whose only free entry is one ``ThieleInnesBlock`` and whose terms
     include one ``RelativeAstrometryTerm``. A fit with any other free entry (the planet
@@ -68,7 +155,10 @@ class ScaleRotateProposal(AbstractDensityProposal):
     anchor: int | None = eqx.field(static=True, default=None)
 
     def _setup(self, fit):
-        """Block, term row data, flat positions of the block coordinates and sizes."""
+        """Block, anchor data and row, flat positions, system, size, mass, epoch.
+
+        ``inner`` is the mass interior to the block's row and ``epoch`` the row's epoch.
+        """
         key, block = _block_of(fit)
         others = sorted(k for k in fit.free if k != key)
         if others:
@@ -83,9 +173,11 @@ class ScaleRotateProposal(AbstractDensityProposal):
         row = jnp.argmax(data.is_valid) if self.anchor is None else self.anchor
         names, sizes = _flat_layout(fit)
         position = [names.index((key, n)) for n in block.coordinate_names]
-        model = fit.model
-        system = resolve(model, block.system)
-        return block, data, row, position, system, len(sizes)
+        planets = resolve(fit.model, block.reads[0])
+        inner = jnp.sum(planets[..., : block.rows[0] + 1], axis=-1)
+        epoch = resolve(fit.model, block.owns).epoch_d[..., block.rows[0]]
+        system = resolve(fit.model, block.system)
+        return block, data, row, position, system, len(sizes), inner, epoch
 
     def _log_gaussian(self, data, row, east, north):
         """Log density of the anchor row's error kernel at ``(east, north)``."""
@@ -109,18 +201,9 @@ class ScaleRotateProposal(AbstractDensityProposal):
             + log_jac
         )
 
-    def _place(self, z7, position, dim):
-        """Flat vectors from the block coordinates ``z7 (n, 7)`` in chart order."""
-        z = jnp.zeros((z7.shape[0], dim))
-        return z.at[:, jnp.asarray(position)].set(z7)
-
-    def sample(self, key, fit, n):
-        """Draw ``n`` orbits; return ``(z, log_q)``."""
-        block, data, row, position, system, dim = self._setup(fit)
-        held = resolve(fit.model, block.owns)
-        planets = resolve(fit.model, block.reads[0])
-        inner = jnp.sum(planets[..., : block.rows[0] + 1], axis=-1)
-        epoch = held.epoch_d[..., block.rows[0]]
+    def _draw(self, key, fit, n):
+        """Draw ``n`` orbits; return ``(z, log_q, inside)``, ``z`` NaN outside."""
+        block, data, row, position, system, dim, inner, epoch = self._setup(fit)
         t_anchor = data.times[row]
         dist_pc = system.frame.dist_pc
         k = jax.random.split(key, 7)
@@ -160,39 +243,37 @@ class ScaleRotateProposal(AbstractDensityProposal):
         lo, hi = support["ln_size"]
         inside = (x[:, 0] > lo) & (x[:, 0] < hi)
         y = jnp.where(inside[:, None], block.chart.unconstrain(x, support), jnp.nan)
-        xc, log_jac = block_coordinates(block, fit.model, y)
-        log_q = self._density(
-            block, data, row, e, t, mass, enclosed, xc, log_jac, table
-        )
-        log_q = jnp.where(inside, log_q, jnp.inf)
-        return self._place(y, position, dim), log_q
+        x, log_jac = block.chart.constrain(y, support)
+        log_q = self._density(block, data, row, e, t, mass, enclosed, x, log_jac, table)
+        z = jnp.zeros((n, dim)).at[:, jnp.asarray(position)].set(y)
+        return z, log_q, inside
+
+    def sample(self, key, fit, n):
+        """Draw ``n`` orbits; return ``(z, log_q)`` (NaN and ``-inf`` when dead)."""
+        z, log_q, inside = self._draw(key, fit, n)
+        return z, jnp.where(inside, log_q, -jnp.inf)
+
+    def weigh(self, key, fit, n, *, batch_size=None):
+        """Draw and weigh ``n`` orbits; a draw outside the period bounds is dead."""
+        z, log_q, inside = self._draw(key, fit, n)
+        x, volume = fit.from_flat(z)
+        log_target = fit.log_density(x, batch_size=batch_size)
+        log_target = jnp.where(inside, log_target, -jnp.inf)
+        return z, jnp.where(inside, log_target + volume - log_q, -jnp.inf), log_target
 
     def log_prob(self, z, fit):
         """Log density of flat vectors ``z (n, d)`` (zero outside the period bounds)."""
-        block, data, row, position, system, _ = self._setup(fit)
-        held = resolve(fit.model, block.owns)
-        planets = resolve(fit.model, block.reads[0])
-        inner = jnp.sum(planets[..., : block.rows[0] + 1], axis=-1)
-        epoch = held.epoch_d[..., block.rows[0]]
-        y = z[:, jnp.asarray(position)]
-        x, log_jac = block_coordinates(block, fit.model, y)
+        block, data, row, position, system, _, inner, epoch = self._setup(fit)
+        support = block.chart_support(fit.model)
+        x, log_jac = block.chart.constrain(z[:, jnp.asarray(position)], support)
         r2 = x[:, 1] ** 2 + x[:, 2] ** 2
         e = jnp.sqrt(r2 / (1.0 + r2))
         enclosed = block.chart.implied_mu(x) / GM_SUN_AU3_PER_D2
         orbit = block.chart.to_orbit(x, mu_AU3_per_d2=1.0, epoch_d=epoch)
         east, north = orbit.offsets_arcsec(data.times[row], system.frame.dist_pc)
         t = jnp.stack([east, north], -1)
-        log_q = self._density(
-            block,
-            data,
-            row,
-            e,
-            t,
-            enclosed - inner,
-            enclosed,
-            x,
-            log_jac,
-            eccentricity_table(block),
-        )
-        lo, hi = block.chart_support(fit.model)["ln_size"]
+        table = eccentricity_table(block)
+        mass = enclosed - inner
+        log_q = self._density(block, data, row, e, t, mass, enclosed, x, log_jac, table)
+        lo, hi = support["ln_size"]
         return jnp.where((x[:, 0] > lo) & (x[:, 0] < hi), log_q, -jnp.inf)

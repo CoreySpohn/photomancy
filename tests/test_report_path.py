@@ -16,7 +16,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
-from jax.flatten_util import ravel_pytree
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.system import OrbitLaw, ThieleInnesBlock
 from priorities import LogUniform
@@ -32,10 +31,9 @@ from photomancy import (
     ReportTerm,
 )
 from photomancy.infer import Fit, Importance
-from photomancy.infer.backends._flat import draw_template
 from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
-from photomancy.orbit.completion import CompletedProposal, Completion, ThetaPrior
-from photomancy.orbit.proposals import ScaleRotateProposal
+from photomancy.orbit.completion import CompletedProposal, Completion
+from photomancy.orbit.proposals import ScaleRotateProposal, ThetaPrior
 from photomancy.orbit.sheets import SheetSum
 
 jax.config.update("jax_enable_x64", True)
@@ -274,10 +272,9 @@ def _scores(fit, both, one, z, astro=None):
 
     With ``astro`` the sheets are of ``one`` plus ``astro``.
     """
-    _, unravel = ravel_pytree(fit.to_real(draw_template(fit)))
 
     def per(zi):
-        x, _ = fit.from_real(unravel(zi))
+        x, _ = fit.from_flat(zi)
         model = fit.model_at(x)
         record = both.leaf_conditional(model)
         pair = (model, both.reflected(model))

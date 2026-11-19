@@ -224,17 +224,6 @@ def test_no_deleted_name_is_left_in_the_package():
     assert not found, found
 
 
-# Private reaches of ``photomancy.orbit`` that wait for a public home; each entry must
-# still occur, so the list shrinks as they get one.
-WAITING = {
-    "completion.py": {
-        "photomancy.infer.backends._flat",
-        "photomancy.infer.backends._flat.draw_template",
-        "photomancy.measurements.astrometry._dynamics",
-    },
-}
-
-
 def _private_reaches(path):
     """Imports of ``path`` that are legacy or private to another subpackage."""
     found = set()
@@ -252,8 +241,7 @@ def test_orbit_reaches_no_private_or_legacy_name_of_another_subpackage():
     """Fails if ``photomancy.orbit`` imports a private module or name of a sibling.
 
     A leading underscore anywhere in the imported path, or the legacy posterior
-    module, counts. The ``WAITING`` entries are the known reaches, and each must still
-    be present.
+    module, counts.
     """
     orbit = ROOT.parent / "orbit"
     found = {
@@ -261,4 +249,4 @@ def test_orbit_reaches_no_private_or_legacy_name_of_another_subpackage():
         for path in sorted(orbit.rglob("*.py"))
         if (reaches := _private_reaches(path))
     }
-    assert found == WAITING, found
+    assert not found, found

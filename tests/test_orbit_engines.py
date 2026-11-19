@@ -20,16 +20,14 @@ from priorities import LogUniform, Uniform
 from skyscapes.population import kipping_eccentricity
 
 from photomancy.infer import AbstractTerm, Fit, Importance, run
-from photomancy.infer.backends._flat import draw_template
 from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
 from photomancy.orbit.backends import collapsed, few_epoch
 from photomancy.orbit.completion import (
     CompletedProposal,
     Completion,
-    ThetaPrior,
     _log_reference,
 )
-from photomancy.orbit.proposals import ScaleRotateProposal
+from photomancy.orbit.proposals import ScaleRotateProposal, ThetaPrior
 
 jax.config.update("jax_enable_x64", True)
 
@@ -123,8 +121,7 @@ def _unscreened(comp, theta, key, n_constants):
     eps = jax.random.normal(k_draw, (n_constants, 4))
     c = mean + jax.scipy.linalg.solve_triangular(chol.T, eps.T, lower=False).T
     z = comp.join(theta, c)
-    _, unravel = ravel_pytree(comp.fit_rest.to_real(draw_template(comp.fit_rest)))
-    x, volume = comp.fit_rest.from_real(jax.vmap(unravel)(z))
+    x, volume = comp.fit_rest.from_flat(z)
     rest = comp.fit_rest.log_density(x) + volume - _log_reference(c, comp.scale_AU)
     keep = jnp.argmax(rest + jax.random.gumbel(k_keep, (n_constants,)))
     return z[keep], log_z + jax.scipy.special.logsumexp(rest) - jnp.log(n_constants)
@@ -132,25 +129,25 @@ def _unscreened(comp, theta, key, n_constants):
 
 @pytest.mark.medium(reason="compiles the completed sample once, 15 s cold")
 def test_completed_weight_is_the_generic_weight(fit):
-    """Fails if ``log_q`` of a completed draw is not the one that gives its weight.
+    """Fails if a completed weight or its reported density is not the generic one.
 
-    ``fit.log_density - log_q`` of the kept draw equals ``log Z + log mean rest -
-    log q(theta)``, so the generic importance path and the completed estimate agree.
-    With no term left to score the default pool is 8 and the completion is the
-    unscreened estimator draw for draw (same key): weights and kept draws to 1e-12
-    (compiled against eager rounding), so the screen cannot change the astrometry-only
-    path.
+    The log weight of a kept draw is ``log Z + log mean rest - log q(theta)``, and the
+    density ``weigh`` reports from the form equals the fit's own density at the draw,
+    so the generic importance weight ``fit.log_density + volume - log_q`` and the
+    completed estimate agree. With no term left to score the default pool is 8 and the
+    completion is the unscreened estimator draw for draw (same key): weights and kept
+    draws to 1e-12 (compiled against eager rounding), so the screen cannot change the
+    astrometry-only path.
     """
     comp = Completion.from_fit(fit)
     proposal = CompletedProposal(ThetaPrior())
-    z, log_q = eqx.filter_jit(proposal.sample)(jax.random.key(0), fit, 32)
-    _, unravel = ravel_pytree(fit.to_real(draw_template(fit)))
-    x, _ = fit.from_real(jax.vmap(unravel)(z))
-    generic = fit.log_density(x) - log_q
+    z, log_w, log_target = eqx.filter_jit(proposal.weigh)(jax.random.key(0), fit, 32)
+    x, _ = fit.from_flat(z)
+    np.testing.assert_allclose(log_target, fit.log_density(x), rtol=1e-9)
     k_base, k_c = jax.random.split(jax.random.key(0))
     theta, log_q_theta = ThetaPrior().sample(k_base, comp, 32)
     z_c, lw, _ = comp.complete(k_c, theta, 8, 4)
-    np.testing.assert_allclose(generic, lw - log_q_theta, rtol=1e-9)
+    np.testing.assert_allclose(log_w, lw - log_q_theta, rtol=1e-9)
     keys = jax.random.split(k_c, 32)
     z_ref, lw_ref = jax.vmap(lambda t, k: _unscreened(comp, t, k, 8))(theta, keys)
     np.testing.assert_allclose(lw, lw_ref, rtol=1e-12, atol=0)
@@ -263,8 +260,8 @@ def test_scale_rotate_density_is_normalized_and_matches_the_draws():
     probability that a draw is inside the period bounds, from the proposal's own draws,
     equals the integral of its density estimated with prior draws, within 4 SE; and
     ``log_q`` of a draw equals ``log_prob`` of it. N = 4000 for a 4 SE of 0.04. A draw
-    outside the period bounds is NaN with ``log_q = +inf``, and the importance backend
-    weighs it zero, so the evidence stays finite.
+    outside the period bounds is NaN with ``log_q = -inf``, and ``weigh`` gives it
+    weight zero, so the evidence stays finite.
     """
     fit = _fit(_term(n_rows=1, err=0.3))
     proposal = ScaleRotateProposal()
@@ -295,8 +292,10 @@ def test_collapsed_and_few_epoch_agree_and_vmap_equals_the_loop():
     """Fails if the engines disagree on the evidence of one row, or vmap differs.
 
     With one anchor row the scale-and-rotate weights are constant, so ``few_epoch`` is
-    exact; ``collapsed`` must agree within 4 combined SE. The completed run over two
-    worlds under ``filter_vmap`` equals the per-world loop at rtol 1e-9 (shared key).
+    exact; ``collapsed`` must agree within 4 combined SE. The log weights of the
+    completed run over three worlds under ``filter_vmap`` equal the per-world loop at
+    rtol 1e-9 (shared key). The third world has no valid row, so no data scale: its
+    slice is refused (NaN weights) in both, and the other two keep live weights.
     """
     fit = _fit(_term(n_rows=1))
     exact = few_epoch(n_proposals=2**12)._run(fit, jax.random.key(0))
@@ -307,12 +306,14 @@ def test_collapsed_and_few_epoch_agree_and_vmap_equals_the_loop():
     assert gap < 4 * float(adaptive.log_evidence_se) + 1e-6
 
     imp = Importance(CompletedProposal(ThetaPrior()), 256)
-    fits = [_fit(_term(shift=s)) for s in (0.0, 0.01)]
+    empty = eqx.tree_at(lambda t: t.data.is_valid, _term(), jnp.zeros(4, bool))
+    fits = [_fit(_term(shift=0.0)), _fit(_term(shift=0.01)), _fit(empty)]
     dyn, static = eqx.partition(fits, eqx.is_array)
     stacked = jax.tree.map(lambda *a: jnp.stack(a), *dyn)
     key = jax.random.key(0)
     batched = eqx.filter_vmap(
-        lambda d: imp._run(eqx.combine(d, static[0]), key).log_evidence
+        lambda d: imp._run(eqx.combine(d, static[0]), key).log_weights
     )(stacked)
-    loop = [imp._run(f, key).log_evidence for f in fits]
+    loop = [imp._run(f, key).log_weights for f in fits]
     np.testing.assert_allclose(batched, jnp.stack(loop), rtol=1e-9)
+    assert np.all(np.isfinite(batched[:2]).any(-1)) and np.isnan(batched[2]).all()

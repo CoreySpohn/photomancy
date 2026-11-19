@@ -1,8 +1,9 @@
 """Importance sampling backends: a proposal, or a proposal adapted over rounds.
 
-``Importance`` draws from one :class:`~photomancy.infer.proposals.AbstractProposal`
-and weights each draw by ``fit.real_log_prob(z) - log_q``, the target density in the
-flat unconstrained vector over the proposal's own (wrapped) density. The evidence is
+``Importance`` takes the weighted draws of one
+:class:`~photomancy.infer.proposals.AbstractProposal` (``weigh``: for a density
+proposal, the target density in the flat unconstrained vector over the proposal's own
+wrapped density). The evidence is
 the importance mean (:func:`photomancy.infer.evidence.importance_evidence`) and is
 consistent whenever the proposal has positive density wherever the target does and the
 weights have a finite mean. Its standard error needs a finite variance of the weights,
@@ -13,7 +14,7 @@ tempers the target, refits a Gaussian mixture on each round's weighted cloud and
 draws the returned cloud from the last proposal.
 
 A draw in a zero-density region of the fit has weight zero, and so has a draw the
-proposal marks dead with ``log_q = +inf`` (its coordinates may be NaN and are not
+proposal marks dead with log weight ``-inf`` (its coordinates may be NaN and are not
 read). Any other NaN target or proposal density is an error: the weights of the slice
 become NaN and ``run`` returns a NaN slice, which the operations of a ``Posterior``
 refuse. So does an ``AdaptiveImportance`` ladder that did not reach temperature one
@@ -23,9 +24,7 @@ refuse. So does an ``AdaptiveImportance`` ladder that did not reach temperature 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax.flatten_util import ravel_pytree
 
-from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
 from photomancy.infer.diagnostics import (
     khat_threshold,
@@ -72,34 +71,10 @@ class ImportanceInfo(eqx.Module):
     khat: jax.Array
 
 
-def _unravel(fit):
-    return ravel_pytree(fit.to_real(draw_template(fit)))[1]
-
-
-def _stored(fit, z):
-    """Stored entries and log volume of the map of flat vectors ``z (n, d)``."""
-    return fit.from_real(jax.vmap(_unravel(fit))(z))
-
-
-def _weigh(fit, proposal, key, n, batch_size):
-    """Draw ``n`` points; return ``(x, log_target, log_weights)`` of the fit's density.
-
-    ``log_weights = log_target + volume - log_q``, the density in the flat vector over
-    the proposal density. A zero-density point (``-inf`` target) keeps weight zero, and
-    a dead draw (``log_q = +inf``) gets weight zero and a ``-inf`` target.
-    """
-    z, log_q = proposal.sample(key, fit, n)
-    x, volume = _stored(fit, z)
-    log_target = fit.log_density(x, batch_size=batch_size)
-    dead = jnp.isposinf(log_q)
-    log_target = jnp.where(dead, -jnp.inf, log_target)
-    return x, log_target, jnp.where(dead, -jnp.inf, log_target + volume - log_q)
-
-
 class Importance(AbstractBackend):
     """Importance sampling from one proposal.
 
-    The draws are weighted ``fit.real_log_prob(z) - log_q`` and the evidence is the
+    The draws and weights are the proposal's (``weigh``) and the evidence is the
     importance mean, so it is consistent for any proposal that covers the target. The
     evidence and its standard error are NaN when the Pareto k-hat of the weights is
     not at or below ``khat_threshold(n_draws)`` (``info.khat``): above it the variance
@@ -110,8 +85,8 @@ class Importance(AbstractBackend):
 
     Attributes:
         proposal: The :class:`~photomancy.infer.proposals.AbstractProposal` to draw
-            from. Only its draws and their ``log_q`` are used, so a properly weighted
-            proposal that is not a density (a completed orbit proposal) is valid.
+            from. Only its weighted draws are used, so a properly weighted proposal
+            that is not a density (a completed orbit proposal) is valid.
         n_draws: Number of draws.
     """
 
@@ -121,7 +96,10 @@ class Importance(AbstractBackend):
     @eqx.filter_jit
     def _run(self, fit, key, *, batch_size=None):
         """Draw from the proposal and weight the draws to the fit."""
-        x, log_target, log_w = _weigh(fit, self.proposal, key, self.n_draws, batch_size)
+        z, log_w, log_target = self.proposal.weigh(
+            key, fit, self.n_draws, batch_size=batch_size
+        )
+        x, _ = fit.from_flat(z)
         log_z, se = importance_evidence(log_w)
         khat = pareto_khat(log_w)
         valid = khat <= khat_threshold(self.n_draws)
@@ -237,9 +215,9 @@ class AdaptiveImportance(AbstractBackend):
         temperatures, kish = [], []
         for _ in range(self.n_rounds - 1):
             k_draw, k_fit, key = jax.random.split(key, 3)
-            z, log_q = proposal.sample(k_draw, fit, self.n_round)
-            x, volume = _stored(fit, z)
             if tempering:
+                z, log_q = proposal.sample(k_draw, fit, self.n_round)
+                x, volume = fit.from_flat(z)
                 log_prior = fit.log_prior(x, batch_size=batch_size) + volume
                 log_like = fit.log_likelihood(x, batch_size=batch_size)
                 log_base = log_prior - log_q
@@ -252,7 +230,9 @@ class AdaptiveImportance(AbstractBackend):
                     log_base + _temper(log_like, beta),
                 )
             else:
-                log_w = fit.log_density(x, batch_size=batch_size) + volume - log_q
+                z, log_w, _ = proposal.weigh(
+                    k_draw, fit, self.n_round, batch_size=batch_size
+                )
             temperatures.append(beta)
             kish.append(kish_ess(log_w))
             proposal = proposal.adapt(
