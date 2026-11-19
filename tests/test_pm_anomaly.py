@@ -23,7 +23,10 @@ from orbix.equations.orbit import period_a, period_to_sma  # noqa: E402
 from priorities import Uniform  # noqa: E402
 
 from photomancy.infer import LaplaceBackend, build_scene_logdensity  # noqa: E402
-from photomancy.measurements import PMAnomalyData, loglike_pm_anomaly  # noqa: E402
+from photomancy.measurements import (  # noqa: E402
+    ProperMotionAnomalyData,
+    loglike_pm_anomaly,
+)
 
 MSUN_KG = 1.989e30
 DIST_PC = 10.0
@@ -75,7 +78,7 @@ def test_pm_anomaly_scales_linearly_with_mass():
 
 def test_pm_anomaly_likelihood_masks_invalid():
     """The placeholder channel (is_valid False) contributes zero log-likelihood."""
-    placeholder = PMAnomalyData.zeros()
+    placeholder = ProperMotionAnomalyData.zeros()
     ll = loglike_pm_anomaly(jnp.array([1.0, -1.0]), placeholder)
     assert float(ll) == 0.0
 
@@ -84,7 +87,7 @@ def test_pm_anomaly_likelihood_peaks_at_truth():
     """The likelihood is maximized at the true anomaly."""
     anom_true = _anom(317.8 * Mearth2kg)
     cov = (0.02e-3 / YR) ** 2 * jnp.eye(2)
-    data = PMAnomalyData(
+    data = ProperMotionAnomalyData(
         t_hip=jnp.array(T_HIP),
         t_gaia=jnp.array(T_GAIA),
         gaia_window=jnp.array(GAIA_WIN),

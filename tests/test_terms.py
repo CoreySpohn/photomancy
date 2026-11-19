@@ -38,9 +38,9 @@ from photomancy.infer import (
 )
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.measurements import (
+    AstrometryData,
     PhotometryData,
-    RelativeAstromData,
-    RVData,
+    RadialVelocityData,
     loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
@@ -96,7 +96,7 @@ def test_sign_anchor(pa_deg, axis):
     only the positive sign is asserted on the nonzero axis, independent of scale.
     Fails if: either conversion or system-term prediction flips or swaps axes.
     """
-    data = RelativeAstromData.from_sep_pa(
+    data = AstrometryData.from_sep_pa(
         times=[0.0], sep=[0.1], sep_err=[0.001], pa_deg=[pa_deg], pa_err_deg=[0.1]
     )
     observed = np.array([data.ra[0], data.dec[0]])
@@ -119,7 +119,7 @@ def test_sep_pa_covariance(max_n):
     Fails if: propagated errors, covariance sign, angle units or padding differ.
     """
     sep, sep_err, pa, pa_err = 0.4, 0.0004, 0.6, 0.002
-    data = RelativeAstromData.from_sep_pa(
+    data = AstrometryData.from_sep_pa(
         times=[25.0],
         sep=[sep],
         sep_err=[sep_err],
@@ -660,7 +660,7 @@ def test_rv_marginal_integrates_to_one_over_the_contrast():
     (the integral is ``1 / sqrt(2)``) or is taken over all valid epochs instead of
     per instrument (``sqrt(3 / 2)``).
     """
-    data = RVData.pad(
+    data = RadialVelocityData.pad(
         times=[0.0, 1.0, 2.0],
         rv=[0.0, 0.0, 0.0],
         rv_err=[1.5, 2.5, 1.0],

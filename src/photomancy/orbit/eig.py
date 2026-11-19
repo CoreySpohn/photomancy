@@ -17,7 +17,7 @@ from orbix.system import System
 from photomancy.infer import cluster_to_mixture, ravel_samples
 from photomancy.infer.eig import evaluate_candidates
 from photomancy.measurements import (
-    RelativeAstromData,
+    AstrometryData,
     RelativeAstrometryTerm,
     interpolate_contrast_curve,
     system_separation_dmag,
@@ -40,7 +40,7 @@ def _astrometry(system, t, planet):
     if not 0 <= planet < count:
         raise ValueError(f"Planet index {planet} outside system of {count} planets")
     one = jnp.ones(1)
-    row = RelativeAstromData(
+    row = AstrometryData(
         times=jnp.atleast_1d(t),
         ra=0.0 * one,
         dec=0.0 * one,
@@ -51,11 +51,6 @@ def _astrometry(system, t, planet):
         is_valid=jnp.ones(1, dtype=bool),
     )
     return RelativeAstrometryTerm(row).predict(system)[:, 0]
-
-
-def _photometry(system, t, area_AU2):
-    sep, dmag = system_separation_dmag(system, jnp.atleast_1d(t), area_AU2=area_AU2)
-    return jnp.stack((sep[0], dmag[0]))
 
 
 def _modes(posterior, n_modes, key):
@@ -80,7 +75,7 @@ def evaluate_orbit_candidates(
     system_path="",
     planet=0,
     contrast_curve=None,
-    area_AU2=None,
+    area_path=None,
     iwa_arcsec=0.0,
 ):
     """Score a planet's relative astrometry at candidate days from the system epoch.
@@ -95,8 +90,8 @@ def evaluate_orbit_candidates(
     Each reported measurement has variance ``obs_variance`` in arcsec squared. An
     optional ``(sep_arcsec, dMag_limit)`` curve makes a mode report only when its
     planet is above the inner working angle and brighter than the curve (one-planet
-    systems). The Lambertian scale is the scene's albedo times squared radius;
-    ``area_AU2`` supplies a fixed scale, which a bare orbix system needs.
+    systems). The Lambertian scale is the scene's albedo times squared radius; a bare
+    orbix system needs it as a model leaf (AU^2) at ``area_path``.
 
     Args:
         posterior: An unbatched :class:`~photomancy.infer.Posterior`.
@@ -107,7 +102,8 @@ def evaluate_orbit_candidates(
         system_path: Model path of the scored system; the empty path is the model.
         planet: Planet index.
         contrast_curve: Optional ``(sep_arcsec, dMag_limit)`` arrays.
-        area_AU2: Optional geometric albedo times radius squared (AU^2).
+        area_path: Model path of the geometric albedo times squared radius (AU^2),
+            or None to read the scene's.
         iwa_arcsec: Inner working angle (arcsec) of the detection model.
 
     Returns:
@@ -126,7 +122,11 @@ def evaluate_orbit_candidates(
         return _astrometry(system_at(z), t, planet)
 
     def photometry(z, t):
-        return _photometry(system_at(z), t, area_AU2)
+        model = posterior.fit.model_at(unravel(z))
+        area = None if area_path is None else resolve(model, area_path)
+        system, t = resolve(model, system_path), jnp.atleast_1d(t)
+        sep, dmag = system_separation_dmag(system, t, albedo_area_AU2=area)
+        return jnp.stack((sep[0], dmag[0]))
 
     detectable = None
     detectable_args = ()

@@ -2,20 +2,20 @@
 
 Plain data, importable without the plotting stack: the ASCII label for
 every physical orbital parameter a corner plot shows (the keys of
-``posterior_physical`` among them), plus the curated default ordering corner
+``classical_elements`` among them), plus the curated default ordering corner
 plots use when the caller does not choose one.
 """
 
 import numpy as np
 
 PARAM_LABELS = {
-    "T": "T [days]",
+    "period_d": "P [days]",
     "log_P": "log10 P [days]",
     "e": "e",
-    "a": "a (AU)",
+    "a_AU": "a (AU)",
     "cos_i": "cos i",
-    "W": "Omega [rad]",
-    "M0": "M0 [rad]",
+    "W_rad": "Omega [rad]",
+    "M0_rad": "M0 [rad]",
     "tp": "tp [days]",
     "cos_w": "cos omega",
     "sin_w": "sin omega",
@@ -35,12 +35,12 @@ PARAM_LABELS = {
 # are reachable explicitly via params=; ll_total (a log-likelihood column a
 # sample dict may carry) is never shown.
 _DEFAULT_CORNER_ORDER = (
-    "T",
-    "a",
+    "period_d",
+    "a_AU",
     "e",
     "cos_i",
-    "W",
-    "M0",
+    "W_rad",
+    "M0_rad",
     "tp",
     "Lambda",
     "Rp",

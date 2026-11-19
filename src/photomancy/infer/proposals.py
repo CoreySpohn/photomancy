@@ -1,10 +1,12 @@
 """Proposal distributions over the flat unconstrained vector of a ``Fit``.
 
-A proposal draws ``z`` in the flat real vector of ``fit.to_real`` (the ``ravel_pytree``
-of one draw: sorted entry keys, sorted coordinate names inside a block) and reports
-``log_q``, its own log density at ``z``. The importance backends weight a draw by
-``fit.real_log_prob(z) - log_q``, so ``log_q`` is the density of the same coordinates
-that ``fit.from_real`` reads.
+A proposal gives properly weighted draws ``z`` in the flat real vector of
+``fit.to_real`` (the ``ravel_pytree`` of one draw: sorted entry keys, sorted coordinate
+names inside a block; ``fit.from_flat`` reads it). ``weigh`` returns the draws, their
+log weights, whose mean estimates the evidence, and the fit's log density at them. A
+density proposal draws ``z`` with its own log density ``log_q`` and weighs a draw by
+``fit.log_density + volume - log_q``, the target density in the flat vector over the
+proposal's.
 
 Periodic coordinates. A block coordinate with a period (``fit.periods()``) is stored
 reduced to the cell ``[0, period)``, and the block density repeats outside it. A
@@ -37,7 +39,6 @@ from jax.flatten_util import ravel_pytree
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logsumexp
 
-from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.particles import systematic_indices
 
 __all__ = [
@@ -50,11 +51,6 @@ __all__ = [
 
 # Elements of the largest intermediate array of a density evaluation (float64).
 _BLOCK_ELEMENTS = 2**22
-
-
-def _unravel(fit):
-    """The inverse of the flat vector of ``fit.to_real`` (one draw)."""
-    return ravel_pytree(fit.to_real(draw_template(fit)))[1]
 
 
 def _period_array(periods):
@@ -98,26 +94,44 @@ def _blockwise(fn, z, per_row):
 
 
 class AbstractProposal(eqx.Module):
-    """A distribution over the flat unconstrained vector of a fit.
+    """Properly weighted draws over the flat unconstrained vector of a fit.
 
-    ``sample`` returns ``(z, log_q)``: the draws and the value that makes
-    ``fit.real_log_prob(z) - log_q`` their importance weight. For a density proposal
-    (:class:`AbstractDensityProposal`) ``log_q`` is the density of the draws, wrapped
-    over the cell for periodic coordinates (see the module docstring). A proposal that
-    is properly weighted but not a density (the ``log_q`` of a draw is the value that
-    gives its weight and no density at ``z`` exists) derives from this class directly.
-    Subclasses are ``eqx.Module`` configurations.
+    ``weigh`` is what a proposal is for: ``n`` draws of the fit with log weights whose
+    mean estimates the evidence. A proposal with a density at any point derives from
+    :class:`AbstractDensityProposal`, which implements ``weigh`` once; a properly
+    weighted proposal with no density at ``z`` (a completed orbit proposal) derives
+    from this class directly and implements ``weigh`` itself. Subclasses are
+    ``eqx.Module`` configurations.
     """
 
     @abstractmethod
-    def sample(self, key, fit, n: int) -> tuple[jax.Array, jax.Array]:
-        """Draw ``n`` points; return ``(z, log_q)`` with ``z`` of shape ``(n, d)``."""
+    def weigh(
+        self, key, fit, n: int, *, batch_size: int | None = None
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """Draw ``n`` properly weighted points of ``fit``.
 
-    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+        A dead draw has log weight ``-inf`` and its coordinates are not read; this is
+        the only death signal of a proposal. A NaN log weight is an error, which the
+        backend turns into a refused slice.
+
+        Args:
+            key: PRNG key.
+            fit: The fit.
+            n: Number of draws.
+            batch_size: Draws per batch of the fit's density, where it is evaluated.
+
+        Returns:
+            ``(z, log_weights, log_target)``: the draws in the flat vector, ``(n, d)``;
+            their log weights, ``(n,)``; and ``fit.log_density`` at the draws, ``(n,)``
+            (``-inf`` at a dead draw).
+        """
+
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
         """Return the next round's proposal, fitted to a weighted cloud ``z``.
 
-        The default is a kernel mixture on the cloud with a share ``defensive`` of the
-        fit's prior (:meth:`MixtureProposal.from_cloud`, :class:`DefensiveProposal`).
+        The default is a kernel mixture on the cloud with a share ``defensive_fraction``
+        of the fit's prior (:meth:`MixtureProposal.from_cloud`,
+        :class:`DefensiveProposal`).
 
         Args:
             key: PRNG key.
@@ -125,7 +139,7 @@ class AbstractProposal(eqx.Module):
             log_weights: Their log weights, ``(N,)``.
             fit: The fit.
             n_centers: Kernels of the mixture.
-            defensive: Share of the defensive prior component.
+            defensive_fraction: Share of the defensive prior component.
         """
         mixture = MixtureProposal.from_cloud(
             key,
@@ -134,20 +148,36 @@ class AbstractProposal(eqx.Module):
             n_centers=n_centers,
             periods=fit.periods(),
         )
-        return DefensiveProposal(mixture, defensive)
+        return DefensiveProposal(mixture, defensive_fraction)
 
 
 class AbstractDensityProposal(AbstractProposal):
-    """A proposal whose ``log_q`` is its density, evaluable at any point.
+    """A proposal with a density, evaluable at any point.
 
-    ``sample`` and ``log_prob`` agree: ``log_q`` is ``log_prob`` at the draws. The
-    tempering of :class:`~photomancy.infer.backends.importance.AdaptiveImportance` and
-    the defensive mixture need the density at points the proposal did not draw.
+    ``sample`` returns ``(z, log_q)`` with ``log_q`` the density of the draws, wrapped
+    over the cell for periodic coordinates (see the module docstring); it agrees with
+    ``log_prob``. The tempering of
+    :class:`~photomancy.infer.backends.importance.AdaptiveImportance` and the
+    defensive mixture need the density at points the proposal did not draw.
     """
+
+    @abstractmethod
+    def sample(self, key, fit, n: int) -> tuple[jax.Array, jax.Array]:
+        """Draw ``n`` points; return ``(z, log_q)`` with ``z`` of shape ``(n, d)``."""
 
     @abstractmethod
     def log_prob(self, z, fit) -> jax.Array:
         """Return the proposal log density of ``z (n, d)`` as ``(n,)``."""
+
+    def weigh(self, key, fit, n, *, batch_size=None):
+        """Draw ``n`` points; weigh each by ``fit.log_density + volume - log_q``.
+
+        A draw in a zero-density region of the fit has weight zero.
+        """
+        z, log_q = self.sample(key, fit, n)
+        x, volume = fit.from_flat(z)
+        log_target = fit.log_density(x, batch_size=batch_size)
+        return z, log_target + volume - log_q, log_target
 
 
 class PriorProposal(AbstractDensityProposal):
@@ -191,7 +221,7 @@ class PriorProposal(AbstractDensityProposal):
 
     def log_prob(self, z, fit):
         """Prior log density in the unconstrained coordinates."""
-        x, volume = fit.from_real(jax.vmap(_unravel(fit))(z))
+        x, volume = fit.from_flat(z)
         return fit.log_prior(x) + volume
 
 
@@ -428,9 +458,14 @@ class DefensiveProposal(AbstractDensityProposal):
         z = jnp.where(pick, z_prior, z_base)
         return z, self.log_prob(z, fit)
 
-    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
         """The default refit, keeping this proposal's own prior component."""
         refit = super().adapt(
-            key, z, log_weights, fit, n_centers=n_centers, defensive=defensive
+            key,
+            z,
+            log_weights,
+            fit,
+            n_centers=n_centers,
+            defensive_fraction=defensive_fraction,
         )
         return eqx.tree_at(lambda d: d.prior, refit, self.prior)

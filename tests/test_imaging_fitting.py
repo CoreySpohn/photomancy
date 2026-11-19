@@ -1,4 +1,4 @@
-"""Null / imaging likelihoods: gradient safety and padding.
+"""dMag detection and null likelihoods: gradient safety and padding.
 
 The contrast-curve likelihood interpolates a dMag0 detection limit at the planet's
 predicted separation. The grids are padded (trailing sep=0, dmag0=-inf), which made
@@ -16,12 +16,9 @@ from kinematics import (  # noqa: E402
 )
 
 from photomancy.measurements import (  # noqa: E402
-    MAX_CC_PTS,
     MAX_IMG,
-    ImagingData,
-    NullData,
-    loglike_imaging,
-    loglike_null,
+    DMagData,
+    loglike_dmag,
 )
 
 MSUN_KG = 1.989e30
@@ -44,28 +41,29 @@ def _predict(data, cos_i):
     )
 
 
-def test_loglike_null_gradient_finite_on_placeholder():
-    """The masked-placeholder gradient (what initialize_model checks) is finite."""
-    null0 = NullData.zeros()
-    grad = jax.grad(lambda ci: loglike_null(*_predict(null0, ci), null0))(0.5)
+def test_loglike_dmag_gradient_finite_on_placeholder():
+    """The masked-placeholder gradient of the dMag likelihood is finite."""
+    img0 = DMagData.zeros()
+    grad = jax.grad(lambda ci: loglike_dmag(*_predict(img0, ci), img0))(0.5)
     assert jnp.isfinite(grad)
 
 
-def test_loglike_imaging_gradient_finite_on_placeholder():
-    """Same gradient-safety for the unified imaging likelihood placeholder."""
-    img0 = ImagingData.zeros()
-    grad = jax.grad(lambda ci: loglike_imaging(*_predict(img0, ci), img0))(0.5)
-    assert jnp.isfinite(grad)
+def test_contrast_curve_nulls_convert_and_keep_a_finite_gradient():
+    """Fails if the contrast-curve constructor misconverts or breaks the gradient.
 
-
-def test_loglike_null_gradient_finite_on_real_padded_curve():
-    """Real padded contrast-curve data also has a finite geometry gradient."""
+    Each contrast limit becomes the dMag limit ``-2.5 log10(contrast)``, every epoch
+    is a valid null and the padding is invalid; the geometry gradient of the padded
+    curves is finite.
+    """
     seps = jnp.broadcast_to(jnp.linspace(0.05, 0.5, 40), (3, 40))
-    contrast = jnp.full((3, 40), 1e-9)
-    data = NullData.from_contrast_curves(
+    contrast = jnp.full((3, 40), 1e-9).at[1].set(1e-10)
+    data = DMagData.from_contrast_curves(
         jnp.array([100.0, 500.0, 900.0]), seps, contrast
     )
-    grad = jax.grad(lambda ci: loglike_null(*_predict(data, ci), data))(0.5)
+    assert jnp.allclose(data.dmag0_grid[:3, :40], -2.5 * jnp.log10(contrast))
+    assert bool(data.is_valid[:3].all()) and not bool(data.is_valid[3:].any())
+    assert not bool(data.is_detected.any())
+    grad = jax.grad(lambda ci: loglike_dmag(*_predict(data, ci), data))(0.5)
     assert jnp.isfinite(grad)
 
 
@@ -79,7 +77,7 @@ def test_null_epochs_penalize_only_a_planet_bright_enough_to_see():
     gradient in dMag is positive (fainter is more likely).
     """
     contrast = jnp.array([[1e-8, 1e-9, 1e-10, 1e-10, 1e-10]])
-    nulls = ImagingData.from_detections_and_nulls(
+    nulls = DMagData.from_detections_and_nulls(
         jnp.zeros(0),
         jnp.zeros(0),
         jnp.zeros(0),
@@ -93,7 +91,7 @@ def test_null_epochs_penalize_only_a_planet_bright_enough_to_see():
     )
 
     def score(separation, dmag):
-        return loglike_imaging(jnp.array([separation]), jnp.array([dmag]), nulls)
+        return loglike_dmag(jnp.array([separation]), jnp.array([dmag]), nulls)
 
     assert score(0.2, 20.0) < -10.0
     for separation, dmag in ((0.2, 30.0), (5.0, 15.0), (0.01, 15.0)):
@@ -101,23 +99,9 @@ def test_null_epochs_penalize_only_a_planet_bright_enough_to_see():
     assert jax.grad(score, argnums=1)(0.2, 25.0) > 0.0
 
 
-def test_nulldata_pad_produces_max_sized_valid_container():
-    """NullData.pad pads epochs + grids to MAX with a correct validity mask."""
-    epochs = jnp.array([100.0, 500.0, 900.0])
-    sep = jnp.broadcast_to(jnp.linspace(0.05, 0.5, 40), (3, 40))
-    dmag0 = jnp.full((3, 40), 25.0)
-    padded = NullData.pad(epochs=epochs, sep_grid=sep, dmag0_grid=dmag0)
-
-    assert padded.epochs.shape == (MAX_IMG,)
-    assert padded.sep_grid.shape == (MAX_IMG, MAX_CC_PTS)
-    assert int(padded.is_valid.sum()) == 3
-    assert bool(padded.is_valid[:3].all())
-    assert not bool(padded.is_valid[3:].any())
-
-
-def test_imagingdata_pad_produces_max_sized_valid_container():
-    """ImagingData.pad pads all per-epoch fields to MAX with a validity mask."""
-    padded = ImagingData.pad(
+def test_dmag_data_pad_produces_max_sized_valid_container():
+    """DMagData.pad pads all per-epoch fields to MAX with a validity mask."""
+    padded = DMagData.pad(
         epochs=jnp.array([200.0, 800.0]),
         sep_grid=jnp.broadcast_to(jnp.linspace(0.05, 0.5, 40), (2, 40)),
         dmag0_grid=jnp.full((2, 40), 25.0),

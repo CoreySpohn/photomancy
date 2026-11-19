@@ -10,7 +10,7 @@ from hwoutils.epoch import Epoch
 from optixstuff.spectral import Band, Quadrature
 
 from photomancy.measurements.astrometry import (
-    RelativeAstromData,
+    AstrometryData,
     RelativeAstrometryTerm,
 )
 from photomancy.measurements.photometry import PhotometryData, PhotometryTerm
@@ -30,7 +30,7 @@ class TargetData:
     """
 
     target: dict
-    relative_astrometry: RelativeAstromData | None
+    relative_astrometry: AstrometryData | None
     photometry: PhotometryData | None
     band_names: tuple[str, ...]
     comparisons: dict
@@ -125,7 +125,7 @@ def load_target(
     rows = selected["astrometry"]
     astrometry = None
     if rows:
-        astrometry = RelativeAstromData.from_sep_pa(
+        astrometry = AstrometryData.from_sep_pa(
             times=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
             sep=[r["sep_mas"] / 1000.0 for r in rows],
             sep_err=[_mean_error(r["sep_err_mas"]) / 1000.0 for r in rows],

@@ -1,12 +1,12 @@
 """Counts reports of planned exposures, with an interchangeable count predictor.
 
-Times are days from the selected system's epoch; a report table carries that epoch
+Times are days from the selected system's epoch; a count-rate table carries that epoch
 and a predictor refuses a model whose epoch differs. Positions, errors and diffraction
 scales are in arcsec. A null is a censored counts measurement; a detection carries
 counts and a position whose covariance is a function of its reported counts. Those
 counts are data, so the joint density of a detection factorizes into the counts, which
 ``ReportTerm`` scores, and a Gaussian position with a data-fixed covariance, which a
-``RelativeAstrometryTerm`` on ``ReportRows.astrometry()`` scores.
+``RelativeAstrometryTerm`` on ``ReportData.astrometry()`` scores.
 """
 
 import math
@@ -27,16 +27,16 @@ from photomancy.measurements._observables import (
     _band_contrasts,
     _relative_positions,
 )
-from photomancy.measurements.astrometry import RelativeAstromData
+from photomancy.measurements.astrometry import AstrometryData
 
 __all__ = [
     "AbstractReportPredictor",
-    "ReportLaw",
+    "CountRateTable",
+    "PrecomputedReportPredictor",
+    "ReportData",
     "ReportPrediction",
-    "ReportRows",
-    "ReportTable",
+    "ReportRule",
     "ReportTerm",
-    "TabulatedReportPredictor",
 ]
 
 
@@ -46,8 +46,8 @@ def _float64(value):
     )
 
 
-class ReportLaw(eqx.Module):
-    """Static detection threshold and observable-based centroid error law."""
+class ReportRule(eqx.Module):
+    """Static detection threshold and observable-based centroid error rule."""
 
     threshold: float = eqx.field(static=True, default=5.0)
     kappa: float = eqx.field(static=True, default=1.0)
@@ -84,7 +84,7 @@ class ReportLaw(eqx.Module):
         )
 
 
-class ReportRows(eqx.Module):
+class ReportData(eqx.Module):
     """One planet slot per exposure; all fields have shape (R,).
 
     ``planned`` stores valid exposure metadata with zero placeholders for outcomes.
@@ -150,7 +150,7 @@ class ReportRows(eqx.Module):
             rows.corr,
         )
 
-    def astrometry(self, planet: int = 0) -> RelativeAstromData:
+    def astrometry(self, planet: int = 0) -> AstrometryData:
         """The positions of the detected rows, as relative astrometry data.
 
         ``ReportTerm`` scores the counts; a ``RelativeAstrometryTerm`` on these data
@@ -159,7 +159,7 @@ class ReportRows(eqx.Module):
         Args:
             planet: Index of the planet the rows report (the predictor's ``planet``).
         """
-        return RelativeAstromData(
+        return AstrometryData(
             times=self.time_d,
             ra=self.ra,
             dec=self.dec,
@@ -194,12 +194,12 @@ class AbstractReportPredictor(eqx.Module):
     """Predict counts, their variance and the centroid for a row bank."""
 
     @abstractmethod
-    def __call__(self, model, rows: ReportRows) -> ReportPrediction:
+    def __call__(self, model, rows: ReportData) -> ReportPrediction:
         """Return one prediction per row, without reading the outcomes."""
         raise NotImplementedError
 
 
-class ReportTable(eqx.Module):
+class CountRateTable(eqx.Module):
     """A mode bank of count rates, diffraction scales and bandpasses.
 
     Separations have shape (n_modes, P). Finite knots increase strictly;
@@ -234,10 +234,10 @@ class ReportTable(eqx.Module):
             )
 
 
-class TabulatedReportPredictor(AbstractReportPredictor):
+class PrecomputedReportPredictor(AbstractReportPredictor):
     """Read the bare system model using the astrometry/photometry term helpers."""
 
-    table: ReportTable
+    table: CountRateTable
     planet: int = eqx.field(static=True)
 
     def __check_init__(self):
@@ -245,11 +245,11 @@ class TabulatedReportPredictor(AbstractReportPredictor):
         if not isinstance(self.planet, int) or self.planet < 0:
             raise ValueError("planet must be a nonnegative static integer")
 
-    def __call__(self, model, rows: ReportRows) -> ReportPrediction:
+    def __call__(self, model, rows: ReportData) -> ReportPrediction:
         """Predict linear-interpolated counts and sky positions for all rows."""
         if model.epoch != self.table.epoch:
             raise ValueError(
-                f"report table epoch {self.table.epoch} differs from "
+                f"count-rate table epoch {self.table.epoch} differs from "
                 f"model epoch {model.epoch}"
             )
         clean = _prediction_rows(rows)
@@ -295,7 +295,7 @@ def _prediction_rows(rows):
     )
 
 
-def _scale_fit(counts, limit, rows, law):
+def _scale_fit(counts, limit, rows, rule):
     """Detections as a Gaussian in the log of a common counts scale.
 
     ``counts`` are the expected planet counts of every row at the model as it is. With
@@ -322,21 +322,21 @@ def _scale_fit(counts, limit, rows, law):
     sd = jnp.sqrt(safe_gg) / safe_cg
     chi2 = s_cc - jnp.where(has, s_cg**2 / safe_gg, 0.0)
     log_norm = jnp.sum(jnp.where(det, -0.5 * jnp.log(2.0 * jnp.pi * var), 0.0))
-    on_region = jnp.all(~det | (rows.counts >= law.detection_limit(limit)))
+    on_region = jnp.all(~det | (rows.counts >= rule.detection_limit(limit)))
     return has, t_hat, sd, chi2, log_norm, on_region
 
 
 class ReportTerm(AbstractConditionalTerm):
-    """An exact or tabulated counts report law on the observed rows.
+    """The counts likelihood of a report, from an exact or a precomputed predictor.
 
     The term scores the counts of every valid row: a null is the probability of counts
     below the threshold, a detection the density of its counts on the detection region.
-    The position of a detection is not scored here; ``rows.astrometry()`` gives the data
+    The position of a detection is not scored here; ``data.astrometry()`` gives the data
     of the ``RelativeAstrometryTerm`` that scores it. ``draw`` generates the whole
     report, positions and their errors included.
 
-    For a tabulated predictor, diffraction scales always come from
-    ``predictor.table.lod_arcsec[rows.mode]``. For any other predictor,
+    For a precomputed predictor, diffraction scales always come from
+    ``predictor.table.lod_arcsec[data.mode]``. For any other predictor,
     ``lod_arcsec`` is required and has shape (R,). It is used only for sampling the
     position errors.
 
@@ -356,8 +356,8 @@ class ReportTerm(AbstractConditionalTerm):
             shapes the proposal only; the likelihood reads the model.
     """
 
-    law: ReportLaw
-    rows: ReportRows
+    rule: ReportRule
+    data: ReportData
     predictor: AbstractReportPredictor
     lod_arcsec: jax.Array | None = eqx.field(
         default=None, converter=lambda x: None if x is None else _float64(x)
@@ -368,13 +368,14 @@ class ReportTerm(AbstractConditionalTerm):
 
     def __check_init__(self):
         """Require row diffraction scales for an exact predictor."""
-        if not isinstance(self.predictor, TabulatedReportPredictor):
+        if not isinstance(self.predictor, PrecomputedReportPredictor):
             if (
                 self.lod_arcsec is None
-                or jnp.shape(self.lod_arcsec) != self.rows.time_d.shape
+                or jnp.shape(self.lod_arcsec) != self.data.time_d.shape
             ):
                 raise ValueError(
-                    "a non-tabulated predictor needs lod_arcsec with shape (R,)"
+                    "a predictor that is not precomputed needs lod_arcsec with "
+                    "shape (R,)"
                 )
         if not self.leaf_exponent > 0:
             raise ValueError("leaf_exponent must be positive")
@@ -384,8 +385,8 @@ class ReportTerm(AbstractConditionalTerm):
         prediction = self.predictor(model, clean)
         detected = rows.is_valid & rows.is_detected
         counts = jnp.where(detected, rows.counts, 0.0)
-        detection = self.law.log_counts_density(counts, clean.limit_counts, prediction)
-        null = self.law.log_null_probability(clean.limit_counts, prediction)
+        detection = self.rule.log_counts_density(counts, clean.limit_counts, prediction)
+        null = self.rule.log_null_probability(clean.limit_counts, prediction)
         value = jnp.where(rows.is_detected, detection, null)
         outcome_nan = jnp.any(
             jnp.stack(
@@ -408,7 +409,7 @@ class ReportTerm(AbstractConditionalTerm):
 
     def __call__(self, model) -> jax.Array:
         """Sum valid null log probabilities and detection counts log densities."""
-        return jnp.sum(self._row_density(model, self.rows)[0])
+        return jnp.sum(self._row_density(model, self.data)[0])
 
     def leaf_conditional(self, model) -> LeafConditional:
         """A Gaussian proposal for the photometric leaf, as a one-component mixture.
@@ -426,10 +427,10 @@ class ReportTerm(AbstractConditionalTerm):
         leaf = jnp.asarray(resolve(model, self.leaf_path))
         if leaf.size != 1:
             raise ValueError(f"leaf {self.leaf_path!r} must hold a single value")
-        clean = _prediction_rows(self.rows)
+        clean = _prediction_rows(self.data)
         prediction = self.predictor(model, clean)
         has, t_hat, sd, chi2, log_norm, on_region = _scale_fit(
-            prediction.counts, clean.limit_counts, self.rows, self.law
+            prediction.counts, clean.limit_counts, self.data, self.rule
         )
         log_pi = jnp.where(
             has & on_region,
@@ -447,32 +448,32 @@ class ReportTerm(AbstractConditionalTerm):
 
     def predict(self, model) -> ReportPrediction:
         """Return the predictor's report for every row."""
-        return self._row_density(model, self.rows)[1]
+        return self._row_density(model, self.data)[1]
 
     def draw(self, key, model) -> Self:
         """Draw counts then two position normals per row, preserving padding."""
-        rows = self.rows
+        rows = self.data
         valid = rows.is_valid & (rows.science_s > 0) & (rows.limit_counts > 0)
         clean = _prediction_rows(eqx.tree_at(lambda r: r.is_valid, rows, valid))
         prediction = self.predictor(model, clean)
         eps = jax.random.normal(key, (rows.time_d.size, 3), dtype=jnp.float64)
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
         counts = prediction.counts + noise * eps[:, 0]
-        detected = valid & (counts >= self.law.detection_limit(clean.limit_counts))
+        detected = valid & (counts >= self.rule.detection_limit(clean.limit_counts))
         reported_counts = jnp.where(detected, counts, 0.0)
         snr = reported_counts / jnp.sqrt(
             clean.limit_counts**2 + jnp.maximum(reported_counts, 0.0)
         )
         lod_scale = (
             self.predictor.table.lod_arcsec[clean.mode]
-            if isinstance(self.predictor, TabulatedReportPredictor)
+            if isinstance(self.predictor, PrecomputedReportPredictor)
             else self.lod_arcsec
         )
-        sigma = self.law.kappa * lod_scale / jnp.where(detected, snr, 1.0)
+        sigma = self.rule.kappa * lod_scale / jnp.where(detected, snr, 1.0)
         sigma = jnp.where(detected, sigma, 0.0)
         ra = prediction.ra + sigma * eps[:, 1]
         dec = prediction.dec + sigma * (
-            self.law.corr * eps[:, 1] + math.sqrt(1 - self.law.corr**2) * eps[:, 2]
+            self.rule.corr * eps[:, 1] + math.sqrt(1 - self.rule.corr**2) * eps[:, 2]
         )
         finite = (
             jnp.isfinite(prediction.counts)
@@ -485,7 +486,7 @@ class ReportTerm(AbstractConditionalTerm):
             jnp.where(detected, dec, 0.0),
             sigma,
             sigma,
-            jnp.where(detected, self.law.corr, 0.0),
+            jnp.where(detected, self.rule.corr, 0.0),
         )
         # The boolean outcome flag cannot carry NaN; counts carries failed draws.
         values = tuple(
@@ -510,21 +511,21 @@ class ReportTerm(AbstractConditionalTerm):
             rows,
             (valid, jnp.where(rows.is_valid, detected, rows.is_detected), *values),
         )
-        return eqx.tree_at(lambda t: t.rows, self, sampled)
+        return eqx.tree_at(lambda t: t.data, self, sampled)
 
     def surrogate(self, table, planet) -> Self:
-        """Copy with a tabulated predictor and its diffraction scales."""
+        """Copy with a precomputed predictor and its diffraction scales."""
         return ReportTerm(
-            self.law,
-            self.rows,
-            TabulatedReportPredictor(table, planet),
+            self.rule,
+            self.data,
+            PrecomputedReportPredictor(table, planet),
             leaf_path=self.leaf_path,
             leaf_exponent=self.leaf_exponent,
         )
 
-    def residual(self, model, other) -> jax.Array:
+    def log_ratio(self, model, other) -> jax.Array:
         """Per-row log p(this) - log p(other), both scored on this term's rows."""
         return (
-            self._row_density(model, self.rows)[0]
-            - other._row_density(model, self.rows)[0]
+            self._row_density(model, self.data)[0]
+            - other._row_density(model, self.data)[0]
         )

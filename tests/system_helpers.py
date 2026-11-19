@@ -20,11 +20,10 @@ from photomancy import (
     StellarAstrometryTerm,
 )
 from photomancy.measurements import (
+    AstrometryData,
     PhotometryData,
-    PMAnomalyData,
-    RelativeAstromData,
-    RVData,
-    StellarAstromData,
+    ProperMotionAnomalyData,
+    RadialVelocityData,
 )
 
 
@@ -112,7 +111,7 @@ _TIMES = np.array([31.0, 120.0, 290.0, 470.0])
 
 def _data(max_n=None):
     """Nonzero residuals and unequal correlated errors exercise every element."""
-    return RelativeAstromData.from_sep_pa(
+    return AstrometryData.from_sep_pa(
         times=_TIMES,
         sep=[0.13, 0.11, 0.09, 0.15],
         sep_err=[0.004] * 4,
@@ -126,7 +125,7 @@ def _new_term(kind, max_n=4):
     """Small observations with residuals and nontrivial covariance/instruments."""
     if kind == "stellar":
         return StellarAstrometryTerm(
-            StellarAstromData.pad(
+            AstrometryData.pad(
                 times=_TIMES,
                 ra=[1e-4, -2e-4, 3e-4, 2e-4],
                 dec=[-1e-4, 1e-4, 2e-4, -2e-4],
@@ -138,7 +137,7 @@ def _new_term(kind, max_n=4):
         )
     if kind == "rv":
         return RadialVelocityTerm(
-            RVData.pad(
+            RadialVelocityData.pad(
                 times=_TIMES,
                 rv=[2.0, -4.0, 8.0, 1.0],
                 rv_err=[1.5] * 4,
@@ -150,7 +149,7 @@ def _new_term(kind, max_n=4):
         )
     if kind == "pma":
         return ProperMotionAnomalyTerm(
-            PMAnomalyData(
+            ProperMotionAnomalyData(
                 t_hip=jnp.array(0.0),
                 t_gaia=jnp.array(9000.0),
                 gaia_window=jnp.array(1023.0),
@@ -174,7 +173,7 @@ def _new_term(kind, max_n=4):
 
 
 def rv_normalization(data):
-    """``0.5 sum_j log N_j`` over the populated instruments of ``RVData``.
+    """``0.5 sum_j log N_j`` over the populated instruments of ``RadialVelocityData``.
 
     The normalization of the flat-offset RV marginal, for references frozen before
     the marginal was a normalized density.

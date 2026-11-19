@@ -103,7 +103,7 @@ def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
     law (the refit), with the size term.
     Tolerance basis: 3 combined standard errors of the swap and the refit.
     Dead draws carry NaN coordinates (visibly dead), the live ones are finite, and an
-    ``append`` on the swapped cloud is not refused by the dead draws.
+    ``append_term`` on the swapped cloud is not refused by the dead draws.
     Fails if: out-of-support draws keep weight or finite wall coordinates, the
     evidence ignores the cut, or a dead draw's NaN refuses a later operation.
     """
@@ -122,7 +122,7 @@ def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
     for v in out.samples[KEY].values():
         assert np.isnan(np.asarray(v)[outside]).all()
         assert np.isfinite(np.asarray(v)[~outside]).all()
-    appended = out.append(_SizeTerm(), min_n_eff=0.0, max_khat=jnp.inf)
+    appended = out.append_term(_SizeTerm(), min_n_eff=0.0, max_khat=jnp.inf)
     assert np.isfinite(float(appended.log_evidence))
     assert np.all(np.isneginf(np.asarray(appended.log_weights)[outside]))
     assert np.all(np.isfinite(np.asarray(appended.log_weights)[~outside]))

@@ -14,10 +14,10 @@ from hwoutils.model_paths import resolve
 from photomancy.infer.fit import AbstractTerm
 from photomancy.measurements._observables import _stellar_reflex
 
-__all__ = ["PMAnomalyData", "ProperMotionAnomalyTerm", "loglike_pm_anomaly"]
+__all__ = ["ProperMotionAnomalyData", "ProperMotionAnomalyTerm", "loglike_pm_anomaly"]
 
 
-class PMAnomalyData(eqx.Module):
+class ProperMotionAnomalyData(eqx.Module):
     """Hipparcos-Gaia proper-motion-anomaly (PMa) observation.
 
     The anomaly is a single ``(RA, DEC)`` proper-motion difference (the Gaia
@@ -63,7 +63,7 @@ def loglike_pm_anomaly(anom_pred, data):
 
     Args:
         anom_pred: Predicted anomaly ``(pm_ra, pm_dec)`` (arcsec/day). Shape ``(2,)``.
-        data: A :class:`~photomancy.measurements.proper_motion.PMAnomalyData` instance.
+        data: A :class:`ProperMotionAnomalyData` instance.
 
     Returns:
         Scalar log-likelihood (zero when ``data.is_valid`` is False, for the
@@ -110,7 +110,7 @@ class ProperMotionAnomalyTerm(AbstractTerm):
     Data ``t_hip`` and ``t_gaia`` are days from the system's epoch.
     """
 
-    data: PMAnomalyData
+    data: ProperMotionAnomalyData
     system_path: str = eqx.field(static=True, default="")
     reads: ClassVar[tuple[str, ...]] = ()
 
@@ -121,7 +121,7 @@ class ProperMotionAnomalyTerm(AbstractTerm):
 
     def _score(self, model):
         valid = self.data.is_valid
-        data = PMAnomalyData(
+        data = ProperMotionAnomalyData(
             t_hip=jnp.where(valid, self.data.t_hip, 0.0),
             t_gaia=jnp.where(valid, self.data.t_gaia, 1.0),
             gaia_window=jnp.where(valid, self.data.gaia_window, 1.0),

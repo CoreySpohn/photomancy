@@ -80,12 +80,12 @@ def test_fit_replace_term_edits_one_slot_and_refuses_a_bad_index():
 def test_replace_term_of_a_padded_row_equals_append_of_the_row(cloud):
     """Writing a row into the padding equals appending that row to an unpadded fit.
 
-    Truth source: ``append`` of ``_Gauss(1.8)`` on the same cloud viewed as a fit with
-    the one real term (the invalid padding contributes exactly zero).
+    Truth source: ``append_term`` of ``_Gauss(1.8)`` on the same cloud viewed as a
+    fit with the one real term (the invalid padding contributes exactly zero).
     Tolerance basis: rounding only; the two ratios are the same numbers up to the
     subtraction of an exact zero, so 1e-12 relative.
     Fails if: the old term is dropped from the ratio, the gate reads the ratio alone,
-    or the evidence increment differs from ``append``'s.
+    or the evidence increment differs from ``append_term``'s.
     """
     swapped = cloud.replace_term(1, _with_row(1.8), **GATE)
     plain = eqx.tree_at(
@@ -93,7 +93,7 @@ def test_replace_term_of_a_padded_row_equals_append_of_the_row(cloud):
         cloud,
         Fit(cloud.fit.model, cloud.fit.free, cloud.fit.terms[:1]),
     )
-    appended = plain.append(_Gauss(jnp.asarray(1.8)), **GATE)
+    appended = plain.append_term(_Gauss(jnp.asarray(1.8)), **GATE)
     assert np.all(np.isfinite(swapped.log_weights))
     for name in ("log_weights", "log_target", "log_evidence", "log_evidence_se"):
         np.testing.assert_allclose(
@@ -167,9 +167,9 @@ def test_the_refusal_is_per_slice_and_update_refits_only_where_refused():
 
 
 def test_update_appends_without_an_index_and_keeps_a_passing_cloud(cloud):
-    """With no index ``update`` is ``append`` when the gate passes.
+    """With no index ``update`` is ``append_term`` when the gate passes.
 
-    Fails if: the backend replaces a cloud that passed, or ``append`` is not used.
+    Fails if: the backend replaces a cloud that passed, or ``append_term`` is not used.
     """
     kept = update(
         cloud,
@@ -178,7 +178,7 @@ def test_update_appends_without_an_index_and_keeps_a_passing_cloud(cloud):
         jax.random.key(1),
         **GATE,
     )
-    direct = cloud.append(_Gauss(jnp.asarray(1.6)), **GATE)
+    direct = cloud.append_term(_Gauss(jnp.asarray(1.6)), **GATE)
     np.testing.assert_array_equal(kept.log_weights, direct.log_weights)
     np.testing.assert_array_equal(kept.samples[KEY], cloud.samples[KEY])
     assert len(kept.fit.terms) == 3 and kept.info is None
@@ -202,7 +202,7 @@ def test_a_nan_gate_limit_is_refused_on_the_host(cloud):
     row = _with_row(1.8)
     nan = float("nan")
     with pytest.raises(ValueError, match="max_khat is NaN"):
-        cloud.append(row, min_n_eff=0, max_khat=nan)
+        cloud.append_term(row, min_n_eff=0, max_khat=nan)
     with pytest.raises(ValueError, match="max_khat is NaN"):
         cloud.replace_term(1, row, min_n_eff=0, max_khat=jnp.asarray(nan))
     with pytest.raises(ValueError, match="min_n_eff is NaN"):
@@ -217,7 +217,7 @@ def test_a_nan_gate_limit_is_refused_on_the_host(cloud):
             min_n_eff=0,
             index=1,
         )
-    ok = cloud.append(row, min_n_eff=0, max_khat=jnp.inf)
+    ok = cloud.append_term(row, min_n_eff=0, max_khat=jnp.inf)
     assert np.all(np.isfinite(ok.log_weights))
     # Inside a jit the limits are traced or constant: no host check, no failure.
     jitted = eqx.filter_jit(lambda t: cloud.replace_term(1, t, **GATE).log_weights)
@@ -238,7 +238,9 @@ def test_batch_size_gives_the_same_results_as_all_at_once(cloud):
     prior = {KEY: Uniform(0.0, HIGH - 0.5)}
     cases = {
         "with_priors": lambda **kw: cloud.with_priors(prior, **GATE, **kw),
-        "append": lambda **kw: cloud.append(_Gauss(jnp.asarray(1.7)), **GATE, **kw),
+        "append_term": lambda **kw: cloud.append_term(
+            _Gauss(jnp.asarray(1.7)), **GATE, **kw
+        ),
         "replace_term": lambda **kw: cloud.replace_term(1, row, **GATE, **kw),
         "update": lambda **kw: update(
             cloud, row, Laplace(n_draws=4000), jax.random.key(2), index=1, **GATE, **kw

@@ -1,8 +1,9 @@
 """Importance sampling backends: a proposal, or a proposal adapted over rounds.
 
-``Importance`` draws from one :class:`~photomancy.infer.proposals.AbstractProposal`
-and weights each draw by ``fit.real_log_prob(z) - log_q``, the target density in the
-flat unconstrained vector over the proposal's own (wrapped) density. The evidence is
+``Importance`` takes the weighted draws of one
+:class:`~photomancy.infer.proposals.AbstractProposal` (``weigh``: for a density
+proposal, the target density in the flat unconstrained vector over the proposal's own
+wrapped density). The evidence is
 the importance mean (:func:`photomancy.infer.evidence.importance_evidence`) and is
 consistent whenever the proposal has positive density wherever the target does and the
 weights have a finite mean. Its standard error needs a finite variance of the weights,
@@ -13,7 +14,7 @@ tempers the target, refits a Gaussian mixture on each round's weighted cloud and
 draws the returned cloud from the last proposal.
 
 A draw in a zero-density region of the fit has weight zero, and so has a draw the
-proposal marks dead with ``log_q = +inf`` (its coordinates may be NaN and are not
+proposal marks dead with log weight ``-inf`` (its coordinates may be NaN and are not
 read). Any other NaN target or proposal density is an error: the weights of the slice
 become NaN and ``run`` returns a NaN slice, which the operations of a ``Posterior``
 refuse. So does an ``AdaptiveImportance`` ladder that did not reach temperature one
@@ -23,9 +24,7 @@ refuse. So does an ``AdaptiveImportance`` ladder that did not reach temperature 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax.flatten_util import ravel_pytree
 
-from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
 from photomancy.infer.diagnostics import (
     khat_threshold,
@@ -56,10 +55,10 @@ class ImportanceInfo(eqx.Module):
         n_rounds: Number of rounds, a static count.
         temperatures: Temperature of each round's weights ``(n_rounds,)``: the ladder
             of the adaptation rounds, then one for the last round.
-        kish_per_round: Kish effective sample size of each round's weights.
-        reached: True when the proposal of the last round was fitted at temperature
-            one (always for ``Importance``). When false, the evidence, its standard
-            error and the log weights of the slice are NaN.
+        n_eff_per_round: Kish effective sample size of each round's weights.
+        reached_target: True when the proposal of the last round was fitted at
+            temperature one (always for ``Importance``). When false, the evidence, its
+            standard error and the log weights of the slice are NaN.
         khat: Pareto k-hat of the returned weights, the value judged against
             ``khat_threshold(n_draws)``. Above it, or NaN, the evidence and its
             standard error are NaN.
@@ -67,39 +66,15 @@ class ImportanceInfo(eqx.Module):
 
     n_rounds: int = eqx.field(static=True)
     temperatures: jax.Array
-    kish_per_round: jax.Array
-    reached: jax.Array
+    n_eff_per_round: jax.Array
+    reached_target: jax.Array
     khat: jax.Array
-
-
-def _unravel(fit):
-    return ravel_pytree(fit.to_real(draw_template(fit)))[1]
-
-
-def _stored(fit, z):
-    """Stored entries and log volume of the map of flat vectors ``z (n, d)``."""
-    return fit.from_real(jax.vmap(_unravel(fit))(z))
-
-
-def _weigh(fit, proposal, key, n, batch_size):
-    """Draw ``n`` points; return ``(x, log_target, log_weights)`` of the fit's density.
-
-    ``log_weights = log_target + volume - log_q``, the density in the flat vector over
-    the proposal density. A zero-density point (``-inf`` target) keeps weight zero, and
-    a dead draw (``log_q = +inf``) gets weight zero and a ``-inf`` target.
-    """
-    z, log_q = proposal.sample(key, fit, n)
-    x, volume = _stored(fit, z)
-    log_target = fit.log_density(x, batch_size=batch_size)
-    dead = jnp.isposinf(log_q)
-    log_target = jnp.where(dead, -jnp.inf, log_target)
-    return x, log_target, jnp.where(dead, -jnp.inf, log_target + volume - log_q)
 
 
 class Importance(AbstractBackend):
     """Importance sampling from one proposal.
 
-    The draws are weighted ``fit.real_log_prob(z) - log_q`` and the evidence is the
+    The draws and weights are the proposal's (``weigh``) and the evidence is the
     importance mean, so it is consistent for any proposal that covers the target. The
     evidence and its standard error are NaN when the Pareto k-hat of the weights is
     not at or below ``khat_threshold(n_draws)`` (``info.khat``): above it the variance
@@ -110,8 +85,8 @@ class Importance(AbstractBackend):
 
     Attributes:
         proposal: The :class:`~photomancy.infer.proposals.AbstractProposal` to draw
-            from. Only its draws and their ``log_q`` are used, so a properly weighted
-            proposal that is not a density (a completed orbit proposal) is valid.
+            from. Only its weighted draws are used, so a properly weighted proposal
+            that is not a density (a completed orbit proposal) is valid.
         n_draws: Number of draws.
     """
 
@@ -121,7 +96,10 @@ class Importance(AbstractBackend):
     @eqx.filter_jit
     def _run(self, fit, key, *, batch_size=None):
         """Draw from the proposal and weight the draws to the fit."""
-        x, log_target, log_w = _weigh(fit, self.proposal, key, self.n_draws, batch_size)
+        z, log_w, log_target = self.proposal.weigh(
+            key, fit, self.n_draws, batch_size=batch_size
+        )
+        x, _ = fit.from_flat(z)
         log_z, se = importance_evidence(log_w)
         khat = pareto_khat(log_w)
         valid = khat <= khat_threshold(self.n_draws)
@@ -176,7 +154,7 @@ def _temper(log_likelihood, beta):
 class AdaptiveImportance(AbstractBackend):
     """Population Monte Carlo: tempered rounds of refitted Gaussian mixtures.
 
-    Round zero draws ``n_round`` points from ``proposal``. When ``proposal`` is a
+    Round zero draws ``n_adapt_draws`` points from ``proposal``. When ``proposal`` is a
     :class:`~photomancy.infer.proposals.PriorProposal` the target is tempered,
     ``prior * likelihood ** beta`` from ``beta = 0``: each earlier round weights its
     draws to the next temperature, the largest at which the Kish size of the cloud
@@ -184,18 +162,18 @@ class AdaptiveImportance(AbstractBackend):
     size at the current temperature and at or above ``2 * n_centers``
     (:func:`~photomancy.infer.diagnostics.kish_temperature`), and refits the proposal to
     that weighted cloud (``AbstractProposal.adapt``: by default
-    ``MixtureProposal.from_cloud`` mixed with the prior, share ``defensive``). Any other
-    proposal is a seed that already targets the posterior: the rounds start at
+    ``MixtureProposal.from_cloud`` mixed with the prior, share ``defensive_fraction``).
+    Any other proposal is a seed that already targets the posterior: the rounds start at
     temperature one and each refits on the weights of the fit's own density. The last
-    round draws ``n_draws`` points from the final proposal and weights them to the
-    fit's own density, so the returned weights and evidence come from that round alone
-    and are importance estimates from independent draws: the last round is an
+    round draws ``n_draws`` points from the final proposal and weights them to the fit's
+    own density, so the returned weights and evidence come from that round alone and are
+    importance estimates from independent draws: the last round is an
     :class:`Importance` run, whose k-hat refusal of the evidence applies. The round
     count is fixed and there is no early exit.
 
     The ladder needs one rung per factor of the likelihood that the cloud can absorb,
     and a concentrated posterior needs about a dozen. If the last proposal was fitted
-    below temperature one (``info.reached`` false), the slice is refused: the
+    below temperature one (``info.reached_target`` false), the slice is refused: the
     evidence, its standard error and the log weights are NaN, as for ``SMC`` past
     ``max_rungs``, because weights from a proposal that missed the posterior can carry
     one live draw, a small k-hat and a wrong evidence. The default three rounds suit a
@@ -207,19 +185,19 @@ class AdaptiveImportance(AbstractBackend):
         proposal: Proposal of round zero (for example ``PriorProposal()``, or a mixture
             fitted to a Laplace cloud, which starts at temperature one).
         n_draws: Draws of the last round, the returned cloud.
-        n_round: Draws of every earlier round.
+        n_adapt_draws: Draws of every earlier round.
         n_rounds: Total rounds (at least two for any adaptation).
         n_centers: Kernels of each refitted mixture.
-        defensive: Share of the prior in each refitted proposal.
+        defensive_fraction: Share of the prior in each refitted proposal.
         target_cess: Fraction of the Kish size that a rung may keep.
     """
 
     proposal: AbstractProposal
     n_draws: int = eqx.field(static=True, default=2000)
-    n_round: int = eqx.field(static=True, default=2**16)
+    n_adapt_draws: int = eqx.field(static=True, default=2**16)
     n_rounds: int = eqx.field(static=True, default=3)
     n_centers: int = eqx.field(static=True, default=256)
-    defensive: float = eqx.field(static=True, default=0.1)
+    defensive_fraction: float = eqx.field(static=True, default=0.1)
     target_cess: float = eqx.field(static=True, default=0.5)
 
     def __check_init__(self):
@@ -237,9 +215,9 @@ class AdaptiveImportance(AbstractBackend):
         temperatures, kish = [], []
         for _ in range(self.n_rounds - 1):
             k_draw, k_fit, key = jax.random.split(key, 3)
-            z, log_q = proposal.sample(k_draw, fit, self.n_round)
-            x, volume = _stored(fit, z)
             if tempering:
+                z, log_q = proposal.sample(k_draw, fit, self.n_adapt_draws)
+                x, volume = fit.from_flat(z)
                 log_prior = fit.log_prior(x, batch_size=batch_size) + volume
                 log_like = fit.log_likelihood(x, batch_size=batch_size)
                 log_base = log_prior - log_q
@@ -252,7 +230,9 @@ class AdaptiveImportance(AbstractBackend):
                     log_base + _temper(log_like, beta),
                 )
             else:
-                log_w = fit.log_density(x, batch_size=batch_size) + volume - log_q
+                z, log_w, _ = proposal.weigh(
+                    k_draw, fit, self.n_adapt_draws, batch_size=batch_size
+                )
             temperatures.append(beta)
             kish.append(kish_ess(log_w))
             proposal = proposal.adapt(
@@ -261,13 +241,13 @@ class AdaptiveImportance(AbstractBackend):
                 log_w,
                 fit,
                 n_centers=self.n_centers,
-                defensive=self.defensive,
+                defensive_fraction=self.defensive_fraction,
             )
         last = Importance(proposal, self.n_draws)._run(fit, key, batch_size=batch_size)
         reached = jnp.asarray(True) if self.n_rounds == 1 else beta >= 1.0
         nan = jnp.asarray(jnp.nan)
         temperatures.append(jnp.ones(()))
-        kish.append(last.info.kish_per_round[0])
+        kish.append(last.info.n_eff_per_round[0])
         info = ImportanceInfo(
             self.n_rounds,
             jnp.stack(temperatures),

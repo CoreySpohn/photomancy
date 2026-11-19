@@ -167,7 +167,7 @@ def _fields(out):
 
 @pytest.mark.medium(reason="four operations compile twice each, 6 s cold")
 def test_every_operation_equals_the_per_world_loop_under_filter_vmap():
-    """``sample``, ``resample``, ``with_priors`` and ``append`` map over worlds.
+    """``sample``, ``resample``, ``with_priors`` and ``append_term`` map over worlds.
 
     Two worlds with different clouds and priors are stacked; each operation under
     ``eqx.filter_vmap`` equals the loop over worlds, and a batched posterior called
@@ -175,7 +175,7 @@ def test_every_operation_equals_the_per_world_loop_under_filter_vmap():
     Truth source: the same operation on each unstacked world.
     Tolerance basis: exact (same arithmetic per slice; rtol 1e-12).
     Fails if: an operation carries its own batch handling that differs from the map
-    (the stacked ``with_priors`` and ``append`` raised a broadcast error).
+    (the stacked ``with_priors`` and ``append_term`` raised a broadcast error).
     """
     worlds = [
         _gaussian_cloud(1.2, prior_sd=sd, n=512, seed=i)
@@ -189,7 +189,7 @@ def test_every_operation_equals_the_per_world_loop_under_filter_vmap():
         "sample": lambda p: p.sample(key, (7,)),
         "resample": lambda p: p.resample(key, 100),
         "with_priors": lambda p: p.with_priors(role, min_n_eff=1.0, max_khat=jnp.inf),
-        "append": lambda p: p.append(extra, min_n_eff=1.0, max_khat=jnp.inf),
+        "append_term": lambda p: p.append_term(extra, min_n_eff=1.0, max_khat=jnp.inf),
     }
     for name, op in operations.items():
         mapped = eqx.filter_vmap(op)(stack)
@@ -348,7 +348,7 @@ def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):
         def __call__(self, model):
             return jnp.where(model.planets[0].Rp_Rearth[0] > 1.5, jnp.nan, 0.0)
 
-    out = cloud.append(_Nan(jnp.asarray(0.0)), min_n_eff=0, max_khat=jnp.inf)
+    out = cloud.append_term(_Nan(jnp.asarray(0.0)), min_n_eff=0, max_khat=jnp.inf)
     assert np.all(np.isnan(out.log_weights)) and np.isnan(out.log_evidence)
 
 
@@ -367,7 +367,7 @@ def test_append_agrees_with_a_refit_and_the_exact_evidence():
     """
     first = run(_leaf_fit(1.5), Laplace(n_draws=8000), jax.random.key(0))
     extra = _Gauss(jnp.asarray(1.8))
-    out = first.append(extra, min_n_eff=1000, max_khat=0.7)
+    out = first.append_term(extra, min_n_eff=1000, max_khat=0.7)
     assert len(out.fit.terms) == 2 and len(first.fit.terms) == 1
     _check_target(out)
     refit = run(out.fit, Grid({KEY: midpoint(0.0, HIGH, 4000)}), jax.random.key(0))
@@ -385,7 +385,7 @@ def test_append_runs_the_static_checks_of_fit(cloud):
 
     Fails if a term that reads a free path is appended, or if a second term that sums
     over a latent another term already sums over (``marginalizes``) is accepted, at
-    construction or through ``append``; both refusals name the path or the latent.
+    construction or through ``append_term``; both refusals name the path or the latent.
     """
 
     class _Reads(_Gauss):
@@ -395,7 +395,7 @@ def test_append_runs_the_static_checks_of_fit(cloud):
         marginalizes = ("orbits[0].sheet",)
 
     with pytest.raises(ValueError, match="Rp_Rearth"):
-        cloud.append(_Reads(jnp.asarray(1.0)), min_n_eff=0, max_khat=1.0)
+        cloud.append_term(_Reads(jnp.asarray(1.0)), min_n_eff=0, max_khat=1.0)
     fit = cloud.fit
     with pytest.raises(ValueError, match=r"orbits\[0\]\.sheet"):
         Fit(fit.model, fit.free, (_Sums(jnp.asarray(1.5)), _Sums(jnp.asarray(1.8))))
@@ -403,8 +403,8 @@ def test_append_runs_the_static_checks_of_fit(cloud):
         lambda p: p.fit, cloud, Fit(fit.model, fit.free, (_Sums(jnp.asarray(1.5)),))
     )
     with pytest.raises(ValueError, match=r"orbits\[0\]\.sheet"):
-        summed.append(_Sums(jnp.asarray(1.8)), min_n_eff=0, max_khat=1.0)
-    summed.append(_Gauss(jnp.asarray(1.8)), min_n_eff=0, max_khat=jnp.inf)
+        summed.append_term(_Sums(jnp.asarray(1.8)), min_n_eff=0, max_khat=1.0)
+    summed.append_term(_Gauss(jnp.asarray(1.8)), min_n_eff=0, max_khat=jnp.inf)
 
 
 # ----- per-slice refusal under vmap ----------------------------------------------
@@ -441,12 +441,12 @@ def test_the_refusal_is_per_slice_under_filter_vmap():
 
 
 def test_model_reads_the_draw_through_the_fit(cloud):
-    """``model(i)`` has the draw at the free path and the held leaves elsewhere."""
+    """``model_at(i)`` has the draw at the free path and the held leaves elsewhere."""
     i = 123
-    model = cloud.model(i)
+    model = cloud.model_at(i)
     np.testing.assert_array_equal(model.planets[0].Rp_Rearth, cloud.samples[KEY][i])
     assert float(model.planets[0].physical_model.Ag[0]) == 0.3
-    assert float(cloud.model(jnp.asarray(i)).planets[0].Rp_Rearth[0]) == float(
+    assert float(cloud.model_at(jnp.asarray(i)).planets[0].Rp_Rearth[0]) == float(
         cloud.samples[KEY][i, 0]
     )
 

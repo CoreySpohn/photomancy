@@ -1,7 +1,7 @@
 """Corner plots over physical orbital parameters: extract, delegate, decorate.
 
 photomancy supplies what eyepiece cannot know: how a fitted posterior turns
-into a physical-sample dict (``posterior_physical``), which parameters are
+into a physical-sample dict (``classical_elements``), which parameters are
 worth showing by default (and that ``ll_total`` never is), the axis-label
 vocabulary, and per-parameter axis ranges -- the one feature whose absence
 kept a third hand-rolled corner implementation alive. The triangle itself
@@ -13,7 +13,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from photomancy.infer import Posterior
-from photomancy.orbit.diagnostics import posterior_physical
+from photomancy.orbit.diagnostics import classical_elements
 from photomancy.viz._require import eyepiece
 from photomancy.viz.labels import PARAM_LABELS, default_corner_params
 
@@ -26,7 +26,7 @@ def _as_sample_dict(samples):
 def _resolve_samples(samples_or_posterior, key, n, orbit_path):
     """Normalize the input to a NumPy physical-sample dict.
 
-    A mapping passes through (the ``posterior_physical`` shape, also the door
+    A mapping passes through (the ``classical_elements`` shape, also the door
     for samples loaded from a file). A :class:`~photomancy.infer.Posterior`
     needs ``key`` and ``orbit_path``.
     """
@@ -37,7 +37,7 @@ def _resolve_samples(samples_or_posterior, key, n, orbit_path):
     if key is None or orbit_path is None:
         raise TypeError("plotting a Posterior requires key and orbit_path")
     return _as_sample_dict(
-        posterior_physical(samples_or_posterior, key, n, orbit_path=orbit_path)
+        classical_elements(samples_or_posterior, key, n, orbit_path=orbit_path)
     )
 
 
@@ -79,7 +79,7 @@ def plot_corner(
 
     Args:
         samples_or_posterior: A ``{name: (n,)}`` physical-sample dict (the
-            ``posterior_physical`` shape; also the door for samples loaded
+            ``classical_elements`` shape; also the door for samples loaded
             from a file) or a :class:`~photomancy.infer.Posterior`, which
             requires ``key`` and ``orbit_path``.
         key: PRNG key for drawing posterior samples. Posterior door only.

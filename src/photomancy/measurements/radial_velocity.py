@@ -14,10 +14,10 @@ from orbix.system import System
 from photomancy.infer.fit import AbstractTerm
 from photomancy.measurements._padding import MAX_RV, _pad_1d, _valid_mask
 
-__all__ = ["RVData", "RadialVelocityTerm", "loglike_rv_marginalized"]
+__all__ = ["RadialVelocityData", "RadialVelocityTerm", "loglike_rv_marginalized"]
 
 
-class RVData(eqx.Module):
+class RadialVelocityData(eqx.Module):
     """Radial velocity observations from one or more instruments.
 
     Args:
@@ -39,7 +39,7 @@ class RVData(eqx.Module):
 
     @classmethod
     def pad(cls, *, times, rv, rv_err, inst_ids, n_inst, max_n=MAX_RV):
-        """Create a padded RVData with ``is_valid`` mask."""
+        """Create a padded RadialVelocityData with ``is_valid`` mask."""
         n = jnp.asarray(times).shape[0]
         return cls(
             times=_pad_1d(times, max_n),
@@ -136,7 +136,7 @@ class RadialVelocityTerm(AbstractTerm):
     Data ``times`` are days from the system's epoch.
     """
 
-    data: RVData
+    data: RadialVelocityData
     system_path: str = eqx.field(static=True, default="")
     jitters: jnp.ndarray | None = None
     jitter_path: str | None = eqx.field(static=True, default=None)
@@ -162,7 +162,7 @@ class RadialVelocityTerm(AbstractTerm):
 
     def _score(self, model):
         valid = self.data.is_valid
-        data = RVData(
+        data = RadialVelocityData(
             times=jnp.where(valid, self.data.times, 0.0),
             rv=jnp.where(valid, self.data.rv, 0.0),
             rv_err=jnp.where(valid, self.data.rv_err, 1.0),

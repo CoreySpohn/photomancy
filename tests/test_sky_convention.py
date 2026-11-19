@@ -21,8 +21,9 @@ from orbix.system import (
 )
 from sky_reference import position_au, sky_position
 
+from photomancy.measurements import system_separation_dmag
 from photomancy.measurements.proper_motion import _path_proper_motion
-from photomancy.orbit.eig import _astrometry, _photometry
+from photomancy.orbit.eig import _astrometry
 
 _FORWARD_TIMES = np.array([-120.0, 0.0, 137.0, 690.0])
 _ECCENTRIC_ELEMENTS = (2.7, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)
@@ -341,7 +342,10 @@ def test_standard_lambert_phase(predictor, case):
             Msun2kg,
             10.0,
         )
-        sep, dmag = np.asarray(_photometry(system, 0.0, area))
+        prediction = system_separation_dmag(
+            system, jnp.array([0.0]), albedo_area_AU2=area
+        )
+        sep, dmag = np.asarray(prediction)[:, 0]
     else:
         sep, dmag = np.asarray(
             predict_photometry(

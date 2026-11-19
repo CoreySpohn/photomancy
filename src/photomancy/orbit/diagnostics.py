@@ -1,15 +1,16 @@
-"""Physical orbital elements read from the draws of a fitted ``Posterior``."""
+"""Classical orbital elements read from the draws of a fitted ``Posterior``."""
 
 import jax
 import jax.numpy as jnp
 from hwoutils.model_paths import resolve
 
 
-def posterior_physical(posterior, key, n, *, orbit_path, row=0):
-    """Draw ``n`` samples of a ``Posterior`` and read one orbit in physical units.
+def classical_elements(posterior, key, n, *, orbit_path, row=0):
+    """Draw ``n`` samples of a ``Posterior`` and read one orbit's classical elements.
 
     Each draw builds its model through the posterior's ``Fit``; the orbits at
-    ``orbit_path`` give the row's period, size, shape and orientation.
+    ``orbit_path`` give the row's period, size, shape and orientation. The keys follow
+    ``FrameOrbit.to_classical``.
 
     Args:
         posterior: A :class:`~photomancy.infer.Posterior` of one slice.
@@ -20,8 +21,8 @@ def posterior_physical(posterior, key, n, *, orbit_path, row=0):
         row: Planet row of those orbits.
 
     Returns:
-        Dict ``{name: (n,)}`` with ``T`` (days), ``a`` (AU), ``e``, ``cos_i``, and
-        ``W`` and ``M0`` (radians, the mean anomaly at the orbit's epoch).
+        Dict ``{name: (n,)}`` with ``period_d``, ``a_AU``, ``e``, ``cos_i``, ``W_rad``
+        and ``M0_rad`` (the mean anomaly at the orbit's epoch).
     """
     draws = posterior.sample(key, (n,))
 
@@ -30,12 +31,12 @@ def posterior_physical(posterior, key, n, *, orbit_path, row=0):
         orbit = jax.tree.map(lambda leaf: leaf[row], orbits)
         classical = orbit.to_classical()
         return {
-            "T": orbit.period_d,
-            "a": classical["a_AU"],
+            "period_d": orbit.period_d,
+            "a_AU": classical["a_AU"],
             "e": classical["e"],
             "cos_i": jnp.cos(classical["i_rad"]),
-            "W": classical["W_rad"],
-            "M0": classical["M0_rad"],
+            "W_rad": classical["W_rad"],
+            "M0_rad": classical["M0_rad"],
         }
 
     return jax.vmap(one)(draws)

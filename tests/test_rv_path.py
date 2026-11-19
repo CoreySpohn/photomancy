@@ -12,7 +12,7 @@ from orbix.system import Body, FrameOrbit, SkyFrame, System
 from term_utils import both
 
 from photomancy import RadialVelocityTerm
-from photomancy.measurements import RVData
+from photomancy.measurements import RadialVelocityData
 
 jax.config.update("jax_enable_x64", True)
 
@@ -43,7 +43,7 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
         for T, Mp in zip(periods, masses, strict=True)
     ) * (AU2m / d2s)
     assert 8.0 < float(jnp.max(jnp.abs(clean))) < 15.0
-    rv = RVData(
+    rv = RadialVelocityData(
         times=times,
         rv=clean + 17.0,
         rv_err=jnp.full(times.shape, 0.2),
@@ -250,7 +250,7 @@ def test_rv_term_uses_total_mass():
     velocities = -jnp.sum(
         K[:, None] * jnp.cos(two_pi * times / periods[:, None]), axis=0
     )
-    data = RVData(
+    data = RadialVelocityData(
         times=times,
         rv=velocities * (AU2m / d2s),
         rv_err=jnp.full(4, 0.5),

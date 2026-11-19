@@ -53,7 +53,8 @@ from orbix.system.observables import distance_AU, phase_angle_rad, separation_ar
 from skyscapes.physical_model import LambertianPhysicalModel
 
 from photomancy import viz
-from photomancy.orbit import ImagingData, RVData, orbits_from_samples
+from photomancy.measurements import DMagData, RadialVelocityData
+from photomancy.orbit import orbits_from_samples
 
 hwostyle.use("dark")
 jax.config.update("jax_enable_x64", True)
@@ -184,7 +185,7 @@ result = viz.plot_corner_overlay(
 Radial-velocity curves, converted from the library's native AU/day to the m/s a
 reader expects. A `(T,)` array draws one curve and a `(K, T)` array draws a fan
 of posterior-predictive draws, which is how a posterior is usually shown
-against its data. Passing an `RVData` adds its valid prefix as errorbars,
+against its data. Passing a `RadialVelocityData` adds its valid prefix as errorbars,
 converted the same way, so the two can never drift apart in units.
 
 ```{code-cell} ipython3
@@ -224,7 +225,7 @@ rv_truth = np.asarray(
 rv_obs = rv_truth + (rv_err_m_s / AU_PER_D_TO_M_PER_S) * rng.standard_normal(
     t_obs.size
 )
-rv_data = RVData.pad(
+rv_data = RadialVelocityData.pad(
     times=jnp.asarray(t_obs),
     rv=jnp.asarray(rv_obs),
     rv_err=jnp.full(t_obs.size, rv_err_m_s / AU_PER_D_TO_M_PER_S),
@@ -238,7 +239,7 @@ result = viz.plot_rv(np.asarray(t_d), np.asarray(rv_fan), data=rv_data)
 ## plot_dmag
 
 Delta-magnitude against time, with the y axis inverted so that fainter is
-downward. `limit_dmag` draws the detection limit. An `ImagingData` contributes
+downward. `limit_dmag` draws the detection limit. An `DMagData` contributes
 both of its epoch kinds: detections as errorbars at their measured dMag, and
 nulls as downward triangles sitting at the limit, since a null has no measured
 dMag of its own to sit at.
@@ -248,10 +249,10 @@ drops below it near conjunction, which is the whole reason scheduling a
 direct-imaging revisit is a decision rather than a routine.
 
 ```{code-cell} ipython3
-def separation_and_dmag(orbit, area_AU2):
+def separation_and_dmag(orbit, albedo_area_AU2):
     """Sky separation (arcsec) and Lambert dMag of one orbit at ``t_d``."""
     r, _ = orbit.at(t_d)
-    radius_Rearth = jnp.atleast_1d(jnp.sqrt(area_AU2) / Rearth2AU)
+    radius_Rearth = jnp.atleast_1d(jnp.sqrt(albedo_area_AU2) / Rearth2AU)
     model = LambertianPhysicalModel(Ag=jnp.ones(1))
     contrast = model.contrast(
         phase_angle_rad(r)[None, :], distance_AU(r)[None, :], None, radius_Rearth
@@ -265,7 +266,7 @@ sep_arcsec, dmag = jax.vmap(separation_and_dmag)(orbits_of(draws), draws["Lambda
 cc_sep = np.linspace(0.045, 0.26, 60)
 cc_dmag = 26.5 - 9.0 * np.exp(-(cc_sep - 0.045) / 0.035)
 
-imaging = ImagingData.from_detections_and_nulls(
+imaging = DMagData.from_detections_and_nulls(
     det_epochs=np.array([120.0, 300.0]),
     det_dmag_obs=np.array([23.4, 22.9]),
     det_dmag_err=np.array([0.15, 0.15]),

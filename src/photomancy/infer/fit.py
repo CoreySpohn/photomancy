@@ -36,7 +36,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock, block_order, check_writers
+from hwoutils.constants import two_pi
 from hwoutils.model_paths import assign, paths_overlap, resolve
+from jax.flatten_util import ravel_pytree
+from jax.scipy.special import log_ndtr, logsumexp
 from priorities import AbstractDistribution, from_real, to_real
 
 __all__ = [
@@ -152,6 +155,80 @@ class LeafConditional(eqx.Module):
     log_pi: jax.Array
     low: jax.Array
     high: jax.Array
+
+    def sample(self, key, low, high, *, widen, uniform):
+        """One draw of ``ln(leaf)`` from the widened record: ``(ln_leaf, log_q)``.
+
+        Component ``k`` is ``Normal(mean_k, (widen * sd_k)^2)`` truncated to
+        ``[low, high]`` (the given bounds, those of the leaf's law, intersected with
+        the record's own) and to six widened standard deviations about its mean, so its
+        tail draws stay accurate (a component with no overlap is dropped), with weight
+        proportional to ``exp(log_pi_k)`` times the mass the unwidened Gaussian has
+        inside. The uniform share ``uniform`` of ``[low, high]`` is the rest, and all
+        of it when no component has weight. ``log_q`` is the exact log density of the
+        draw in ``ln(leaf)``; it is at least ``log(uniform) - log(high - low)`` for
+        every draw inside the range. One record, unbatched; ``jax.vmap`` it for many.
+        """
+        low = jnp.maximum(low, self.low)
+        high = jnp.minimum(high, self.high)
+        scale = widen * self.sd
+        win_lo = jnp.maximum(low, self.mean - _WINDOW * scale)
+        win_hi = jnp.minimum(high, self.mean + _WINDOW * scale)
+        reach = win_hi > win_lo
+        win_lo, win_hi = jnp.where(reach, win_lo, 0.0), jnp.where(reach, win_hi, 1.0)
+        inside = _log_normal_mass(
+            (low - self.mean) / self.sd, (high - self.mean) / self.sd
+        )
+        log_w = jnp.where(reach, self.log_pi + inside, -jnp.inf)
+        peak = jnp.isfinite(jnp.max(log_w))
+        share = jnp.where(peak, uniform, 1.0)
+        log_w = jnp.where(
+            peak,
+            log_w - logsumexp(jnp.where(jnp.isfinite(log_w), log_w, -jnp.inf)),
+            -jnp.inf,
+        )
+        weight = jnp.exp(log_w) * (1.0 - share)
+        lo_std, hi_std = (win_lo - self.mean) / scale, (win_hi - self.mean) / scale
+        k_pick, k_norm, k_flat = jax.random.split(key, 3)
+        cdf = jnp.cumsum(jnp.concatenate([weight, jnp.asarray([share])]))
+        pick = jnp.searchsorted(cdf, jax.random.uniform(k_pick) * cdf[-1], side="right")
+        pick = jnp.minimum(pick, cdf.shape[0] - 1)
+        flat = pick == cdf.shape[0] - 1
+        comp = jnp.minimum(pick, scale.shape[0] - 1)
+        # an interval in the upper tail is drawn as its mirror image in the lower tail
+        mirror = lo_std[comp] > 0
+        a = jnp.where(mirror, -hi_std[comp], lo_std[comp])
+        b = jnp.where(mirror, -lo_std[comp], hi_std[comp])
+        z = jax.random.truncated_normal(k_norm, a, b)
+        z = jnp.where(mirror, -z, z)
+        draw_n = self.mean[comp] + scale[comp] * z
+        draw_u = low + (high - low) * jax.random.uniform(k_flat)
+        ln_leaf = jnp.clip(jnp.where(flat, draw_u, draw_n), low, high)
+        log_mass = _log_normal_mass(lo_std, hi_std)
+        z_at = (ln_leaf - self.mean) / scale
+        log_comp = (
+            jnp.log(jnp.where(weight > 0, weight, 1.0))
+            - 0.5 * z_at**2
+            - 0.5 * jnp.log(two_pi)
+            - jnp.log(scale)
+            - log_mass
+        )
+        in_window = (ln_leaf >= win_lo) & (ln_leaf <= win_hi)
+        log_comp = jnp.where((weight > 0) & in_window, log_comp, -jnp.inf)
+        log_flat = jnp.log(share) - jnp.log(high - low)
+        return ln_leaf, logsumexp(jnp.concatenate([log_comp, log_flat[None]]))
+
+
+# A leaf component reaches this many widened standard deviations.
+_WINDOW = 6.0
+
+
+def _log_normal_mass(a, b):
+    """``log(Phi(b) - Phi(a))`` for ``a <= b``, from the tail with the smaller mass."""
+    upper = a > 0
+    lo, hi = jnp.where(upper, -b, a), jnp.where(upper, -a, b)
+    log_hi = log_ndtr(hi)
+    return log_hi + jnp.log1p(-jnp.exp(log_ndtr(lo) - log_hi))
 
 
 class AbstractConditionalTerm(AbstractTerm):
@@ -463,6 +540,30 @@ class Fit(eqx.Module):
                 out += [period[name]] * size
         return tuple(out)
 
+    def unravel(self, z) -> dict:
+        """Unconstrained entries of flat vectors ``z (..., d)``.
+
+        The flat vector is the ``ravel_pytree`` of one draw of :meth:`to_real` (see
+        :meth:`periods`); the result is an argument of :meth:`from_real` with the batch
+        shape of ``z``.
+        """
+        shapes = eqx.filter_eval_shape(
+            lambda k: self.to_real(self.sample_prior(k)), jax.random.key(0)
+        )
+        template = jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), shapes)
+        unravel = ravel_pytree(template)[1]
+        z = jnp.asarray(z)
+        u = jax.vmap(unravel)(z.reshape(-1, z.shape[-1]))
+        return jax.tree.map(lambda a: a.reshape(*z.shape[:-1], *a.shape[1:]), u)
+
+    def from_flat(self, z) -> tuple[dict, jax.Array]:
+        """Stored entries and the log volume of the map from flat vectors ``z``.
+
+        ``from_real(unravel(z))``: the volume is that of the map from the flat
+        unconstrained vector, so ``log_density(x) + volume`` is the density in ``z``.
+        """
+        return self.from_real(self.unravel(z))
+
     def real_log_prob(self, u: dict) -> jax.Array:
         """Return the density in ``u``: the density of ``from_real(u)`` plus volume."""
         x, volume = self.from_real(u)
@@ -579,7 +680,7 @@ class Fit(eqx.Module):
                 raise ValueError(f"leaf law {key!r} needs a priorities distribution")
         return Fit(self.model, {**self.free, **priors}, self.terms)
 
-    def append(self, term: AbstractTerm) -> "Fit":
+    def append_term(self, term: AbstractTerm) -> "Fit":
         """Return a fit with one more term; the free set is unchanged."""
         return Fit(self.model, self.free, (*self.terms, term))
 
