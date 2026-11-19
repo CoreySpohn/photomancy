@@ -211,8 +211,7 @@ backend menu composable.
 The prior layer is tensorflow-probability free. Generic distributions come from the
 `priorities` library, where each has a closed-form inverse cumulative distribution function,
 so one definition serves the gradient, sample, and unit-cube needs of every backend. The
-orbit priors, with their named eccentricity distributions, stay in
-{py:mod}`photomancy.priors`.
+orbit priors are orbit laws of orbix (`orbix.system.OrbitLaw`), held by the orbit blocks.
 
 Domains compose on the generic engine rather than forming parallel stacks. When a domain
 grows its own copy of the inference machinery, that copy drifts from the engine and the

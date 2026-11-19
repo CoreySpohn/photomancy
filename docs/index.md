@@ -8,13 +8,13 @@ builds the scene, and photomancy divines the scene back from the data: posterior
 the scene parameters, the Bayesian evidence for model comparison, and the expected
 information gain of a candidate next observation.
 
-The engine is forward-model agnostic. A fit is a `logdensity` over a partitioned scene
-PyTree, assembled from three plug-ins (a forward model, a likelihood, and a prior) and
-run through a uniform `Backend` that returns one `Posterior` exposing `.sample`,
-`.log_prob`, and `.evidence`. The [architecture overview](explanation/architecture)
-describes how the pieces fit together and where the library is headed. And if, like me,
-you get confused about all the Bayesian inference and JAX nomenclature take a look at
-[the glossary](explanation/glossary).
+The engine is forward-model agnostic. A fit is a normalized log density over the free
+entries of a model: the model holds every quantity, a dictionary names the free entries
+and their priors, and data terms score the measurements. `run(fit, backend, key)` turns a
+fit into a `Posterior`, a cloud of weighted draws with the evidence and its standard
+error, whichever backend produced it. [Fits and posteriors](explanation/fit-and-posterior)
+builds one fit step by step on a problem with a known answer, and
+[the glossary](explanation/glossary) collects the Bayesian inference and JAX vocabulary.
 
 ## Ecosystem position
 
@@ -22,7 +22,7 @@ you get confused about all the Bayesian inference and JAX nomenclature take a lo
 flowchart LR
     orbix["orbix<br/>geometry"]
     skyscapes["skyscapes<br/>scene + SEDs"]
-    photomancy["<b>photomancy</b><br/>logdensity -> backend -> posterior -> EIG"]
+    photomancy["<b>photomancy</b><br/>fit -> backend -> posterior -> EIG"]
     out["posteriors + evidence<br/>+ next observation"]
 
     orbix --> photomancy
@@ -32,27 +32,34 @@ flowchart LR
 
 ## Quick start
 
-A domain supplies three plug-ins over a scene, and the engine turns them into a fit:
+A fit names a model, its free entries with their priors, and the data terms, and `run`
+turns it into a posterior. For one planet's orbit from relative astrometry, with an orbix
+`System` as the model:
 
-This sketch requires a user-supplied scene, forward model, likelihood, and prior.
+This sketch requires a user-supplied orbix `System` and `AstrometryData`.
 
 ```python notest
-from photomancy.infer import LaplaceBackend, build_scene_logdensity
+from orbix.system import OrbitLaw, ThieleInnesBlock
+from priorities import LogUniform, Uniform
+from skyscapes.population import kipping_eccentricity
 
-# forward:    scene -> predicted data
-# likelihood: predicted -> scalar log-likelihood
-# prior:      a priorities distribution over the fitted leaves
-logdensity, z0, unravel = build_scene_logdensity(
-    scene, forward_model=forward, likelihood=likelihood, prior=prior
+from photomancy.infer import Fit, run
+from photomancy.measurements import RelativeAstrometryTerm
+from photomancy.orbit import any_epoch, classical_elements
+
+law = OrbitLaw(
+    period_d=LogUniform(50.0, 5000.0), eccentricity=kipping_eccentricity(0.9)
 )
+block = ThieleInnesBlock(law, Uniform(0.9, 1.1), rows=(0,), system="")
+fit = Fit(system, {"orbits": block}, (RelativeAstrometryTerm(data),))
 
-posterior = LaplaceBackend().run(logdensity, z0)
-samples = posterior.sample(key, 1000)  # (1000, d), flat z-space
-log_evidence = posterior.evidence
+posterior = run(fit, any_epoch(), key)
+log_evidence = posterior.log_evidence  # NaN when the backend refuses its estimate
+elements = classical_elements(posterior, key, 1000, orbit_path="orbits")
 ```
 
-The orbit, disk, and atmosphere domains package these plug-ins for their own data, so a
-typical fit calls a domain helper rather than wiring the plug-ins by hand.
+The [orbit fitting example](examples/orbit_fitting) runs this on synthetic data and folds
+in new epochs one at a time.
 
 For nested-model comparisons, convert the natural-log evidence difference to the
 bound-based, two-sided Gaussian significance used by Benneke and Seager (2013):
@@ -62,7 +69,7 @@ This comparison requires posteriors from two user-supplied model fits.
 ```python notest
 from photomancy.infer import sigma_from_log_bayes_factor
 
-log_bayes_factor = posterior_with.evidence - posterior_without.evidence
+log_bayes_factor = posterior_with.log_evidence - posterior_without.log_evidence
 sigma = sigma_from_log_bayes_factor(log_bayes_factor)
 ```
 
@@ -80,9 +87,9 @@ reference for the equations and paper citations.
 pip install photomancy
 ```
 
-The Laplace and staged MAP backends work from the base install. The sampler backends are
-optional extras: `photomancy[blackjax]` for NUTS, MCLMC, Pathfinder and SMC,
-`photomancy[jaxns]` for nested sampling, or `photomancy[samplers]` for both.
+The importance, Laplace, quadrature and staged MAP backends work from the base install.
+The sampler backends are optional extras: `photomancy[blackjax]` for NUTS, MCLMC and
+Pathfinder, `photomancy[jaxns]` for nested sampling, or `photomancy[samplers]` for both.
 
 ```bash
 pip install "photomancy[samplers]"
@@ -92,19 +99,20 @@ photomancy is in early development, and the API may still change.
 
 ## Status
 
-Orbit fitting is implemented across radial-velocity, astrometry, and imaging data, and
-disk fitting rides the same engine. Atmospheric retrieval is in progress, and
-image-domain fitting against a coronagraph forward is the next major target. See the
-[architecture overview](explanation/architecture) for the design and the roadmap.
+Orbit fitting is implemented across radial-velocity, astrometry, photometry and
+detection-report data, and the pixel likelihood fits coronagraph images through the
+coronagraphoto forward model. Disk fitting and atmospheric retrieval are in progress. See
+the [architecture overview](explanation/architecture) for the design and the roadmap.
 
 ```{toctree}
 :maxdepth: 1
 :caption: Explanation
 :hidden:
 
+explanation/fit-and-posterior
+explanation/orbital-parameterizations
 explanation/architecture
 explanation/mathematical-foundations
-explanation/orbital-parameterizations
 explanation/postprocessing
 explanation/glossary
 ```
