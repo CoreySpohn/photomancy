@@ -35,7 +35,10 @@ def any_epoch(n_draws=2**16, n_rounds=3, **adaptive):
     term proposes. Round zero draws the nonlinear coordinates from the block's own law
     (:class:`ShapePriorProposal`) and every round refits a kernel mixture on them, with
     a defensive share of that law. The returned cloud and the evidence come from the
-    last round alone.
+    last round alone. The refit kernels are over-dispersed: twice the Silverman
+    bandwidth in every round (``ShapePriorProposal.bandwidth``), because the Silverman
+    width leaves the proposal lighter-tailed than the posterior where the centers are
+    sparse, and the weights then have a heavy tail that the Pareto k-hat gate refuses.
 
     Two sizes set the cost. ``n_draws`` is the size of the returned cloud, the last
     round. Every earlier round draws ``n_adapt_draws`` points, the default of
