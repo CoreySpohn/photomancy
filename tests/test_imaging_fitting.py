@@ -160,7 +160,7 @@ def test_joint_astrom_imaging_fit_recovers_period():
     from priorities import LogUniform
     from test_system_priors import BOUNDS, _scene
 
-    from photomancy import ImagingTerm, RelativeAstrometryTerm
+    from photomancy import DMagTerm, RelativeAstrometryTerm
     from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
     from photomancy.orbit.init import find_init
     from photomancy.orbit.laplace import map_laplace_mixture_fit
@@ -176,7 +176,7 @@ def test_joint_astrom_imaging_fit_recovers_period():
             (10.0 ** log_p_range[0], 10.0 ** log_p_range[1]),
         ),
         star_mass_kg=msun,
-        terms=(RelativeAstrometryTerm(astrom), ImagingTerm(img)),
+        terms=(RelativeAstrometryTerm(astrom), DMagTerm(img)),
         scalars={
             name: ScalarCoordinate(LogUniform(*bounds))
             for name, bounds in BOUNDS.items()

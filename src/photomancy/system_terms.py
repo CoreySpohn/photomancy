@@ -44,7 +44,7 @@ from photomancy.orbit.likelihoods import (
 )
 
 __all__ = [
-    "ImagingTerm",
+    "DMagTerm",
     "NullTerm",
     "PhotometryTerm",
     "ProperMotionAnomalyTerm",
@@ -406,8 +406,14 @@ class NullTerm(eqx.Module):
         return loglike_null(*prediction, self.data), prediction
 
 
-class ImagingTerm(eqx.Module):
+class DMagTerm(eqx.Module):
     """Score single-planet Gaussian dMag measurements and contrast-curve nulls.
+
+    This term scores catalogue-level measurements, not pixels (the pixel
+    likelihood is :class:`photomancy.image.ImageTerm`). It is on the legacy term
+    protocol (``__call__`` returns ``(value, prediction)``, a ``select`` callable,
+    an ``area_AU2`` keyword) and is not an ``AbstractTerm``; it is ported or deleted
+    with the orbit glue.
 
     As for NullTerm, the prediction is a pair of vectors (arcsec, dMag).
     Measured dMag is a Gaussian observable at detected epochs; null epochs
