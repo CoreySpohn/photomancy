@@ -1,42 +1,43 @@
-"""Retrieval targets for atmosphere fitting: fit-leaf selectors + default priors.
+"""Retrieval targets for atmosphere fitting: free paths and default priors.
 
-A retrieval "target" is a ``(fit-leaf selector, default prior)`` pair. The fixed-T
-abundance target (``abundance_fit_leaves`` + ``default_abundance_prior``) is the first;
+A retrieval "target" is a set of model paths and a law for each. The fixed-T
+abundance target (``abundance_paths`` + ``default_abundance_prior``) is the first;
 temperature / TP-structure targets slot in alongside as skyscapes grows its T-varying
 forward (the ``for_retrieval`` model is inert in temperature, so abundance is the only
 fittable target there).
 """
 
 import jax.numpy as jnp
+from hwoutils.model_paths import resolve
 from priorities import Uniform
 
-from photomancy.infer.priors import IndependentPrior
+__all__ = ["abundance_paths", "default_abundance_prior"]
 
 
-def abundance_fit_leaves(pm):
-    """The per-species ``log_mmr`` leaves (in species order) -- the abundance target."""
-    return [s.profile.log_mmr for s in pm.species]
+def abundance_paths(pm):
+    """The per-species ``log_mmr`` model paths, in species order (abundance target)."""
+    return tuple(f"species[{k}].profile.log_mmr" for k in range(len(pm.species)))
 
 
-def default_abundance_prior(
-    pm, *, fit_leaves=abundance_fit_leaves, log_mmr_range=(-12.0, 0.0)
-):
-    """An uninformative uniform prior over the fitted log10 mass-mixing-ratio leaves.
+def default_abundance_prior(pm, *, paths=None, log_mmr_range=(-12.0, 0.0)):
+    """An uninformative uniform law for each fitted log10 mass-mixing-ratio leaf.
 
-    Every abundance scalar gets ``Uniform(log_mmr_range)``, so the prior aligns to
-    the fit's z automatically (no per-leaf ordering needed). This is the honest
-    blind-retrieval default -- it does not assume you know the abundance.
+    Every abundance scalar gets ``Uniform(log_mmr_range)`` over the shape of its leaf.
+    This is the honest blind-retrieval default -- it does not assume you know the
+    abundance.
 
     Args:
-        pm: The atmosphere model whose fitted leaves set the prior dimension.
-        fit_leaves: ``pm -> list[leaf]`` selecting the abundance leaves
-            (default :func:`abundance_fit_leaves`).
+        pm: The atmosphere model whose leaves set the shapes of the laws.
+        paths: Model paths of the abundance leaves (default :func:`abundance_paths`).
         log_mmr_range: ``(low, high)`` bounds on each ``log10`` mass-mixing-ratio.
 
     Returns:
-        An :class:`~photomancy.infer.priors.IndependentPrior` holding one
-        ``priorities.Uniform`` over the raveled abundance leaves.
+        ``{path: Uniform}`` for the ``free`` field of a ``Fit`` over ``pm``.
     """
-    ndim = sum(int(jnp.size(leaf)) for leaf in fit_leaves(pm))
+    paths = abundance_paths(pm) if paths is None else paths
     low, high = log_mmr_range
-    return IndependentPrior((Uniform(jnp.full((ndim,), low), jnp.full((ndim,), high)),))
+    free = {}
+    for path in paths:
+        shape = jnp.shape(resolve(pm, path))
+        free[path] = Uniform(jnp.full(shape, low), jnp.full(shape, high))
+    return free

@@ -1,20 +1,32 @@
 """Fit a skyscapes Scene's disk through the scene-as-PyTree engine.
 
 photomancy reimplements no disk physics -- the forward is skyscapes' own ``Scene`` /
-disk render. Only the inference glue lives here: select the fitted leaves, build a
-Gaussian-image likelihood, and delegate to ``build_scene_logdensity``. The forward is an
-injected callable, so the radiance render now and a coronagraph render later
-share one code path.
+disk render. Only the inference glue lives here: the forward module and the default
+prior over the fitted leaves. A fit is ``Fit(system, default_disk_prior(system),
+(ForwardTerm(radiance_forward(...), likelihood),))``.
+The forward is an injected module, so the radiance render now and a coronagraph render
+later share one code path.
 """
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
-from jax.flatten_util import ravel_pytree
+from hwoutils.model_paths import resolve
 from priorities import LogNormal, Normal
 
-from photomancy.infer.model import build_gaussian_fit
-from photomancy.infer.priors import IndependentPrior
+__all__ = ["default_disk_prior", "radiance_forward"]
+
+
+class _RadianceForward(eqx.Module):
+    """``system -> photon radiance image`` at one wavelength and time."""
+
+    wavelength_nm: jnp.ndarray
+    time_d: jnp.ndarray
+    grid: object
+
+    def __call__(self, system):
+        return system.photon_radiance(
+            self.wavelength_nm, self.time_d, grid=self.grid
+        ).data
 
 
 def radiance_forward(wavelength_nm, time_d, *, grid):
@@ -30,118 +42,46 @@ def radiance_forward(wavelength_nm, time_d, *, grid):
         grid: The sky ``PixelGrid`` (arcsec, with an orientation) to sample on.
 
     Returns:
-        ``forward(system) -> image`` of shape ``grid.shape``: the disk photon radiance
-        in ph s^-1 m^-2 nm^-1 sr^-1 at the pixel centres (a density, independent of
-        the pixel size).
+        An ``eqx.Module`` ``forward(system) -> image`` of shape ``grid.shape``: the
+        disk photon radiance in ph s^-1 m^-2 nm^-1 sr^-1 at the pixel centres (a
+        density, independent of the pixel size).
     """
-    wl = jnp.asarray(wavelength_nm)
-    t = jnp.asarray(time_d)
-
-    def forward(system):
-        return system.photon_radiance(wl, t, grid=grid).data
-
-    return forward
+    return _RadianceForward(jnp.asarray(wavelength_nm), jnp.asarray(time_d), grid)
 
 
-def build_disk_logdensity(
-    system,
-    image,
-    *,
-    fit_leaves,
-    noise_sigma,
-    forward,
-    prior=None,
-):
-    """Flat logdensity fitting selected ``Scene`` leaves to a disk image.
-
-    Args:
-        system: A skyscapes ``Scene`` (its its selected leaves are the params).
-        image: Observed disk image, shape ``(ny, nx)``.
-        fit_leaves: ``system -> list[leaf]`` selecting the leaves to fit (e.g.
-            ``lambda s: [s.disk.sma_AU, s.midplane_inc_deg, ...]``).
-        noise_sigma: Per-pixel Gaussian noise sigma (scalar).
-        forward: ``system -> predicted image`` -- the swappable seam.
-        prior: Optional prior, forwarded to ``build_scene_logdensity`` -- either a
-            distribution over z (from ``priorities``, or an ``IndependentPrior``) or
-            a ``system -> scalar`` callable. ``None`` is flat (improper).
-
-    Returns:
-        ``(logdensity, z0, unravel)`` from ``build_scene_logdensity``: ``logdensity(z)``
-        scores a flat position over the fitted leaves, ``z0`` is the scene's initial
-        position; ``unravel(z)`` rebuilds the fitted-leaf PyTree.
-    """
-    return build_gaussian_fit(
-        system,
-        image,
-        fit_leaves=fit_leaves,
-        noise_sigma=noise_sigma,
-        forward=forward,
-        prior=prior,
-    )
-
-
-# The canonical disk fit-leaf prior specs, aligned to ``disk_fit_leaves`` order:
-# (kind, scale) per leaf -- LogNormal for positive scales, Normal for slopes / angles.
+# The canonical disk free entries: (path, kind, scale) -- LogNormal for positive scales,
+# Normal for slopes and angles.
 _DISK_PRIOR_SPECS = (
-    ("lognormal", 0.5),  # sma_AU -- positive radial scale
-    ("normal", 3.0),  # alpha_in -- inner radial slope
-    ("normal", 3.0),  # alpha_out -- outer radial slope
-    ("lognormal", 0.5),  # ksi0_AU -- positive vertical scale
-    ("normal", 20.0),  # midplane_inc_deg -- orientation angle (deg)
-    ("normal", 20.0),  # midplane_position_angle_deg -- orientation angle (deg)
+    ("disk.sma_AU", "lognormal", 0.5),  # positive radial scale
+    ("disk.alpha_in", "normal", 3.0),  # inner radial slope
+    ("disk.alpha_out", "normal", 3.0),  # outer radial slope
+    ("disk.ksi0_AU", "lognormal", 0.5),  # positive vertical scale
+    ("midplane_inc_deg", "normal", 20.0),  # orientation angle (deg)
+    ("midplane_position_angle_deg", "normal", 20.0),  # orientation angle (deg)
 )
 
 
-def disk_fit_leaves(system):
-    """The canonical disk fit-leaves: radial / vertical shape + shared orientation.
-
-    Returns the six leaves ``sma_AU, alpha_in, alpha_out, ksi0_AU, midplane_inc_deg,
-    midplane_position_angle_deg`` -- the selection ``default_disk_prior`` is aligned
-    to. Pass it as ``build_disk_logdensity``'s ``fit_leaves``.
-    """
-    return [
-        system.disk.sma_AU,
-        system.disk.alpha_in,
-        system.disk.alpha_out,
-        system.disk.ksi0_AU,
-        system.midplane_inc_deg,
-        system.midplane_position_angle_deg,
-    ]
-
-
 def default_disk_prior(system):
-    """A weakly-informative ``IndependentPrior`` for the canonical disk fit.
+    """A weakly-informative free dict for the canonical disk fit.
 
-    Aligned to ``disk_fit_leaves`` and centered on the system's current geometry with
+    Keyed by the six model paths ``disk.sma_AU``, ``disk.alpha_in``,
+    ``disk.alpha_out``, ``disk.ksi0_AU``, ``midplane_inc_deg`` and
+    ``midplane_position_angle_deg``, and centered on the system's current geometry with
     broad scales -- LogNormal for the positive scales (``sma_AU``, ``ksi0_AU``), Normal
     for the radial slopes and the orientation angles. No absolute physics is hardcoded:
-    each prior sits around whatever value ``system`` currently holds. Pass it together
-    with ``disk_fit_leaves`` so the prior's z matches the fit's z.
+    each law sits around whatever value ``system`` currently holds.
 
     Args:
-        system: A skyscapes ``Scene`` whose current disk geometry centers the prior.
+        system: A skyscapes ``Scene`` whose current disk geometry centers the laws.
 
     Returns:
-        An ``IndependentPrior`` over the raveled ``disk_fit_leaves`` selection (ndim 6).
+        ``{path: law}`` for the ``free`` field of a ``Fit`` over ``system``.
     """
-    n = len(_DISK_PRIOR_SPECS)
-    mask = jax.tree_util.tree_map(lambda _: False, system)
-    mask = eqx.tree_at(disk_fit_leaves, mask, [True] * n)
-    z0 = ravel_pytree(eqx.partition(system, mask)[0])[0]  # current values, z order
-
-    # Tag each fitted leaf with its spec index, then ravel so specs line up with z0
-    # (the ravel order need not match the disk_fit_leaves list order).
-    tagged = eqx.tree_at(
-        disk_fit_leaves, system, [jnp.asarray(float(i)) for i in range(n)]
-    )
-    spec_z = ravel_pytree(eqx.partition(tagged, mask)[0])[0]
-
-    components = []
-    for j in range(n):
-        kind, scale = _DISK_PRIOR_SPECS[int(spec_z[j])]
-        value = z0[j]
+    free = {}
+    for path, kind, scale in _DISK_PRIOR_SPECS:
+        value = jnp.asarray(resolve(system, path))
         if kind == "lognormal":
-            components.append(LogNormal(jnp.log(value)[None], jnp.asarray([scale])))
+            free[path] = LogNormal(jnp.log(value), jnp.asarray(scale))
         else:
-            components.append(Normal(value[None], jnp.asarray([scale])))
-    return IndependentPrior(tuple(components))
+            free[path] = Normal(value, jnp.asarray(scale))
+    return free
