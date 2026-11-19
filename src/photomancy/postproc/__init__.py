@@ -26,7 +26,7 @@ from photomancy.postproc.analysis import (
 # Post-processing seam (interface + arms)
 from photomancy.postproc.arms import (
     AbstractPostProcessing,
-    MatchedFilterPostProc,
+    MatchedFilterPostProcessing,
     MawetPostProcessing,
 )
 
@@ -129,7 +129,7 @@ __all__ = [
     "DetectionStats",
     "AbstractPostProcessing",
     "MawetPostProcessing",
-    "MatchedFilterPostProc",
+    "MatchedFilterPostProcessing",
     "student_t_sf",
     # Template providers (PSF-template matched filtering)
     "AbstractTemplateProvider",

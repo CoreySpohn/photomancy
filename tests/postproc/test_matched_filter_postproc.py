@@ -12,7 +12,7 @@ from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
 
 from photomancy.postproc import ApertureSampler, DetectionEstimator, TwoSampleTTest
-from photomancy.postproc.arms import MatchedFilterPostProc
+from photomancy.postproc.arms import MatchedFilterPostProcessing
 from photomancy.postproc.contracts import DetectionStats, FrameSet
 from photomancy.postproc.core.detection import PSFTemplateFilter
 from photomancy.postproc.templates import ArrayTemplateProvider
@@ -63,7 +63,7 @@ def make_frameset(
 
 
 def _manual_composition(provider, noise_variance=None) -> DetectionEstimator:
-    """Hand-build the exact composition MatchedFilterPostProc.detect wires up."""
+    """Hand-build the exact composition MatchedFilterPostProcessing.detect wires up."""
     return DetectionEstimator(
         filter=PSFTemplateFilter(
             provider=provider, order=3, noise_variance=noise_variance
@@ -78,7 +78,7 @@ def test_arm_matches_manual_composition_bitwise():
     fs = make_frameset(jr.PRNGKey(100))
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterPostProc(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterPostProcessing(provider=provider, fwhm_px=FWHM_PX)
     result = arm.detect(fs, positions)
 
     manual = _manual_composition(provider)
@@ -100,7 +100,7 @@ def test_statistic_kind_and_result_type():
     fs = make_frameset(jr.PRNGKey(101))
     positions = jnp.array([[32.0, 48.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterPostProc(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterPostProcessing(provider=provider, fwhm_px=FWHM_PX)
     result = arm.detect(fs, positions)
     assert isinstance(result, DetectionStats)
     assert result.statistic_kind == "psf_template_t"
@@ -116,7 +116,7 @@ def test_grid_center_consulted():
         replace(fs.grid, center_y=20.0, center_x=40.0),
     )
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterPostProc(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterPostProcessing(provider=provider, fwhm_px=FWHM_PX)
     default_center = arm.detect(fs, positions)
     offset_center = arm.detect(fs_off, positions)
     assert not np.array_equal(
@@ -136,8 +136,12 @@ def test_whitening_differs_with_heteroscedastic_variance():
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
 
-    whitened = MatchedFilterPostProc(provider=provider, fwhm_px=FWHM_PX, whiten=True)
-    unwhitened = MatchedFilterPostProc(provider=provider, fwhm_px=FWHM_PX, whiten=False)
+    whitened = MatchedFilterPostProcessing(
+        provider=provider, fwhm_px=FWHM_PX, whiten=True
+    )
+    unwhitened = MatchedFilterPostProcessing(
+        provider=provider, fwhm_px=FWHM_PX, whiten=False
+    )
     with_whitening = whitened.detect(fs, positions)
     without_whitening = unwhitened.detect(fs, positions)
 
@@ -165,8 +169,12 @@ def test_whitening_matches_unwhitened_for_uniform_variance():
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
 
-    whitened = MatchedFilterPostProc(provider=provider, fwhm_px=FWHM_PX, whiten=True)
-    unwhitened = MatchedFilterPostProc(provider=provider, fwhm_px=FWHM_PX, whiten=False)
+    whitened = MatchedFilterPostProcessing(
+        provider=provider, fwhm_px=FWHM_PX, whiten=True
+    )
+    unwhitened = MatchedFilterPostProcessing(
+        provider=provider, fwhm_px=FWHM_PX, whiten=False
+    )
     with_whitening = whitened.detect(fs, positions)
     without_whitening = unwhitened.detect(fs, positions)
 
@@ -191,7 +199,7 @@ def test_detect_is_jit_safe():
     fs = make_frameset(jr.PRNGKey(105))
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterPostProc(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterPostProcessing(provider=provider, fwhm_px=FWHM_PX)
 
     direct = arm.detect(fs, positions)
     jitted = eqx.filter_jit(lambda a, f, p: a.detect(f, p))(arm, fs, positions)

@@ -123,7 +123,7 @@ class MawetPostProcessing(AbstractPostProcessing):
         )
 
 
-class MatchedFilterPostProc(AbstractPostProcessing):
+class MatchedFilterPostProcessing(AbstractPostProcessing):
     """PSF-template matched-filter detection on the coadded frame.
 
     The statistic is the small-sample-corrected two-sample t-statistic of

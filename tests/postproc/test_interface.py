@@ -201,7 +201,7 @@ def test_template_filter_names_resolve_at_top_level():
         "extract_patch",
         "AbstractTemplateProvider",
         "ArrayTemplateProvider",
-        "MatchedFilterPostProc",
+        "MatchedFilterPostProcessing",
     ):
         assert hasattr(postproc, name), name
         assert name in postproc.__all__, name
