@@ -52,7 +52,6 @@ MASS_BOUNDS = (1e3, 1e6)
 RADIUS_BOUNDS = (1e-5, 10**-2.5)
 ALBEDO_BOUNDS = (0.01, 1.0)
 EARTH_MASS_MSUN = Mearth2kg / Msun2kg
-COORDS = ("ln_a_AU", "logit_e", "atanh_cos_i", "W_rad", "w_rad", "M0_rad")
 
 
 def _relative():
@@ -153,8 +152,34 @@ def _block(law=None, chart=None):
     return OrbitBlock(chart or ClassicalChart(), law, rows=(0,), system="dynamics")
 
 
-def _coords(point):
-    return {name: jnp.array([value]) for name, value in zip(COORDS, point, strict=True)}
+COORDS = _block().coordinate_names
+
+
+def _orbit_map(mass=0.0):
+    """The golden block's chart and the chart-coordinate bounds its law maps."""
+    block, model = _block(), _scene(planet_mass_Msun=mass)
+    mu = block._mu(model)[..., jnp.asarray(block.rows)]
+    return block.chart, block._support(mu)
+
+
+def _coords(point, mass=0.0):
+    """Block coordinates of a golden point, given in chart coordinates."""
+    chart, support = _orbit_map(mass)
+    y = chart.unconstrain(jnp.asarray(point)[None, :], support)
+    return {name: y[:, k] for k, name in enumerate(COORDS)}
+
+
+def _chart_coords(block_coords, mass=0.0):
+    """Chart coordinates ``(..., 6)`` and ``log |dx/dy|`` of block coordinates."""
+    chart, support = _orbit_map(mass)
+    y = jnp.stack([jnp.asarray(block_coords[n]) for n in COORDS], axis=-1)
+    x, log_jac = chart.constrain(y, support)
+    return x[..., 0, :], log_jac[..., 0]
+
+
+def _chart_jacobian(x, mass=0.0):
+    """Old density minus new for an orbit entry: ``-log |dx/dy|`` of the block map."""
+    return -float(_chart_coords(x["dynamics.orbits"], mass)[1])
 
 
 def _check_against_old(fit, golden, entries, jacobian, *, constant=None):
@@ -194,7 +219,7 @@ def test_golden_fixed_mass_astrometry(offsets):
         fit,
         golden,
         lambda i: {"dynamics.orbits": _coords(golden["points"][i])},
-        lambda x: 0.0,
+        _chart_jacobian,
     )
 
 
@@ -220,14 +245,17 @@ def test_golden_free_mass_kinematics(offsets):
         mass = jnp.exp(golden["ln_mass_Mearth"][i]) * EARTH_MASS_MSUN
         return {
             "dynamics.planets.mass_Msun": jnp.array([mass]),
-            "dynamics.orbits": _coords(golden["points"][i]),
+            "dynamics.orbits": _coords(golden["points"][i], float(mass)),
         }
 
     offsets["g2"] = _check_against_old(
         fit,
         golden,
         entries,
-        lambda x: float(jnp.log(x["dynamics.planets.mass_Msun"][0])),
+        lambda x: (
+            float(jnp.log(x["dynamics.planets.mass_Msun"][0]))
+            + _chart_jacobian(x, float(x["dynamics.planets.mass_Msun"][0]))
+        ),
     )
 
 
@@ -259,7 +287,7 @@ def test_golden_free_radius_albedo_photometry(offsets):
         return float(
             jnp.log(x["planets[0].Rp_Rearth"][0])
             + jnp.log(x["planets[0].physical_model.Ag"][0])
-        )
+        ) + _chart_jacobian(x)
 
     offsets["g3"] = _check_against_old(fit, golden, entries, jacobian)
 
@@ -356,7 +384,11 @@ def test_refuses_an_index_into_an_array_leaf():
 
 
 def test_refuses_a_changed_free_set():
-    """with_priors keeps the free set and the map of a block."""
+    """with_priors keeps the free set and the map of a block.
+
+    A law whose bounds move changes the map (the bounds are the coordinates' range), so
+    it is refused; a law with the same bounds and another shape is a swap.
+    """
     fit = Fit(
         _scene(),
         {"planets[0].Rp_Rearth": LogUniform(0.5, 4.0), "dynamics.orbits": _block()},
@@ -376,8 +408,15 @@ def test_refuses_a_changed_free_set():
         fit.with_priors({"planets[0].Rp_Rearth": _block()})
     swapped = fit.with_priors({"planets[0].Rp_Rearth": LogUniform(1.0, 2.0)})
     assert swapped.free["planets[0].Rp_Rearth"].low == 1.0
-    law = OrbitLaw(period_d=LogUniform(100.0, 3000.0), eccentricity=Uniform(0.0, 1.0))
-    assert fit.with_priors({"dynamics.orbits": _block(law)}).digest() != fit.digest()
+    moved = OrbitLaw(period_d=LogUniform(100.0, 3000.0), eccentricity=Uniform(0.0, 1.0))
+    with pytest.raises(ValueError, match="same map"):
+        fit.with_priors({"dynamics.orbits": _block(moved)})
+    reshaped = OrbitLaw(
+        period_d=LogUniform(*PERIOD_RANGE), eccentricity=Uniform(0.0, 1.0)
+    )
+    assert (
+        fit.with_priors({"dynamics.orbits": _block(reshaped)}).digest() != fit.digest()
+    )
 
 
 def test_refuses_a_term_that_is_not_an_abstract_term():
@@ -474,7 +513,7 @@ def test_density_is_normalized_prior_draws_agree():
     fit = _mixed_fit()
     x = fit.sample_prior(jax.random.key(3), (4, 2))
     assert x["planets[0].Rp_Rearth"].shape == (4, 2, 1)
-    assert x["dynamics.orbits"]["ln_a_AU"].shape == (4, 2, 1)
+    assert x["dynamics.orbits"][COORDS[0]].shape == (4, 2, 1)
     lp = fit.log_prior(x)
     assert lp.shape == (4, 2) and np.all(np.isfinite(lp))
     one = jax.tree.map(lambda a: a[1, 1], x)
@@ -709,6 +748,9 @@ def _mean_ratio(old_fit, new_fit, n=40000):
 def test_a_prior_swap_ratio_averages_to_one_under_the_old_prior(kind):
     """``E_old[pi_new / pi_old] = 1`` when the new support lies inside the old.
 
+    The orbit case swaps the eccentricity law at fixed bounds (a bound change is a
+    different map and is refused).
+
     Truth source: the identity itself, for normalized densities; the tolerance is four
     Monte Carlo standard errors of the sample mean (seeded draws).
     Fails if: a leaf law or an orbit block's density is not normalized, or the swap
@@ -718,10 +760,10 @@ def test_a_prior_swap_ratio_averages_to_one_under_the_old_prior(kind):
         fit = Fit(_scene(), {"planets[0].Rp_Rearth": LogUniform(0.5, 4.0)})
         new = fit.with_priors({"planets[0].Rp_Rearth": LogUniform(1.0, 2.0)})
     else:
-        wide = OrbitLaw(
-            period_d=LogUniform(300.0, 3000.0), eccentricity=kipping_eccentricity()
+        flat = OrbitLaw(
+            period_d=LogUniform(*PERIOD_RANGE), eccentricity=Uniform(0.0, 1.0)
         )
-        fit = Fit(_scene(), {"dynamics.orbits": _block(wide)})
+        fit = Fit(_scene(), {"dynamics.orbits": _block(flat)})
         new = fit.with_priors({"dynamics.orbits": _block()})
     mean, se = _mean_ratio(fit, new)
     assert abs(mean - 1.0) < 4.0 * se

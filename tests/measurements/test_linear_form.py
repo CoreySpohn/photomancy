@@ -1,14 +1,25 @@
-"""``linear_form`` of the astrometry terms: a quadratic in the sky constants."""
+"""``linear_form`` of relative astrometry: a Gaussian in the sky constants."""
 
-import equinox as eqx
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import numpy as np
+import priorities
 import pytest
 from golden_systems import model_at, systems
-from orbix.system import System, ThieleInnesChart
+from hwoutils.model_paths import assign
+from orbix.system import (
+    ClassicalChart,
+    OrbitBlock,
+    OrbitLaw,
+    System,
+    ThieleInnesBlock,
+    linear_gaussian_conditional,
+)
 from orbix.system.core import Body, SkyFrame
 
+from photomancy.infer import AbstractLinearTerm, AbstractTerm, Fit, LinearForm
 from photomancy.measurements import (
     RelativeAstromData,
     RelativeAstrometryTerm,
@@ -18,31 +29,22 @@ from photomancy.measurements import (
 
 jax.config.update("jax_enable_x64", True)
 
-CHART = ThieleInnesChart()
 TIMES = np.array([31.0, 120.0, 290.0, 470.0, 650.0])
+OPEN_LAW = OrbitLaw(priorities.HalfNormal(0.3), a_AU=priorities.LogNormal(0.0, 1.0))
+CONSTANTS = ("A_AU", "B_AU", "F_AU", "G_AU")
 
 
-def _with_constants(orbits, row, constants):
-    """Orbits whose row ``row`` keeps its shape and takes the sky constants."""
-    shape = jax.tree.map(lambda a: a[row], orbits)
-    coords = CHART.from_orbit(shape).at[3:].set(constants)
-    new = CHART.to_orbit(
-        coords, mu_AU3_per_d2=shape.mu_AU3_per_d2, epoch_d=shape.epoch_d
-    )
-    return jax.tree.map(lambda a, b: a.at[row].set(b), orbits, new)
-
-
-def _two_planet_system():
+def _system(k=1):
     return System.from_classical(
         Body(jnp.asarray(1.0)),
-        Body(jnp.array([3e-4, 1e-3])),
+        Body(jnp.array([3e-4, 1e-3][:k])),
         SkyFrame(jnp.asarray(8.0)),
-        a_AU=jnp.array([1.2, 3.1]),
-        e=jnp.array([0.2, 0.4]),
-        i_rad=jnp.array([0.9, 1.2]),
-        W_rad=jnp.array([0.5, 2.0]),
-        w_rad=jnp.array([1.0, 0.3]),
-        M0_rad=jnp.array([0.7, 2.2]),
+        a_AU=jnp.array([1.2, 3.1][:k]),
+        e=jnp.array([0.2, 0.4][:k]),
+        i_rad=jnp.array([0.9, 1.2][:k]),
+        W_rad=jnp.array([0.5, 2.0][:k]),
+        w_rad=jnp.array([1.0, 0.3][:k]),
+        M0_rad=jnp.array([0.7, 2.2][:k]),
     )
 
 
@@ -59,117 +61,142 @@ def _relative_data(planet_id):
     )
 
 
-def _stellar_data():
-    return StellarAstromData.pad(
-        times=TIMES,
-        ra=[1e-4, -2e-4, 3e-4, 2e-4, -1e-4],
-        dec=[-1e-4, 1e-4, 2e-4, -2e-4, 1e-4],
-        ra_err=[5e-5] * 5,
-        dec_err=[8e-5] * 5,
-        corr=[0.2, -0.3, 0.1, 0.0, 0.4],
-        max_n=7,
+def _gaussian(form, constants):
+    """The Gaussian log density of the form's records, written out here."""
+    resid = form.target - form.design @ constants
+    determinant = jnp.linalg.det(form.precision)
+    active = determinant > 0
+    quad = jnp.einsum("tk,tkl,tl->t", resid, form.precision, resid)
+    safe = jnp.where(active, determinant, 1.0)
+    return float(
+        jnp.sum(
+            jnp.where(
+                active, -jnp.log(2 * jnp.pi) + 0.5 * jnp.log(safe) - 0.5 * quad, 0
+            )
+        )
     )
 
 
-def _assert_quadratic(term, model, replace, row, scale_AU):
-    """The term at random constants equals the form's quadratic at those constants.
+def _through_the_block(model, system, constants):
+    """The model with sky constants written the way a Thiele-Innes block writes them."""
+    block = ThieleInnesBlock(
+        OPEN_LAW, priorities.Uniform(0.5, 2.0), rows=(0,), system=system
+    )
+    x = block.inverse(model)
+    x = {**x, **{n: jnp.asarray(constants[k])[None] for k, n in enumerate(CONSTANTS)}}
+    for path, value in block.forward(x, model).items():
+        model = assign(model, path, value)
+    return model
 
-    Draw constants from a Gaussian of scale ``scale_AU`` (seed 0), write them into the
-    model through the chart and compare to ``form.log_likelihood``. The form is built
-    once at the base model: the nonlinear shape does not change with the constants.
+
+def _assert_pinned(term, model, system, scale_AU):
+    """The term equals the form's Gaussian at constants written by the block.
+
+    Constants of scale ``scale_AU`` (seed 0) go in through ``ThieleInnesBlock.forward``,
+    which also rewrites the star mass and the mean motion, as a fit does. The form is
+    built once at the base model.
     """
-    form = term.linear_form(model, row=row)
-    keys = jax.random.split(jax.random.key(0), 3)
-    for key in keys:
+    form = term.linear_form(model, row=0)
+    for key in jax.random.split(jax.random.key(0), 3):
         c = scale_AU * jax.random.normal(key, (4,))
-        actual = float(term(replace(model, c)))
-        np.testing.assert_allclose(
-            float(form.log_likelihood(c)), actual, rtol=1e-11, atol=1e-9
-        )
+        actual = float(term(_through_the_block(model, system, c)))
+        np.testing.assert_allclose(_gaussian(form, c), actual, rtol=1e-11, atol=1e-9)
 
 
 def test_relative_form_is_the_term_on_the_golden_system():
-    """Fails if the design, target, precision or arcsec scale of the form is wrong.
+    """Fails if the design, target or precision units of the form are wrong.
 
-    Golden system g1 (a scene, one planet, four records and padding): the quadratic
-    at three random sets of constants reproduces the term value to rtol 1e-11. The
-    two sides sum the same Gaussian rows in different orders, so rounding only.
+    Golden system g1 (a scene, one planet, four records and padding): the Gaussian of
+    the form at three random sets of constants, written through the Thiele-Innes
+    block, reproduces the term value to rtol 1e-11. Both sides sum the same Gaussian
+    rows, so rounding only; the form is in arcsec with no log scale to add.
     """
     _, scene, entry, terms = next(s for s in systems() if s[0] == "g1")
-    model = model_at(scene, entry(0))
-    term = terms[0]
-
-    def replace(model, c):
-        orbits = _with_constants(model.dynamics.orbits, 0, c)
-        return eqx.tree_at(lambda m: m.dynamics.orbits, model, orbits)
-
-    _assert_quadratic(term, model, replace, 0, 0.5)
+    _assert_pinned(terms[0], model_at(scene, entry(0)), "dynamics", 0.5)
 
 
-def test_relative_form_picks_one_row_of_a_chain():
-    """Fails if the row's own shape is not used, or other planets' records slip in.
-
-    Two planets; the records belong to planet 1. Constants of row 1 are varied while
-    row 0 stays. A record of planet 0 must fail at run time.
-    """
-    system = _two_planet_system()
-    term = RelativeAstrometryTerm(_relative_data([1] * 5))
-
-    def replace(model, c):
-        return eqx.tree_at(
-            lambda m: m.orbits, model, _with_constants(model.orbits, 1, c)
-        )
-
-    _assert_quadratic(term, system, replace, 1, 1.0)
-    mixed = RelativeAstrometryTerm(_relative_data([1, 0, 1, 1, 1]))
+def test_relative_form_on_a_bare_system_with_records_of_its_row():
+    """Fails if a single-row bare system is not exact, or another planet is accepted."""
+    system = _system()
+    term = RelativeAstrometryTerm(_relative_data([0] * 5))
+    _assert_pinned(term, system, "", 1.0)
+    mixed = RelativeAstrometryTerm(_relative_data([0, 1, 0, 0, 0]))
     with pytest.raises(Exception, match="another planet"):
-        mixed.linear_form(system, row=1)
+        mixed.linear_form(system, row=0)
 
 
-def test_stellar_form_holds_the_other_planets():
-    """Fails if the reflex weight or the other planets' reflex is wrong in the form.
+def test_a_fit_on_a_bare_system_joins_the_block_path():
+    """Fails if an orbit block on a bare system (``system=""``) cannot be fit.
 
-    Two planets with masses 3e-4 and 1e-3 solar: the star's reflex depends on both.
-    Constants of row 1 vary with row 0 held, and the form must match the term.
-    Then the form of row 0 is checked the same way.
+    The block's paths come from ``join``, so the empty root gives ``orbits`` rather
+    than ``.orbits``; the fit draws it and evaluates a finite density.
     """
-    system = _two_planet_system()
-    term = StellarAstrometryTerm(_stellar_data())
-    for row in (0, 1):
-
-        def replace(model, c, row=row):
-            return eqx.tree_at(
-                lambda m: m.orbits, model, _with_constants(model.orbits, row, c)
-            )
-
-        _assert_quadratic(term, system, replace, row, 1.0)
+    block = OrbitBlock(ClassicalChart(), OPEN_LAW, rows=(0,), system="")
+    term = RelativeAstrometryTerm(_relative_data([0] * 5))
+    fit = Fit(_system(), {"orbits": block}, (term,))
+    x = fit.sample_prior(jax.random.key(0), (3,))
+    assert x["orbits"][block.coordinate_names[0]].shape == (3, 1)
+    assert np.all(np.isfinite(fit.log_density(x)))
 
 
-def test_stellar_form_on_the_free_mass_golden_system():
-    """Fails if the form misreads a scene's planet mass or distance (golden g2)."""
-    _, scene, entry, terms = next(s for s in systems() if s[0] == "g2")
-    model = model_at(scene, entry(1))
-    term = terms[0]
+def test_relative_form_refuses_a_system_with_more_than_one_planet_row():
+    """Fails if a two-planet form is built: it errs by 0.2 nat at a 10 percent move.
 
-    def replace(model, c):
-        orbits = _with_constants(model.dynamics.orbits, 0, c)
-        return eqx.tree_at(lambda m: m.dynamics.orbits, model, orbits)
+    With two rows the other row's offset, its mass weight and its mean motion move
+    with the constants under a block that writes the star mass, which a form at fixed
+    values cannot follow.
+    """
+    term = RelativeAstrometryTerm(_relative_data([1] * 5))
+    with pytest.raises(Exception, match="more than one planet row"):
+        term.linear_form(_system(k=2), row=1)
 
-    _assert_quadratic(term, model, replace, 0, 0.5)
+
+def test_the_linear_capability_is_a_type_and_the_stellar_term_does_not_have_it():
+    """Fails if a consumer must probe attributes, or the stellar term claims a form.
+
+    The stellar reflex depends on the star mass and on every row's mass, which move
+    with the constants under ``ThieleInnesBlock``, so its form is not linear in them.
+    """
+    relative = RelativeAstrometryTerm(_relative_data([0] * 5))
+    stellar = StellarAstrometryTerm(
+        StellarAstromData.pad(
+            times=TIMES,
+            ra=[1e-4] * 5,
+            dec=[1e-4] * 5,
+            ra_err=[5e-5] * 5,
+            dec_err=[8e-5] * 5,
+            corr=[0.0] * 5,
+            max_n=7,
+        )
+    )
+    assert isinstance(relative, AbstractLinearTerm)
+    assert isinstance(stellar, AbstractTerm)
+    assert not isinstance(stellar, AbstractLinearTerm)
+    assert not hasattr(stellar, "linear_form")
+    form = relative.linear_form(_system(), row=0)
+    assert isinstance(form, LinearForm)
+    assert {f.name for f in dataclasses.fields(form)} == {
+        "design",
+        "target",
+        "precision",
+    }
 
 
-def test_conditional_adds_the_arcsec_scale():
-    """Fails if ``conditional`` drops ``log_scale``: its evidence is off by dist^2.
+def test_conditional_marginal_is_the_density_of_the_data_in_arcsec():
+    """Fails if the form is not in the data's units (the evidence is off by dist^2).
 
-    With a near-flat prior the evidence is the likelihood at the posterior mean plus
-    the prior density there, minus half log det of the posterior information.
+    ``linear_gaussian_conditional`` on the form with a near-flat prior gives the
+    Gaussian density of the data at the posterior mean plus the prior density there,
+    minus half log det of the posterior information.
     """
     _, scene, entry, terms = next(s for s in systems() if s[0] == "g1")
     form = terms[0].linear_form(model_at(scene, entry(0)))
     prior = 1e-12
-    mean, chol, log_z = form.conditional(prior)
+    mean, chol, log_z = linear_gaussian_conditional(
+        form.design, form.target, form.precision, prior
+    )
     expected = (
-        form.log_likelihood(mean)
+        _gaussian(form, mean)
         + 0.5 * 4 * jnp.log(prior)
         - jnp.sum(jnp.log(jnp.diag(chol)))
         - 0.5 * prior * jnp.sum(mean**2)

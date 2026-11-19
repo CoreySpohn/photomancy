@@ -39,7 +39,7 @@ from hwoutils.blocks import AbstractBlock, block_order, check_writers
 from hwoutils.model_paths import assign, paths_overlap, resolve
 from priorities import AbstractDistribution, from_real, to_real
 
-__all__ = ["AbstractTerm", "Fit"]
+__all__ = ["AbstractLinearTerm", "AbstractTerm", "Fit", "LinearForm"]
 
 
 class AbstractTerm(eqx.Module):
@@ -70,6 +70,41 @@ class AbstractTerm(eqx.Module):
     def predict(self, model):
         """Return the prediction of ``model`` for this term's data, where it has one."""
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
+
+
+class LinearForm(eqx.Module):
+    """A measurement as a Gaussian in the four sky constants of one orbit row.
+
+    At fixed nonlinear orbit shape the predicted offset of a record is linear in the
+    sky constants ``c = (A, B, F, G)`` in AU, ``target_t = design_t @ c + noise_t``,
+    in the units of the data: the design is in arcsec per AU, the target in arcsec and
+    the precision in arcsec^-2. A density computed from the form is therefore the
+    density of the data as the term reports it. Padded records have zero precision.
+    Forms concatenate along the record axis.
+
+    Attributes:
+        design: Shape ``(T, 2, 4)``.
+        target: Observed east/north offsets, shape ``(T, 2)``.
+        precision: Inverse noise covariance per record, shape ``(T, 2, 2)``.
+    """
+
+    design: jax.Array
+    target: jax.Array
+    precision: jax.Array
+
+
+class AbstractLinearTerm(AbstractTerm):
+    """A term whose likelihood is exactly Gaussian in the sky constants of one row.
+
+    The capability is the type: a consumer that completes or marginalizes the constants
+    selects terms with ``isinstance``. ``linear_form`` is exact only where the term's
+    records depend on the constants through the row's own orbit; a term refuses the
+    models for which that fails.
+    """
+
+    @abstractmethod
+    def linear_form(self, model, row: int = 0) -> LinearForm:
+        """The term as a Gaussian in the sky constants of orbit ``row`` of ``model``."""
 
 
 def _sum_leaf(value, leaf_ndim, dist):

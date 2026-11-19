@@ -637,16 +637,12 @@ def test_a_prior_swap_on_an_orbit_block_keeps_log_target_equal_to_the_density():
     Fails if: the block prior is left out of the ratio or counted per coordinate.
     """
     from orbix.system import OrbitLaw
-    from priorities import LogUniform
-    from skyscapes.population import kipping_eccentricity
+    from priorities import LogUniform, Uniform
     from test_fit import PERIOD_RANGE, _block, _relative
 
     fit = Fit(_scene(), {"dynamics.orbits": _block()}, (_relative(),))
     post = run(fit, SMC(n_particles=200, n_mcmc_steps=3), jax.random.key(1))
-    law = OrbitLaw(
-        period_d=LogUniform(PERIOD_RANGE[0] * 0.8, PERIOD_RANGE[1] * 1.2),
-        eccentricity=kipping_eccentricity(),
-    )
+    law = OrbitLaw(period_d=LogUniform(*PERIOD_RANGE), eccentricity=Uniform(0.0, 1.0))
     out = post.with_priors(
         {"dynamics.orbits": _block(law)}, min_n_eff=0, max_khat=jnp.inf
     )

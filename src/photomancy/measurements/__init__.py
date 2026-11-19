@@ -14,7 +14,6 @@ from photomancy.measurements._padding import (
     MAX_STELLAR_ASTROM,
 )
 from photomancy.measurements.astrometry import (
-    LinearForm,
     RelativeAstromData,
     RelativeAstrometryTerm,
     StellarAstromData,
@@ -65,7 +64,6 @@ __all__ = [
     "AbstractReportPredictor",
     "DMagTerm",
     "ImagingData",
-    "LinearForm",
     "NullData",
     "PMAnomalyData",
     "PhotometryData",

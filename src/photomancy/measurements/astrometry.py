@@ -1,8 +1,8 @@
 """Astrometry of a planetary system: relative and stellar-reflex positions on the sky.
 
 Data containers, the bivariate-Gaussian kernel, the two terms, and the linear form of
-the relative-astrometry term in the four sky constants of an orbit. Positions are
-east/north offsets in arcsec; data times are days from the system's epoch.
+the relative-astrometry term in the four sky constants of an orbit (one planet row).
+Positions are east/north offsets in arcsec; data times are days from the system's epoch.
 
 A term reads its system from the model at ``system_path`` (the empty path is the model
 itself). The system is any object whose ``positions(time_d)`` (relative) or
@@ -18,14 +18,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.model_paths import resolve
-from orbix.system import (
-    System,
-    frame_to_sky_block,
-    linear_gaussian_conditional,
-    sky_design,
-)
+from orbix.system import System, sky_design
 
-from photomancy.infer.fit import AbstractTerm
+from photomancy.infer.fit import AbstractLinearTerm, AbstractTerm, LinearForm
 from photomancy.measurements._observables import (
     _relative_positions,
     _stellar_reflex,
@@ -38,7 +33,6 @@ from photomancy.measurements._padding import (
 )
 
 __all__ = [
-    "LinearForm",
     "RelativeAstromData",
     "RelativeAstrometryTerm",
     "StellarAstromData",
@@ -277,93 +271,31 @@ def _sample_radec(key, term, prediction):
     return eqx.tree_at(lambda t: t.data, term, sampled)
 
 
-class LinearForm(eqx.Module):
-    """A measurement as a Gaussian in the four sky constants of one orbit row.
-
-    At fixed nonlinear orbit shape (``n``, ``ex``, ``ey``, epoch) the predicted offset
-    of a record is linear in the sky constants ``c = (A, B, F, G)`` in AU, so
-    ``target_t = design_t @ c + noise_t``. Lengths are AU and precisions AU^-2.
-    Padded records have zero precision.
-
-    Attributes:
-        design: Shape ``(T, 2, 4)``.
-        target: Observed east/north offsets minus any part held fixed by other rows,
-            shape ``(T, 2)``.
-        precision: Inverse noise covariance per record, shape ``(T, 2, 2)``.
-        log_scale: Constant that converts the density of the AU-valued data to the
-            density of the term's own units (arcsec), ``2 log(dist_pc)`` per record.
-    """
-
-    design: jax.Array
-    target: jax.Array
-    precision: jax.Array
-    log_scale: jax.Array
-
-    def log_likelihood(self, constants):
-        """The term's log likelihood as a quadratic in ``constants``, shape ``(4,)``."""
-        resid = self.target - self.design @ constants
-        determinant = jnp.linalg.det(self.precision)
-        active = determinant > 0
-        n_values = jnp.sum(active) * self.target.shape[-1]
-        logdet = jnp.sum(
-            jnp.where(active, jnp.log(jnp.where(active, determinant, 1.0)), 0.0)
-        )
-        quad = jnp.einsum("tk,tkl,tl->", resid, self.precision, resid)
-        return (
-            -0.5 * n_values * jnp.log(2.0 * jnp.pi)
-            + 0.5 * logdet
-            - 0.5 * quad
-            + self.log_scale
-        )
-
-    def conditional(self, prior_precision):
-        """Conditional of the constants under ``N(0, prior_precision^-1)``, and log Z.
-
-        Returns ``(mean, chol, log_marginal)`` as orbix ``linear_gaussian_conditional``
-        does, with the log marginal in the term's own units: the density of the data
-        with the constants integrated out against the Gaussian reference prior.
-        """
-        mean, chol, log_marginal = linear_gaussian_conditional(
-            self.design, self.target, self.precision, prior_precision
-        )
-        return mean, chol, log_marginal + self.log_scale
-
-
 def _dynamics(system):
     """The orbix ``System`` of a scene, or the system itself."""
     return system if isinstance(system, System) else system.dynamics
 
 
-def _record_form(design, data, dist_pc, held_AU):
-    """Assemble a :class:`LinearForm` from AU designs and arcsec records."""
+def _record_form(design, data):
+    """Assemble a :class:`LinearForm` from an arcsec-per-AU design and the records."""
     valid = data.is_valid
-    target = jnp.stack([data.ra, data.dec], -1) * dist_pc - held_AU
-    target = jnp.where(valid[:, None], target, 0.0)
+    target = jnp.where(valid[:, None], jnp.stack([data.ra, data.dec], -1), 0.0)
     sx = jnp.where(valid, data.ra_err, 1.0)
     sy = jnp.where(valid, data.dec_err, 1.0)
     rho = jnp.where(valid, data.corr, 0.0)
     scale = 1.0 / (1.0 - rho**2)
     off = -scale * rho / (sx * sy)
-    precision = (
-        jnp.stack(
-            [
-                jnp.stack([scale / sx**2, off], -1),
-                jnp.stack([off, scale / sy**2], -1),
-            ],
-            -2,
-        )
-        / dist_pc**2
+    precision = jnp.stack(
+        [jnp.stack([scale / sx**2, off], -1), jnp.stack([off, scale / sy**2], -1)], -2
     )
-    precision = jnp.where(valid[:, None, None], precision, 0.0)
     return LinearForm(
         design=jnp.where(valid[:, None, None], design, 0.0),
         target=target,
-        precision=precision,
-        log_scale=2.0 * jnp.log(dist_pc) * jnp.sum(valid),
+        precision=jnp.where(valid[:, None, None], precision, 0.0),
     )
 
 
-class RelativeAstrometryTerm(AbstractTerm):
+class RelativeAstrometryTerm(AbstractLinearTerm):
     """Score relative east/north offsets from a system's sky positions.
 
     Attributes:
@@ -415,37 +347,38 @@ class RelativeAstrometryTerm(AbstractTerm):
         return _sample_radec(key, self, self.predict(model))
 
     def linear_form(self, model, row=0) -> LinearForm:
-        """The term as a quadratic in the sky constants of orbit ``row``.
+        """The term as a Gaussian in the sky constants of orbit ``row``.
 
         Only ``n``, ``ex``, ``ey`` and the epoch of the row's orbit in ``model`` enter
-        the design, so the form is exact for every value of the four constants at
-        that shape. The part of the offset set by the interior rows of a chain stays
-        at its value in ``model`` and moves to the target. Every valid record must
-        belong to ``row`` (its ``planet_id``); a record of another planet fails at run
-        time, since a single form cannot carry it.
+        the design, so the form is exact for every value of the four constants at that
+        shape, provided the records depend on the constants only through that orbit.
+        That holds for a system with a single planet row, and the form refuses a system
+        with more: the other rows' offsets, masses and mean motions move with the
+        constants under a block that writes the star mass (``ThieleInnesBlock``). It
+        also refuses a record of another planet, which one form cannot carry. The
+        design is in arcsec per AU, the target and precision in the units of the data.
 
         Args:
             model: The model holding the system at ``system_path``.
             row: Zero-based Jacobi chain index of the planet.
         """
-        system = resolve(model, self.system_path)
-        dynamics = _dynamics(system)
+        dynamics = _dynamics(resolve(model, self.system_path))
         shape = jax.tree.map(lambda a: a[row], dynamics.orbits)
-        dist = dynamics.frame.dist_pc
         valid = self.data.is_valid
         times = jnp.where(valid, self.data.times, shape.epoch_d)
-        design = sky_design(shape, times)
-        constants = frame_to_sky_block(shape.a_AU, shape.quat)
-        own = jnp.einsum("tkp,p->tk", design, constants)
-        planet = jnp.full(times.shape, row)
-        offset = _relative_positions(system, times, planet) * dist
-        held = offset.T - own
+        design = sky_design(shape, times) / dynamics.frame.dist_pc
+        design = eqx.error_if(
+            design,
+            jnp.asarray(dynamics.orbits.a_AU.shape[-1] > 1),
+            "linear_form: the system has more than one planet row, so the other rows "
+            "move with the constants",
+        )
         design = eqx.error_if(
             design,
             jnp.any(valid & (self.data.planet_id != row)),
             "linear_form: a valid record belongs to another planet",
         )
-        return _record_form(design, self.data, dist, held)
+        return _record_form(design, self.data)
 
 
 class StellarAstrometryTerm(AbstractTerm):
@@ -488,30 +421,3 @@ class StellarAstrometryTerm(AbstractTerm):
     def draw(self, key, model) -> Self:
         """Copy with correlated Gaussian positions at the same epochs."""
         return _sample_radec(key, self, self.predict(model))
-
-    def linear_form(self, model, row=0) -> LinearForm:
-        """The term as a quadratic in the sky constants of orbit ``row``.
-
-        The star's reflex is ``-m_row / M_enclosed`` times the row's relative offset
-        plus the reflex of the other planets, which stay at their values in ``model``
-        and move to the target. Masses are read from the model and held. As for the
-        relative term, only the nonlinear shape of the row enters the design.
-
-        Args:
-            model: The model holding the system at ``system_path``.
-            row: Zero-based Jacobi chain index of the planet whose constants vary.
-        """
-        system = resolve(model, self.system_path)
-        dynamics = _dynamics(system)
-        orbit = jax.tree.map(lambda a: a[row], dynamics.orbits)
-        masses = dynamics.planets.mass_Msun
-        enclosed = dynamics.star.mass_Msun + jnp.cumsum(masses)[row]
-        weight = masses[row] / enclosed
-        dist = dynamics.frame.dist_pc
-        valid = self.data.is_valid
-        times = jnp.where(valid, self.data.times, orbit.epoch_d)
-        design = -weight * sky_design(orbit, times)
-        constants = frame_to_sky_block(orbit.a_AU, orbit.quat)
-        own = jnp.einsum("tkp,p->tk", design, constants)
-        reflex = _stellar_reflex(system, times) * dist
-        return _record_form(design, self.data, dist, reflex.T - own)

@@ -40,7 +40,7 @@ def _g2_entry(i):
     mass = jnp.exp(GOLDEN["g2"]["ln_mass_Mearth"][i]) * EARTH_MASS_MSUN
     return {
         "dynamics.planets.mass_Msun": jnp.array([mass]),
-        "dynamics.orbits": _coords(GOLDEN["g2"]["points"][i]),
+        "dynamics.orbits": _coords(GOLDEN["g2"]["points"][i], float(mass)),
     }
 
 

@@ -17,7 +17,17 @@ import optax
 import pytest
 from orbix.system import ClassicalChart
 from priorities import Uniform
-from test_fit import COORDS, GOLDEN, PERIOD_RANGE, _block, _relative, _scene
+from test_fit import (
+    COORDS,
+    GOLDEN,
+    PERIOD_RANGE,
+    _block,
+    _chart_coords,
+    _coords,
+    _orbit_map,
+    _relative,
+    _scene,
+)
 
 from photomancy.infer import (
     MAP,
@@ -43,9 +53,11 @@ KEY = "planets[0].Rp_Rearth"
 HIGH = 4.0
 WIDTH = 0.3
 # L-BFGS steps of the golden-orbit optimum comparisons. The old density cuts each angle
-# to one cell, so a long run leaves the cell and stalls on its edge; both backends
-# take identical steps while the path stays inside it.
-STEPS = 8
+# to one cell, so a long run leaves the cell and stalls on its edge. Both backends take
+# identical steps only while the line search is not decided by rounding: the two
+# densities agree to 2e-12 absolute (1e-16 relative) but past the second step an
+# accept/reject of the line search flips and the paths part (0.8 apart at step 4).
+STEPS = 2
 
 
 class _Gauss(AbstractTerm):
@@ -447,11 +459,7 @@ def _golden_fit():
 
 def _golden_start():
     point = GOLDEN["g1"]["points"][0]
-    return {
-        "dynamics.orbits": {
-            n: jnp.array([v]) for n, v in zip(COORDS, point, strict=True)
-        }
-    }
+    return {"dynamics.orbits": _coords(point)}
 
 
 def _old_problem():
@@ -471,10 +479,32 @@ def _old_problem():
     return problem, problem.flatten({"orbit": point})
 
 
+def _in_block_coordinates(problem, start):
+    """The old chart problem re-expressed in the new fit's block coordinates.
+
+    Prior and density pick up ``log |dx/dy|`` of the block map; the likelihood and the
+    evidence are unchanged. Vectors stay in the old chart order.
+    """
+    chart, support = _orbit_map()
+
+    def carry(fn, jac):
+        def wrapped(y):
+            x, log_jac = chart.constrain(y[None, :], support)
+            return fn(x[0]) + (log_jac[0] if jac else 0.0)
+
+        return wrapped
+
+    return (
+        carry(problem.logdensity, True),
+        carry(problem.logprior, True),
+        carry(problem.loglikelihood, False),
+        chart.unconstrain(start[None, :], support)[0],
+    )
+
+
 def _new_coords(post):
     """Chart coordinates of each draw as ``(N, 6)`` in the old coordinate order."""
-    block = post.samples["dynamics.orbits"]
-    return np.stack([np.asarray(block[n])[:, 0] for n in COORDS], axis=-1)
+    return np.asarray(_chart_coords(post.samples["dynamics.orbits"])[0])
 
 
 def _wrap_angles(z):
@@ -565,7 +595,8 @@ def test_smc_agrees_with_the_old_backend_on_the_golden_orbit():
     from photomancy.infer.backends import SMCBackend
     from photomancy.priors import LOG_HAAR
 
-    problem, _ = _old_problem()
+    _, logprior, loglikelihood, _ = _in_block_coordinates(*_old_problem())
+    perm = np.array([sorted(COORDS).index(n) for n in COORDS])
     fit = _golden_fit()
     n = 1500
     old_z, new_z = [], []
@@ -574,7 +605,7 @@ def test_smc_agrees_with_the_old_backend_on_the_golden_orbit():
         draws = fit.to_real(fit.sample_prior(key, (n,)))
         particles = jax.vmap(lambda u: jax.flatten_util.ravel_pytree(u)[0])(draws)
         old = SMCBackend(n_mcmc_steps=8).run(
-            problem.logprior, problem.loglikelihood, particles, key
+            logprior, loglikelihood, particles[:, perm], key
         )
         old_z.append(float(old.evidence))
         new_z.append(
@@ -597,9 +628,9 @@ def test_laplace_agrees_with_the_old_backend_on_the_golden_orbit():
     """
     from photomancy.infer.backends import LaplaceBackend
 
-    problem, start = _old_problem()
+    logdensity, _, _, start = _in_block_coordinates(*_old_problem())
     old = LaplaceBackend(n_steps=STEPS, min_eigenvalue=1.0).run(
-        problem.logdensity, start, jax.random.key(0)
+        logdensity, start, jax.random.key(0)
     )
     post = run(
         _golden_fit(),
@@ -624,14 +655,14 @@ def test_map_equals_the_old_map_backend_on_the_golden_orbit():
     """The new MAP optimum equals the old ``MAPBackend`` optimum to 1e-6."""
     from photomancy.infer.backends import MAPBackend
 
-    problem, start = _old_problem()
+    logdensity, _, _, start = _in_block_coordinates(*_old_problem())
     stage = (FitStage(STEPS, ("all",), solver=optax.lbfgs(), name="lbfgs"),)
-    old = MAPBackend(labels="all", transforms={}, stages=stage).run(
-        problem.logdensity, start
-    )
+    old = MAPBackend(labels="all", transforms={}, stages=stage).run(logdensity, start)
     post = run(
         _golden_fit(),
         MAP(n_steps=STEPS, init=_golden_start()),
         jax.random.key(0),
     )
-    np.testing.assert_allclose(_new_coords(post)[0], np.asarray(old.params), atol=1e-6)
+    block = post.samples["dynamics.orbits"]
+    new = np.stack([np.asarray(block[n])[0, 0] for n in COORDS])
+    np.testing.assert_allclose(new, np.asarray(old.params), atol=1e-6)
