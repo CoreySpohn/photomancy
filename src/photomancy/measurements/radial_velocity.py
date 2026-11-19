@@ -21,7 +21,7 @@ class RadialVelocityData(eqx.Module):
     """Radial velocity observations from one or more instruments.
 
     Args:
-        times: Observation epochs (days). Shape ``(N,)``.
+        time_d: Observation epochs (days). Shape ``(N,)``.
         rv: Measured radial velocities (m/s). Shape ``(N,)``.
         rv_err: RV measurement uncertainties (m/s). Shape ``(N,)``.
         inst_ids: Integer instrument index per observation, ``0..n_inst-1``.
@@ -30,7 +30,7 @@ class RadialVelocityData(eqx.Module):
         n_inst: Number of distinct instruments (static, for ``segment_sum``).
     """
 
-    times: jnp.ndarray
+    time_d: jnp.ndarray
     rv: jnp.ndarray
     rv_err: jnp.ndarray
     inst_ids: jnp.ndarray
@@ -38,11 +38,11 @@ class RadialVelocityData(eqx.Module):
     n_inst: int = eqx.field(static=True)
 
     @classmethod
-    def pad(cls, *, times, rv, rv_err, inst_ids, n_inst, max_n=MAX_RV):
+    def pad(cls, *, time_d, rv, rv_err, inst_ids, n_inst, max_n=MAX_RV):
         """Create a padded RadialVelocityData with ``is_valid`` mask."""
-        n = jnp.asarray(times).shape[0]
+        n = jnp.asarray(time_d).shape[0]
         return cls(
-            times=_pad_1d(times, max_n),
+            time_d=_pad_1d(time_d, max_n),
             rv=_pad_1d(rv, max_n),
             rv_err=_pad_1d(rv_err, max_n, fill=1.0),
             inst_ids=_pad_1d(inst_ids, max_n).astype(int),
@@ -54,7 +54,7 @@ class RadialVelocityData(eqx.Module):
     def zeros(cls, max_n=MAX_RV, n_inst=1):
         """Create an all-invalid placeholder (for model tracing)."""
         return cls(
-            times=jnp.zeros(max_n),
+            time_d=jnp.zeros(max_n),
             rv=jnp.zeros(max_n),
             rv_err=jnp.ones(max_n),
             inst_ids=jnp.zeros(max_n, dtype=int),
@@ -133,7 +133,7 @@ class RadialVelocityTerm(AbstractTerm):
     model itself. Jitter is in m/s with shape ``(data.n_inst,)``: a fixed array in
     ``jitters``, a model leaf read at ``jitter_path`` (so a fit can free it), or zeros
     when neither is given. Predictions have shape ``(T,)`` with invalid rows zeroed.
-    Data ``times`` are days from the system's epoch.
+    Data ``time_d`` is in days from the system's epoch.
     """
 
     data: RadialVelocityData
@@ -163,7 +163,7 @@ class RadialVelocityTerm(AbstractTerm):
     def _score(self, model):
         valid = self.data.is_valid
         data = RadialVelocityData(
-            times=jnp.where(valid, self.data.times, 0.0),
+            time_d=jnp.where(valid, self.data.time_d, 0.0),
             rv=jnp.where(valid, self.data.rv, 0.0),
             rv_err=jnp.where(valid, self.data.rv_err, 1.0),
             inst_ids=jnp.where(valid, self.data.inst_ids, 0),
@@ -172,11 +172,11 @@ class RadialVelocityTerm(AbstractTerm):
         )
         system = resolve(model, self.system_path)
         if isinstance(system, System):
-            prediction = system.solve(data.times).radial_velocity_m_per_s(
+            prediction = system.solve(data.time_d).radial_velocity_m_per_s(
                 0, "barycenter"
             )
         else:
-            prediction = system.star_radial_velocity(time_d=data.times)
+            prediction = system.star_radial_velocity(time_d=data.time_d)
         prediction = jnp.where(valid, prediction, 0.0)
         value = loglike_rv_marginalized(
             data.rv,

@@ -84,7 +84,7 @@ def test_target_routing_and_composition(tmp_path):
     loaded = load_target(path, epoch=_EPOCH, pixel_data_ids=("img-1",))
     assert loaded.target["name"] == "X"
     assert loaded.band_names == ("L'",)
-    assert loaded.relative_astrometry.times.size == 1
+    assert loaded.relative_astrometry.time_d.size == 1
     np.testing.assert_allclose(loaded.relative_astrometry.ra, [0.3], rtol=1e-14)
     np.testing.assert_allclose(loaded.relative_astrometry.ra_err, [0.007], rtol=1e-14)
     np.testing.assert_allclose(
@@ -111,7 +111,7 @@ def test_target_routing_and_composition(tmp_path):
     np.testing.assert_allclose(TermLogDensity(terms)(model), expected, rtol=1e-14)
     pending = load_target(path, epoch=_EPOCH, include_pending=True, bandpasses=bands)
     assert pending.band_names == ("L'", "H")
-    assert pending.relative_astrometry.times.size == 2
+    assert pending.relative_astrometry.time_d.size == 2
     np.testing.assert_array_equal(pending.photometry.is_upper_limit, [False, True])
     assert len(pending.terms(system=model.system)) == 2
     assert len(pending.comparisons["astrometry"]) == 1
@@ -170,7 +170,7 @@ def test_target_epoch_invariance(tmp_path, include_pending):
         for e in epochs
     ]
     for name in ("relative_astrometry", "photometry"):
-        times = [np.asarray(getattr(data, name).times) for data in loaded]
+        times = [np.asarray(getattr(data, name).time_d) for data in loaded]
         np.testing.assert_array_equal(times[0] - times[1], 100.25)
         dates = np.array([2460000.0, 2460100.0][: times[0].size], dtype=np.float64)
         np.testing.assert_array_equal(times[0], epochs[0].days(dates))

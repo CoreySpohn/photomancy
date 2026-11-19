@@ -204,7 +204,7 @@ class ScaleRotateProposal(AbstractDensityProposal):
     def _draw(self, key, fit, n):
         """Draw ``n`` orbits; return ``(z, log_q, inside)``, ``z`` NaN outside."""
         block, data, row, position, system, dim, inner, epoch = self._setup(fit)
-        t_anchor = data.times[row]
+        t_anchor = data.time_d[row]
         dist_pc = system.frame.dist_pc
         k = jax.random.split(key, 7)
         table = eccentricity_table(block)
@@ -270,7 +270,7 @@ class ScaleRotateProposal(AbstractDensityProposal):
         e = jnp.sqrt(r2 / (1.0 + r2))
         enclosed = block.chart.implied_mu(x) / GM_SUN_AU3_PER_D2
         orbit = block.chart.to_orbit(x, mu_AU3_per_d2=1.0, epoch_d=epoch)
-        east, north = orbit.offsets_arcsec(data.times[row], system.frame.dist_pc)
+        east, north = orbit.offsets_arcsec(data.time_d[row], system.frame.dist_pc)
         t = jnp.stack([east, north], -1)
         table = eccentricity_table(block)
         mass = enclosed - inner

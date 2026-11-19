@@ -52,7 +52,7 @@ class DMagData(eqx.Module):
     z-score non-detection likelihood (nulls) via ``jnp.where``.
 
     Args:
-        epochs: Observation epochs (days). Shape ``(M,)``.
+        time_d: Observation times (days). Shape ``(M,)``.
         sep_grid: Separation grid per epoch (arcsec), padded and monotonic.
             Shape ``(M, K)``.
         dmag0_grid: Limiting dMag per epoch, padded with ``-jnp.inf`` for
@@ -67,7 +67,7 @@ class DMagData(eqx.Module):
         is_valid: Boolean validity mask. Shape ``(M,)``.
     """
 
-    epochs: jnp.ndarray
+    time_d: jnp.ndarray
     sep_grid: jnp.ndarray
     dmag0_grid: jnp.ndarray
     is_detected: jnp.ndarray
@@ -79,12 +79,12 @@ class DMagData(eqx.Module):
     @classmethod
     def from_detections_and_nulls(
         cls,
-        det_epochs,
+        det_time_d,
         det_dmag_obs,
         det_dmag_err,
         det_sep_grid,
         det_dmag0_grid,
-        null_epochs,
+        null_time_d,
         null_sep_grid,
         null_dmag0_grid,
         snr_thresh=5.0,
@@ -98,14 +98,14 @@ class DMagData(eqx.Module):
         static shape.
 
         Args:
-            det_epochs: Detection observation epochs (days). Shape ``(N_det,)``.
+            det_time_d: Detection observation epochs (days). Shape ``(N_det,)``.
             det_dmag_obs: Measured dMag at detection epochs. Shape ``(N_det,)``.
             det_dmag_err: dMag uncertainty at detection epochs. Shape ``(N_det,)``.
             det_sep_grid: Contrast-curve separation grid for detection epochs.
                 Shape ``(N_det, K)``.
             det_dmag0_grid: Contrast-curve dMag limit for detection epochs.
                 Shape ``(N_det, K)``.
-            null_epochs: Null observation epochs (days). Shape ``(N_null,)``.
+            null_time_d: Null observation epochs (days). Shape ``(N_null,)``.
             null_sep_grid: Contrast-curve separation grid for null epochs.
                 Shape ``(N_null, K)``.
             null_dmag0_grid: Contrast-curve dMag limit for null epochs.
@@ -117,13 +117,13 @@ class DMagData(eqx.Module):
         Returns:
             A ``DMagData`` instance.
         """
-        det_epochs = jnp.asarray(det_epochs)
-        null_epochs = jnp.asarray(null_epochs)
-        n_det = det_epochs.shape[0]
-        n_null = null_epochs.shape[0]
+        det_time_d = jnp.asarray(det_time_d)
+        null_time_d = jnp.asarray(null_time_d)
+        n_det = det_time_d.shape[0]
+        n_null = null_time_d.shape[0]
         n_total = n_det + n_null
 
-        epochs = jnp.concatenate([det_epochs, null_epochs])
+        time_d = jnp.concatenate([det_time_d, null_time_d])
         sep_grid = jnp.concatenate(
             [jnp.asarray(det_sep_grid), jnp.asarray(null_sep_grid)]
         )
@@ -139,7 +139,7 @@ class DMagData(eqx.Module):
         # Pad sep_grid columns to max_pts
 
         return cls(
-            epochs=_pad_1d(epochs, max_n),
+            time_d=_pad_1d(time_d, max_n),
             sep_grid=_pad_2d(sep_grid, max_n, max_pts),
             dmag0_grid=_pad_2d(dmag0_grid, max_n, max_pts, fill=-jnp.inf),
             is_detected=_pad_1d(is_detected, max_n).astype(bool),
@@ -152,7 +152,7 @@ class DMagData(eqx.Module):
     @classmethod
     def from_contrast_curves(
         cls,
-        epochs,
+        time_d,
         sep_grids,
         contrast_grids,
         snr_thresh=5.0,
@@ -164,7 +164,7 @@ class DMagData(eqx.Module):
         Converts each contrast limit to a dMag limit, ``dMag = -2.5 * log10(contrast)``.
 
         Args:
-            epochs: Observation epochs (days). Shape ``(N_epochs,)``.
+            time_d: Observation times (days). Shape ``(N_epochs,)``.
             sep_grids: Separation grids per epoch (arcsec).
                 Shape ``(N_epochs, N_pts)``.
             contrast_grids: Contrast detection limits per epoch.
@@ -173,10 +173,10 @@ class DMagData(eqx.Module):
             max_n: Padding size for epochs.
             max_pts: Padding size for contrast curve points.
         """
-        epochs = jnp.asarray(epochs)
-        n = epochs.shape[0]
+        time_d = jnp.asarray(time_d)
+        n = time_d.shape[0]
         return cls.pad(
-            epochs=epochs,
+            time_d=time_d,
             sep_grid=jnp.asarray(sep_grids),
             dmag0_grid=contrast_to_delta_mag(jnp.asarray(contrast_grids)),
             is_detected=jnp.zeros(n, dtype=bool),
@@ -191,7 +191,7 @@ class DMagData(eqx.Module):
     def pad(
         cls,
         *,
-        epochs,
+        time_d,
         sep_grid,
         dmag0_grid,
         is_detected,
@@ -202,9 +202,9 @@ class DMagData(eqx.Module):
         max_pts=MAX_CC_PTS,
     ):
         """Create a padded DMagData with an ``is_valid`` mask."""
-        n = jnp.asarray(epochs).shape[0]
+        n = jnp.asarray(time_d).shape[0]
         return cls(
-            epochs=_pad_1d(epochs, max_n),
+            time_d=_pad_1d(time_d, max_n),
             sep_grid=_pad_2d(sep_grid, max_n, max_pts),
             dmag0_grid=_pad_2d(dmag0_grid, max_n, max_pts, fill=-jnp.inf),
             is_detected=_pad_1d(is_detected, max_n).astype(bool),
@@ -218,7 +218,7 @@ class DMagData(eqx.Module):
     def zeros(cls, max_n=MAX_IMG, max_pts=MAX_CC_PTS, snr_thresh=5.0):
         """Create an all-invalid placeholder (for model tracing)."""
         return cls(
-            epochs=jnp.zeros(max_n),
+            time_d=jnp.zeros(max_n),
             sep_grid=jnp.zeros((max_n, max_pts)),
             dmag0_grid=jnp.full((max_n, max_pts), -jnp.inf),
             is_detected=jnp.zeros(max_n, dtype=bool),
@@ -232,14 +232,14 @@ class DMagData(eqx.Module):
 class PhotometryData(eqx.Module):
     """Linear planet/star contrast measurements and upper limits.
 
-    All fields have shape ``(N,)``. ``times`` uses the system's day frame;
+    All fields have shape ``(N,)``. ``time_d`` uses the system's day frame;
     ``contrast`` and ``contrast_err`` are dimensionless linear flux ratios.
     ``band_id`` and ``planet_id`` index the term's bandpasses and system planets.
     ``is_upper_limit`` selects a Gaussian cumulative probability below the
     reported contrast; ``is_valid`` excludes padded rows.
     """
 
-    times: jnp.ndarray
+    time_d: jnp.ndarray
     contrast: jnp.ndarray
     contrast_err: jnp.ndarray
     band_id: jnp.ndarray
@@ -251,7 +251,7 @@ class PhotometryData(eqx.Module):
     def pad(
         cls,
         *,
-        times,
+        time_d,
         contrast,
         contrast_err,
         band_id,
@@ -260,9 +260,9 @@ class PhotometryData(eqx.Module):
         max_n=MAX_IMG,
     ):
         """Pad contrast observations, using unit errors on invalid rows."""
-        n = jnp.asarray(times).shape[0]
+        n = jnp.asarray(time_d).shape[0]
         return cls(
-            times=_pad_1d(times, max_n),
+            time_d=_pad_1d(time_d, max_n),
             contrast=_pad_1d(contrast, max_n),
             contrast_err=_pad_1d(contrast_err, max_n, fill=1.0),
             band_id=_pad_1d(band_id, max_n).astype(int),
@@ -275,7 +275,7 @@ class PhotometryData(eqx.Module):
     def from_dmag(
         cls,
         *,
-        times,
+        time_d,
         dmag,
         dmag_err,
         band_id,
@@ -290,14 +290,14 @@ class PhotometryData(eqx.Module):
         conversion for the limit and its noise scale. Planet indices default
         to zero, limit flags to False, and ``max_n=None`` keeps all rows valid.
         """
-        times = jnp.asarray(times)
+        time_d = jnp.asarray(time_d)
         contrast = delta_mag_to_contrast(jnp.asarray(dmag))
         if planet_id is None:
-            planet_id = jnp.zeros(times.shape, dtype=int)
+            planet_id = jnp.zeros(time_d.shape, dtype=int)
         if is_upper_limit is None:
-            is_upper_limit = jnp.zeros(times.shape, dtype=bool)
+            is_upper_limit = jnp.zeros(time_d.shape, dtype=bool)
         values = dict(
-            times=times,
+            time_d=time_d,
             contrast=contrast,
             contrast_err=0.4 * jnp.log(10.0) * contrast * jnp.asarray(dmag_err),
             band_id=jnp.asarray(band_id, dtype=int),
@@ -306,7 +306,7 @@ class PhotometryData(eqx.Module):
         )
         if max_n is not None:
             return cls.pad(**values, max_n=max_n)
-        return cls(**values, is_valid=jnp.ones(times.shape, dtype=bool))
+        return cls(**values, is_valid=jnp.ones(time_d.shape, dtype=bool))
 
 
 # Finite "undetectable" dMag0 sentinel (replaces -inf): the predicted flux ratio
@@ -499,7 +499,7 @@ class PhotometryTerm(AbstractTerm):
     ``system_path`` (the empty path is the model itself) returns ``(W, K, T)`` band
     contrasts. Each row selects its own band, planet and epoch. An upper limit
     contributes ``log Phi((limit - prediction) / contrast_err)``. Invalid rows return
-    zero. Data ``times`` are days from the system's epoch. Bands share one ephemeris.
+    zero. Data ``time_d`` is in days from the system's epoch. Bands share one ephemeris.
     """
 
     data: PhotometryData
@@ -516,7 +516,7 @@ class PhotometryTerm(AbstractTerm):
     def _score(self, model):
         valid = self.data.is_valid
         data = PhotometryData(
-            times=jnp.where(valid, self.data.times, 0.0),
+            time_d=jnp.where(valid, self.data.time_d, 0.0),
             contrast=jnp.where(valid, self.data.contrast, 0.0),
             contrast_err=jnp.where(valid, self.data.contrast_err, 1.0),
             band_id=jnp.where(valid, self.data.band_id, 0),
@@ -529,7 +529,7 @@ class PhotometryTerm(AbstractTerm):
             system,
             self.quadrature,
             self.bandpasses,
-            data.times,
+            data.time_d,
             data.band_id,
             data.planet_id,
         )
@@ -601,7 +601,7 @@ class DMagTerm(AbstractTerm):
         valid = self.data.is_valid
         prediction = system_separation_dmag(
             resolve(model, self.system_path),
-            jnp.where(valid, self.data.epochs, 0.0),
+            jnp.where(valid, self.data.time_d, 0.0),
             albedo_area_AU2=None
             if self.area_path is None
             else resolve(model, self.area_path),

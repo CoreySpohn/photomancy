@@ -49,7 +49,7 @@ def _system(k=1):
 
 def _relative_data(planet_id):
     return AstrometryData.pad(
-        times=TIMES,
+        time_d=TIMES,
         ra=[0.10, -0.05, 0.12, 0.2, -0.1],
         dec=[0.02, 0.11, -0.07, 0.15, 0.05],
         ra_err=[0.004, 0.005, 0.003, 0.006, 0.004],
@@ -159,7 +159,7 @@ def test_the_linear_capability_is_a_type_and_the_stellar_term_does_not_have_it()
     relative = RelativeAstrometryTerm(_relative_data([0] * 5))
     stellar = StellarAstrometryTerm(
         AstrometryData.pad(
-            times=TIMES,
+            time_d=TIMES,
             ra=[1e-4] * 5,
             dec=[1e-4] * 5,
             ra_err=[5e-5] * 5,

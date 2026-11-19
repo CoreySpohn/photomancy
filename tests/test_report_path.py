@@ -153,7 +153,7 @@ def build_fit(term=None):
     )
     block = ThieleInnesBlock(law, LogUniform(0.9, 1.1), rows=(0,), system="dynamics")
     records = AstrometryData(
-        times=jnp.asarray(REC_TIMES),
+        time_d=jnp.asarray(REC_TIMES),
         ra=jnp.asarray(REC_RA),
         dec=jnp.asarray(REC_DEC),
         ra_err=jnp.full(2, 0.0035),

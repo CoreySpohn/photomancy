@@ -41,7 +41,7 @@ def _astrometry(system, t, planet):
         raise ValueError(f"Planet index {planet} outside system of {count} planets")
     one = jnp.ones(1)
     row = AstrometryData(
-        times=jnp.atleast_1d(t),
+        time_d=jnp.atleast_1d(t),
         ra=0.0 * one,
         dec=0.0 * one,
         ra_err=one,

@@ -59,7 +59,7 @@ def _block(system=""):
 
 def _term(n_rows=4, err=0.004, shift=0.0, system_path=""):
     data = AstrometryData.from_sep_pa(
-        times=TIMES[:n_rows],
+        time_d=TIMES[:n_rows],
         sep=np.array([0.13, 0.11, 0.09, 0.15])[:n_rows] + shift,
         sep_err=[err] * n_rows,
         pa_deg=[45.0, 120.0, 210.0, 310.0][:n_rows],

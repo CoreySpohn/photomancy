@@ -25,7 +25,7 @@ def imaging_data():
     sep = jnp.tile(jnp.linspace(0.02, 0.5, 20), (4, 1))
     curve = jnp.full((4, 20), 24.0)
     return DMagData.pad(
-        epochs=TIMES,
+        time_d=TIMES,
         sep_grid=sep,
         dmag0_grid=curve,
         is_detected=[True, False, True, False],
@@ -34,7 +34,7 @@ def imaging_data():
         max_n=4,
         max_pts=20,
     ), DMagData.pad(
-        epochs=TIMES,
+        time_d=TIMES,
         sep_grid=sep,
         dmag0_grid=curve,
         is_detected=[False] * 4,

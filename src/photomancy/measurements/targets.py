@@ -25,7 +25,7 @@ class TargetData:
     ``band_names`` lists filters in first-used order. ``comparisons`` maps
     table names to raw rows: comparison rows, skipped pending rows, and pixels.
     A bandpass mapping supplied at load time is the default for ``terms``.
-    Observation containers retain ``times``, in days from ``epoch``, the same
+    Observation containers retain ``time_d``, in days from ``epoch``, the same
     origin required by the system used to evaluate their terms.
     """
 
@@ -126,7 +126,7 @@ def load_target(
     astrometry = None
     if rows:
         astrometry = AstrometryData.from_sep_pa(
-            times=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
+            time_d=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
             sep=[r["sep_mas"] / 1000.0 for r in rows],
             sep_err=[_mean_error(r["sep_err_mas"]) / 1000.0 for r in rows],
             pa_deg=[r["pa_deg"] for r in rows],
@@ -138,7 +138,7 @@ def load_target(
     photometry = None
     if rows:
         photometry = PhotometryData.from_dmag(
-            times=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
+            time_d=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
             dmag=[r["dmag"] for r in rows],
             dmag_err=[_mean_error(r["dmag_err"]) for r in rows],
             band_id=[band_names.index(r["filter"]) for r in rows],

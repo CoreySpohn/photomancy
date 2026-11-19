@@ -72,7 +72,7 @@ def test_stellar_and_relative_likelihoods_share_form():
     ra_pred = jnp.linspace(-0.1, 0.1, n)
     dec_pred = jnp.linspace(0.05, -0.05, n)
     data = AstrometryData(
-        times=jnp.arange(n, dtype=float),
+        time_d=jnp.arange(n, dtype=float),
         ra=ra_pred + 1e-3,
         dec=dec_pred - 1e-3,
         ra_err=jnp.full(n, 2e-3),

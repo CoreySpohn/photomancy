@@ -160,7 +160,7 @@ class ReportData(eqx.Module):
             planet: Index of the planet the rows report (the predictor's ``planet``).
         """
         return AstrometryData(
-            times=self.time_d,
+            time_d=self.time_d,
             ra=self.ra,
             dec=self.dec,
             ra_err=self.ra_err,
