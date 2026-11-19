@@ -184,7 +184,9 @@ class Posterior(eqx.Module):
             coordinates, exactly ``-inf`` off the prior's support. It is never a
             proposal density.
         log_evidence: Log marginal likelihood ``(*batch,)``, float64, NaN when absent
-            (the MCMC backends have none, and no estimate is invented).
+            (the MCMC backends have none, and no estimate is invented) or refused by
+            the backend (a validity condition of its estimator failed, such as the
+            k-hat of importance weights above ``khat_threshold``).
         log_evidence_se: Standard error of ``log_evidence`` ``(*batch,)``, float64, NaN
             when the backend has none.
         fit: The ``Fit`` whose density the weights target.

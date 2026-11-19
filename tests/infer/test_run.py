@@ -51,7 +51,7 @@ from photomancy.infer import (
 )
 from photomancy.infer.backends.grid import gauss_legendre, midpoint
 from photomancy.infer.backends.staged import FitStage
-from photomancy.infer.diagnostics import pareto_khat
+from photomancy.infer.diagnostics import khat_threshold, pareto_khat
 from photomancy.infer.evidence import importance_evidence
 from photomancy.infer.posterior import cluster_to_mixture, ravel_samples
 
@@ -451,18 +451,26 @@ def test_laplace_prior_only_evidence_on_an_orbit_block_is_zero():
     on only about 79 percent of keys at the old floor of 0.1, which carried a bias of
     about -0.02 nat (24 keys: -0.027 +- 0.005; at 0.03: +0.001 +- 0.005), so the test
     averages eight keys.
-    Tolerance basis: the mean within 3 standard errors of the mean, the reported
+    Tolerance basis: the mean within 3 standard errors of the mean, the delta-method
     errors of the eight runs added in quadrature over 8, with every k-hat below 1 (a
-    finite mean of the weights).
+    finite mean of the weights). The estimator is taken on the raw weights of every
+    key, because a key whose k-hat is above ``khat_threshold`` publishes a NaN
+    evidence; the published evidence is that estimate where the k-hat passes and NaN
+    where it does not.
     Fails if: the wrapped proposal density does not integrate to one over a cell, or
     the default floor narrows the proposal enough to bias the evidence.
     """
     fit = _prior_only_orbit_fit()
-    posts = [run(fit, Laplace(n_draws=4000), jax.random.key(k)) for k in range(8)]
-    z = np.array([float(p.log_evidence) for p in posts])
-    se = np.array([float(p.log_evidence_se) for p in posts])
+    laplace = Laplace(n_draws=4000)
+    draws = [laplace._run(fit, jax.random.key(k)) for k in range(8)]
+    z, se = np.array([importance_evidence(d.log_weights) for d in draws]).T
     assert abs(z.mean()) < 3 * np.sqrt(np.sum(se**2)) / 8, (z, se)
-    assert max(float(pareto_khat(p.log_weights)) for p in posts) < 1.0
+    khat = np.array([float(d.info.importance.khat) for d in draws])
+    assert khat.max() < 1.0
+    published = np.array([float(d.log_evidence) for d in draws])
+    passes = khat <= khat_threshold(4000)
+    np.testing.assert_allclose(published[passes], z[passes], rtol=1e-12)
+    assert np.all(np.isnan(published[~passes]))
 
 
 def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
@@ -591,7 +599,11 @@ def test_importance_evidence_is_the_importance_mean_of_its_weights():
     """The backend evidence equals ``importance_evidence`` on the same weights.
 
     The weights are rebuilt from the same key through the proposal's own ``sample``;
-    equality is to rounding (rtol 1e-10).
+    equality is to rounding (rtol 1e-10). Fails also if the evidence is published
+    above the k-hat limit: a Gaussian proposal a little wider than the target keeps a
+    finite evidence within 4 SE of the exact value, one four times narrower (weights of
+    infinite variance) returns NaN evidence and error with finite weights and its
+    ``info.khat`` above ``khat_threshold``.
     """
     fit = _leaf_fit()
     proposal = PriorProposal()
@@ -603,6 +615,18 @@ def test_importance_evidence_is_the_importance_mean_of_its_weights():
     log_z, se = importance_evidence(log_w)
     np.testing.assert_allclose(float(post.log_evidence), float(log_z), rtol=1e-10)
     np.testing.assert_allclose(float(post.log_evidence_se), float(se), rtol=1e-10)
+    # the target is about N(-0.51, 0.32^2) in the flat coordinate of the leaf
+    for sd, refused in ((0.4, False), (0.08, True)):
+        gauss = MixtureProposal(jnp.array([[-0.51]]), jnp.array([[[sd**2]]]))
+        post = run(fit, Importance(gauss, n_draws=2000), key)
+        assert np.all(np.isfinite(np.asarray(post.log_weights)))
+        if refused:
+            assert float(post.info.khat) > khat_threshold(2000)
+            assert np.isnan(float(post.log_evidence))
+            assert np.isnan(float(post.log_evidence_se))
+        else:
+            gap = abs(float(post.log_evidence) - _exact_log_z())
+            assert gap < 4 * float(post.log_evidence_se)
 
 
 def _unravel_leaf(fit):
