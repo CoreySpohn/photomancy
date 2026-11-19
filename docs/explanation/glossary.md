@@ -58,9 +58,7 @@ Partition
    same shape as the scene, its `filter_spec`, marking each {term}`leaf` to fit or to hold
    fixed. [Equinox filtering](https://docs.kidger.site/equinox/all-of-equinox/) then
    separates the scene into the fitted vector $z$ and a static remainder $S_0$, recombined
-   for scoring as $S = \mathrm{combine}(z, S_0)$. Opening one more leaf in the partition is
-   the difference between a circular and a Keplerian orbit fit in the
-   [orbit example](../examples/orbit_fitting).
+   for scoring as $S = \mathrm{combine}(z, S_0)$.
 
 Static and dynamic
    [Equinox sorts](https://docs.kidger.site/equinox/all-of-equinox/) a module's fields into

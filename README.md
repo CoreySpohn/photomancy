@@ -18,12 +18,14 @@ photomancy divines the scene back from the data, producing posteriors over the s
 parameters, the Bayesian evidence for model comparison, and the expected information gain
 of a candidate next observation.
 
-The engine is forward-model agnostic. A fit is a `logdensity` over a partitioned scene
-PyTree, assembled from three plug-ins, a forward model, a likelihood, and a prior, and run
-through a uniform backend that returns one posterior. The same inference machinery serves
-orbit fitting today and disk, atmosphere, and image-domain fitting as those forward models
-come online, so an improvement to a sampler or to the information-gain calculation reaches
-every domain at once.
+The engine is forward-model agnostic. A fit is a normalized log density over the free
+entries of a model: the model holds every quantity, a dictionary names the free entries and
+their priors, and data terms score the measurements. `run(fit, backend, key)` turns a fit
+into a `Posterior`, a cloud of weighted draws with the evidence and its standard error,
+whichever backend produced it. The same machinery serves orbit fitting from astrometry,
+radial velocity and photometry, and fitting of coronagraph images pixel by pixel
+(`photomancy.image.ImageTerm`), so an improvement to a backend or to the information-gain
+calculation reaches every domain at once.
 
 ## Installation
 
@@ -31,76 +33,108 @@ every domain at once.
 pip install photomancy
 ```
 
-The Laplace and staged MAP backends work from the base install. The sampler backends are
-optional extras: `photomancy[blackjax]` for NUTS, MCLMC and Pathfinder,
-`photomancy[jaxns]` for nested sampling, or `photomancy[samplers]` for both.
+The importance, Laplace, quadrature and staged MAP backends work from the base install.
+The sampler backends are optional extras: `photomancy[blackjax]` for NUTS, MCLMC and
+Pathfinder, `photomancy[jaxns]` for nested sampling, or `photomancy[samplers]` for both.
 
 ```bash
 pip install "photomancy[samplers]"
 ```
 
-photomancy requires Python 3.11 or newer and is in early development, so the API may still
+photomancy requires Python 3.12 or newer and is in early development, so the API may still
 change. For a source checkout with the test and documentation extras, clone the repository
 and run `pip install -e ".[test,docs]"`.
 
 ## Quick start
 
-A domain supplies three plug-ins over a scene, and the engine turns them into a fit:
+Fit the orbit of one planet from four epochs of relative astrometry. The model is an
+[orbix](https://github.com/CoreySpohn/orbix) `System`, the orbit is freed by a
+`ThieleInnesBlock` with its prior, and the data are a `RelativeAstrometryTerm` drawn at the
+true orbit.
 
-This sketch requires a user-supplied scene, forward model, likelihood, and prior.
+```python
+import jax
+import jax.numpy as jnp
+import numpy as np
+from orbix.system import Body, OrbitLaw, SkyFrame, System, ThieleInnesBlock
+from priorities import LogUniform, Uniform
+from skyscapes.population import kipping_eccentricity
 
-```python notest
-from photomancy.infer import LaplaceBackend, build_scene_logdensity
+from photomancy.infer import Fit, run
+from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
+from photomancy.orbit import any_epoch, classical_elements
 
-# forward:    scene -> predicted data
-# likelihood: predicted -> scalar log-likelihood
-# prior:      a priorities distribution over the fitted leaves
-logdensity, z0, unravel = build_scene_logdensity(
-    scene, forward_model=forward, likelihood=likelihood, prior=prior
+jax.config.update("jax_enable_x64", True)
+
+truth = System.from_classical(
+    Body(jnp.asarray(1.0)),  # star mass, solar masses
+    Body(jnp.array([0.0])),  # planet masses, solar masses
+    SkyFrame(jnp.asarray(10.0)),  # distance, pc
+    a_AU=jnp.array([1.0]),
+    e=jnp.array([0.1]),
+    i_rad=jnp.array([1.0]),
+    W_rad=jnp.array([1.0]),
+    w_rad=jnp.array([2.0]),
+    M0_rad=jnp.array([1.0]),
 )
+layout = AstrometryData.from_sep_pa(
+    time_d=[0.0, 90.0, 180.0, 270.0],
+    sep=[0.1] * 4,
+    sep_err=[0.004] * 4,
+    pa_deg=[0.0] * 4,
+    pa_err_deg=[1.0] * 4,
+)
+term = RelativeAstrometryTerm(layout).draw(jax.random.key(0), truth)
 
-posterior = LaplaceBackend().run(logdensity, z0)
-samples = posterior.sample(key, 1000)  # (1000, d), flat parameter space
-log_evidence = posterior.evidence
+law = OrbitLaw(
+    period_d=LogUniform(50.0, 5000.0), eccentricity=kipping_eccentricity(0.9)
+)
+block = ThieleInnesBlock(law, Uniform(0.9, 1.1), rows=(0,), system="")
+fit = Fit(truth, {"orbits": block}, (term,))
+
+posterior = run(fit, any_epoch(), jax.random.key(1))
+elements = classical_elements(posterior, jax.random.key(2), 1000, orbit_path="orbits")
+print(posterior.log_evidence, np.percentile(elements["period_d"], [16, 50, 84]))
 ```
 
-The orbit, disk, and atmosphere domains package these plug-ins for their own data, so a
-typical fit calls a domain helper rather than wiring the three pieces by hand.
+When a fifth epoch arrives, `update(posterior, new_term, any_epoch(), key, min_n_eff=...,
+max_khat=...)` reweights the existing draws by the new term and refits only when the
+reweighting fails its gate.
 
 ## What it does
 
-- Posteriors over scene parameters behind one interface (`sample`, `log_prob`, `evidence`),
-  whichever backend produced them.
-- Bayesian evidence and Bayes factors for model comparison and detection, answering
-  questions such as whether an orbit needs eccentricity or whether a spectral feature is
-  present.
-- Multimodal posteriors as evidence-weighted mixtures, so period aliases and mirror
-  ambiguities are carried honestly rather than collapsed onto one answer.
-- Sequential updating, where a posterior becomes the prior for the next observation through
-  `to_prior`, so information accumulates across a campaign.
-- Expected information gain over candidate observations, turning a fit into a recommendation
-  for where to look next.
+- Posteriors over the free entries of a model behind one type, `Posterior`, whichever
+  backend produced them: the draws, their normalized weights, the fit's density at each
+  draw, and the fit itself, so any quantity of the model can be read at every draw.
+- Bayesian evidence with a standard error for model comparison and detection. A backend
+  that cannot vouch for its estimate (an importance estimate whose Pareto k-hat is above
+  the limit for its draw count, say) returns NaN rather than a wrong number.
+- Multimodal posteriors carried as weighted draws, so period aliases and mirror
+  ambiguities stay in the cloud rather than being collapsed onto one answer.
+- Sequential updating: `Posterior.append_term` and `Posterior.replace_term` reweight a
+  posterior by new data without refitting, under a gate on the effective sample size and
+  the k-hat of the new weights, and `update` refits only where that gate refuses.
+- Expected information gain of a candidate next observation, turning a fit into a
+  recommendation for where to look next.
 
 ## Backends
 
-Every backend exposes one method, `run(logdensity, init, key) -> Posterior`, and sees only
-the flat logdensity, never the scene or the forward model, so a new sampler becomes useful
-to every domain at once.
+Every backend is passed to `run(fit, backend, key)` and returns a `Posterior`.
 
-| Backend | Method | Returns |
+| Backend | Method | Evidence |
 |---|---|---|
-| `LaplaceBackend` | MAP optimization plus the eigenvalue-clamped inverse Hessian | a Gaussian posterior and the Laplace evidence |
-| `LaplaceMixtureBackend` | multi-start Laplace, weighted by evidence | a mixture of Gaussians over the modes |
-| `PathfinderBackend` | quasi-Newton variational inference | a Gaussian posterior and the ELBO |
-| `PathfinderMixtureBackend` | multi-start Pathfinder, weighted by ELBO | a mixture of Gaussians over the modes |
-| `NUTSBackend` | the No-U-Turn sampler with window adaptation | equally weighted samples |
-| `MCLMCBackend` | microcanonical Langevin Monte Carlo | equally weighted samples |
-| `JaxnsBackend` | nested sampling | samples and the evidence for model comparison |
-| `MAPBackend` | staged gradient fit over a parameter PyTree, with named groups freed stage by stage | a point estimate (`PointPosterior`) |
+| `Importance` | importance sampling from one proposal | yes |
+| `AdaptiveImportance` | rounds of Gaussian mixtures refitted to the weighted draws | yes |
+| `Laplace` | a Gaussian at each mode, importance weighted to the fit | yes |
+| `Pathfinder` | Pathfinder Gaussians, importance weighted to the fit | yes |
+| `NUTS` | the No-U-Turn sampler with window adaptation | no |
+| `MCLMC` | microcanonical Langevin Monte Carlo | no |
+| `NestedSampling` | jaxns nested sampling | yes |
+| `MAP` | staged gradient optimization, one draw at the optimum | no |
+| `Grid` | quadrature on a product grid | yes, without a standard error |
 
-`MAPBackend` is the exception to the flat-logdensity rule: it takes the parameter PyTree itself
-and runs the stages of a fit such as a multi-exposure coronagraph model. See the
-[staged fit guide](https://github.com/CoreySpohn/photomancy/blob/main/docs/how-to/staged-map-fit.md).
+The orbit package adds two configured backends named for the data in hand: `few_epoch()`
+for one or two astrometric epochs, and `any_epoch()` for everything else.
 
 ## Documentation
 
@@ -112,23 +146,20 @@ once the `docs` extra is installed:
 sphinx-build -b html docs docs/.build/html
 ```
 
-It covers the
-[architecture and design principles](https://github.com/CoreySpohn/photomancy/blob/main/docs/explanation/architecture.md),
-a [mathematical treatment](https://github.com/CoreySpohn/photomancy/blob/main/docs/explanation/mathematical-foundations.md)
-of the fit, the evidence, and the information gain, and worked examples for a
-[visual walkthrough](https://github.com/CoreySpohn/photomancy/blob/main/docs/examples/walkthrough.ipynb)
-on an abstract problem and for
-[orbit fitting](https://github.com/CoreySpohn/photomancy/blob/main/docs/examples/orbit_fitting.ipynb).
-If the JAX and Bayesian vocabulary is unfamiliar, the
-[glossary](https://github.com/CoreySpohn/photomancy/blob/main/docs/explanation/glossary.md)
-defines the terms the rest of the documentation relies on.
+It explains
+[fits and posteriors](https://github.com/CoreySpohn/photomancy/blob/main/docs/explanation/fit-and-posterior.md)
+step by step on a problem with a known answer, describes the
+[orbit coordinates and engines](https://github.com/CoreySpohn/photomancy/blob/main/docs/explanation/orbital-parameterizations.md),
+and works through
+[an orbit fit as the epochs arrive](https://github.com/CoreySpohn/photomancy/blob/main/docs/examples/orbit_fitting.md).
 
 ## Status
 
-Orbit fitting is implemented across radial-velocity, astrometry, and imaging data, and disk
-fitting rides the same engine. Atmospheric retrieval is in progress, and image-domain
-fitting against a coronagraph forward is the next major target. On the backend side, a
-stochastic variational backend with a normalizing-flow guide is planned.
+Orbit fitting is implemented across radial-velocity, astrometry, photometry and
+detection-report data, and the pixel likelihood fits coronagraph images through the
+coronagraphoto forward model. Disk fitting and atmospheric retrieval are in progress. On
+the backend side, a stochastic variational backend with a normalizing-flow guide is
+planned.
 
 ## License
 

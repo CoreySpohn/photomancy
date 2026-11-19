@@ -36,9 +36,9 @@ rather than the documentation host.
 
 One warm super-Earth, ten parsecs away, and a posterior over it. The samples
 are drawn from a hand-built distribution around a known truth rather than from
-a real fit, which keeps this page fast and deterministic; the shapes are
-exactly what `ChartOrbitProblem.to_physical` and `sample_physical` produce, so the
-calls below are the calls you would make on a real posterior.
+a real fit, which keeps this page fast and deterministic. The orbital keys are
+those `photomancy.orbit.classical_elements` returns for a fitted `Posterior`,
+so the calls below are the calls you would make on a real posterior.
 
 ```{code-cell} ipython3
 import hwostyle
@@ -49,12 +49,12 @@ import numpy as np
 
 from hwoutils.constants import AU2m, Mearth2kg, Msun2kg, Rearth2AU, d2s
 from hwoutils.conversions import contrast_to_delta_mag
+from orbix.system import FrameOrbit, enclosed_mu
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 from skyscapes.physical_model import LambertianPhysicalModel
 
 from photomancy import viz
 from photomancy.measurements import DMagData, RadialVelocityData
-from photomancy.orbit import orbits_from_samples
 
 hwostyle.use("dark")
 jax.config.update("jax_enable_x64", True)
@@ -71,48 +71,45 @@ matplotlib.rcParams["figure.dpi"] = 160
 
 AU_PER_D_TO_M_PER_S = AU2m / d2s
 DIST_PC = 10.0
-# The periapsis orientation is held fixed across the page so that the corner
+# The argument of periapsis is held fixed across the page so that the corner
 # plot and the predictive panels describe the same planet.
-COS_W, SIN_W = np.cos(0.6), np.sin(0.6)
+W_PERI_RAD = 0.6
 
 TRUTH = {
-    "T": 520.0,
-    "a": 1.28,
+    "period_d": 520.0,
+    "a_AU": 1.28,
     "e": 0.24,
     "cos_i": 0.42,
-    "W": 2.1,
-    "M0": 0.7,
+    "W_rad": 2.1,
+    "M0_rad": 0.7,
     "Rp": 1.8 * Rearth2AU,
     "Ag": 0.30,
     "Mp": 5.0 * Mearth2kg,
-    "Ms": Msun2kg,
 }
 TRUTH["Lambda"] = TRUTH["Ag"] * TRUTH["Rp"] ** 2
 TRUTH["Mp_sini"] = TRUTH["Mp"] * np.sqrt(1.0 - TRUTH["cos_i"] ** 2)
-TRUTH["tp"] = -TRUTH["M0"] * TRUTH["T"] / (2.0 * np.pi)
 
 
 def posterior_fan(n, seed, width=1.0):
-    """A physical-sample dict shaped like the one to_physical emits."""
+    """A physical-sample dict with the keys of classical_elements and more."""
     rng = np.random.default_rng(seed)
     jitter = lambda scale: scale * width * rng.standard_normal(n)  # noqa: E731
 
-    s = {"T": TRUTH["T"] * (1.0 + jitter(0.03))}
+    s = {"period_d": TRUTH["period_d"] * (1.0 + jitter(0.03))}
     # The stellar mass is measured, not known, so Kepler's third law leaves a
-    # correlated ridge in the (T, a) plane rather than pinning a to T exactly.
-    Ms = TRUTH["Ms"] * (1.0 + jitter(0.05))
-    s["a"] = (Ms / Msun2kg) ** (1.0 / 3.0) * (s["T"] / 365.25) ** (2.0 / 3.0)
+    # correlated ridge in the (period, a) plane rather than pinning a to the period.
+    star_mass_Msun = 1.0 + jitter(0.05)
+    s["a_AU"] = star_mass_Msun ** (1.0 / 3.0) * (s["period_d"] / 365.25) ** (2.0 / 3.0)
     s["e"] = np.clip(TRUTH["e"] + jitter(0.05), 0.0, 0.85)
     s["cos_i"] = np.clip(TRUTH["cos_i"] + jitter(0.07), -1.0, 1.0)
-    s["W"] = TRUTH["W"] + jitter(0.15)
-    s["M0"] = TRUTH["M0"] + jitter(0.10)
-    s["tp"] = -s["M0"] * s["T"] / (2.0 * np.pi)
+    s["W_rad"] = TRUTH["W_rad"] + jitter(0.15)
+    s["M0_rad"] = TRUTH["M0_rad"] + jitter(0.10)
     s["Rp"] = np.abs(TRUTH["Rp"] * (1.0 + jitter(0.12)))
     s["Ag"] = np.clip(TRUTH["Ag"] + jitter(0.05), 0.05, 0.9)
     s["Lambda"] = s["Ag"] * s["Rp"] ** 2
     s["Mp"] = np.abs(TRUTH["Mp"] * (1.0 + jitter(0.18)))
     s["Mp_sini"] = s["Mp"] * np.sqrt(np.clip(1.0 - s["cos_i"] ** 2, 0.0, 1.0))
-    # to_physical also emits the deterministic log-likelihood site. It is a
+    # A sample dict loaded from a file may carry a log-likelihood column. It is a
     # diagnostic, not a parameter, and the corner defaults below drop it.
     s["ll_total"] = rng.standard_normal(n)
     return s
@@ -124,7 +121,8 @@ sorted(samples)
 
 ## PARAM_LABELS
 
-The axis-label vocabulary: one ASCII label for every key `to_physical` emits.
+The axis-label vocabulary: one ASCII label for every physical parameter a
+corner plot shows, the keys of `classical_elements` among them.
 It is plain data, so it imports without the plotting stack and can be edited or
 extended in place before a call.
 
@@ -147,19 +145,20 @@ viz.default_corner_params(samples)
 ## plot_corner
 
 The corner plot over physical orbital parameters. It takes either a
-`{name: (n,)}` sample dict, as here, or a fitted posterior together with the
-`ChartOrbitProblem` and a PRNG key, in which case it draws the samples itself.
+`{name: (n,)}` sample dict, as here, or a fitted `Posterior` together with a
+PRNG key and the model path of its orbits (`orbit_path`), in which case it
+draws the samples and reads their classical elements itself.
 `truths` marks the generating values and `ranges` pins the axis limits so that
 two figures stay comparable.
 
-The `(T, a)` panel is the one to read first: the two are tied by Kepler's third
-law, and the ridge is diagonal rather than a line only because the stellar mass
-carries its own uncertainty.
+The period and semi-major axis panel is the one to read first: the two are tied
+by Kepler's third law, and the ridge is diagonal rather than a line only because
+the stellar mass carries its own uncertainty.
 
 ```{code-cell} ipython3
 result = viz.plot_corner(
     samples,
-    params=["T", "a", "e", "cos_i"],
+    params=["period_d", "a_AU", "e", "cos_i"],
     truths=TRUTH,
     title="a five-epoch posterior",
 )
@@ -175,32 +174,38 @@ eventually has to show.
 ```{code-cell} ipython3
 result = viz.plot_corner_overlay(
     [posterior_fan(2500, seed=11), posterior_fan(2500, seed=12, width=0.45)],
-    params=["T", "e", "cos_i"],
+    params=["period_d", "e", "cos_i"],
     names=["1 epoch", "4 epochs"],
 )
 ```
 
 ## plot_rv
 
-Radial-velocity curves, converted from the library's native AU/day to the m/s a
-reader expects. A `(T,)` array draws one curve and a `(K, T)` array draws a fan
-of posterior-predictive draws, which is how a posterior is usually shown
-against its data. Passing a `RadialVelocityData` adds its valid prefix as errorbars,
-converted the same way, so the two can never drift apart in units.
+Radial-velocity curves, converted from the AU/day of orbit velocities to the
+m/s a reader expects. A `(T,)` array draws one curve and a `(K, T)` array draws
+a fan of posterior-predictive draws, which is how a posterior is usually shown
+against its data. Passing a `RadialVelocityData`, which holds its velocities in
+m/s, adds its valid prefix as errorbars.
 
 ```{code-cell} ipython3
-t_d = jnp.linspace(0.0, TRUTH["T"], 300)
+t_d = jnp.linspace(0.0, TRUTH["period_d"], 300)
 n_draws = 80
 draws = {k: jnp.asarray(v[:n_draws]) for k, v in samples.items()}
 
+
 def orbits_of(physical):
-    """Batched orbix orbits for a physical-sample dict at the fixed orientation."""
-    full = dict(
-        physical,
-        cos_w=jnp.full_like(physical["T"], COS_W),
-        sin_w=jnp.full_like(physical["T"], SIN_W),
+    """Batched orbix orbits for a physical-sample dict at the fixed periapsis."""
+    a_AU = jnp.asarray(physical["a_AU"])
+    mass_Msun = jnp.asarray(physical["Mp"]) / Msun2kg
+    return FrameOrbit.from_classical(
+        a_AU,
+        physical["e"],
+        jnp.arccos(physical["cos_i"]),
+        physical["W_rad"],
+        jnp.full_like(a_AU, W_PERI_RAD),
+        physical["M0_rad"],
+        mu_AU3_per_d2=enclosed_mu(jnp.asarray(1.0), mass_Msun[..., None])[..., 0],
     )
-    return orbits_from_samples(full, Msun2kg, reference_day=0.0)
 
 
 def stellar_rv_au_per_d(orbit, mass_kg, times):
@@ -217,18 +222,16 @@ rv_fan = jax.vmap(lambda orbit, mass: stellar_rv_au_per_d(orbit, mass, t_d))(
 rng = np.random.default_rng(4)
 t_obs = np.array([15.0, 90.0, 180.0, 275.0, 360.0])
 rv_err_m_s = 0.08
-truth_keys = ("T", "e", "cos_i", "W", "tp", "Mp")
+truth_keys = ("a_AU", "e", "cos_i", "W_rad", "M0_rad", "Mp")
 truth_orbit = orbits_of({k: jnp.asarray(TRUTH[k]) for k in truth_keys})
-rv_truth = np.asarray(
+rv_truth_m_s = AU_PER_D_TO_M_PER_S * np.asarray(
     stellar_rv_au_per_d(truth_orbit, TRUTH["Mp"], jnp.asarray(t_obs))
 )
-rv_obs = rv_truth + (rv_err_m_s / AU_PER_D_TO_M_PER_S) * rng.standard_normal(
-    t_obs.size
-)
+rv_obs_m_s = rv_truth_m_s + rv_err_m_s * rng.standard_normal(t_obs.size)
 rv_data = RadialVelocityData.pad(
-    times=jnp.asarray(t_obs),
-    rv=jnp.asarray(rv_obs),
-    rv_err=jnp.full(t_obs.size, rv_err_m_s / AU_PER_D_TO_M_PER_S),
+    time_d=jnp.asarray(t_obs),
+    rv=jnp.asarray(rv_obs_m_s),
+    rv_err=jnp.full(t_obs.size, rv_err_m_s),
     inst_ids=jnp.zeros(t_obs.size, dtype=int),
     n_inst=1,
 )
@@ -267,12 +270,12 @@ cc_sep = np.linspace(0.045, 0.26, 60)
 cc_dmag = 26.5 - 9.0 * np.exp(-(cc_sep - 0.045) / 0.035)
 
 imaging = DMagData.from_detections_and_nulls(
-    det_epochs=np.array([120.0, 300.0]),
+    det_time_d=np.array([120.0, 300.0]),
     det_dmag_obs=np.array([23.4, 22.9]),
     det_dmag_err=np.array([0.15, 0.15]),
     det_sep_grid=np.tile(cc_sep, (2, 1)),
     det_dmag0_grid=np.tile(cc_dmag, (2, 1)),
-    null_epochs=np.array([500.0]),
+    null_time_d=np.array([500.0]),
     null_sep_grid=np.tile(cc_sep, (1, 1)),
     null_dmag0_grid=np.tile(cc_dmag, (1, 1)),
 )
@@ -318,7 +321,7 @@ result in a closed loop.
 
 ```{code-cell} ipython3
 candidates_d = np.linspace(0.0, 900.0, 400)
-geometric = 0.35 + 0.12 * np.sin(2.0 * np.pi * candidates_d / TRUTH["T"])
+geometric = 0.35 + 0.12 * np.sin(2.0 * np.pi * candidates_d / TRUTH["period_d"])
 alias = 1.1 * np.exp(-0.5 * ((candidates_d - 300.0) / 70.0) ** 2)
 
 result = viz.plot_eig(
