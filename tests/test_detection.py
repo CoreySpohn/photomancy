@@ -7,17 +7,30 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import toy_coronagraph as toy
+from image_scene import (
+    Placed,
+    make_detector,
+    make_exposure,
+    make_instrument,
+    make_scene,
+)
 
 from photomancy.detection import (
     curvature_block,
+    detect,
     likelihood_ratio_map,
+    measure,
     profile_amplitude,
 )
+from photomancy.exposure import ExposureModel
+from photomancy.image import ImageTerm
 from photomancy.infer.likelihoods import (
     gaussian_loglike,
     huber_loglike,
     laplace_loglike,
 )
+from photomancy.postproc.core.detection import PSFTemplateFilter
+from photomancy.postproc.templates.base import ArrayTemplateProvider
 
 
 def _problem(seed=1, n=200, shift=0.7):
@@ -322,3 +335,190 @@ def test_curvature_block_matches_closed_form_and_finite_difference():
     np.testing.assert_array_equal(block, block.T)
     single = curvature_block(quadratic, params, lambda p: p.v)
     np.testing.assert_allclose(single, [[a_mat[2, 2]]], rtol=1e-12)
+
+
+# ----- detect and measure over an ImageTerm ---------------------------------------
+
+_VARIANCE = 100.0
+_PAS = jnp.arange(0.0, 360.0, 30.0)
+_TRUE_PA, _TRUE_AMP = 150.0, 3.0
+
+
+def _image_problem(kind, seed=11):
+    """A model, an ImageTerm over one frame, and the noise-free mean at the truth.
+
+    The frame is the expected counts of a planet of amplitude 3 (units of contrast
+    1e-10) at position angle 150 degrees plus noise from the detector's own law.
+    """
+    detector = make_detector(
+        kind, **({"variance_e2": _VARIANCE} if kind == "constant" else {})
+    )
+    instrument = make_instrument(detector)
+    scene = make_scene(contrast=0.0)
+    exposure = make_exposure(scene, instrument)
+    model = ExposureModel(instrument, (), scene)
+    shape = (1, *detector.shape)
+    blank = ImageTerm(jnp.zeros(shape), jnp.ones(shape, bool), exposure=exposure)
+    truth = Placed()(model, _TRUE_PA, _TRUE_AMP)
+    mean = np.asarray(blank.predict(truth))
+    rng = np.random.default_rng(seed)
+    if kind == "constant":
+        observed = mean + np.sqrt(_VARIANCE) * rng.normal(size=mean.shape)
+    else:
+        observed = rng.poisson(mean).astype(float)
+    mask = np.ones(shape, bool)
+    mask[..., :3, :] = False
+    mask[..., 10:13, 10:13] = False
+    term = ImageTerm(jnp.asarray(observed), jnp.asarray(mask), exposure=exposure)
+    return model, term, mean, mask
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.medium(
+    reason="forward-mode scan through the renderer compiles for each of three calls"
+)
+def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame():
+    """``detect`` is the whitened matched filter for a linear model, Gaussian noise.
+
+    Truth source: NumPy ``a_hat = t'Wr / t'Wt``, ``z = t'Wr / sqrt(t'Wt)``,
+    ``sigma = 1 / sqrt(t'Wt)`` over the scored pixels, with ``r = data - m0``, ``m0``
+    the expected counts without the planet and ``t`` the expected counts of a unit
+    planet at the position (the model is linear in the planet's contrast).
+    Tolerance basis: exact-algebra (rtol 1e-9; one Newton step is exact for a
+    quadratic, and the data are about 1e3 counts so the residual keeps 12 digits).
+    Fails if: the statistic uses the wrong noise, the mask, the position axis, or the
+    Newton step is not exact for a Gaussian term.
+    """
+    model, term, _, mask = _image_problem("constant")
+    place = Placed()
+    m0 = np.asarray(term.predict(place(model, 0.0, 0.0)))
+    resid = np.asarray(term.observed_e) - m0
+    want_a, want_z, want_s = [], [], []
+    for pa in np.asarray(_PAS):
+        t = np.asarray(term.predict(place(model, pa, 1.0))) - m0
+        w = mask / _VARIANCE
+        twt = np.sum(w * t * t)
+        twr = np.sum(w * t * resid)
+        want_a.append(twr / twt)
+        want_z.append(twr / np.sqrt(twt))
+        want_s.append(1.0 / np.sqrt(twt))
+    out = detect(term, model, place, _PAS)
+    np.testing.assert_allclose(out.a_hat, want_a, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(out.z, want_z, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(out.sigma, want_s, rtol=1e-9)
+    assert int(jnp.argmax(out.z)) == int(np.argmax(np.asarray(_PAS) == _TRUE_PA))
+    assert float(out.z.max()) > 5.0
+    batched = detect(term, model, place, _PAS, batch_size=5)
+    np.testing.assert_allclose(batched.z, out.z, rtol=1e-12, atol=1e-12)
+
+
+@vv.case("scene-fits", "code-verification", basis="monte-carlo")
+def test_detect_on_poisson_counts_recovers_the_planet():
+    """On Poisson counts the map peaks at the true angle and the amplitude is close.
+
+    The amplitude is within four formal standard errors of the truth, and Newton has
+    converged by four steps.
+
+    Truth source: the injected amplitude and position angle.
+    Tolerance basis: monte-carlo (one seeded realization, four formal sigma; a
+    correct implementation passes for any seed with probability above 0.9999) and
+    floating-point (rtol 1e-6 between 4 and 8 Newton steps).
+    Fails if: the Poisson term is not the one profiled, or Newton diverges.
+    """
+    model, term, _, _ = _image_problem("poisson")
+    place = Placed()
+    out = detect(term, model, place, _PAS)
+    best = int(jnp.argmax(out.z))
+    assert float(_PAS[best]) == _TRUE_PA
+    assert abs(float(out.a_hat[best]) - _TRUE_AMP) < 4.0 * float(out.sigma[best])
+    more = detect(term, model, place, _PAS, n_newton=8)
+    np.testing.assert_allclose(out.a_hat, more.a_hat, rtol=1e-6, atol=1e-9)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.medium(
+    reason="second-order autodiff through the renderer compiles the Hessian"
+)
+def test_measure_covariance_matches_the_curvature_block_and_the_fisher_matrix():
+    """The covariance is the inverse curvature block, the inverse Fisher at the truth.
+
+    At noise-free truth the covariance of amplitude and position angle is the inverse
+    Fisher matrix ``J'WJ``.
+
+    Truth source: ``curvature_block`` over a record of (amplitude, position angle);
+    and NumPy ``J'WJ`` with ``J = [dm/da, dm/dpa]`` from the expected counts,
+    ``dm/dpa`` by a central difference of step 0.01 degree. With zero residual the
+    Hessian equals ``J'WJ``.
+    Tolerance basis: floating-point (rtol 1e-8 against the block, same Hessian; rtol
+    1e-4 against the Fisher matrix, the central difference error, about
+    (0.01 / 7.6)**2).
+    Fails if: the covariance uses another curvature, the position enters the wrong
+    scalar, or the Newton iteration does not reach the maximum (value check, atol
+    1e-6).
+    """
+    model, term, mean, mask = _image_problem("constant")
+    place = Placed()
+    clean = eqx.tree_at(lambda t: t.observed_e, term, jnp.asarray(mean))
+    rows = measure(clean, model, place, jnp.asarray(_TRUE_PA + 2.0), n_newton=10)
+    assert rows.names == ("amplitude", "position/0")
+    np.testing.assert_allclose(rows.value, [_TRUE_AMP, _TRUE_PA], atol=1e-6)
+
+    class Source(eqx.Module):
+        amplitude: jax.Array
+        position: jax.Array
+
+    def loglike(src):
+        return clean(place(model, src.position, src.amplitude))
+
+    truth = Source(jnp.asarray(_TRUE_AMP), jnp.asarray(_TRUE_PA))
+    block = curvature_block(loglike, truth, lambda s: (s.amplitude, s.position))
+    np.testing.assert_allclose(rows.cov, np.linalg.inv(block), rtol=1e-8)
+    np.testing.assert_allclose(rows.sigma, np.sqrt(np.diag(rows.cov)))
+
+    h = 0.01
+    pred = lambda pa, a: np.asarray(clean.predict(place(model, pa, a)))  # noqa: E731
+    d_amp = pred(_TRUE_PA, 1.0) - pred(_TRUE_PA, 0.0)
+    d_pa = (pred(_TRUE_PA + h, _TRUE_AMP) - pred(_TRUE_PA - h, _TRUE_AMP)) / (2 * h)
+    jac = np.stack([d_amp[mask], d_pa[mask]], axis=1)
+    fisher = jac.T @ jac / _VARIANCE
+    np.testing.assert_allclose(rows.cov, np.linalg.inv(fisher), rtol=1e-4)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_psf_template_filter_amplitude_equals_the_linear_profile_amplitude():
+    """``PSFTemplateFilter`` matches the linear amplitude profile.
+
+    Truth source: ``profile_amplitude(gaussian_loglike(patch, sigma), b, t - tbar)``
+    with ``b`` the weighted patch mean and ``tbar`` the weighted template mean, which
+    is the generalized least squares amplitude of ``y = c + a t`` (the filter's
+    definition).
+    Both the inverse-variance and the unweighted forms are checked, at an integer
+    position so the patch extraction is exact.
+    Tolerance basis: exact-algebra (rtol 1e-9; spline interpolation at an integer
+    position reproduces the pixels to rounding).
+    Fails if: the filter drops the weighting or the background, or the linear profile
+    uses a different normalization.
+    """
+    rng = np.random.default_rng(21)
+    size, k = 25, 9
+    image = rng.normal(size=(size, size)) + 3.0
+    variance = rng.uniform(0.5, 2.0, size=(size, size))
+    yy, xx = np.mgrid[:k, :k] - (k - 1) / 2
+    stamp = np.exp(-(yy**2 + xx**2) / 6.0) + 0.05 * rng.normal(size=(k, k))
+    position = jnp.asarray([12.0, 12.0])
+    window = (slice(8, 17), slice(8, 17))
+    patch, var_patch = image[window], variance[window]
+    provider = ArrayTemplateProvider(stamp)
+    for weighted in (True, False):
+        flt = PSFTemplateFilter(
+            provider, noise_variance=jnp.asarray(variance) if weighted else None
+        ).bind(position)
+        got = flt.evaluate(jnp.asarray(image), position)
+        w = 1.0 / var_patch if weighted else np.ones_like(patch)
+        b = np.sum(w * patch) / np.sum(w)
+        t_zm = stamp - np.sum(w * stamp) / np.sum(w)
+        sigma = np.sqrt(var_patch) if weighted else np.ones_like(patch)
+        want, _, _ = profile_amplitude(
+            gaussian_loglike(patch, sigma), np.full_like(patch, b), t_zm
+        )
+        np.testing.assert_allclose(got, want, rtol=1e-9)

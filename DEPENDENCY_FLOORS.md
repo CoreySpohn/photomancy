@@ -16,7 +16,7 @@ self-version constraint on shallow VCS checkouts.
 | Dependency | Declared floor | Resolved version | Groups |
 | --- | --- | --- | --- |
 | blackjax | >=1.6 | 1.6 | blackjax, samplers, docs, test |
-| coronagraphoto | >=4.2.0 | not run at the floor | docs |
+| coronagraphoto | >=4.2.0 | not run at the floor | runtime |
 | equinox | >=0.13.2 | 0.13.2 | runtime |
 | eyepiece | >=0.1.0 | 0.16.1.dev25+gc7a4bea5a | docs, test, viz |
 | hatch-fancy-pypi-readme | >=24.1.0 | 24.1.0 | build |

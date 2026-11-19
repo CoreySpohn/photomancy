@@ -20,6 +20,12 @@ prediction and a template function, an ``eqx.Module``, so the model that produce
   fixed number of Newton steps.
 - :func:`likelihood_ratio_map` does that at every trial position, for one or several
   exposures that share the amplitude.
+- :func:`detect` is the same map over terms of a model (a
+  :class:`photomancy.image.ImageTerm` or any ``AbstractTerm``): a source is placed in
+  the model at each trial position and its amplitude is profiled, so the noise and the
+  response come from the term itself.
+- :func:`measure` estimates the amplitude and position of a source and takes their
+  covariance from the curvature block.
 - :func:`curvature_block` gives the negative Hessian of a log-density over one small
   group of parameters, the check that a group is identifiable before it is freed.
 """
@@ -34,8 +40,11 @@ import jax.numpy as jnp
 
 __all__ = [
     "DetectionMap",
+    "MeasuredRows",
     "curvature_block",
+    "detect",
     "likelihood_ratio_map",
+    "measure",
     "profile_amplitude",
 ]
 
@@ -132,6 +141,12 @@ def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 4):
     return _profile(objective, n_newton, dtype)
 
 
+def _summarize(a_hat, two_delta, curvature):
+    z = jnp.sign(a_hat) * jnp.sqrt(jnp.maximum(two_delta, 0.0))
+    sigma = jnp.where(curvature > 0.0, jax.lax.rsqrt(jnp.abs(curvature)), jnp.inf)
+    return a_hat, z, sigma
+
+
 def _map_terms(terms, n_newton, position):
     images = tuple(template_fn(position) for _, _, template_fn in terms)
 
@@ -142,10 +157,7 @@ def _map_terms(terms, n_newton, position):
         )
 
     dtype = jnp.result_type(*(b for _, b, _ in terms), float)
-    a_hat, two_delta, curvature = _profile(objective, n_newton, dtype)
-    z = jnp.sign(a_hat) * jnp.sqrt(jnp.maximum(two_delta, 0.0))
-    sigma = jnp.where(curvature > 0.0, jax.lax.rsqrt(jnp.abs(curvature)), jnp.inf)
-    return a_hat, z, sigma
+    return _summarize(*_profile(objective, n_newton, dtype))
 
 
 @eqx.filter_jit
@@ -201,6 +213,153 @@ def likelihood_ratio_map(
         _check_curvature(likelihood)
     terms = tuple((lik, jnp.asarray(base), fn) for lik, base, fn in terms)
     return _run_map(terms, positions, n_newton, batch_size)
+
+
+def _as_terms(term):
+    terms = tuple(term) if isinstance(term, Sequence) else (term,)
+    if not terms:
+        raise ValueError("terms must contain at least one term")
+    return terms
+
+
+@eqx.filter_jit
+def _detect(terms, model, place, positions, n_newton, batch_size):
+    def at(position):
+        def objective(a):
+            placed = place(model, position, a)
+            return sum(jnp.asarray(t(placed), jnp.float64) for t in terms)
+
+        return _summarize(*_profile(objective, n_newton, jnp.float64))
+
+    a_hat, z, sigma = jax.lax.map(at, positions, batch_size=batch_size)
+    return DetectionMap(a_hat=a_hat, z=z, sigma=sigma)
+
+
+def detect(
+    term, model, place, positions, *, n_newton: int = 4, batch_size: int | None = None
+) -> DetectionMap:
+    """Matched-filter map of a source over trial positions, from the terms' likelihood.
+
+    At each position ``x`` the source amplitude ``a`` maximizes
+    ``sum_k term_k(place(model, x, a))`` by Newton steps from ``a = 0``, and the map
+    reports ``a_hat``, the signed root ``z = sign(a_hat) sqrt(2 [ell(a_hat) - ell(0)])``
+    and the formal standard error ``1 / sqrt(curvature)``. The noise, the response and
+    the detector come from the terms, so there is no second likelihood. When the model
+    is linear in ``a`` and the likelihood is Gaussian with fixed variance, this is the
+    classical whitened matched filter ``z = t'Wr / sqrt(t'Wt)``. Several terms
+    (exposures) constrain one shared amplitude.
+
+    Args:
+        term: One :class:`photomancy.infer.fit.AbstractTerm` or a sequence of them.
+        model: The model without the source: ``place`` at amplitude 0 must leave the
+            terms' value unchanged (the source is absent from ``model`` or has zero
+            flux there).
+        place: ``(model, position, amplitude) -> model``, adding a source of the given
+            amplitude at the position. Make it an ``eqx.Module`` so arrays it holds are
+            traced inputs rather than compiled constants.
+        positions: Trial positions, an array or pytree whose leading axis indexes
+            positions; ``place`` receives one slice.
+        n_newton: Newton steps per position. A Gaussian likelihood linear in the
+            amplitude is exact after one; a Poisson likelihood needs a few.
+        batch_size: Positions per ``jax.lax.map`` batch (which sets peak memory), or
+            ``None`` for one at a time.
+
+    Returns:
+        A :class:`DetectionMap` with leaves of shape ``(n_positions,)``.
+
+    Raises:
+        ValueError: If ``term`` is an empty sequence.
+    """
+    return _detect(_as_terms(term), model, place, positions, n_newton, batch_size)
+
+
+class MeasuredRows(eqx.Module):
+    """A measurement of a source's amplitude and position with its covariance.
+
+    Attributes:
+        names: One label per scalar: ``"amplitude"``, then ``"position/i"`` for the
+            i-th scalar of the flattened position.
+        value: The estimate, shape ``(n,)``.
+        cov: The formal covariance, the inverse of the observed information
+            (:func:`curvature_block` over the same scalars), shape ``(n, n)``.
+    """
+
+    names: tuple[str, ...] = eqx.field(static=True)
+    value: jax.Array
+    cov: jax.Array
+
+    @property
+    def sigma(self) -> jax.Array:
+        """Formal standard errors, shape ``(n,)``."""
+        return jnp.sqrt(jnp.diag(self.cov))
+
+
+class _Source(eqx.Module):
+    amplitude: jax.Array
+    position: jax.Array
+
+
+@eqx.filter_jit
+def _measure(terms, model, place, position, amplitude, n_newton):
+    flat, unravel = jax.flatten_util.ravel_pytree(position)
+    flat = flat.astype(jnp.float64)
+
+    def loglike(source):
+        placed = place(model, unravel(source.position), source.amplitude)
+        return sum(jnp.asarray(t(placed), jnp.float64) for t in terms)
+
+    def of_theta(theta):
+        return loglike(_Source(theta[0], theta[1:]))
+
+    if amplitude is None:
+        amplitude, _, _ = _profile(
+            lambda a: loglike(_Source(a, flat)), n_newton, jnp.float64
+        )
+    theta = jnp.concatenate([jnp.asarray(amplitude, jnp.float64)[None], flat])
+    grad, hess = jax.grad(of_theta), jax.hessian(of_theta)
+
+    def step(theta, _):
+        g, h = grad(theta), hess(theta)
+        ok = jnp.all(jnp.linalg.eigvalsh(h) < 0.0)
+        delta = jnp.linalg.solve(jnp.where(ok, h, -jnp.eye(theta.size)), g)
+        return theta - jnp.where(ok, delta, 0.0), None
+
+    theta, _ = jax.lax.scan(step, theta, None, length=n_newton)
+    source = _Source(theta[0], theta[1:])
+    info = curvature_block(loglike, source, lambda s: (s.amplitude, s.position))
+    return theta, jnp.linalg.inv(info)
+
+
+def measure(
+    term, model, place, position, *, amplitude=None, n_newton: int = 4
+) -> MeasuredRows:
+    """Estimate a source's amplitude and position, with the covariance of the estimate.
+
+    Newton steps on the summed term log likelihood over the amplitude and the position
+    jointly, from ``position`` (a detection peak from :func:`detect`, say) and from
+    ``amplitude`` (profiled at that position when ``None``). A step is skipped while the
+    Hessian is not negative definite. The covariance is the inverse of
+    :func:`curvature_block` over the amplitude and position at the estimate, so it is
+    the formal covariance of the maximum-likelihood estimate and is not a statement
+    about the prior. The estimate is only as good as the start: a position far from any
+    peak can leave the Newton iteration on a saddle.
+
+    Args:
+        term: One term or a sequence of terms.
+        model: The model without the source, as for :func:`detect`.
+        place: ``(model, position, amplitude) -> model``, as for :func:`detect`.
+        position: Starting position, a float array or pytree of float arrays.
+        amplitude: Starting amplitude, or ``None`` to profile it at ``position``.
+        n_newton: Newton steps, for the amplitude profile and again for the joint fit.
+
+    Returns:
+        A :class:`MeasuredRows` over ``(amplitude, *flattened position)``.
+    """
+    terms = _as_terms(term)
+    flat = jax.flatten_util.ravel_pytree(position)[0]
+    theta, cov = _measure(terms, model, place, position, amplitude, n_newton)
+    names = ("amplitude", *(f"position/{i}" for i in range(flat.size)))
+    return MeasuredRows(names=names, value=theta, cov=cov)
 
 
 def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:

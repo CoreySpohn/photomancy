@@ -35,7 +35,7 @@ def test_terms_read_their_exposure_block_and_restrict_gives_a_view():
     """
     model = ExposureModel(
         instrument=jnp.asarray([1.0, 2.0]),
-        exposures=(jnp.asarray(3.0), jnp.asarray(-1.0)),
+        nuisance=(jnp.asarray(3.0), jnp.asarray(-1.0)),
         scene=jnp.asarray([0.5, 0.5]),
     )
     data = [jnp.asarray([3.0, 6.0]), jnp.asarray([0.0, 0.0]), jnp.asarray([1.0, 2.0])]
@@ -92,9 +92,9 @@ def _window_flux(index, data, window):
     """Closed-form flux: the window ratio of data to the pre-step prediction."""
 
     def update(params, aux):
-        star = params.exposures[0]
+        star = params.nuisance[0]
         flux = star.flux * jnp.sum(window * data) / jnp.sum(window * aux[index])
-        return eqx.tree_at(lambda m: m.exposures[0].flux, params, flux)
+        return eqx.tree_at(lambda m: m.nuisance[0].flux, params, flux)
 
     return update
 
@@ -150,7 +150,7 @@ def _self_fit(companion_peak):
     labels = group_labels(
         init,
         {
-            "tilt": lambda m: [e.tilt for e in m.exposures],
+            "tilt": lambda m: [e.tilt for e in m.nuisance],
             "ote": lambda m: m.instrument.ote,
             "si": lambda m: m.instrument.si,
             "companion": lambda m: m.scene.flux,
@@ -242,7 +242,7 @@ def test_self_fit_recovers_the_seams_and_leaves_the_companion_out():
         instrument = fit.params.instrument
         assert _relative_error(instrument.ote, truth.ote) < 2e-2
         assert _relative_error(instrument.si, truth.si) < 4e-2
-        star = fit.params.exposures[0]
+        star = fit.params.nuisance[0]
         assert float(jnp.linalg.norm(star.tilt - sci_star.tilt)) < 5e-4
         assert float(abs(star.flux / sci_star.flux - 1.0)) < 5e-4
         assert len(log) - n_data_renders == 4

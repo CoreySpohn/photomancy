@@ -25,7 +25,7 @@ from photomancy.orbit.data import (
 from photomancy.orbit.inference import build_chart_logdensity
 from photomancy.priors import orbit_log_prior
 from photomancy.system_terms import (
-    ImagingTerm,
+    DMagTerm,
     NullTerm,
     ProperMotionAnomalyTerm,
     RadialVelocityTerm,
@@ -178,7 +178,7 @@ def test_all_channels_and_reference_measure(data):
     terms = (
         *_dynamical_terms(data),
         NullTerm(data.null),
-        ImagingTerm(data.imaging),
+        DMagTerm(data.imaging),
         custom_term,
     )
     orbits = _orbits(mass)
@@ -365,7 +365,7 @@ def test_jacobi_predictions(two_planets):
     assert (
         np.max(np.abs(actual[1] - pair_positions)) > 1e-7
     )  # arcsec, resolved physics change
-    for term in (NullTerm(data.null), ImagingTerm(data.imaging)):
+    for term in (NullTerm(data.null), DMagTerm(data.imaging)):
         with pytest.raises(ValueError, match=r"(?i)multi-planet"):
             term(jacobi, area_AU2=1e-8)
 
@@ -385,7 +385,7 @@ def test_radiative_padding_and_dark_limit(data):
         return term(model, area_AU2=jnp.exp(log_area))
 
     evaluate = eqx.filter_jit(jax.value_and_grad(score, has_aux=True))
-    for term in (ImagingTerm(data.imaging), NullTerm(data.null)):
+    for term in (DMagTerm(data.imaging), NullTerm(data.null)):
         poisoned_data = jax.tree.map(
             lambda a: (
                 a.at[-1].set(jnp.nan) if jnp.issubdtype(a.dtype, jnp.floating) else a
