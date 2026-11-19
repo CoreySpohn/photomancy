@@ -18,12 +18,13 @@ from test_fit import _scene
 from test_run import HIGH, KEY, WIDTH, _Gauss, _leaf_fit
 
 from photomancy.infer import (
-    SMC,
     AbstractTerm,
     Fit,
     Grid,
+    Importance,
     Laplace,
     Posterior,
+    PriorProposal,
     eig_contrastive,
     eig_nested,
     kish_ess,
@@ -658,7 +659,7 @@ def test_a_prior_swap_on_an_orbit_block_keeps_log_target_equal_to_the_density():
     from test_fit import PERIOD_RANGE, _block, _relative
 
     fit = Fit(_scene(), {"dynamics.orbits": _block()}, (_relative(),))
-    post = run(fit, SMC(n_particles=200, n_mcmc_steps=3), jax.random.key(1))
+    post = run(fit, Importance(PriorProposal(), n_draws=200), jax.random.key(1))
     law = OrbitLaw(period_d=LogUniform(*PERIOD_RANGE), eccentricity=Uniform(0.0, 1.0))
     out = post.with_priors(
         {"dynamics.orbits": _block(law)}, min_n_eff=0, max_khat=jnp.inf

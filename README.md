@@ -32,7 +32,7 @@ pip install photomancy
 ```
 
 The Laplace and staged MAP backends work from the base install. The sampler backends are
-optional extras: `photomancy[blackjax]` for NUTS, MCLMC, Pathfinder and SMC,
+optional extras: `photomancy[blackjax]` for NUTS, MCLMC and Pathfinder,
 `photomancy[jaxns]` for nested sampling, or `photomancy[samplers]` for both.
 
 ```bash
@@ -95,7 +95,6 @@ to every domain at once.
 | `PathfinderMixtureBackend` | multi-start Pathfinder, weighted by ELBO | a mixture of Gaussians over the modes |
 | `NUTSBackend` | the No-U-Turn sampler with window adaptation | equally weighted samples |
 | `MCLMCBackend` | microcanonical Langevin Monte Carlo | equally weighted samples |
-| `SMCBackend` | adaptive-tempered sequential Monte Carlo | samples and the evidence |
 | `JaxnsBackend` | nested sampling | samples and the evidence for model comparison |
 | `MAPBackend` | staged gradient fit over a parameter PyTree, with named groups freed stage by stage | a point estimate (`PointPosterior`) |
 

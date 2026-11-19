@@ -205,17 +205,17 @@ class MixturePosterior(AbstractPosterior):
         """Exact ``Mixture`` over z: carries the modes into the next prior.
 
         The mixture has no inverse CDF, so it serves the gradient and sample
-        backends (Laplace, NUTS, SMC) and not nested sampling.
+        backends (Laplace, NUTS) and not nested sampling.
         """
         choleskys = jnp.linalg.cholesky(self.covs)
         return Mixture(self.log_evidences, MultivariateNormal(self.means, choleskys))
 
 
 class SamplePosterior(AbstractPosterior):
-    """A posterior represented by weighted samples (NUTS, SMC).
+    """A posterior represented by weighted samples (NUTS).
 
     Columns are named by ``param_names`` -- the space is whatever those names denote
-    (unconstrained ``z`` for NUTS / SMC). ``sample``
+    (unconstrained ``z`` for NUTS). ``sample``
     resamples particles by weight (inverse-CDF SIR, ``O(n)`` memory); ``log_prob`` is
     unsupported; ``evidence`` is the backend's ``log Z`` (or ``NaN``).
 

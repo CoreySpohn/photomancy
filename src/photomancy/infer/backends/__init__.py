@@ -1,6 +1,6 @@
 """photomancy inference backends.
 
-Each backend is an ``AbstractBackend`` (Laplace, NUTS, adaptive-tempered SMC, nested
+Each backend is an ``AbstractBackend`` (Laplace, NUTS, nested
 sampling, MCLMC, Pathfinder, importance sampling and its adaptive form, a staged MAP
 fit and a quadrature Grid) that
 ``photomancy.infer.run(fit, backend, key)`` runs on a ``Fit`` and returns a
@@ -9,7 +9,7 @@ The earlier ``*Backend`` classes (``run(logdensity, init, key)``) remain until t
 consumers move.
 
 The Laplace, Grid and staged MAP backends need only optax. The BlackJAX backends (NUTS,
-MCLMC, Pathfinder, SMC) and the jaxns backend import their sampler when they run:
+MCLMC, Pathfinder) and the jaxns backend import their sampler when they run:
 install ``photomancy[blackjax]``, ``photomancy[jaxns]`` or ``photomancy[samplers]``.
 """
 
@@ -40,14 +40,12 @@ from photomancy.infer.backends.pathfinder import (
     PathfinderInfo,
     PathfinderMixtureBackend,
 )
-from photomancy.infer.backends.smc import SMC, SMCBackend, SMCInfo
 from photomancy.infer.backends.staged import MAP, MAPBackend, MAPInfo, map_fit
 
 __all__ = [
     "MAP",
     "MCLMC",
     "NUTS",
-    "SMC",
     "AbstractBackend",
     "AdaptiveImportance",
     "BackendDraws",
@@ -71,8 +69,6 @@ __all__ = [
     "PathfinderBackend",
     "PathfinderInfo",
     "PathfinderMixtureBackend",
-    "SMCBackend",
-    "SMCInfo",
     "build_scene_nested_model",
     "gauss_legendre",
     "map_fit",

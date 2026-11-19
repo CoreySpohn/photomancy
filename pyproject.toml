@@ -86,7 +86,7 @@ test = [
 # Sampler backends. The Laplace and staged MAP backends need neither.
 # >=1.6: the MCLMC tuner requires logdensity_fn from 1.6 on, and 1.5 does
 # not accept the keyword, so the two cannot be supported by one call.
-blackjax = ["blackjax>=1.6"]  # NUTS, MCLMC, Pathfinder and tempered SMC
+blackjax = ["blackjax>=1.6"]  # NUTS, MCLMC and Pathfinder
 # jaxctx supplies the prior interface the jaxns 3 adapter subclasses. The chart
 # nested prior takes the chi quantile of the quaternion radius from
 # tensorflow_probability (jaxns uses the same provider).

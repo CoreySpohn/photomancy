@@ -16,7 +16,6 @@ from photomancy.infer.backends import (
     MCLMCBackend,
     NUTSBackend,
     PathfinderBackend,
-    SMCBackend,
 )
 
 def density(z):
@@ -29,7 +28,6 @@ calls = {
         lambda: NUTSBackend(n_warmup=2, n_samples=2).run(density, z, key),
         lambda: MCLMCBackend(n_tune=2, n_samples=2).run(density, z, key),
         lambda: PathfinderBackend().run(density, z, key),
-        lambda: SMCBackend().run(density, density, jnp.zeros((4, 2)), key),
     ],
     "jaxns": [lambda: JaxnsBackend().run(None, key=key)],
 }

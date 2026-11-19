@@ -174,9 +174,9 @@ class AdaptiveImportance(AbstractBackend):
     The ladder needs one rung per factor of the likelihood that the cloud can absorb,
     and a concentrated posterior needs about a dozen. If the last proposal was fitted
     below temperature one (``info.reached_target`` false), the slice is refused: the
-    evidence, its standard error and the log weights are NaN, as for ``SMC`` past
-    ``max_rungs``, because weights from a proposal that missed the posterior can carry
-    one live draw, a small k-hat and a wrong evidence. The default three rounds suit a
+    evidence, its standard error and the log weights are NaN, because weights from a
+    proposal that missed the posterior can carry one live draw, a small k-hat and a
+    wrong evidence. The default three rounds suit a
     proposal that already covers the posterior (a seed from ``Laplace`` or a previous
     fit). A start from the prior on a concentrated posterior needs tens of rounds
     (about 40 of 2**13 draws for an eight-parameter orbit) or the ``Laplace`` route.
