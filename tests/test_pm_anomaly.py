@@ -22,7 +22,15 @@ from kinematics import (  # noqa: E402
 from orbix.equations.orbit import period_a, period_to_sma  # noqa: E402
 from priorities import Uniform  # noqa: E402
 
-from photomancy.infer import LaplaceBackend, build_scene_logdensity  # noqa: E402
+from photomancy.infer import (  # noqa: E402
+    Fit,
+    ForwardTerm,
+    Laplace,
+    run,
+    weighted_cov,
+    weighted_mean,
+)
+from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
 from photomancy.measurements import (  # noqa: E402
     ProperMotionAnomalyData,
     loglike_pm_anomaly,
@@ -110,79 +118,68 @@ class _Sys(eqx.Module):
     log_Mp: jnp.ndarray
 
 
-# Medium: The joint seven-parameter PMa fit needs a cold gradient and Hessian compile.
-@pytest.mark.medium
-def test_joint_relative_astrom_and_pma_recovers_mass():
-    """Relative astrometry pins the orbit shape; the PMa then pins the mass."""
-    t_ast = jnp.asarray(np.linspace(0.0, T_GAIA, 12))
-    ra_t, dec_t = predict_relative_astrometry(
-        t_ast,
-        A_TRUE,
-        E_TRUE,
-        COSI_TRUE,
-        W_TRUE,
-        CW_TRUE,
-        SW_TRUE,
-        TP_TRUE,
-        MSUN_KG,
-        DIST_PC,
-    )
-    anom_t = _anom((10.0**LOG_MP_TRUE) * Mearth2kg)
-    aerr, pmerr = 1e-3, 0.02e-3 / YR
-    ra_o = ra_t + aerr * jax.random.normal(jax.random.key(0), t_ast.shape)
-    dec_o = dec_t + aerr * jax.random.normal(jax.random.key(1), t_ast.shape)
-    anom_o = anom_t + pmerr * jax.random.normal(jax.random.key(2), (2,))
+class _Forward(eqx.Module):
+    """``system -> (ra, dec, pma)`` concatenated: relative orbit plus the anomaly."""
 
-    def forward(s):
+    t_ast: jax.Array
+
+    def __call__(self, s):
         P = 10.0**s.logP
         a = period_to_sma(P, MSUN_KG)
         tp = -s.M0 * P / TWO_PI
         cw, sw = jnp.cos(s.omega), jnp.sin(s.omega)
         Mp = (10.0**s.log_Mp) * Mearth2kg
         ra, dec = predict_relative_astrometry(
-            t_ast, a, s.e, s.cos_i, s.W, cw, sw, tp, MSUN_KG, DIST_PC
+            self.t_ast, a, s.e, s.cos_i, s.W, cw, sw, tp, MSUN_KG, DIST_PC
         )
         anom = predict_pm_anomaly(
-            T_HIP,
-            T_GAIA,
-            GAIA_WIN,
-            25,
-            a,
-            s.e,
-            s.cos_i,
-            s.W,
-            cw,
-            sw,
-            tp,
-            MSUN_KG,
-            Mp,
+            T_HIP, T_GAIA, GAIA_WIN, 25, a, s.e, s.cos_i, s.W, cw, sw, tp, MSUN_KG, Mp,
             DIST_PC,
-        )
-        return ra, dec, anom
+        )  # fmt: skip
+        return jnp.concatenate([ra, dec, anom])
 
-    def likelihood(pred):
-        ra, dec, anom = pred
-        return (
-            -0.5 * jnp.sum(((ra - ra_o) / aerr) ** 2)
-            - 0.5 * jnp.sum(((dec - dec_o) / aerr) ** 2)
-            - 0.5 * jnp.sum(((anom - anom_o) / pmerr) ** 2)
-        )
 
-    prior = Uniform(
-        jnp.array([3.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]),
-        jnp.array([4.0, 0.9, 1.0, TWO_PI, TWO_PI, TWO_PI, 4.0]),
-    )
-    init = _Sys(
+# Medium: The joint seven-parameter PMa fit needs a cold gradient and Hessian compile.
+@pytest.mark.medium
+def test_joint_relative_astrom_and_pma_recovers_mass():
+    """Relative astrometry pins the orbit shape; the PMa then pins the mass.
+
+    Fails if the anomaly channel is dropped from the forward or mis-scaled (the mass
+    is then unconstrained and the width test fails), or if the Laplace stage does not
+    reach the joint mode.
+    """
+    t_ast = jnp.asarray(np.linspace(0.0, T_GAIA, 12))
+    forward = _Forward(t_ast)
+    truth = _Sys(
         logP=jnp.array(np.log10(P_TRUE)),
         e=jnp.array(E_TRUE),
         cos_i=jnp.array(COSI_TRUE),
         W=jnp.array(W_TRUE),
         omega=jnp.array(OM_TRUE),
         M0=jnp.array(M0_TRUE),
-        log_Mp=jnp.array(LOG_MP_TRUE + 0.3),
+        log_Mp=jnp.array(LOG_MP_TRUE),
     )
-    ld, z0, unravel = build_scene_logdensity(init, forward, likelihood, prior)
-    post = LaplaceBackend(n_steps=100, min_eigenvalue=1e-12).run(ld, z0)
-    fit = unravel(post.mean)
-    assert abs(float(fit.log_Mp) - LOG_MP_TRUE) < 0.1  # mass recovered to ~25%
-    assert float(jnp.sqrt(jnp.diag(post.cov))[-1]) < 0.2  # mass is constrained
+    aerr, pmerr = 1e-3, 0.02e-3 / YR
+    sigma = jnp.concatenate([jnp.full(24, aerr), jnp.full(2, pmerr)])
+    noise = jnp.concatenate(
+        [
+            jax.random.normal(jax.random.key(0), (12,)),
+            jax.random.normal(jax.random.key(1), (12,)),
+            jax.random.normal(jax.random.key(2), (2,)),
+        ]
+    )
+    obs = forward(truth) + sigma * noise
+
+    low = [3.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]
+    high = [4.0, 0.9, 1.0, TWO_PI, TWO_PI, TWO_PI, 4.0]
+    paths = ("logP", "e", "cos_i", "W", "omega", "M0", "log_Mp")
+    prior = {p: Uniform(lo, hi) for p, lo, hi in zip(paths, low, high, strict=True)}
+    x0 = {p: getattr(truth, p) for p in paths}
+    x0["log_Mp"] = x0["log_Mp"] + 0.3
+    fit = Fit(truth, prior, (ForwardTerm(forward, gaussian_loglike(obs, sigma)),))
+    post = run(fit, Laplace(n_draws=512, n_steps=100, init=x0), jax.random.key(3))
+    lw, mass = post.log_weights, post.samples["log_Mp"]
+    mean = float(weighted_mean(lw, mass))
+    width = float(jnp.sqrt(weighted_cov(lw, mass)))
+    assert abs(mean - LOG_MP_TRUE) < 0.1  # mass recovered to ~25%
+    assert width < 0.2  # mass is constrained
