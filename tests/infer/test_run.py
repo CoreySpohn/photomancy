@@ -214,6 +214,57 @@ def test_laplace_corrects_the_gaussian_with_importance_weights():
     assert post.info.means.shape == (1, 1)
 
 
+class _TwoBumps(AbstractTerm):
+    """Likelihood with a bump at each of two radii, a bimodal target."""
+
+    centers: jax.Array
+    reads = ()
+
+    def __call__(self, model):
+        z = (model.planets[0].Rp_Rearth - self.centers) / WIDTH
+        return jax.scipy.special.logsumexp(-0.5 * z**2)
+
+    def draw(self, key, model):
+        return self
+
+
+def _bimodal_fit():
+    centers = jnp.array([1.0, 3.0])
+    return Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_TwoBumps(centers),))
+
+
+def _mode_radii(fit, post):
+    """Radii of the modes of a Laplace or Pathfinder run, in the stored coordinates."""
+    x, _ = fit.from_real({KEY: post.info.means})
+    return np.asarray(x[KEY])[:, 0]
+
+
+@pytest.mark.parametrize("backend", [Laplace, Pathfinder])
+def test_explicit_starts_land_on_distinct_modes(backend):
+    """One start per bump gives one mode per bump; a repeated start gives one mode."""
+    fit = _bimodal_fit()
+    starts = {KEY: jnp.array([[1.1], [2.9]])}
+    post = run(fit, backend(n_draws=400, n_modes=2, init=starts), jax.random.key(0))
+    np.testing.assert_allclose(np.sort(_mode_radii(fit, post)), [1.0, 3.0], atol=0.15)
+
+    one = run(
+        fit,
+        backend(n_draws=400, n_modes=2, init={KEY: jnp.array([1.1])}),
+        jax.random.key(0),
+    )
+    assert np.all(np.abs(_mode_radii(fit, one) - 1.0) < 0.15)
+
+
+def test_explicit_starts_refuse_a_wrong_leading_length():
+    """The leading axis must match the number of starts."""
+    with pytest.raises(ValueError, match="one start each"):
+        run(
+            _bimodal_fit(),
+            Laplace(n_draws=100, n_modes=2, init={KEY: jnp.ones((3, 1))}),
+            jax.random.key(0),
+        )
+
+
 def test_nuts_has_no_evidence_and_the_right_moments():
     """NUTS draws match the known mean; the evidence is NaN; chains are in info."""
     fit = _leaf_fit()

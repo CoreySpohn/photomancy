@@ -7,8 +7,6 @@ applies an optional contrast curve and delegates the analytic EIG to
 :func:`photomancy.infer.eig.evaluate_candidates`.
 """
 
-from typing import NamedTuple
-
 import jax
 import jax.numpy as jnp
 from hwoutils.model_paths import resolve
@@ -24,14 +22,6 @@ from photomancy.measurements import (
 )
 
 __all__ = ["evaluate_orbit_candidates"]
-
-
-class _Modes(NamedTuple):
-    """Gaussian modes of a posterior in the layout ``evaluate_candidates`` reads."""
-
-    means: jnp.ndarray
-    covs: jnp.ndarray
-    log_weights: jnp.ndarray
 
 
 def _astrometry(system, t, planet):
@@ -51,18 +41,6 @@ def _astrometry(system, t, planet):
         is_valid=jnp.ones(1, dtype=bool),
     )
     return RelativeAstrometryTerm(row).predict(system)[:, 0]
-
-
-def _modes(posterior, n_modes, key):
-    """Cluster the draws into ``n_modes`` Gaussian modes over the flat entries."""
-    mixture = cluster_to_mixture(posterior, n_modes, key)
-    components = mixture.component_distribution
-    tril = components.scale_tril
-    return _Modes(
-        means=components.loc,
-        covs=tril @ jnp.swapaxes(tril, -1, -2),
-        log_weights=jax.nn.log_softmax(mixture.mixing_logits),
-    )
 
 
 def evaluate_orbit_candidates(
@@ -112,7 +90,8 @@ def evaluate_orbit_candidates(
         ``separation`` and ``dMag``, shape ``(N, n_modes)``, at each mode mean (zero
         without a contrast curve).
     """
-    modes = _modes(posterior, n_modes, key)
+    mixture = cluster_to_mixture(posterior, n_modes, key)
+    means = mixture.component_distribution.loc
     _, unravel = ravel_samples(posterior)
 
     def system_at(z):
@@ -142,7 +121,7 @@ def evaluate_orbit_candidates(
 
     epochs = jnp.asarray(time_d)
     res = evaluate_candidates(
-        modes,
+        mixture,
         epochs,
         forward,
         obs_variance,
@@ -151,7 +130,7 @@ def evaluate_orbit_candidates(
     )
     if contrast_curve is not None:
         sep_dmag = jax.vmap(
-            lambda t: jax.vmap(photometry, in_axes=(0, None))(modes.means, t)
+            lambda t: jax.vmap(photometry, in_axes=(0, None))(means, t)
         )(epochs)
         res["separation"] = sep_dmag[..., 0]
         res["dMag"] = sep_dmag[..., 1]

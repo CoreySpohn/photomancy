@@ -1,5 +1,8 @@
 """Tests for the domain-agnostic EIG layer."""
 
+import json
+from pathlib import Path
+
 import jax
 import numpy as np
 import pytest
@@ -15,6 +18,7 @@ from nmc_reference import (  # noqa: E402
     probit_site_moments_mc,
     reported_mixture_mode_mi_mc,
 )
+from priorities import Mixture, MultivariateNormal  # noqa: E402
 
 from photomancy.infer.eig import (  # noqa: E402
     alias_breaking_eig,
@@ -29,11 +33,20 @@ from photomancy.infer.eig import (  # noqa: E402
     null_update,
     probit_gaussian_mass,
 )
-from photomancy.infer.legacy_posterior import MixturePosterior  # noqa: E402
+
+
+def _mixture(means, covs, log_evidences):
+    """A ``priorities.Mixture`` of Gaussian modes from moments and log weights."""
+    return Mixture(
+        mixing_logits=jnp.asarray(log_evidences),
+        component_distribution=MultivariateNormal(
+            loc=jnp.asarray(means), scale_tril=jnp.linalg.cholesky(jnp.asarray(covs))
+        ),
+    )
 
 
 def _two_mode_posterior():
-    return MixturePosterior(
+    return _mixture(
         means=jnp.array([[1.0], [2.0]]),
         covs=jnp.array([[[1.0]], [[1.0]]]),
         log_evidences=jnp.array([0.0, 0.0]),
@@ -540,7 +553,7 @@ ROTATION_45 = jnp.array([[1.0, 1.0], [-1.0, 1.0]]) / jnp.sqrt(2.0)
 
 
 def _opposite_correlation_posterior():
-    return MixturePosterior(
+    return _mixture(
         means=jnp.zeros((2, 2)),
         covs=OPPOSITE_COVS,
         log_evidences=jnp.log(jnp.array([0.5, 0.5])),
@@ -807,7 +820,7 @@ def test_covariance_bound_is_exact_for_mixed_units_in_float32():
 
 
 def _separated_null_posterior():
-    return MixturePosterior(
+    return _mixture(
         means=jnp.array([[-10.0], [10.0]]),
         covs=jnp.ones((2, 1, 1)),
         log_evidences=jnp.log(jnp.array([0.5, 0.5])),
@@ -884,7 +897,7 @@ def _reporting_posterior(x_means, x_vars, det_probs, weights):
     covs = jnp.zeros((n_modes, 2, 2))
     covs = covs.at[:, 0, 0].set(jnp.asarray(x_vars))
     covs = covs.at[:, 1, 1].set(1.0e-4)
-    posterior = MixturePosterior(
+    posterior = _mixture(
         means=means, covs=covs, log_evidences=jnp.log(jnp.asarray(weights))
     )
     return posterior
@@ -989,3 +1002,42 @@ def test_mixed_reporting_bounds_the_monte_carlo_mode_information():
     assert res["alias_eig"][0] <= _entropy(weights) + 1e-12
     within = jnp.sum(weights * det * 0.5 * jnp.log1p(x_vars / obs_var))
     assert jnp.allclose(res["geometric_eig"][0], within, rtol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# Golden: the result before the Mixture input port
+# ---------------------------------------------------------------------------
+
+GOLDEN = Path(__file__).parent / "data" / "eig_mixture_golden.json"
+
+
+def _golden_forward(z, c):
+    return jnp.array([c * z[0] + z[1], z[1] - 0.5 * c * z[2]])
+
+
+def _golden_detectable(z, c):
+    return jax.nn.sigmoid(z[0] - 0.2 * c)
+
+
+@pytest.mark.parametrize("name", ["two_modes_plain", "three_modes_reporting"])
+def test_evaluate_candidates_matches_golden_of_the_legacy_input(name):
+    """The Mixture input reproduces the result captured from the legacy input.
+
+    The golden (``scripts/one_stack/capture_eig_mixture_golden.py`` on the base
+    commit) holds the full result dict. Tolerance: rtol 1e-12, since the Cholesky
+    round trip of the covariances changes them by about 1e-16.
+    """
+    fixture = json.loads(GOLDEN.read_text())[name]
+    mixture = _mixture(fixture["means"], fixture["covs"], fixture["log_weights"])
+    res = evaluate_candidates(
+        mixture,
+        jnp.asarray(fixture["candidates"]),
+        _golden_forward,
+        0.5,
+        detectable=_golden_detectable if fixture["reporting"] else None,
+    )
+    assert set(res) == set(fixture["result"])
+    for key, expected in fixture["result"].items():
+        np.testing.assert_allclose(
+            np.asarray(res[key]), np.asarray(expected), rtol=1e-12, atol=1e-13
+        )

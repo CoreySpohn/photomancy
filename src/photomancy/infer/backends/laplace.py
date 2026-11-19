@@ -268,9 +268,11 @@ class Laplace(AbstractBackend):
             whose weights vary more (variance). The default 0.03 is unbiased on that
             fit.
         max_decrement: Largest Newton decrement, in nats, of a mode that is kept.
-        init: ``None`` for prior draws as starts, one constrained draw, or a
-            ``Posterior`` whose weights pick the starts; the starts are placed in the
-            flat vector by ``fit.to_flat``.
+        init: ``None`` for prior draws as starts, one constrained draw (repeated for
+            every start), an entry dict whose every leaf has a leading axis of length
+            ``n_modes`` (one explicit start each, so each alias keeps its own mode),
+            or a ``Posterior`` whose weights pick the starts; the starts are placed in
+            the flat vector by ``fit.to_flat``.
     """
 
     n_draws: int = eqx.field(static=True, default=2000)

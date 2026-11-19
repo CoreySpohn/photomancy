@@ -9,6 +9,7 @@ of one draw's entry dict (sorted keys), so ``unravel(z)`` is a valid argument to
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.flatten_util import ravel_pytree
 
 from photomancy.infer.posterior import Posterior
@@ -47,8 +48,9 @@ def start_points(fit, init, key, n):
     Args:
         fit: The fit.
         init: ``None`` for prior draws; one constrained draw ``x`` (an entry dict with
-            leaf shapes, repeated ``n`` times); or a :class:`Posterior` (``n`` draws
-            by its weights).
+            leaf shapes, repeated ``n`` times); an entry dict whose every leaf has one
+            extra leading axis of length ``n`` (one explicit start each, in order);
+            or a :class:`Posterior` (``n`` draws by its weights).
         key: PRNG key (unused for a single draw).
         n: Number of starts.
     """
@@ -58,8 +60,30 @@ def start_points(fit, init, key, n):
         index = jax.random.categorical(key, init.log_weights, shape=(n,))
         x = jax.tree.map(lambda a: a[index], init.samples)
     else:
-        x = jax.tree.map(lambda a: jnp.broadcast_to(a, (n, *a.shape)), init)
+        x = _repeat_or_stack(fit, init, n)
     return fit.to_flat(x)
+
+
+def _repeat_or_stack(fit, init, n):
+    """Repeat one entry dict ``n`` times, or pass ``n`` stacked starts through."""
+    template = draw_template(fit)
+    extra = {
+        np.ndim(init[key]) - np.ndim(template[key]) for key in template if key in init
+    }
+    if extra == {0}:
+        return jax.tree.map(lambda a: jnp.broadcast_to(a, (n, *a.shape)), init)
+    if extra == {1}:
+        sizes = {np.shape(a)[0] for a in jax.tree.leaves(init)}
+        if sizes != {n}:
+            raise ValueError(
+                f"init entries carry a leading axis of length {sorted(sizes)}; "
+                f"expected {n}, one start each"
+            )
+        return init
+    raise ValueError(
+        "init entries must all have the leaf shape (one start, repeated) or all one "
+        "extra leading axis (one start each)"
+    )
 
 
 class FlatDensity(eqx.Module):

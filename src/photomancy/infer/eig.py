@@ -1,6 +1,8 @@
 """Domain-agnostic analytic Expected Information Gain over a Posterior.
 
-Scores candidate observations from a ``MixturePosterior`` (per-mode Gaussians) as
+Scores candidate observations from a ``priorities.Mixture`` of
+``priorities.MultivariateNormal`` modes over a flat vector (what
+:func:`~photomancy.infer.cluster_to_mixture` returns) as
 estimator tiers of one mutual information ``I((M, D, theta); Y)``: the Gaussian tier is
 the analytic Laplace covariance update (``Sigma^-1 += J^T R^-1 J``), the discrete tier
 carries the exact detection-channel MI, an ``H(w)``-capped upper bound on the mode
@@ -465,7 +467,7 @@ def _build_eig_batch_fn(forward, detectable=None):
 
 
 def evaluate_candidates(
-    posterior,
+    mixture,
     candidates,
     forward,
     obs_variance,
@@ -505,8 +507,11 @@ def evaluate_candidates(
     does not represent.
 
     Args:
-        posterior: A ``MixturePosterior`` (``means (K, d)``, ``covs (K, d, d)``,
-            ``log_evidences (K,)``).
+        mixture: A :class:`priorities.Mixture` of
+            :class:`priorities.MultivariateNormal` modes over the flat vector, as
+            :func:`~photomancy.infer.cluster_to_mixture` returns. The means are
+            ``loc``, the covariances ``scale_tril @ scale_tril.T`` and the weights
+            ``softmax(mixing_logits)``.
         candidates: Batch of candidate designs (opaque to the core). Shape ``(N, ...)``.
         forward: ``forward(z, candidate) -> y (n_obs,)``, differentiable in flat ``z``.
         obs_variance: Scalar or ``(n_obs,)`` measurement variance.
@@ -530,11 +535,15 @@ def evaluate_candidates(
     obs_var = jnp.atleast_1d(jnp.asarray(obs_variance))
     batch_fn = _build_eig_batch_fn(forward, detectable)
 
-    weights = jnp.exp(posterior.log_weights)
+    components = mixture.component_distribution
+    means = components.loc
+    tril = components.scale_tril
+    covs = tril @ jnp.swapaxes(tril, -1, -2)
+    weights = jax.nn.softmax(mixture.mixing_logits)
     total, geom, alias, preds, det_w = batch_fn(
         jnp.asarray(candidates),
-        posterior.means,
-        posterior.covs,
+        means,
+        covs,
         weights,
         obs_var,
         detectable_args,
