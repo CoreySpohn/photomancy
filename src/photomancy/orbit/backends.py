@@ -52,6 +52,12 @@ def any_epoch(n_draws=2**16, n_rounds=3, **adaptive):
     see :meth:`~photomancy.infer.Posterior.with_priors`), size ``n_draws`` at about
     100 draws per unit of ``min_n_eff``.
 
+    The evidence has a third condition, read from the pool of constants that each shape
+    draws (:class:`CompletedProposal`): it is NaN unless at least half of that pool is
+    effective for the draws that carry the weight (``info.proposal_valid``). A fit that
+    one or two epochs leave with a tight constraint on the orbit size, which the pool
+    does not know, fails it; the draws and weights are still returned.
+
     Args:
         n_draws: Draws of the last round, the returned cloud.
         n_rounds: Number of rounds (the last is the returned cloud).
