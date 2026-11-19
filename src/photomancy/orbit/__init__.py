@@ -8,6 +8,7 @@ likelihoods and terms live in ``photomancy.measurements``. Built on orbix geomet
 (``orbix.equations``, ``orbix.kepler``, ``orbix.system``).
 """
 
+from photomancy.orbit.completion import CompletedProposal, Completion, ThetaPrior
 from photomancy.orbit.diagnostics import (
     mode_observables,
     mode_scalars,
@@ -50,6 +51,7 @@ from photomancy.orbit.nested import (
 )
 from photomancy.orbit.ofti import AbstractConditioner, ScaleAndRotate, ofti
 from photomancy.orbit.projected import astrometric_loss, make_astrometric_evaluator
+from photomancy.orbit.proposals import ScaleRotateProposal
 from photomancy.orbit.thiele_innes import (
     TIFitResult,
     thiele_innes_fit,
@@ -76,15 +78,19 @@ __all__ = [
     "AbstractUpdateTarget",
     "AdaptiveImportanceSampler",
     "ChartOrbitProblem",
+    "CompletedProposal",
+    "Completion",
     "ConjugateGaussianTarget",
     "FixedMassTarget",
     "OrbitPriorTransform",
     "OrbitUpdater",
     "ParamBounds",
     "ScaleAndRotate",
+    "ScaleRotateProposal",
     "TIBasisModel",
     # Thiele-Innes fitter
     "TIFitResult",
+    "ThetaPrior",
     "ThieleInnesTarget",
     "UpdaterBelief",
     "UpdaterDiagnostics",
