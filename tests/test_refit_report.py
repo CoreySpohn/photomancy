@@ -24,6 +24,7 @@ from kinematics import (  # noqa: E402
 )
 from orbix.system import FrameOrbit  # noqa: E402
 from scipy import stats  # noqa: E402
+from skyscapes.population import kipping_eccentricity  # noqa: E402
 
 from photomancy.orbit import refit  # noqa: E402
 from photomancy.orbit.data import NullData, RelativeAstromData  # noqa: E402
@@ -44,7 +45,6 @@ from photomancy.orbit.refit import (  # noqa: E402
     ti_to_elements,
 )
 from photomancy.orbit.updater import UpdaterStatus  # noqa: E402
-from photomancy.priors import ECC_ALPHA, ECC_BETA  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "data" / "refit_report_golden.json"
 DIST_PC = 10.0
@@ -296,7 +296,7 @@ def test_prior_cloud_follows_the_declared_prior():
     el = np.asarray(prior_cloud(target, jax.random.key(0), n))
     e_max = float(target.model.e_max)
     xs = np.linspace(0.0, e_max, 20001)
-    pdf = stats.beta.pdf(xs, ECC_ALPHA, ECC_BETA)
+    pdf = np.exp(np.asarray(kipping_eccentricity().log_prob(xs)))
     pdf[0] = 0.0
     mean_e = np.trapezoid(xs * pdf, xs) / np.trapezoid(pdf, xs)
     assert el[:, 1].max() < e_max

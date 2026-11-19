@@ -71,7 +71,7 @@ def predict_rv(times, T, Ms, Mp_sini, e, cos_w, sin_w, tp, *, Mp=0.0):
     """
     mu = G * (Ms + Mp)
     a = (mu * (T / two_pi) ** 2) ** (1.0 / 3.0)
-    orbit = FrameOrbit.unit_plane(e, tp, two_pi / T)
+    orbit = FrameOrbit.from_unit_plane(e, tp, two_pi / T)
     _, rate = orbit.perifocal_coordinates(times)
     return -a * Mp_sini / (Ms + Mp) * (sin_w * rate[..., 0] + cos_w * rate[..., 1])
 

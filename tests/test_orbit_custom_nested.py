@@ -9,7 +9,7 @@ import pytest
 from hwoutils.constants import Msun2kg
 from jaxctx import ScopedDict
 from orbix.system import EccentricityVectorChart
-from priorities import LogUniform
+from priorities import LogUniform, Uniform
 from test_nested import _scene_orbit
 from test_system_priors import BOUNDS, _scene
 
@@ -41,7 +41,7 @@ def _gaussian_term(mean, sigma):
 
 def _problem(sigma):
     """Sampleable chart problem with the custom Gaussian term on the two scales."""
-    prior = FactorizedOrbitPrior(_scene_orbit, (10.0, 10000.0), "disk", 1.0)
+    prior = FactorizedOrbitPrior(_scene_orbit, (10.0, 10000.0), Uniform(0.0, 1.0))
     scalars = {
         name: ScalarCoordinate(LogUniform(*bounds)) for name, bounds in BOUNDS.items()
     }

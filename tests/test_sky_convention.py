@@ -445,7 +445,11 @@ def test_ofti_hits_independent_target():
         mu_AU3_per_d2=mu,
         dist_pc=10.0,
     )
-    a, e, cos_i, W, cos_w, sin_w, tp = np.asarray(orbit.periapsis_rows())
+    elements = orbit.to_periapsis_elements()
+    a, e, cos_i, W, cos_w, sin_w, tp = (
+        np.asarray(elements[k])
+        for k in ("a_AU", "e", "cos_i", "W_rad", "cos_w", "sin_w", "tp_d")
+    )
     period = 2 * np.pi * np.sqrt(a**3 / mu)
     actual = sky_position(
         times,

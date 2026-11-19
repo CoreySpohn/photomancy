@@ -17,10 +17,9 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from hwoutils.constants import G, Msun2kg, two_pi  # noqa: E402
-from jax.scipy.special import betainc  # noqa: E402
-from jax.scipy.stats import beta as beta_dist  # noqa: E402
 from kinematics import predict_relative_astrometry  # noqa: E402
 from orbix.equations.orbit import thiele_innes_constants  # noqa: E402
+from skyscapes.population import kipping_eccentricity  # noqa: E402
 
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import MU_SUN  # noqa: E402
@@ -32,7 +31,6 @@ from photomancy.orbit.refit import (  # noqa: E402
     ti_to_elements,
 )
 from photomancy.orbit.updater import UpdaterStatus  # noqa: E402
-from photomancy.priors import ECC_ALPHA, ECC_BETA  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "data" / "refit_golden.json"
 DIST_PC = 10.0
@@ -77,9 +75,7 @@ def test_prior_density_carries_the_constants_jacobian():
     jac = jax.jacfwd(inverse)(CHART[3:])
     log_det = jnp.linalg.slogdet(jac)[1]
     e = CHART[0]
-    log_e = beta_dist.logpdf(e, ECC_ALPHA, ECC_BETA) - jnp.log(
-        betainc(ECC_ALPHA, ECC_BETA, target.model.e_max)
-    )
+    log_e = kipping_eccentricity(target.model.e_max).log_prob(e)
     assert float(target.log_prior(CHART) - log_e) == pytest.approx(
         float(log_det) + _density_constant(target), abs=1e-10
     )
@@ -103,9 +99,7 @@ def test_prior_matches_the_discriminant_formula_and_support():
     u = jnp.sum(theta[:, 3:] ** 2, axis=1)
     v = east_x * north_y - east_y * north_x
     disc = jnp.sqrt(jnp.maximum(u**2 - 4 * v**2, 1e-300))
-    log_e = beta_dist.logpdf(e, ECC_ALPHA, ECC_BETA) - jnp.log(
-        betainc(ECC_ALPHA, ECC_BETA, target.model.e_max)
-    )
+    log_e = kipping_eccentricity(target.model.e_max).log_prob(e)
     expected = (
         log_e - jnp.log((u + disc) / 2) - jnp.log(disc) + _density_constant(target)
     )

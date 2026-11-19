@@ -34,6 +34,7 @@ from hwoutils.constants import G, Msun2kg, mas2arcsec
 jax.config.update("jax_enable_x64", True)
 
 from orbix.system import FrameOrbit  # noqa: E402
+from skyscapes.population import kipping_eccentricity  # noqa: E402
 
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import TIBasisModel, lambert_depth_fit  # noqa: E402
@@ -187,7 +188,7 @@ def price_references(key, data, model, repeats):
             0,
             Msun2kg,
             DIST_PC,
-            "kipping13",
+            kipping_eccentricity(),
             (float(np.log10(50.0)), float(np.log10(5000.0))),
             0.9,
         )

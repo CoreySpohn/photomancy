@@ -21,7 +21,11 @@ ORBIT = classical_coordinates(1.6, 0.2, 0.3, 0.8, 0.5, 40.0, PERIOD_D)
 
 def _rows(scene):
     """One planet's ``(a, e, cos_i, W, cos_w, sin_w, tp)`` from a scene."""
-    return jax.tree.map(lambda leaf: leaf[0], scene.dynamics.orbits).periapsis_rows()
+    orbit = jax.tree.map(lambda leaf: leaf[0], scene.dynamics.orbits)
+    elements = orbit.to_periapsis_elements()
+    return tuple(
+        elements[k] for k in ("a_AU", "e", "cos_i", "W_rad", "cos_w", "sin_w", "tp_d")
+    )
 
 
 def test_physical_scale_coordinates_decode_to_radius_albedo_and_area():

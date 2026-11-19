@@ -325,10 +325,10 @@ def test_chart_grid_target_in_common_coordinates(e_max):
 
     orbit = chart.to_orbit(x, mu_AU3_per_d2=G * star)
     ra_new, dec_new = jax.vmap(lambda o: o.offsets_arcsec(data.times, 10.0))(orbit)
-    rows = orbit.periapsis_rows()
+    elements = orbit.to_periapsis_elements()
     ra_old, dec_old = jax.vmap(
-        lambda r: predict_relative_astrometry(data.times, *r, MSUN, 10.0)
-    )(rows)
+        lambda *r: predict_relative_astrometry(data.times, *r, MSUN, 10.0)
+    )(*(elements[k] for k in ("a_AU", "e", "cos_i", "W_rad", "cos_w", "sin_w", "tp_d")))
     np.testing.assert_allclose(ra_new[keep], ra_old[keep], rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(dec_new[keep], dec_old[keep], rtol=1e-12, atol=1e-14)
     new_ll = jax.vmap(lambda a, b: loglike_relative_astrom(a, b, data))(ra_new, dec_new)

@@ -19,7 +19,8 @@ from orbix.system import (
 
 from photomancy.system_density import SystemLogDensity
 
-# Chart name that posteriors over ``FrameOrbit.periapsis_rows`` columns declare.
+# Chart name that posteriors over the periapsis elements of
+# ``FrameOrbit.to_periapsis_elements`` (stacked as columns) declare.
 ORBIT_ROWS_CHART = "OrbitRows"
 
 

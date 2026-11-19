@@ -9,8 +9,9 @@ import tensorflow_probability.substrates.jax as tfp
 from hwoutils.constants import Msun2kg
 from jaxctx import ScopedDict
 from jaxctx import transform as transform_model
+from orbit_fit import ecc_law
 from orbix.system import EccentricityVectorChart, FrameChart
-from priorities import HalfNormal, LogUniform
+from priorities import HalfNormal, LogUniform, TruncatedDistribution
 from test_system_density import _floor
 from test_system_priors import BOUNDS, _scene
 from test_terms import _new_term
@@ -135,7 +136,10 @@ def _scene_orbit(scene):
 
 
 def _nested_problem(chart, ecc_prior, rv=None, e_max=1.0):
-    prior = FactorizedOrbitPrior(_scene_orbit, (10.0, 10000.0), ecc_prior, e_max)
+    law = ecc_law(ecc_prior)
+    if e_max < 1.0:
+        law = TruncatedDistribution(law, high=e_max)
+    prior = FactorizedOrbitPrior(_scene_orbit, (10.0, 10000.0), law)
     scalars = {
         name: ScalarCoordinate(LogUniform(*bounds)) for name, bounds in BOUNDS.items()
     }

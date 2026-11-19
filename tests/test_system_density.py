@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg
 from hwoutils.epoch import Epoch
+from orbit_fit import ecc_law
 from orbix.equations import period_to_sma
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, SkyFrame, System
 from skyscapes.physical_model import LambertianPhysicalModel
@@ -430,7 +431,7 @@ def sampling_problem():
     density = build_chart_logdensity(
         ClassicalChart(),
         build,
-        FactorizedOrbitPrior(orbit_of, ecc_prior="disk"),
+        FactorizedOrbitPrior(orbit_of, eccentricity=ecc_law("disk")),
         terms=(measurement,),
         star_mass_kg=Msun2kg,
     )

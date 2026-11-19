@@ -109,6 +109,7 @@ from orbix.system import (
     ThieleInnesChart,
     disk_to_plane,
 )
+from skyscapes.population import kipping_eccentricity
 
 from photomancy.infer.particles import (
     kish_ess,
@@ -120,7 +121,7 @@ from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
 from photomancy.orbit.inference import orbit_chart_log_volume
 from photomancy.orbit.likelihoods import loglike_relative_astrom
-from photomancy.priors import ECC_ALPHA, ECC_BETA, orbit_log_prior
+from photomancy.priors import orbit_log_prior
 
 _EV_CHART = EccentricityVectorChart()
 _TI_CHART = ThieleInnesChart()
@@ -594,7 +595,7 @@ class ThieleInnesTarget(AbstractUpdateTarget):
             Tuple ``(H_ra, H_dec)``, each shape ``(K, 4)``.
         """
         e, ln_period, tau = theta[0], theta[1], theta[2]
-        orbit = FrameOrbit.unit_plane_from_phase(e, ln_period, tau, self.model.t_ref)
+        orbit = FrameOrbit.from_unit_plane_phase(e, ln_period, tau, self.model.t_ref)
         xy, _ = orbit.perifocal_coordinates(times)
         x, y = xy[..., 0] / self.dist_pc, xy[..., 1] / self.dist_pc
         zero = jnp.zeros_like(x)
@@ -647,10 +648,10 @@ class FixedMassTarget(AbstractUpdateTarget):
     The prior is the shared one-planet physical density of
     :func:`~photomancy.priors.orbit_log_prior` (``ln P`` uniform between the
     periods at the fixed mass, ``e ~ Beta(0.867, 3.03)`` restricted to
-    ``e < e_max``, ``cos i ~ U(-1, 1)`` and uniform angles, the ``kipping13``
-    law of :func:`~photomancy.orbit.ofti.ofti`) plus the chart's log volume. The
-    density is normalized, truncation included, and ``-inf`` off its support
-    (``e = 0`` included: the Beta density diverges there).
+    ``e < e_max``, ``cos i ~ U(-1, 1)`` and uniform angles, the
+    ``kipping_eccentricity`` law of :func:`~photomancy.orbit.ofti.ofti`) plus the
+    chart's log volume. The density is normalized, truncation included, and ``-inf``
+    off its support (``e = 0`` included: the Beta density diverges there).
 
     Args:
         Ms_kg: Stellar mass (kg). Default one solar mass.
@@ -732,7 +733,7 @@ class FixedMassTarget(AbstractUpdateTarget):
         ln_a_lo, ln_a_hi = self.ln_a_bounds()
         k = jax.random.split(key, 6)
         ln_a = jax.random.uniform(k[0], (n,), minval=ln_a_lo, maxval=ln_a_hi)
-        e = jax.random.beta(k[1], ECC_ALPHA, ECC_BETA, (n,))
+        e = kipping_eccentricity().sample(k[1], (n,))
         cos_i = jax.random.uniform(k[2], (n,), minval=-1.0, maxval=1.0)
         W, omega, m_ref = (
             jax.random.uniform(k[i], (n,), maxval=two_pi) for i in (3, 4, 5)
@@ -755,7 +756,7 @@ class FixedMassTarget(AbstractUpdateTarget):
         density = orbit_log_prior(
             orbit,
             period_range_d=(self.period_lo_day, self.period_hi_day),
-            e_max=self.e_max,
+            eccentricity=kipping_eccentricity(self.e_max),
         )
         volume = orbit_chart_log_volume(_EV_CHART, theta)
         return jnp.where(

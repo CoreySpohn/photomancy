@@ -57,6 +57,7 @@ docs = [
     "blackjax>=1.6",
     "jaxctx>=1.2.0",
     "jaxns>=3.0.0",
+    "tfp-nightly>=0.26.0.dev20260621",
 ]
 # Include the plotting and sampler dependencies directly so their tests run without
 # a recursive self-version constraint, including in shallow VCS checkouts.
@@ -85,9 +86,20 @@ test = [
 # >=1.6: the MCLMC tuner requires logdensity_fn from 1.6 on, and 1.5 does
 # not accept the keyword, so the two cannot be supported by one call.
 blackjax = ["blackjax>=1.6"]  # NUTS, MCLMC, Pathfinder and tempered SMC
-# jaxctx supplies the prior interface the jaxns 3 adapter subclasses.
-jaxns = ["jaxctx>=1.2.0", "jaxns>=3.0.0"]  # nested sampling
-samplers = ["blackjax>=1.6", "jaxctx>=1.2.0", "jaxns>=3.0.0"]
+# jaxctx supplies the prior interface the jaxns 3 adapter subclasses. The chart
+# nested prior takes the chi quantile of the quaternion radius from
+# tensorflow_probability (jaxns uses the same provider).
+jaxns = [
+    "jaxctx>=1.2.0",
+    "jaxns>=3.0.0",
+    "tfp-nightly>=0.26.0.dev20260621",
+]  # nested sampling
+samplers = [
+    "blackjax>=1.6",
+    "jaxctx>=1.2.0",
+    "jaxns>=3.0.0",
+    "tfp-nightly>=0.26.0.dev20260621",
+]
 # eyepiece>=0.1.0 carries every interface photomancy.viz calls (corner,
 # corner_overlay, sky_fan, cov_ellipse, save_fig, PlotResult); checked by
 # interface in the test suite rather than by version string.
@@ -168,11 +180,11 @@ optional_dependencies_dev_groups = ["dev", "docs", "test"]
 [tool.deptry.per_rule_ignores]
 DEP002 = [
     "jaxlib",  # JAX loads its compiled backend; retain the explicit version floor.
-    "skyscapes",  # Disk and atmosphere fits consume user-supplied skyscapes models.
     # The sampler extras are imported by name when a backend runs.
     "blackjax",
     "jaxctx",
     "jaxns",
+    "tfp-nightly",
 ]
 
 [tool.ty.environment]

@@ -5,7 +5,8 @@ import jax.numpy as jnp
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
 from orbix.system import Body, ClassicalChart, SkyFrame, System
-from priorities import LogUniform
+from priorities import LogUniform, Uniform
+from skyscapes.population import kipping_eccentricity, rayleigh_eccentricity
 
 from photomancy import RelativeAstrometryTerm
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
@@ -13,6 +14,16 @@ from photomancy.orbit.init import find_init
 from photomancy.orbit.laplace import map_laplace_fit
 from photomancy.priors import FactorizedOrbitPrior, orbit_log_prior
 from photomancy.system_density import ScalarCoordinate
+
+
+def ecc_law(name):
+    """The named eccentricity distribution, built on demand so it follows x64."""
+    return {
+        "disk": lambda: Uniform(0.0, 1.0),
+        "kipping13": kipping_eccentricity,
+        "rayleigh": lambda: rayleigh_eccentricity(0.3, 1.0),
+        "vaneylen19": lambda: rayleigh_eccentricity(0.049, 1.0),
+    }[name]()
 
 
 def _first_orbit(system):
@@ -110,7 +121,7 @@ def mass_problem(
     chart=None,
     period_range_d=(600.0, 1600.0),
     mass_bounds=(0.01, 1.0e4),
-    ecc_prior="kipping13",
+    eccentricity=None,
 ):
     """One-planet chart problem whose planet mass is sampled in ``ln(Mearth)``.
 
@@ -131,7 +142,11 @@ def mass_problem(
     density = build_chart_logdensity(
         chart,
         build,
-        FactorizedOrbitPrior(_first_orbit, period_range_d, ecc_prior),
+        FactorizedOrbitPrior(
+            _first_orbit,
+            period_range_d,
+            ecc_law("kipping13") if eccentricity is None else eccentricity,
+        ),
         star_mass_kg=star_mass_kg,
         terms=tuple(terms),
         scalars={"mass_Mearth": ScalarCoordinate(LogUniform(*mass_bounds))},

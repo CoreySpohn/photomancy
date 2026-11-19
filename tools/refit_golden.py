@@ -44,6 +44,7 @@ import numpy as np
 from hwoutils.constants import G, Msun2kg, Rearth2AU, mas2arcsec, two_pi
 from orbix.system import FrameOrbit
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
+from skyscapes.population import kipping_eccentricity
 
 from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 from photomancy.orbit.data import RelativeAstromData
@@ -57,7 +58,6 @@ from photomancy.orbit.refit import (
     physical_prior_target,
     scale_rotate_draw,
 )
-from photomancy.priors import ECC_ALPHA, ECC_BETA
 
 jax.config.update("jax_enable_x64", True)
 
@@ -228,7 +228,7 @@ def brute_force_reference(k, n_chunks=64, seed=1):
     for chunk in range(n_chunks):
         ks = jax.random.split(jax.random.fold_in(jax.random.key(seed), chunk), 7)
         n = BRUTE_CHUNK
-        e = jax.random.beta(ks[0], ECC_ALPHA, ECC_BETA, (n,))
+        e = kipping_eccentricity().sample(ks[0], (n,))
         ln_p = jax.random.uniform(ks[1], (n,), minval=m.lnP_lo, maxval=m.lnP_hi)
         tau = jax.random.uniform(ks[2], (n,))
         cos_i = jax.random.uniform(ks[3], (n,), minval=-1.0, maxval=1.0)

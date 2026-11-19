@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg
 from kinematics import predict_photometry, predict_relative_astrometry
-from orbit_fit import classical_coordinates, mass_problem
+from orbit_fit import classical_coordinates, ecc_law, mass_problem
 from orbix.equations import period_to_sma
 
 from photomancy.infer.posterior import MixturePosterior
@@ -34,7 +34,7 @@ def _problem(mass_bounds=(1e3, 1e6), period_range_d=(10.0, 1e4)):
         dist_pc=10.0,
         period_range_d=period_range_d,
         mass_bounds=mass_bounds,
-        ecc_prior="disk",
+        eccentricity=ecc_law("disk"),
     )
 
 

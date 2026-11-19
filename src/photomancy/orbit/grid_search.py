@@ -312,8 +312,15 @@ def grid_search(
         jnp.where(support2 & jnp.isfinite(log_target), log_target - log_q, -jnp.inf)
     )
     orbits = _CHART.to_orbit(safe_x, mu_AU3_per_d2=mu, epoch_d=0.0)
-    rows = orbits.periapsis_rows()
-    rows = rows.at[:, 6].set(jnp.mod(rows[:, 6], orbits.period_d))
+    elements = orbits.to_periapsis_elements()
+    elements["tp_d"] = jnp.mod(elements["tp_d"], orbits.period_d)
+    rows = jnp.stack(
+        [
+            elements[k]
+            for k in ("a_AU", "e", "cos_i", "W_rad", "cos_w", "sin_w", "tp_d")
+        ],
+        axis=-1,
+    )
     return SamplePosterior(
         samples=rows,
         log_weights=log_w,

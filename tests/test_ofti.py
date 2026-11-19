@@ -13,6 +13,7 @@ import pytest
 from hwoutils.constants import G
 from hwoutils.epoch import Epoch
 from kinematics import predict_relative_astrometry
+from orbit_fit import ecc_law
 from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_anomaly_tp, mean_motion
 
@@ -28,7 +29,6 @@ from photomancy.orbit.ofti import (
     ofti,
     scored_orbit,
 )
-from photomancy.priors import ECC_PRIOR_NAMES, eccentricity_draws
 
 MSUN = 1.98892e30
 DIST_PC = 10.0
@@ -83,9 +83,13 @@ def _logP_from_a(a):
     return np.log10(2.0 * np.pi / np.sqrt(MU / np.asarray(a) ** 3))
 
 
-def _anchor_correction(key, n, data, ecc_prior="disk"):
+_ELEMENT_KEYS = ("a_AU", "e", "cos_i", "W_rad", "cos_w", "sin_w", "tp_d")
+
+
+def _anchor_correction(key, n, data, eccentricity=None):
     """``2 ln rho`` of the reference targets that ``sample_and_score`` draws."""
-    *_, tx, ty = _draw_anchor_proposals(key, n, data, 0, ecc_prior)
+    eccentricity = ecc_law("disk") if eccentricity is None else eccentricity
+    *_, tx, ty = _draw_anchor_proposals(key, n, data, 0, eccentricity)
     return 2.0 * jnp.log(jnp.hypot(tx, ty))
 
 
@@ -126,7 +130,7 @@ def test_scale_and_rotate_hits_ref_point():
         30.0,
         0.99,
     )
-    a, e, cos_i, W, cos_w, sin_w, tp = (float(row[i]) for i in range(7))
+    a, e, cos_i, W, cos_w, sin_w, tp = (float(row[k]) for k in _ELEMENT_KEYS)
     ra_p, dec_p = predict_relative_astrometry(
         jnp.atleast_1d(t_ref), a, e, cos_i, W, cos_w, sin_w, tp, MSUN, DIST_PC
     )
@@ -156,8 +160,8 @@ def test_period_kepler_consistent():
         30.0,
         0.99,
     )
-    a = float(row[0])
-    tp = float(row[6])
+    a = float(row["a_AU"])
+    tp = float(row["tp_d"])
     n_new = mean_motion(a, MU)
     m_recovered = float(mean_anomaly_tp(t_ref, n_new, tp) % (2.0 * jnp.pi))
     assert m_recovered == pytest.approx(m_ref % (2.0 * np.pi), abs=1e-4)
@@ -296,9 +300,10 @@ def test_scale_rotate_matches_frozen_perifocal_route():
     inputs = jnp.asarray(_FROZEN_INPUTS)
     t_ref = data.times[0]
     score_data = eqx.tree_at(lambda d: d.is_valid, data, data.is_valid.at[0].set(False))
-    rows, ll = jax.vmap(
+    elements, ll = jax.vmap(
         lambda r: scored_orbit(*r, score_data, t_ref, MU, DIST_PC, 2.0, 3.0, 0.9)
     )(inputs)
+    rows = jnp.stack([elements[k] for k in _ELEMENT_KEYS], axis=-1)
     np.testing.assert_allclose(rows, np.asarray(_FROZEN_ROWS), rtol=1e-9, atol=1e-9)
     error = np.abs(np.asarray(ll) - np.asarray(_FROZEN_LL))
     floor = max(1e-10, 64 * np.finfo(float).eps * np.sum(1 + np.abs(_FROZEN_LL)))
@@ -306,7 +311,7 @@ def test_scale_rotate_matches_frozen_perifocal_route():
     print(f"OFTI: score error {error.max():.3g}, floor {floor:.3g}")
 
     key = jax.random.PRNGKey(3)
-    args = (key, 512, data, 0, MSUN, DIST_PC, "kipping13")
+    args = (key, 512, data, 0, MSUN, DIST_PC, ecc_law("kipping13"))
     _, scored = _sample_and_score(*args, (2.0, 3.0), 0.9)
     _, uncut = _sample_and_score(*args, (-30.0, 30.0), 1.0)
     inside = np.isfinite(np.asarray(scored))
@@ -418,7 +423,7 @@ def test_single_epoch_reference_scatter(loglike_ref):
         dist_pc=DIST_PC,
         key=key,
         n_accept=n,
-        ecc_prior="disk",
+        eccentricity=ecc_law("disk"),
         log_P_range=(-30.0, 30.0),
         e_max=1.0,
         batch=4096,
@@ -441,7 +446,7 @@ def test_single_epoch_reference_scatter(loglike_ref):
 
     _, proposal_key, _ = jax.random.split(key, 3)
     rows, ll = _sample_and_score(
-        proposal_key, 4096, data, 0, MSUN, DIST_PC, "disk", (-30.0, 30.0), 1.0
+        proposal_key, 4096, data, 0, MSUN, DIST_PC, ecc_law("disk"), (-30.0, 30.0), 1.0
     )
     # The only score is the importance correction -2 ln rho of the reference target
     # (rho well under 1 arcsec here, so it is positive and below the bound 0.0).
@@ -462,7 +467,15 @@ def test_score_uses_only_nonreference_epoch():
         (jnp.array([True, True, False]), jnp.full(3, 0.4)),
     )
     rows, ll = _sample_and_score(
-        jax.random.PRNGKey(0), 5, data, 0, MSUN, DIST_PC, "disk", (-30.0, 30.0), 1.0
+        jax.random.PRNGKey(0),
+        5,
+        data,
+        0,
+        MSUN,
+        DIST_PC,
+        ecc_law("disk"),
+        (-30.0, 30.0),
+        1.0,
     )
     ra, dec = _predict_rows(data.times, *rows.T, MSUN, DIST_PC)
     dx = np.asarray((data.ra[1] - ra[:, 1]) / data.ra_err[1])
@@ -472,7 +485,7 @@ def test_score_uses_only_nonreference_epoch():
     second_epoch_ll -= np.log(
         2.0 * np.pi * float(data.ra_err[1] * data.dec_err[1]) * np.sqrt(1.0 - rho**2)
     )
-    ll = ll + _anchor_correction(jax.random.PRNGKey(0), 5, data, "disk")
+    ll = ll + _anchor_correction(jax.random.PRNGKey(0), 5, data, ecc_law("disk"))
     np.testing.assert_allclose(ll, second_epoch_ll, rtol=1e-4, atol=1e-4)
 
 
@@ -507,7 +520,7 @@ def test_prior_recovery():
         dist_pc=DIST_PC,
         key=jax.random.PRNGKey(1),
         n_accept=6000,
-        ecc_prior="disk",
+        eccentricity=ecc_law("disk"),
         log_P_range=(-30.0, 30.0),
         e_max=0.999,
         batch=20000,
@@ -528,7 +541,7 @@ def test_single_epoch_broad_posterior():
         dist_pc=DIST_PC,
         key=jax.random.PRNGKey(1),
         n_accept=4000,
-        ecc_prior="disk",
+        eccentricity=ecc_law("disk"),
         log_P_range=(2.0, 3.0),
         batch=20000,
     )
@@ -554,7 +567,7 @@ def test_truth_recovery():
         dist_pc=DIST_PC,
         key=jax.random.PRNGKey(4),
         n_accept=800,
-        ecc_prior="disk",
+        eccentricity=ecc_law("disk"),
         log_P_range=(1.5, 4.0),
         batch=100000,
         max_batches=200,
@@ -568,19 +581,6 @@ def test_truth_recovery():
 # ---------------------------------------------------------------------------
 # Eccentricity distribution helper
 # ---------------------------------------------------------------------------
-
-
-def test_eccentricity_draws():
-    """Every named law draws eccentricities in [0, 1); unknown names raise.
-
-    Fails if a registry name is dropped or a law leaves the unit interval.
-    """
-    for name in ECC_PRIOR_NAMES:
-        draws = eccentricity_draws(jax.random.PRNGKey(0), (2000,), name)
-        assert draws.shape == (2000,)
-        assert bool(jnp.all((draws >= 0.0) & (draws < 1.0)))
-    with pytest.raises(ValueError):
-        eccentricity_draws(jax.random.PRNGKey(0), (2,), "not-a-prior")
 
 
 # ---------------------------------------------------------------------------
@@ -606,7 +606,7 @@ def test_ofti_matches_nuts():
         dist_pc=DIST_PC,
         key=jax.random.PRNGKey(8),
         n_accept=2000,
-        ecc_prior="kipping13",
+        eccentricity=ecc_law("kipping13"),
         log_P_range=log_P_range,
         e_max=1.0,
         batch=100000,

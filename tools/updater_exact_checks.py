@@ -824,7 +824,12 @@ def reference_sample(protocol, setup, key, n_prop, chunk=2**16):
         ms, dist = float(target.Ms_kg), float(target.dist_pc)
         scored = records(setup, mask=np.zeros(1, bool))
         log_p = tuple(math.log10(p) for p in setup["period_days"])
-        ecc = protocol["model_pairs"]["physical_fixed"]["defaults"]["ecc_prior"]
+        from skyscapes.population import kipping_eccentricity
+
+        assert protocol["model_pairs"]["physical_fixed"]["defaults"]["ecc_prior"] == (
+            "kipping13"
+        )
+        ecc = kipping_eccentricity()
         batch = min(chunk, n_prop)
         rows_fn = panel._physical_rows_fn()
 

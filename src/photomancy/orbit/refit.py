@@ -44,11 +44,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
-from jax.scipy.special import betainc, logsumexp, ndtr
+from jax.scipy.special import logsumexp, ndtr
 from orbix.equations.orbit import mean_motion, thiele_innes_to_elements
 from orbix.system import FrameOrbit, ThieleInnesChart, sky_block_to_frame
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 from orbix.system.rotation import rotate
+from skyscapes.population import kipping_eccentricity
 
 from photomancy.infer.particles import (
     kish_ess,
@@ -65,7 +66,7 @@ from photomancy.orbit.updater import (
     _linear_gaussian,
     _rest_log_prior,
 )
-from photomancy.priors import ECC_ALPHA, ECC_BETA, orbit_log_prior
+from photomancy.priors import orbit_log_prior
 from photomancy.report import ReportLaw, ReportPrediction
 
 ELEMENT_NAMES = (
@@ -176,7 +177,7 @@ class PhysicalPriorTarget(ThieleInnesTarget):
         density = orbit_log_prior(
             orbit,
             period_range_d=(jnp.exp(m.lnP_lo), jnp.exp(m.lnP_hi)),
-            e_max=m.e_max,
+            eccentricity=kipping_eccentricity(m.e_max),
         )
         in_window = (orbit.mu_AU3_per_d2 >= m.mu_lo) & (orbit.mu_AU3_per_d2 <= m.mu_hi)
         log_mass = jnp.where(in_window, -jnp.log(jnp.log(m.mu_hi / m.mu_lo)), -jnp.inf)
@@ -518,7 +519,7 @@ def _report_xy(target, theta, data):
     """Orbit-plane ``(cos E - e, sqrt(1 - e^2) sin E)`` at the report epochs."""
     e, ln_period, tau = theta[0], theta[1], theta[2]
     m = target.model
-    xy, _ = FrameOrbit.unit_plane_from_phase(
+    xy, _ = FrameOrbit.from_unit_plane_phase(
         e, ln_period, tau, m.t_ref
     ).perifocal_coordinates(data.epochs)
     return xy[..., 0], xy[..., 1]
@@ -1326,7 +1327,7 @@ def scale_rotate_draw(target, records, key, *, n_proposals, report=None):
     n = n_proposals
     anchor = jnp.argmax(records.is_valid)
     k = jax.random.split(key, 8)
-    e = jax.random.beta(k[0], ECC_ALPHA, ECC_BETA, (n,))
+    e = kipping_eccentricity().sample(k[0], (n,))
     cos_i = jax.random.uniform(k[1], (n,), minval=-1.0, maxval=1.0)
     omega = jax.random.uniform(k[2], (n,), maxval=two_pi)
     m_ref = jax.random.uniform(k[3], (n,), maxval=two_pi)
@@ -1374,18 +1375,17 @@ def scale_rotate_draw(target, records, key, *, n_proposals, report=None):
     log_offset = (
         jnp.log((2.0 / 3.0) * (m.lnP_hi - m.lnP_lo))
         + jnp.log(two_pi)
-        + jnp.log(betainc(ECC_ALPHA, ECC_BETA, m.e_max))
+        + jnp.log(kipping_eccentricity().cdf(m.e_max))
     )
-    a, ec, ci, w_node, cw, sw, tp = rows.T
-    period = two_pi / mean_motion(a, mu)
+    period = two_pi / mean_motion(rows["a_AU"], mu)
     elements = jnp.stack(
         [
             jnp.log(period),
-            ec,
-            ci,
-            w_node,
-            jnp.mod(jnp.arctan2(sw, cw), two_pi),
-            jnp.mod((tp - m.t_ref) / period, 1.0),
+            rows["e"],
+            rows["cos_i"],
+            rows["W_rad"],
+            jnp.mod(jnp.arctan2(rows["sin_w"], rows["cos_w"]), two_pi),
+            jnp.mod((rows["tp_d"] - m.t_ref) / period, 1.0),
             ln_mu - jnp.log(MU_SUN),
             jnp.full(n, jnp.nan),
         ],
@@ -1564,7 +1564,7 @@ def prior_cloud(target, key, n):
     """
     m = target.model
     k = jax.random.split(key, 8)
-    pool = jax.random.beta(k[0], ECC_ALPHA, ECC_BETA, (2 * n,))
+    pool = kipping_eccentricity().sample(k[0], (2 * n,))
     order = jnp.argsort(pool >= m.e_max, stable=True)
     ecc = pool[order][:n]
     ln_period = jax.random.uniform(k[1], (n,), minval=m.lnP_lo, maxval=m.lnP_hi)

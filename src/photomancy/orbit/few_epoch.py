@@ -97,7 +97,7 @@ class TIBasisModel(eqx.Module):
         with X = cos(E) - e and Y = sqrt(1-e^2) sin(E).
         """
         e, lnP, tau = theta[0], theta[1], theta[2]
-        xy, _ = FrameOrbit.unit_plane_from_phase(
+        xy, _ = FrameOrbit.from_unit_plane_phase(
             e, lnP, tau, self.t_ref
         ).perifocal_coordinates(times)
         X, Y = xy[..., 0], xy[..., 1]

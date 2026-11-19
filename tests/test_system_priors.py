@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Mearth2kg, Msun2kg, Rearth2AU, two_pi
 from hwoutils.epoch import Epoch
+from orbit_fit import ecc_law
 from orbix.equations import period_to_sma
 from orbix.system import (
     Body,
@@ -23,7 +24,7 @@ from orbix.system import (
     SkyFrame,
     System,
 )
-from priorities import HalfNormal, LogUniform
+from priorities import HalfNormal, LogUniform, TruncatedDistribution
 from scipy import integrate, stats
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Scene
@@ -130,16 +131,20 @@ def test_eccentricity_sites_and_conditional_cdfs():
         ("vaneylen19", stats.rayleigh(scale=0.049)),
         ("kipping13", stats.beta(0.867, 3.03)),
     ):
-        law = partial(orbit_log_prior, ecc_prior=name)
+        law = partial(orbit_log_prior, eccentricity=ecc_law(name))
         _check(
             name,
             law(orbits),
             jnp.asarray(_ECC_LOG_PROB[name]) - jnp.log(orbits.e) + constant,
         )
 
-        def density(e, law=law):
+        capped = partial(
+            orbit_log_prior, eccentricity=TruncatedDistribution(ecc_law(name), high=cap)
+        )
+
+        def density(e, capped=capped):
             orbit = eqx.tree_at(lambda o: (o.ex, o.ey), one, (e, 0.0))
-            return law(orbit, e_max=cap)
+            return capped(orbit)
 
         score = jax.jit(density)
         for end in (0.17, cap):
@@ -151,8 +156,8 @@ def test_eccentricity_sites_and_conditional_cdfs():
                 epsrel=1e-12,
             )
             _check(f"{name} CDF", area, marginal.cdf(end) / marginal.cdf(cap))
-        assert np.isneginf(score(cap))
-        assert np.isfinite(score(0.0)) == (name in ("rayleigh", "vaneylen19"))
+        assert np.isneginf(score(cap + 1e-9))
+        assert np.isneginf(score(0.0))
 
 
 def test_scalar_cdfs_and_support():
@@ -251,7 +256,11 @@ def test_fixed_mass_reference_across_charts():
         density = build_chart_logdensity(
             chart,
             lambda o: o,
-            partial(orbit_log_prior, period_range_d=(50, 5000), e_max=0.7),
+            partial(
+                orbit_log_prior,
+                period_range_d=(50, 5000),
+                eccentricity=TruncatedDistribution(ecc_law("kipping13"), high=0.7),
+            ),
             star_mass_kg=Msun2kg,
         )
         params = {"orbit": chart.from_orbit(orbits)}
@@ -339,7 +348,7 @@ def test_old_unconstrained_joint_with_sampled_jitter():
         chart,
         _scene,
         lambda s: orbit_log_prior(
-            s.dynamics.orbits, period_range_d=(10, 1e4), ecc_prior="disk"
+            s.dynamics.orbits, period_range_d=(10, 1e4), eccentricity=ecc_law("disk")
         )[0],
         star_mass_kg=Msun2kg,
         terms=(RadialVelocityTerm(poisoned),),
@@ -392,6 +401,7 @@ def test_fixed_count_population_intensity():
         OccurrencePopulation,
         PlanetTypes,
         PopulationConfig,
+        kipping_eccentricity,
         occurrence_table_from_grid,
     )
 
@@ -409,7 +419,7 @@ def test_fixed_count_population_intensity():
     )
     grid = occurrence_table_from_grid([[2.5]], [0.1, 8.0], [0.2, 20.0], [[0]])
     population = OccurrencePopulation(
-        grid, types, PopulationConfig(e_min=0.01, e_max=0.9), Epoch()
+        grid, types, PopulationConfig(eccentricity=kipping_eccentricity(0.9)), Epoch()
     )
     prior = PopulationPrior(population, host)
     build = partial(population.mark_build, host, label=0)
@@ -443,7 +453,7 @@ def test_fixed_count_population_intensity():
         expected + jnp.log(mass),
     )
     scene = jax.tree.map(lambda x: x[0], scenes)
-    packed = Scene.from_systems([scene], capacity=2)
+    packed = Scene.from_scenes([scene], capacity=2)
     padded = jax.tree.map(lambda x: x[0], packed)
     _check("one valid population slot", eqx.filter_jit(prior)(padded), expected[0])
     absent = eqx.tree_at(lambda s: s.valid, scene, jnp.array([False]))

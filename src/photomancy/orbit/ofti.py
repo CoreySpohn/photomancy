@@ -22,14 +22,15 @@ import jax
 import jax.numpy as jnp
 from hwoutils.constants import G
 from orbix.system import ClassicalChart
+from skyscapes.population import kipping_eccentricity
 
 from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.inference import ORBIT_ROWS_CHART
 from photomancy.orbit.likelihoods import loglike_relative_astrom
-from photomancy.priors import eccentricity_draws
 
 # Output rows match grid_search column order for cross-tier compatibility.
 PARAM_NAMES = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")
+_ELEMENT_KEYS = ("a_AU", "e", "cos_i", "W_rad", "cos_w", "sin_w", "tp_d")
 
 _TWO_PI = 2.0 * jnp.pi
 
@@ -42,16 +43,16 @@ def _default_ref_idx(data):
     return int(jnp.argmax(snr))
 
 
-def _draw_anchor_proposals(key, n, data, ref_idx, ecc_prior):
+def _draw_anchor_proposals(key, n, data, ref_idx, eccentricity):
     """Draw shapes from their priors and a reference target from its Gaussian error.
 
     Returns ``(e, cos_i, omega, m_ref, tx, ty)``, each shape ``(n,)``: eccentricity
-    from the named law, ``cos_i`` uniform, argument of periapsis and reference mean
-    anomaly uniform, and the target offset (arcsec) as the observed reference point
-    plus its correlated Gaussian noise.
+    from the eccentricity distribution, ``cos_i`` uniform, argument of periapsis and
+    reference mean anomaly uniform, and the target offset (arcsec) as the observed
+    reference point plus its correlated Gaussian noise.
     """
     k_e, k_i, k_w, k_m, k_n1, k_n2 = jax.random.split(key, 6)
-    e = eccentricity_draws(k_e, (n,), ecc_prior)
+    e = eccentricity.sample(k_e, (n,))
     cos_i = jax.random.uniform(k_i, (n,), minval=-1.0, maxval=1.0)
     omega = jax.random.uniform(k_w, (n,), minval=0.0, maxval=_TWO_PI)
     m_ref = jax.random.uniform(k_m, (n,), minval=0.0, maxval=_TWO_PI)
@@ -79,7 +80,7 @@ class AbstractConditioner(eqx.Module):
 
     @abstractmethod
     def sample_and_score(
-        self, key, n, data, ref_idx, Ms, dist_pc, ecc_prior, log_P_range, e_max
+        self, key, n, data, ref_idx, Ms, dist_pc, eccentricity, log_P_range, e_max
     ):
         """Return ``(rows (n, 7), loglike (n,))`` for ``n`` proposed orbits."""
 
@@ -144,8 +145,8 @@ def scored_orbit(
 ):
     """Scale-and-rotate one drawn shape onto a target and score it on ``data``.
 
-    Returns ``(row, loglike)``: the orbit's ``periapsis_rows`` row
-    ``(a, e, cos_i, W, cos_w, sin_w, tp)`` and the relative-astrometry
+    Returns ``(elements, loglike)``: the orbit's ``to_periapsis_elements`` dict
+    (``a_AU, e, cos_i, W_rad, cos_w, sin_w, tp_d``) and the relative-astrometry
     log-likelihood of the valid rows of ``data`` (the caller masks the reference
     epoch), ``-inf`` outside the period range or ``e < e_max``. The score carries
     no ``-2 ln rho`` correction.
@@ -165,7 +166,7 @@ def scored_orbit(
     ll = loglike_relative_astrom(ra, dec, data)
     log_P = jnp.log10(orbit.period_d)
     in_support = (log_P >= log_P_lo) & (log_P <= log_P_hi) & (e < e_max)
-    return orbit.periapsis_rows(), jnp.where(in_support, ll, -jnp.inf)
+    return orbit.to_periapsis_elements(), jnp.where(in_support, ll, -jnp.inf)
 
 
 class ScaleAndRotate(AbstractConditioner):
@@ -187,7 +188,7 @@ class ScaleAndRotate(AbstractConditioner):
     """
 
     def sample_and_score(
-        self, key, n, data, ref_idx, Ms, dist_pc, ecc_prior, log_P_range, e_max
+        self, key, n, data, ref_idx, Ms, dist_pc, eccentricity, log_P_range, e_max
     ):
         """Draw n orbits from priors and scale-and-rotate onto the reference epoch.
 
@@ -198,7 +199,7 @@ class ScaleAndRotate(AbstractConditioner):
             ref_idx: Reference-epoch index for scale-and-rotate.
             Ms: Stellar mass (kg).
             dist_pc: Distance (parsec).
-            ecc_prior: Eccentricity prior name (see priors.ECC_PRIOR_NAMES).
+            eccentricity: Eccentricity distribution (a ``priorities`` record).
             log_P_range: (log10 P min, log10 P max) truncation on derived period.
             e_max: Eccentricity truncation.
 
@@ -208,7 +209,7 @@ class ScaleAndRotate(AbstractConditioner):
             outside the truncated support.
         """
         e, cos_i, omega, m_ref, tx, ty = _draw_anchor_proposals(
-            key, n, data, ref_idx, ecc_prior
+            key, n, data, ref_idx, eccentricity
         )
         mu = G * Ms
         t_ref = data.times[ref_idx]
@@ -219,7 +220,7 @@ class ScaleAndRotate(AbstractConditioner):
         safe_e = jnp.clip(e, 1e-12, 1.0 - 1e-12)
 
         def condition(e_i, ci_i, w_i, m_i, tx_i, ty_i):
-            row, ll = scored_orbit(
+            elements, ll = scored_orbit(
                 e_i,
                 ci_i,
                 w_i,
@@ -234,9 +235,10 @@ class ScaleAndRotate(AbstractConditioner):
                 log_P_hi,
                 e_max,
             )
-            return row, ll - 2.0 * jnp.log(jnp.hypot(tx_i, ty_i))
+            return elements, ll - 2.0 * jnp.log(jnp.hypot(tx_i, ty_i))
 
-        return jax.vmap(condition)(safe_e, cos_i, omega, m_ref, tx, ty)
+        elements, ll = jax.vmap(condition)(safe_e, cos_i, omega, m_ref, tx, ty)
+        return jnp.stack([elements[name] for name in _ELEMENT_KEYS], axis=-1), ll
 
 
 def ofti(
@@ -247,7 +249,7 @@ def ofti(
     key,
     n_accept=2000,
     ref_idx=None,
-    ecc_prior="kipping13",
+    eccentricity=None,
     log_P_range=(2.0, 5.0),
     e_max=0.99,
     batch=10**5,
@@ -276,7 +278,8 @@ def ofti(
         key: JAX PRNG key.
         n_accept: Target number of accepted orbits. Default 2000.
         ref_idx: Reference-epoch index; None selects the highest-SNR valid epoch.
-        ecc_prior: Eccentricity prior name. Default "kipping13".
+        eccentricity: Eccentricity distribution (a ``priorities`` record). Default
+            ``kipping_eccentricity()``.
         log_P_range: (log10 P min, log10 P max) truncation on the derived period
             (days). Truncates the prior induced by scale-and-rotate.
         e_max: Eccentricity truncation. Default 0.99.
@@ -302,6 +305,8 @@ def ofti(
             accepted (acceptance too low; use Laplace/NUTS for well-constrained,
             long-arc orbits).
     """
+    if eccentricity is None:
+        eccentricity = kipping_eccentricity()
     if conditioner is None:
         conditioner = ScaleAndRotate()
     if ref_idx is None:
@@ -310,7 +315,7 @@ def ofti(
     @eqx.filter_jit
     def score_batch(k):
         return conditioner.sample_and_score(
-            k, batch, data, ref_idx, Ms, dist_pc, ecc_prior, log_P_range, e_max
+            k, batch, data, ref_idx, Ms, dist_pc, eccentricity, log_P_range, e_max
         )
 
     accepted = []

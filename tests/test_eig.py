@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
 from kinematics import predict_relative_astrometry
-from orbit_fit import chart_problem, classical_coordinates, scale_problem
+from orbit_fit import chart_problem, classical_coordinates, ecc_law, scale_problem
 from orbix.equations import period_a, period_to_sma
 
 from photomancy import RelativeAstrometryTerm
@@ -271,7 +271,7 @@ def test_ofti_to_eig_end_to_end():
         dist_pc=DIST_PC,
         key=jax.random.key(0),
         n_accept=1000,
-        ecc_prior="disk",
+        eccentricity=ecc_law("disk"),
         log_P_range=tuple(float(np.log10(x)) for x in PERIOD_RANGE_D),
         batch=50000,
         max_batches=300,

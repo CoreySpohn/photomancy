@@ -67,7 +67,7 @@ def test_find_init_period_is_kepler_consistent():
     """find_init's period must imply (via Kepler III) the true orbit size."""
     data, a_true = _seed3001_three_epoch()
     orbit, _ = _best_start(data)
-    a_kepler = float(orbit.periapsis_rows()[0])
+    a_kepler = float(orbit.to_periapsis_elements()["a_AU"])
     # the Kepler-implied semimajor axis must match the true orbit, not an a-free alias
     assert abs(a_kepler - a_true) / a_true < 0.15, (
         f"got T={float(orbit.period_d):.0f}d -> a={a_kepler:.3f}, truth {a_true:.3f}"
@@ -205,11 +205,11 @@ def test_chart_fit_matches_frozen_perifocal_fit_over_trials():
             floor = max(1e-10, 64 * eps * (1.0 + abs(want)))
             assert abs(float(got) - want) <= floor * max(1.0, abs(want))
             worst = max(worst, abs(float(got) - want) / max(1.0, abs(want)))
-        rows = np.asarray(new.orbits.periapsis_rows())
-        np.testing.assert_allclose(rows[:, 0], a, rtol=1e-8)
-        np.testing.assert_allclose(rows[:, 2], cos_i, rtol=1e-8, atol=1e-10)
-        np.testing.assert_allclose(rows[:, 1], e, rtol=1e-10)
-        offset = np.abs(np.angle(np.exp(1j * (rows[:, 3] - W))))
+        elements = new.orbits.to_periapsis_elements()
+        np.testing.assert_allclose(elements["a_AU"], a, rtol=1e-8)
+        np.testing.assert_allclose(elements["cos_i"], cos_i, rtol=1e-8, atol=1e-10)
+        np.testing.assert_allclose(elements["e"], e, rtol=1e-10)
+        offset = np.abs(np.angle(np.exp(1j * (np.asarray(elements["W_rad"]) - W))))
         np.testing.assert_allclose(np.sort(offset), [0.0, np.pi], atol=1e-8)
         assert sorted(np.asarray(new.branches).tolist()) == [-1, 1]
         sky = [

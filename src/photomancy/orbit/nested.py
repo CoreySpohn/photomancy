@@ -118,8 +118,9 @@ class OrbitPriorTransform(eqx.Module):
             q = jnp.where(q == 0.0, 0.5, q)
             sd = problem.chart.gauge_sd
             if sd is None:
-                from tensorflow_probability.substrates.jax.math import igammainv
-
+                igammainv = import_extra(
+                    "tensorflow_probability.substrates.jax.math", "jaxns"
+                ).igammainv
                 radius = jnp.sqrt(2 * igammainv(2.0, q))  # chi distribution, 4 d.o.f.
             else:
                 # A normal centered at one conditioned on a positive radius.

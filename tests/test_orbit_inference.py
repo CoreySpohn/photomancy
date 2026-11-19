@@ -10,7 +10,12 @@ jax.config.update("jax_enable_x64", True)
 from hwoutils.constants import G  # noqa: E402
 from hwoutils.epoch import Epoch  # noqa: E402
 from kinematics import predict_relative_astrometry  # noqa: E402
-from orbit_fit import _first_orbit, chart_problem, classical_coordinates  # noqa: E402
+from orbit_fit import (  # noqa: E402
+    _first_orbit,
+    chart_problem,
+    classical_coordinates,
+    ecc_law,
+)
 from orbix.equations import period_a, period_to_sma  # noqa: E402
 from orbix.system import (  # noqa: E402
     Body,
@@ -181,7 +186,7 @@ def test_orbit_nested_sampling_recovers_period_and_evidence():
     density = build_chart_logdensity(
         chart,
         build,
-        FactorizedOrbitPrior(_first_orbit, PERIOD_RANGE_D, "kipping13"),
+        FactorizedOrbitPrior(_first_orbit, PERIOD_RANGE_D, ecc_law("kipping13")),
         star_mass_kg=MSUN_KG,
         terms=(RelativeAstrometryTerm(astrom),),
     )

@@ -2246,10 +2246,22 @@ class UnitExecutor:
             self._physical_rows = _physical_rows_fn()
         batch = min(self.chunk, n_prop)
 
+        from skyscapes.population import kipping_eccentricity
+
+        assert defaults["ecc_prior"] == "kipping13"
+
         @eqx.filter_jit
         def score(kb):
             rows, ll = ScaleAndRotate().sample_and_score(
-                kb, batch, scored, anchor, ms, dist, defaults["ecc_prior"], log_p, e_max
+                kb,
+                batch,
+                scored,
+                anchor,
+                ms,
+                dist,
+                kipping_eccentricity(),
+                log_p,
+                e_max,
             )
             return rows, ll
 
