@@ -175,7 +175,7 @@ class SMC(AbstractBackend):
     target_ess: float = 0.5
     max_rungs: int = eqx.field(static=True, default=200)
 
-    def _run(self, fit, key):
+    def _run(self, fit, key, *, batch_size=None):
         """Temper prior particles to the posterior; return them with the evidence."""
         key_init, key_run = jax.random.split(key)
         starts = start_points(fit, None, key_init, self.n_particles)

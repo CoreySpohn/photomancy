@@ -198,11 +198,12 @@ class NestedSampling(AbstractBackend):
     """jaxns nested sampling of a ``Fit``: posterior draws and the evidence.
 
     Live points fill the unit cube and map to the fit's entries through the inverse
-    CDF of each leaf law (``Fit.from_unit``); a fit with a block entry is refused until
-    its block has a unit-cube map. The draws are the dead points with weights
-    ``L_i dX_i``; the evidence is jaxns's expectation estimate of ``log Z`` and its
-    standard error is the standard deviation of ``log Z`` from the shrinkage
-    distribution. The sampler is jitted internally and runs one fit at a time.
+    CDF of each leaf law and the unit-cube map of each block (``Fit.from_unit``); a fit
+    with a block that has no unit-cube map is refused. The draws are the dead points
+    with weights ``L_i dX_i``; the evidence is jaxns's expectation estimate of
+    ``log Z`` and its standard error is the standard deviation of ``log Z`` from the
+    shrinkage distribution. The sampler is jitted internally and runs one fit at a
+    time.
 
     Args:
         n_live: Number of independent root chains (jaxns ``root_allocation_degree``);
@@ -214,7 +215,7 @@ class NestedSampling(AbstractBackend):
     n_live: int | None = eqx.field(static=True, default=None)
     max_samples: int = eqx.field(static=True, default=100_000)
 
-    def _run(self, fit, key):
+    def _run(self, fit, key, *, batch_size=None):
         """Run nested sampling on the unit cube of ``fit``."""
         NestedSampler = import_extra("jaxns.core", "jaxns").NestedSampler
         Model = import_extra("jaxns.model", "jaxns").Model

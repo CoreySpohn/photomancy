@@ -4,7 +4,8 @@ Two kinds of test. The fast ones use a one-leaf fit with a closed-form evidence:
 uniform prior on a planet radius times an unnormalized Gaussian likelihood, so every
 backend has a known answer. The ``slow`` ones run each backend on the golden orbit (the
 fixed-mass relative-astrometry fit whose density is pinned against the old system
-density in ``test_fit.py``) and compare with the old backend on the same problem.
+density in ``test_fit.py``) and compare with the old backend on the same problem, or,
+where the old chains are trapped by its walls, NUTS against MCLMC.
 """
 
 import math
@@ -15,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+from jax.flatten_util import ravel_pytree
 from orbix.system import ClassicalChart
 from priorities import Uniform
 from test_fit import (
@@ -35,16 +37,22 @@ from photomancy.infer import (
     NUTS,
     SMC,
     AbstractTerm,
+    AdaptiveImportance,
     Fit,
     Grid,
+    Importance,
     Laplace,
+    MixtureProposal,
     NestedSampling,
     Pathfinder,
     Posterior,
+    PriorProposal,
     run,
 )
 from photomancy.infer.backends.grid import gauss_legendre, midpoint
 from photomancy.infer.backends.staged import FitStage
+from photomancy.infer.diagnostics import pareto_khat
+from photomancy.infer.evidence import importance_evidence
 from photomancy.infer.posterior import cluster_to_mixture, ravel_samples
 
 jax.config.update("jax_enable_x64", True)
@@ -296,8 +304,12 @@ def test_nested_sampling_recovers_the_evidence():
     assert abs(float(post.log_evidence) - _exact_log_z()) < 5 * max(se, 0.02)
     assert abs(_moments(post)[0] - 1.5) < 0.05
     block_fit = Fit(_scene(), {"dynamics.orbits": _block()}, (_relative(),))
-    with pytest.raises(ValueError, match="block"):
-        run(block_fit, NestedSampling(), jax.random.key(0))
+    unit = block_fit.unit_template()["dynamics.orbits"]
+    assert unit.shape == (_block().unit_size,)
+    stored = block_fit.from_unit(
+        jax.tree.map(lambda u: u + 0.5, block_fit.unit_template())
+    )
+    assert bool(jnp.isfinite(block_fit.log_density(stored)))
 
 
 def test_a_stack_of_worlds_equals_the_per_world_loop():
@@ -341,6 +353,11 @@ _WORLD_BACKENDS = {
     "nuts": NUTS(n_warmup=60, n_draws=40, n_chains=2),
     "smc": SMC(n_particles=200, n_mcmc_steps=3),
     "pathfinder": Pathfinder(n_draws=200),
+    "laplace": Laplace(n_draws=200),
+    "importance": Importance(PriorProposal(), n_draws=200),
+    "adaptive": AdaptiveImportance(
+        PriorProposal(), n_draws=200, n_round=400, n_rounds=2, n_centers=16
+    ),
     "grid": Grid({KEY: midpoint(0.0, HIGH, 120)}),
 }
 
@@ -421,23 +438,148 @@ def test_smc_prior_only_evidence_on_an_orbit_block_is_zero():
     assert abs(float(post.log_evidence)) < 0.1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="L1: orbit angle coordinates are plain reals with a periodic density, so a "
-    "proposal wider than one 2 pi cell inflates the importance evidence",
-)
 def test_laplace_prior_only_evidence_on_an_orbit_block_is_zero():
-    """The same prior-only evidence through ``Laplace`` (known defect, strict xfail).
+    """The prior-only evidence through ``Laplace`` is 0 within 3 standard errors.
 
-    Measured with ``min_eigenvalue=0.1``: log Z about +3.1 +- 0.3 against truth 0 with
-    a passing k-hat. Remove the marker when the block declares its periods.
+    Truth source: the block prior is normalized, so ``log Z = 0``.
+    Tolerance basis: 3 standard errors of the importance mean, with a k-hat below 1
+    (a finite mean of the weights). The weights of the prior-only fit are heavy
+    tailed (k-hat 0.5 to 0.8), which biases the estimate by about 0.02 nat at 4000
+    draws.
+    Fails if: the wrapped proposal density does not integrate to one over a cell.
     """
     post = run(
         _prior_only_orbit_fit(),
-        Laplace(n_draws=2000, min_eigenvalue=0.1),
+        Laplace(n_draws=4000, min_eigenvalue=0.1),
         jax.random.key(0),
     )
-    assert abs(float(post.log_evidence)) < 4 * float(post.log_evidence_se)
+    assert abs(float(post.log_evidence)) < 3 * float(post.log_evidence_se)
+    assert float(pareto_khat(post.log_weights)) < 1.0
+
+
+def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
+    """The documented remedy: refit a mixture on the Laplace cloud and adapt from it.
+
+    Truth source: the prior-only evidence is exactly 0. Measured: log Z 0.002 +- 0.010,
+    k-hat 0.28. Fails if: ``MixtureProposal.from_cloud`` or the adaptive rounds lose
+    the periodic wrap or the tail cover.
+    """
+    fit = _prior_only_orbit_fit()
+    laplace = run(fit, Laplace(n_draws=4000, min_eigenvalue=0.1), jax.random.key(0))
+    flat = _flat_samples(fit, laplace.samples)
+    seed = MixtureProposal.from_cloud(
+        jax.random.key(1),
+        flat,
+        laplace.log_weights,
+        n_centers=64,
+        periods=fit.periods(),
+    )
+    post = run(
+        fit,
+        AdaptiveImportance(seed, n_draws=4000, n_round=2**14),
+        jax.random.key(2),
+    )
+    assert abs(float(post.log_evidence)) < 3 * float(post.log_evidence_se)
+    assert float(pareto_khat(post.log_weights)) < 0.7
+
+
+def _flat_samples(fit, samples):
+    """Flat unconstrained vectors ``(n, d)`` of the stored samples."""
+    return jax.vmap(lambda x: ravel_pytree(fit.to_real(x))[0])(samples)
+
+
+@pytest.mark.parametrize("sequence", ["random", "roberts"])
+def test_prior_importance_prior_only_evidence_is_exactly_zero(sequence):
+    """Drawing from the prior itself gives unit weights, so ``log Z = 0`` to rounding.
+
+    Fails if: ``log_q`` of ``PriorProposal`` differs from the fit's log density by
+    anything but rounding (a volume term or a periodic cell mismatch).
+    """
+    post = run(
+        _prior_only_orbit_fit(),
+        Importance(PriorProposal(sequence), n_draws=500),
+        jax.random.key(0),
+    )
+    assert abs(float(post.log_evidence)) < 1e-8
+    assert float(post.log_evidence_se) < 1e-8
+
+
+@pytest.mark.parametrize("sequence", ["random", "roberts"])
+def test_prior_importance_recovers_the_conjugate_evidence(sequence):
+    """Prior-sampling importance on the one-leaf fit recovers the exact evidence.
+
+    Truth source: ``_exact_log_z`` (closed form). Tolerance basis: 3 standard errors of
+    the importance mean (a quasi-random sequence is held to the same bound).
+    """
+    post = run(
+        _leaf_fit(),
+        Importance(PriorProposal(sequence), n_draws=20000),
+        jax.random.key(0),
+    )
+    se = float(post.log_evidence_se)
+    assert abs(float(post.log_evidence) - _exact_log_z()) < 3 * se
+
+
+def test_importance_evidence_is_the_importance_mean_of_its_weights():
+    """The backend evidence equals ``importance_evidence`` on the same weights.
+
+    The weights are rebuilt from the same key through the proposal's own ``sample``;
+    equality is to rounding (rtol 1e-10).
+    """
+    fit = _leaf_fit()
+    proposal = PriorProposal()
+    key = jax.random.key(4)
+    post = run(fit, Importance(proposal, n_draws=500), key)
+    z, log_q = proposal.sample(key, fit, 500)
+    x, volume = fit.from_real(jax.vmap(_unravel_leaf(fit))(z))
+    log_w = fit.log_density(x) + volume - log_q
+    log_z, se = importance_evidence(log_w)
+    np.testing.assert_allclose(float(post.log_evidence), float(log_z), rtol=1e-10)
+    np.testing.assert_allclose(float(post.log_evidence_se), float(se), rtol=1e-10)
+
+
+def _unravel_leaf(fit):
+    return ravel_pytree(fit.to_real(fit.sample_prior(jax.random.key(0))))[1]
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [NUTS(n_warmup=30, n_draws=20, n_chains=2), SMC(n_particles=100, n_mcmc_steps=2)],
+)
+def test_stored_angles_lie_in_one_cell(backend):
+    """Sampled orbit angles are stored reduced to ``[0, 2 pi)`` for every sampler.
+
+    Fails if: ``Fit.from_real`` leaves a periodic coordinate unwrapped, so a chain that
+    drifts past the cell edge stores an angle outside it.
+    """
+    fit = _prior_only_orbit_fit()
+    post = run(fit, backend, jax.random.key(0))
+    block = post.samples["dynamics.orbits"]
+    for name, period in zip(_block().coordinate_names, _block().periods, strict=True):
+        values = np.asarray(block[name])
+        if period is None:
+            continue
+        assert values.min() >= 0.0 and values.max() < period, name
+
+
+class _AlwaysNan(_Gauss):
+    """The Gaussian term with every evaluation NaN."""
+
+    def __call__(self, model):
+        return super().__call__(model) * jnp.nan
+
+
+def test_laplace_with_no_surviving_mode_returns_a_nan_slice():
+    """A fit whose only mode fails the guard gives NaN weights and evidence.
+
+    The term is NaN everywhere, so no mode has a finite position and none is kept.
+    Fails if: the guard returns a clean-looking posterior.
+    """
+    fit = Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_AlwaysNan(jnp.asarray(1.5)),))
+    post = run(fit, Laplace(n_draws=200), jax.random.key(0))
+    assert int(post.info.n_modes_kept) == 0
+    assert np.all(np.isnan(np.asarray(post.log_weights)))
+    assert np.isnan(float(post.log_evidence))
 
 
 def test_run_refuses_a_fit_built_without_x64():
@@ -516,71 +658,42 @@ def _wrap_angles(z):
     )
 
 
+def _chain_features(post, n_chains, n_draws):
+    """Wrap-invariant features of each chain mean, ``(n_chains, 9)``."""
+    f = _wrap_angles(_new_coords(post).reshape(n_chains, n_draws, 6))
+    return f.mean(axis=1), f.reshape(-1, f.shape[-1]).std(axis=0)
+
+
 @pytest.mark.slow
-def test_nuts_agrees_with_the_old_backend_on_the_golden_orbit():
-    """New and old NUTS posterior means agree within five combined standard errors.
+def test_nuts_and_mclmc_agree_on_the_golden_orbit():
+    """Two independent gradient samplers give the same posterior feature means.
 
-    Both sample the golden orbit from the same start with four independent chains. The
-    statistic is the difference of the chain-mean averages of the three non-angle chart
-    coordinates and of the cosine and sine of each angle, each against five times the
-    standard error from the scatter of the four chain means (per backend, combined in
-    quadrature), floored at 2 percent of the old posterior standard deviation.
+    Truth source: each other. The old backend is no longer the reference, because its
+    hard walls (the period range and each angle cell) trap its chains at the edge of
+    the cell, while the mapped block has no wall inside the support; an importance
+    reference degenerates on this multimodal posterior (Kish size of a few draws).
+    Tolerance basis: five combined standard errors (scatter of the chain means of each
+    sampler: four NUTS chains, three MCLMC chains), floored at 2 percent of the
+    posterior standard deviation. Features are the three non-angle chart coordinates
+    and cos and sin of each angle.
+    Fails if: the mapped block or the chart coordinates misplace the density for one
+    sampler's geometry (the two samplers share nothing but the density).
     """
-    from photomancy.infer.backends import NUTSBackend
-
-    problem, start = _old_problem()
-    old = np.stack(
-        [
-            np.asarray(
-                NUTSBackend(n_warmup=400, n_samples=600)
-                .run(problem.logdensity, start, jax.random.key(k))
-                .samples
-            )
-            for k in range(4)
-        ]
-    )
-    post = run(
+    nuts = run(
         _golden_fit(),
         NUTS(n_warmup=400, n_draws=600, n_chains=4, init=_golden_start()),
         jax.random.key(11),
     )
-    new = _new_coords(post).reshape(4, 600, 6)
-    f_old, f_new = _wrap_angles(old), _wrap_angles(new)
-    mean_old, mean_new = f_old.mean(axis=1), f_new.mean(axis=1)
-    se = np.sqrt(mean_old.var(axis=0, ddof=1) / 4 + mean_new.var(axis=0, ddof=1) / 4)
-    floor = 0.02 * f_old.reshape(-1, f_old.shape[-1]).std(axis=0)
-    diff = np.abs(mean_old.mean(axis=0) - mean_new.mean(axis=0))
-    assert np.all(diff < 5 * np.maximum(se, floor)), (diff, se, floor)
-
-
-@pytest.mark.slow
-def test_mclmc_agrees_with_the_old_backend_on_the_golden_orbit():
-    """New and old MCLMC means agree to the same rule as NUTS (two runs each)."""
-    from photomancy.infer.backends import MCLMCBackend
-
-    problem, start = _old_problem()
-    old = np.stack(
-        [
-            np.asarray(
-                MCLMCBackend(n_tune=1500, n_samples=3000)
-                .run(problem.logdensity, start, jax.random.key(k))
-                .samples
-            )
-            for k in range(3)
-        ]
-    )
-    post = run(
+    mclmc = run(
         _golden_fit(),
         MCLMC(n_tune=1500, n_draws=3000, n_chains=3, init=_golden_start()),
         jax.random.key(5),
     )
-    new = _new_coords(post).reshape(3, 3000, 6)
-    f_old, f_new = _wrap_angles(old), _wrap_angles(new)
-    mean_old, mean_new = f_old.mean(axis=1), f_new.mean(axis=1)
-    se = np.sqrt(mean_old.var(axis=0, ddof=1) / 3 + mean_new.var(axis=0, ddof=1) / 3)
-    floor = 0.02 * f_old.reshape(-1, f_old.shape[-1]).std(axis=0)
-    diff = np.abs(mean_old.mean(axis=0) - mean_new.mean(axis=0))
-    assert np.all(diff < 5 * np.maximum(se, floor)), (diff, se, floor)
+    m_n, sd = _chain_features(nuts, 4, 600)
+    m_c, _ = _chain_features(mclmc, 3, 3000)
+    se = np.sqrt(m_n.var(axis=0, ddof=1) / 4 + m_c.var(axis=0, ddof=1) / 3)
+    diff = np.abs(m_n.mean(axis=0) - m_c.mean(axis=0))
+    assert np.all(diff < 5 * np.maximum(se, 0.02 * sd)), (diff, se, sd)
 
 
 @pytest.mark.slow

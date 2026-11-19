@@ -11,7 +11,6 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from photomancy.infer.evidence import importance_evidence
 from photomancy.infer.posterior import Posterior
 
 
@@ -85,45 +84,3 @@ class FlatDensity(eqx.Module):
 def flat_density(fit):
     """Return the :class:`FlatDensity` of ``fit``."""
     return FlatDensity(fit, fit.to_real(draw_template(fit)))
-
-
-def mixture_importance(fit, density, means, covs, log_pi, n_draws, key):
-    """Draw from a Gaussian mixture proposal and weight the draws to the fit.
-
-    Args:
-        fit: The fit.
-        density: Its :class:`FlatDensity`.
-        means: Component means ``(K, d)``.
-        covs: Component covariances ``(K, d, d)``.
-        log_pi: Unnormalized component log weights ``(K,)``; NaN counts as zero.
-        n_draws: Number of draws.
-        key: PRNG key.
-
-    Returns:
-        ``(x, log_weights, log_evidence, se, component, proposal_log_prob)``
-        with ``x`` the stored-coordinate entries of the ``n_draws`` draws, unnormalized
-        log weights ``density(z) - log q(z)``, the importance estimate of the evidence
-        and its independent-draw error, the component of each draw and ``log q``.
-    """
-    log_pi = jnp.where(jnp.isnan(log_pi), -jnp.inf, log_pi)
-    log_pi = log_pi - jax.scipy.special.logsumexp(log_pi)
-    chol = jnp.linalg.cholesky(covs)
-    k_comp, k_eps = jax.random.split(key)
-    comp = jax.random.categorical(k_comp, log_pi, shape=(n_draws,))
-    eps = jax.random.normal(k_eps, (n_draws, means.shape[-1]))
-    z = means[comp] + jnp.einsum("nij,nj->ni", chol[comp], eps)
-
-    def log_q(point):
-        def one(mean, ch, lp):
-            return lp + jax.scipy.stats.multivariate_normal.logpdf(
-                point, mean, ch @ ch.T
-            )
-
-        return jax.scipy.special.logsumexp(jax.vmap(one)(means, chol, log_pi))
-
-    proposal = jax.vmap(log_q)(z)
-    log_w = jax.vmap(density)(z) - proposal
-    log_z, se = importance_evidence(log_w)
-    unravel = ravel_pytree(density.template)[1]
-    x, _ = density.fit.from_real(jax.vmap(unravel)(z))
-    return x, log_w, log_z, se, comp, proposal

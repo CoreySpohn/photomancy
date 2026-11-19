@@ -26,7 +26,9 @@ def _normalized(log_weights):
     return jnp.where(refused, jnp.nan, norm)
 
 
-def run(fit: Fit, backend: AbstractBackend, key) -> Posterior:
+def run(
+    fit: Fit, backend: AbstractBackend, key, *, batch_size: int | None = None
+) -> Posterior:
     """Run ``backend`` on ``fit`` and return the :class:`Posterior`.
 
     The backend returns its native draws and unnormalized log weights; this function
@@ -46,12 +48,22 @@ def run(fit: Fit, backend: AbstractBackend, key) -> Posterior:
         fit: The fit to run.
         backend: An :class:`~photomancy.infer.backends.base.AbstractBackend`.
         key: PRNG key.
+        batch_size: Chunk of draws evaluated at once when the density of a cloud is
+            taken (a ``jax.lax.map`` batch, the same values to rounding), for the
+            importance backends' weights and for ``log_target``. ``None`` evaluates
+            every draw at once; give it when a term (an ``ImageTerm``) makes memory
+            grow with the draw count. A sampler's own per-step density is not batched.
 
     Returns:
         A :class:`Posterior` over ``fit``.
     """
-    draws = backend._run(fit, key)
-    log_target = jnp.asarray(fit.log_density(draws.samples), jnp.float64)
+    draws = backend._run(fit, key, batch_size=batch_size)
+    log_target = (
+        fit.log_density(draws.samples, batch_size=batch_size)
+        if draws.log_target is None
+        else draws.log_target
+    )
+    log_target = jnp.asarray(log_target, jnp.float64)
     return Posterior(
         samples=draws.samples,
         log_weights=_normalized(draws.log_weights),

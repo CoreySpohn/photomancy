@@ -152,7 +152,7 @@ class NUTS(AbstractBackend):
     dense_mass_matrix: bool = eqx.field(static=True, default=True)
     init: Posterior | dict | None = None
 
-    def _run(self, fit, key):
+    def _run(self, fit, key, *, batch_size=None):
         """Adapt and sample every chain; return flat draws with uniform weights."""
         key_init, key_run = jax.random.split(key)
         starts = start_points(fit, self.init, key_init, self.n_chains)

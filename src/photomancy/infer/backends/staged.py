@@ -813,7 +813,7 @@ class MAP(AbstractBackend):
             x = self.init
         return fit.to_real(x)
 
-    def _run(self, fit, key):
+    def _run(self, fit, key, *, batch_size=None):
         """Optimize from the start and return the optimum as a one-draw cloud."""
         start = self._start(fit, key)
         labels = self.labels

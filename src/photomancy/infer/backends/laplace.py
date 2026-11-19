@@ -14,12 +14,9 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from photomancy.infer.backends._flat import (
-    flat_density,
-    mixture_importance,
-    start_points,
-)
-from photomancy.infer.backends.base import AbstractBackend, BackendDraws, LegacyBackend
+from photomancy.infer.backends._flat import flat_density, start_points
+from photomancy.infer.backends.base import AbstractBackend, LegacyBackend
+from photomancy.infer.backends.importance import ImportanceInfo, modes_importance
 from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
 from photomancy.infer.posterior import Posterior
 
@@ -42,8 +39,8 @@ def _map_optimize(neg_logdensity, init, n_steps):
     return z_map
 
 
-def laplace_covariance(neg_logdensity, z_map, min_eigenvalue):
-    """Eigenvalue-clamped inverse Hessian of ``neg_logdensity`` at ``z_map``."""
+def _hessian(neg_logdensity, z_map):
+    """Symmetrized Hessian of ``neg_logdensity`` at ``z_map`` (forward over reverse)."""
     grad_fn = jax.grad(neg_logdensity)
 
     def hvp(v):
@@ -51,8 +48,12 @@ def laplace_covariance(neg_logdensity, z_map, min_eigenvalue):
 
     d = z_map.shape[0]
     hess = jax.vmap(hvp)(jnp.eye(d, dtype=z_map.dtype))
-    hess = 0.5 * (hess + hess.T)
-    eigvals, eigvecs = jnp.linalg.eigh(hess)
+    return 0.5 * (hess + hess.T)
+
+
+def laplace_covariance(neg_logdensity, z_map, min_eigenvalue):
+    """Eigenvalue-clamped inverse Hessian of ``neg_logdensity`` at ``z_map``."""
+    eigvals, eigvecs = jnp.linalg.eigh(_hessian(neg_logdensity, z_map))
     eigvals = jnp.maximum(eigvals, min_eigenvalue)
     precision = (eigvecs * eigvals) @ eigvecs.T
     return jnp.linalg.inv(precision)
@@ -143,55 +144,117 @@ class LaplaceMixtureBackend(LegacyBackend):
         return MixturePosterior(means=means, covs=covs, log_evidences=log_evidences)
 
 
+@eqx.filter_jit
+def _laplace_mode(logdensity, init, n_steps, min_eigenvalue):
+    """One mode with the diagnostics that decide whether it is a usable proposal.
+
+    Returns ``(z_map, cov, log_z, min_raw_eigenvalue, grad_norm, newton_decrement)``:
+    the covariance floors the Hessian eigenvalues at ``min_eigenvalue``; the raw
+    eigenvalue and the gradient are those of the unregularized negative log density at
+    ``z_map``, and the Newton decrement ``0.5 g' cov g`` is the number of nats the point
+    still lies below the Gaussian's peak.
+    """
+
+    def neg(z):
+        return -logdensity(z)
+
+    z_map = _map_optimize(neg, init, n_steps)
+    grad = jax.grad(neg)(z_map)
+    eigvals, eigvecs = jnp.linalg.eigh(_hessian(neg, z_map))
+    floored = jnp.maximum(eigvals, min_eigenvalue)
+    cov = (eigvecs / floored) @ eigvecs.T
+    d = z_map.shape[0]
+    log_z = (
+        logdensity(z_map)
+        + 0.5 * d * jnp.log(2.0 * jnp.pi)
+        - 0.5 * jnp.sum(jnp.log(floored))
+    )
+    return (
+        z_map,
+        cov,
+        log_z,
+        jnp.min(eigvals),
+        jnp.linalg.norm(grad),
+        0.5 * grad @ cov @ grad,
+    )
+
+
 class LaplaceInfo(eqx.Module):
-    """The Gaussian mixture proposal of a :class:`Laplace` or :class:`Pathfinder` run.
+    """The modes of a :class:`Laplace` run and which of them the proposal kept.
 
     Coordinates are the unconstrained flat vector of ``fit.to_real`` (sorted entry
     keys, each leaf row-major).
 
     Attributes:
-        means: Component means ``(K, d)``.
-        covs: Component covariances ``(K, d, d)``.
-        mode_log_evidence: Per-component log evidence (Laplace) or ELBO (Pathfinder)
-            that sets the proposal weights ``(K,)``.
-        component: Proposal component each draw came from ``(N,)``.
-        proposal_log_prob: Log density of the proposal at each draw ``(N,)``.
+        means: Mode locations ``(K, d)``.
+        covs: Floored inverse Hessians ``(K, d, d)``.
+        mode_log_evidence: Laplace log evidence of each mode, which sets its weight in
+            the proposal ``(K,)``.
+        kept: Whether each mode entered the proposal ``(K,)``.
+        n_modes_kept: Number of modes kept; zero means the slice is NaN.
+        min_raw_eigenvalue: Smallest eigenvalue of each mode's unregularized Hessian of
+            the negative log density ``(K,)``; a large negative value is an indefinite
+            point, not a mode.
+        grad_norm: Norm of the gradient of the negative log density at each mode
+            ``(K,)``.
+        newton_decrement: ``0.5 g' cov g`` at each mode, in nats ``(K,)``.
+        importance: The :class:`~photomancy.infer.backends.importance.ImportanceInfo`.
     """
 
     means: jax.Array
     covs: jax.Array
     mode_log_evidence: jax.Array
-    component: jax.Array
-    proposal_log_prob: jax.Array
+    kept: jax.Array
+    n_modes_kept: jax.Array
+    min_raw_eigenvalue: jax.Array
+    grad_norm: jax.Array
+    newton_decrement: jax.Array
+    importance: ImportanceInfo
 
 
 class Laplace(AbstractBackend):
-    """MAP plus Hessian proposals and an importance-weighted posterior.
+    """A Gaussian at each mode, wrapped on periodic coordinates, importance weighted.
 
-    From each of ``n_modes`` starts the density is maximized with L-BFGS and the
-    eigenvalue-clamped inverse Hessian is the covariance, in unconstrained
-    coordinates. The proposal is the mixture of those Gaussians weighted by their
-    Laplace evidences; ``n_draws`` draws are weighted by ``density / proposal``. The
-    evidence is the importance mean, so it is exact in expectation whatever the
-    Gaussian's quality, and the weights carry the non-Gaussian correction.
-    ``log_target`` is the fit's density; the proposal is only in ``info``.
+    1. From each of ``n_modes`` starts the density is maximized with L-BFGS. The
+       proposal is one Gaussian at the mode with the inverse Hessian as covariance, in
+       the unconstrained coordinates, wrapped on every coordinate the fit declares
+       periodic (several modes make a mixture weighted by the Laplace evidences).
+    2. The draws are weighted ``density / proposal`` with the wrapped proposal density.
+       The weights correct the Gaussian to the posterior; the evidence is the importance
+       mean and is consistent whenever the weights have a finite mean.
+    3. The backend promises nothing about ``khat``. The caller reads it from the result
+       (``pareto_khat``); a value above 0.7 means the Gaussian is a poor match and the
+       standard error is optimistic. The backend does not gate: the operations of a
+       ``Posterior`` do.
+    4. Expected to be poor: a posterior that is flat or nearly flat in an angle (a
+       Gaussian cannot match a flat density on a circle), a posterior with more than one
+       mode, and a mode near a zero-density region of a block.
+    5. In those cases the cloud is a seed for
+       ``AdaptiveImportance(MixtureProposal.from_cloud(key, z, log_weights,
+       n_centers=...), n_draws)``, with ``z`` the flat vectors of the cloud.
+    6. Widening the covariance is not a remedy: it makes the weights worse.
+
+    A mode is dropped from the proposal when it is not a mode: when the unregularized
+    Hessian has an eigenvalue below ``-min_eigenvalue`` (an indefinite point, as where
+    an optimizer stalls against a wall) or the Newton decrement exceeds
+    ``max_decrement`` nats (the gradient has not converged). A direction with
+    curvature between ``-min_eigenvalue`` and ``min_eigenvalue`` is flat, not wrong,
+    and gets the variance ``1 / min_eigenvalue``. With no mode left the slice is NaN
+    (draws, weights, evidence and standard error) and ``info.n_modes_kept`` is zero;
+    ``info.min_raw_eigenvalue`` and ``info.grad_norm`` say why.
 
     ``run(fit, Laplace(init=posterior), key)`` is the route to an evidence for a NUTS
-    result. Angle coordinates of an orbit block are plain reals whose density repeats
-    every ``2 pi`` and stored draws are not reduced to a cell. The importance evidence
-    on such a block is correct only when the proposal lies well inside one cell: a
-    proposal that spans more than a cell integrates the same mass several times and
-    inflates the evidence while the weight diagnostics still pass (a log evidence
-    off by about 3 with k-hat 0.8 was measured on a prior-only orbit fit), and the
-    default ``min_eigenvalue`` on a flat direction gives a proposal so wide that every
-    weight is ``-inf``. Use ``SMC`` for the evidence of such a fit until the block
-    declares its periods.
+    result.
 
     Args:
         n_draws: Importance draws.
         n_modes: Number of starts and proposal components.
         n_steps: L-BFGS iterations per start.
-        min_eigenvalue: Floor on the precision eigenvalues.
+        min_eigenvalue: Floor on the precision eigenvalues of the proposal covariance
+            and the indefiniteness threshold. At the default the standard deviation of
+            a flat direction is at most 3.2, which the image window of the wrapped
+            density covers (``MixtureProposal``).
+        max_decrement: Largest Newton decrement, in nats, of a mode that is kept.
         init: ``None`` for prior draws as starts, one constrained draw, or a
             ``Posterior`` whose weights pick the starts.
     """
@@ -199,25 +262,37 @@ class Laplace(AbstractBackend):
     n_draws: int = eqx.field(static=True, default=2000)
     n_modes: int = eqx.field(static=True, default=1)
     n_steps: int = eqx.field(static=True, default=100)
-    min_eigenvalue: float = 1e-10
+    min_eigenvalue: float = 0.1
+    max_decrement: float = 1.0
     init: Posterior | dict | None = None
 
-    def _run(self, fit, key):
-        """Fit the modes, then draw and weight from their mixture."""
+    @eqx.filter_jit
+    def _run(self, fit, key, *, batch_size=None):
+        """Find the modes, then draw and weight from the mixture of the kept ones."""
         k_start, k_draw = jax.random.split(key)
         density = flat_density(fit)
         starts = start_points(fit, self.init, k_start, self.n_modes)
-        means, covs, log_z = jax.vmap(
-            lambda z0: laplace_fit(density, z0, self.n_steps, self.min_eigenvalue)
+        means, covs, log_z, min_eig, grad_norm, decrement = jax.vmap(
+            lambda z0: _laplace_mode(density, z0, self.n_steps, self.min_eigenvalue)
         )(starts)
-        x, log_w, evidence, se, comp, proposal = mixture_importance(
-            fit, density, means, covs, log_z, self.n_draws, k_draw
+        kept = (
+            jnp.all(jnp.isfinite(means), axis=-1)
+            & jnp.isfinite(log_z)
+            & (min_eig >= -self.min_eigenvalue)
+            & (decrement <= self.max_decrement)
         )
-        return BackendDraws(
-            samples=x,
-            log_weights=log_w,
-            log_evidence=evidence,
-            log_evidence_se=se,
-            info=LaplaceInfo(means, covs, log_z, comp, proposal),
-            kind="monte_carlo",
+        draws = modes_importance(
+            fit, k_draw, means, covs, log_z, kept, self.n_draws, batch_size
         )
+        info = LaplaceInfo(
+            means,
+            covs,
+            log_z,
+            kept,
+            jnp.sum(kept),
+            min_eig,
+            grad_norm,
+            decrement,
+            draws.info,
+        )
+        return eqx.tree_at(lambda d: d.info, draws, info)

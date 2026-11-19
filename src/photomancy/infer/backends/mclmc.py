@@ -171,7 +171,7 @@ class MCLMC(AbstractBackend):
     thin: int = eqx.field(static=True, default=1)
     init: Posterior | dict | None = None
 
-    def _run(self, fit, key):
+    def _run(self, fit, key, *, batch_size=None):
         """Tune and sample every chain; return flat draws with uniform weights."""
         key_init, key_run = jax.random.split(key)
         starts = start_points(fit, self.init, key_init, self.n_chains)

@@ -47,6 +47,9 @@ class BackendDraws(eqx.Module):
         log_evidence_se: Scalar standard error of ``log_evidence``, NaN when absent.
         info: The backend's diagnostics module (chain index, flags, a trace) or None.
         kind: ``"monte_carlo"`` or ``"quadrature"``.
+        log_target: The fit's log density at ``samples`` when the backend already
+            computed it (the importance backends do), else ``None`` and ``run``
+            evaluates it.
     """
 
     samples: dict
@@ -55,6 +58,7 @@ class BackendDraws(eqx.Module):
     log_evidence_se: jax.Array
     info: eqx.Module | None
     kind: str = eqx.field(static=True)
+    log_target: jax.Array | None = None
 
 
 class AbstractBackend(eqx.Module):
@@ -76,8 +80,14 @@ class AbstractBackend(eqx.Module):
     """
 
     @abstractmethod
-    def _run(self, fit, key) -> BackendDraws:
-        """Run inference on ``fit``; return native draws and unnormalized weights."""
+    def _run(self, fit, key, *, batch_size: int | None = None) -> BackendDraws:
+        """Run inference on ``fit``; return native draws and unnormalized weights.
+
+        ``batch_size`` is the ``jax.lax.map`` chunk of density evaluations over a cloud
+        of draws (``None`` evaluates every draw at once). A backend that evaluates the
+        density of a cloud (the importance backends) honors it; a sampler evaluates its
+        density per chain or particle inside its own loop and ignores it.
+        """
 
 
 class LegacyBackend(eqx.Module):

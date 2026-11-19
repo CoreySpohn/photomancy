@@ -68,7 +68,8 @@ def update(
         max_khat: As in :meth:`Posterior.with_priors`.
         index: Position of the term to replace in ``post.fit.terms``, or ``None`` to
             append.
-        batch_size: Draws evaluated at once for the term (a ``jax.lax.map`` chunk).
+        batch_size: Draws evaluated at once for the term and for the refit (a
+            ``jax.lax.map`` chunk).
 
     Returns:
         A :class:`~photomancy.infer.posterior.Posterior` over the new fit.
@@ -89,7 +90,7 @@ def update(
     kept = _dynamic(moved)
 
     def refit():
-        new = run(moved.fit, backend, key)
+        new = run(moved.fit, backend, key, batch_size=batch_size)
         if new.kind != moved.kind:
             raise ValueError(
                 f"the refit backend returned kind {new.kind!r}, the posterior is "

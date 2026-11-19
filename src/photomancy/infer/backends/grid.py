@@ -60,7 +60,7 @@ class Grid(AbstractBackend):
 
     axes: dict
 
-    def _run(self, fit, key):
+    def _run(self, fit, key, *, batch_size=None):
         """Evaluate the density on the product grid."""
         template = draw_template(fit)
         slots = {}

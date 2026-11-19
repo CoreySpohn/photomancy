@@ -17,19 +17,15 @@ than baking into the compiled kernel as constants.
 
 import equinox as eqx
 import jax
+import jax.numpy as jnp
 
-from photomancy.infer.backends._flat import (
-    flat_density,
-    mixture_importance,
-    start_points,
-)
+from photomancy.infer.backends._flat import flat_density, start_points
 from photomancy.infer.backends.base import (
     AbstractBackend,
-    BackendDraws,
     LegacyBackend,
     import_extra,
 )
-from photomancy.infer.backends.laplace import LaplaceInfo
+from photomancy.infer.backends.importance import ImportanceInfo, modes_importance
 from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
 from photomancy.infer.posterior import Posterior
 
@@ -119,18 +115,40 @@ class PathfinderMixtureBackend(LegacyBackend):
         return MixturePosterior(means=means, covs=covs, log_evidences=elbos)
 
 
+class PathfinderInfo(eqx.Module):
+    """The paths of a :class:`Pathfinder` run.
+
+    Coordinates are the unconstrained flat vector of ``fit.to_real``.
+
+    Attributes:
+        means: Variational means ``(K, d)``.
+        covs: Variational covariances ``(K, d, d)``.
+        elbo: ELBO of each path, which sets its weight in the proposal ``(K,)``.
+        kept: Whether each path entered the proposal (a finite ELBO) ``(K,)``.
+        n_modes_kept: Number of paths kept; zero means the slice is NaN.
+        importance: The :class:`~photomancy.infer.backends.importance.ImportanceInfo`.
+    """
+
+    means: jax.Array
+    covs: jax.Array
+    elbo: jax.Array
+    kept: jax.Array
+    n_modes_kept: jax.Array
+    importance: ImportanceInfo
+
+
 class Pathfinder(AbstractBackend):
-    """Pathfinder proposals and an importance-weighted posterior.
+    """Pathfinder proposals, wrapped on periodic coordinates, importance weighted.
 
     As :class:`~photomancy.infer.backends.laplace.Laplace`, with each component fitted
     by BlackJAX Pathfinder (a Gaussian from the L-BFGS trajectory, steadier than one
-    Hessian when a mode is poorly conditioned) and weighted by its ELBO. The draws are
-    importance weighted to the fit, so the evidence is the importance mean and the
-    proposal quality shows in the weights. Angle coordinates of an orbit block are
-    plain reals whose density repeats every ``2 pi``; as for
-    :class:`~photomancy.infer.backends.laplace.Laplace`, the importance evidence on such
-    a block is correct only when the proposal lies well inside one cell, and the weight
-    diagnostics do not catch the failure. Use ``SMC`` for such an evidence.
+    Hessian when a mode is poorly conditioned) and weighted by its ELBO. The proposal
+    is the mixture of the paths, wrapped on every periodic coordinate; the draws are
+    weighted to the fit with the wrapped density, so the evidence is the importance mean
+    and the proposal quality shows in the weights. The backend promises nothing about
+    ``khat`` and does not gate. A path whose ELBO is not finite leaves the mixture; with
+    none left the slice is NaN. The cases where a Gaussian is a poor proposal, and the
+    seed for ``AdaptiveImportance``, are those of ``Laplace``.
 
     Args:
         n_draws: Importance draws.
@@ -147,7 +165,8 @@ class Pathfinder(AbstractBackend):
     maxcor: int = eqx.field(static=True, default=10)
     init: Posterior | dict | None = None
 
-    def _run(self, fit, key):
+    @eqx.filter_jit
+    def _run(self, fit, key, *, batch_size=None):
         """Fit the paths, then draw and weight from their mixture."""
         k_start, k_fit, k_draw = jax.random.split(key, 3)
         density = flat_density(fit)
@@ -156,14 +175,9 @@ class Pathfinder(AbstractBackend):
         means, covs, elbo = jax.vmap(
             lambda z0, k: pathfinder_fit(density, z0, k, self.maxiter, self.maxcor)
         )(starts, keys)
-        x, log_w, evidence, se, comp, proposal = mixture_importance(
-            fit, density, means, covs, elbo, self.n_draws, k_draw
+        kept = jnp.isfinite(elbo) & jnp.all(jnp.isfinite(means), axis=-1)
+        draws = modes_importance(
+            fit, k_draw, means, covs, elbo, kept, self.n_draws, batch_size
         )
-        return BackendDraws(
-            samples=x,
-            log_weights=log_w,
-            log_evidence=evidence,
-            log_evidence_se=se,
-            info=LaplaceInfo(means, covs, elbo, comp, proposal),
-            kind="monte_carlo",
-        )
+        info = PathfinderInfo(means, covs, elbo, kept, jnp.sum(kept), draws.info)
+        return eqx.tree_at(lambda d: d.info, draws, info)
