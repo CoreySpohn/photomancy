@@ -22,7 +22,15 @@ from kinematics import (  # noqa: E402
 )
 from priorities import Uniform  # noqa: E402
 
-from photomancy.infer import LaplaceBackend, build_scene_logdensity  # noqa: E402
+from photomancy.infer import (  # noqa: E402
+    Fit,
+    ForwardTerm,
+    Laplace,
+    run,
+    weighted_cov,
+    weighted_mean,
+)
+from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
 from photomancy.measurements import (  # noqa: E402
     AstrometryData,
     loglike_relative_astrom,
@@ -97,28 +105,15 @@ class _Orbit(eqx.Module):
     log_Mp: jnp.ndarray
 
 
-# Medium: The seven-parameter reflex fit includes a cold optimizer and Hessian.
-@pytest.mark.medium
-def test_mass_is_identifiable_from_reflex():
-    """A reflex-astrometry fit recovers the planet mass (period -> a -> amplitude)."""
-    P_days = 4331.0  # a = 5.2 AU around 1 Msun
-    times = jnp.asarray(np.linspace(0.0, 1.4 * P_days, 30))
-    log_Mp_true = float(np.log10(317.8))
-    truth = _Orbit(
-        a=jnp.array(5.2),
-        e=jnp.array(0.2),
-        cos_i=jnp.array(0.5),
-        W=jnp.array(0.8),
-        omega=jnp.array(1.0),
-        tp=jnp.array(1500.0),
-        log_Mp=jnp.array(log_Mp_true),
-    )
-    err = 5e-5  # 0.05 mas
+class _Reflex(eqx.Module):
+    """``orbit -> (ra, dec)`` stellar reflex, concatenated."""
 
-    def forward(o):
+    times: jax.Array
+
+    def __call__(self, o):
         Mp = (10.0**o.log_Mp) * Mearth2kg
         ra, dec = predict_stellar_astrometry(
-            times,
+            self.times,
             o.a,
             o.e,
             o.cos_i,
@@ -132,32 +127,36 @@ def test_mass_is_identifiable_from_reflex():
         )
         return jnp.concatenate([ra, dec])
 
-    ra_t, dec_t = predict_stellar_astrometry(
-        times,
-        truth.a,
-        truth.e,
-        truth.cos_i,
-        truth.W,
-        jnp.cos(truth.omega),
-        jnp.sin(truth.omega),
-        truth.tp,
-        MSUN_KG,
-        (10.0**log_Mp_true) * Mearth2kg,
-        DIST_PC,
-    )
-    key = jax.random.key(0)
-    obs = jnp.concatenate([ra_t, dec_t]) + err * jax.random.normal(
-        key, (2 * len(times),)
-    )
 
-    def likelihood(pred):
-        return -0.5 * jnp.sum(((pred - obs) / err) ** 2)
+# Medium: The seven-parameter reflex fit includes a cold optimizer and Hessian.
+@pytest.mark.medium
+def test_mass_is_identifiable_from_reflex():
+    """A reflex-astrometry fit recovers the planet mass (period -> a -> amplitude).
 
-    prior = Uniform(
-        jnp.array([1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0]),
-        jnp.array([10.0, 0.9, 1.0, 2 * np.pi, 2 * np.pi, P_days, 4.0]),
+    Fails if the reflex amplitude loses its mass dependence (the mass is then
+    unconstrained and the width test fails) or the fit does not reach the mode.
+    """
+    P_days = 4331.0  # a = 5.2 AU around 1 Msun
+    times = jnp.asarray(np.linspace(0.0, 1.4 * P_days, 30))
+    log_Mp_true = float(np.log10(317.8))
+    truth = _Orbit(
+        a=jnp.array(5.2),
+        e=jnp.array(0.2),
+        cos_i=jnp.array(0.5),
+        W=jnp.array(0.8),
+        omega=jnp.array(1.0),
+        tp=jnp.array(1500.0),
+        log_Mp=jnp.array(log_Mp_true),
     )
-    init = _Orbit(
+    err = 5e-5  # 0.05 mas
+    forward = _Reflex(times)
+    obs = forward(truth) + err * jax.random.normal(jax.random.key(0), (2 * len(times),))
+
+    low = [1.0, 0.0, -1.0, 0.0, 0.0, 1.0, 1.0]
+    high = [10.0, 0.9, 1.0, 2 * np.pi, 2 * np.pi, P_days, 4.0]
+    paths = ("a", "e", "cos_i", "W", "omega", "tp", "log_Mp")
+    prior = {p: Uniform(lo, hi) for p, lo, hi in zip(paths, low, high, strict=True)}
+    x0 = dict(
         a=jnp.array(5.5),
         e=jnp.array(0.25),
         cos_i=jnp.array(0.45),
@@ -166,11 +165,11 @@ def test_mass_is_identifiable_from_reflex():
         tp=jnp.array(1580.0),
         log_Mp=jnp.array(log_Mp_true + 0.2),
     )
-    ld, z0, unravel = build_scene_logdensity(init, forward, likelihood, prior)
-    post = LaplaceBackend(n_steps=800, min_eigenvalue=1e-12).run(ld, z0)
-    fit = unravel(post.mean)
-    sigma = jnp.sqrt(jnp.diag(post.cov))
+    fit = Fit(truth, prior, (ForwardTerm(forward, gaussian_loglike(obs, err)),))
+    post = run(fit, Laplace(n_draws=512, n_steps=800, init=x0), jax.random.key(1))
 
-    assert jnp.isfinite(post.evidence)
-    assert abs(float(fit.log_Mp) - log_Mp_true) < 0.05  # mass to ~12%
-    assert float(sigma[-1]) < 0.1  # log_Mp is well constrained, not degenerate
+    assert int(post.info.n_modes_kept) == 1
+    lw, mass = post.log_weights, post.samples["log_Mp"]
+    assert abs(float(weighted_mean(lw, mass)) - log_Mp_true) < 0.05  # mass to ~12%
+    # log_Mp is well constrained, not degenerate
+    assert float(jnp.sqrt(weighted_cov(lw, mass))) < 0.1
