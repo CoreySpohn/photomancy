@@ -110,7 +110,6 @@ DELETED = (
     "PhysicalPriorTarget",
     "physical_prior_target",
     "RefitCloud",
-    "ReportData",
     "loglike_report",
     "report_log_weights",
     "draw_report_scale",
@@ -202,6 +201,10 @@ DELETED = (
     "StellarAstromData",
     "RVData",
     "PMAnomalyData",
+    "ReportRows",
+    "ReportLaw",
+    "ReportTable",
+    "TabulatedReportPredictor",
 )
 
 

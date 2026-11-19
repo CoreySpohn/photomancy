@@ -27,7 +27,7 @@ from photomancy.measurements._padding import (
     _pad_2d,
     _valid_mask,
 )
-from photomancy.measurements.report import ReportLaw, ReportPrediction
+from photomancy.measurements.report import ReportPrediction, ReportRule
 
 __all__ = [
     "DMagData",
@@ -441,7 +441,7 @@ def _fixed_noise_null(alpha_pred, dMag_pred, data):
     dmag0 = interpolate_contrast_curve(alpha_pred, data.sep_grid, data.dmag0_grid)
     # Clip the exponent when the sampler proposes an implausibly bright orbit.
     exp_arg = jnp.clip(-0.4 * (dMag_pred - dmag0), max=200.0)
-    law = ReportLaw(threshold=data.snr_thresh)
+    law = ReportRule(threshold=data.snr_thresh)
     counts = law.detection_limit(1.0) * 10.0**exp_arg
     zero = jnp.zeros_like(counts)
     prediction = ReportPrediction(counts, jnp.ones_like(counts), zero, zero)

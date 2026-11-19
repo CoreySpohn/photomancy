@@ -25,11 +25,11 @@ from skyscapes.population import kipping_eccentricity
 from skyscapes.scene import FlatStar, Planet, Scene
 
 from photomancy import (
-    ReportLaw,
-    ReportRows,
-    ReportTable,
+    CountRateTable,
+    PrecomputedReportPredictor,
+    ReportData,
+    ReportRule,
     ReportTerm,
-    TabulatedReportPredictor,
 )
 from photomancy.infer import Fit, Importance
 from photomancy.infer.backends._flat import draw_template
@@ -83,7 +83,7 @@ def table():
     sep = np.geomspace(0.005, 2.0, 128)
     contrast = 5e-11 * (1.0 + (0.05 / sep) ** 6)
     bandpass = Transmission.from_band(BAND)
-    return ReportTable(
+    return CountRateTable(
         jnp.asarray(sep)[None],
         jnp.asarray(THRESHOLD * LIMIT_COUNTS / contrast)[None],
         jnp.array([0.03]),
@@ -113,7 +113,7 @@ def rows(
     if positions:
         ra[:2], dec[:2] = REC_RA, REC_DEC
         err_ra[:], err_dec[:], corr[:] = 0.0035, 0.005, 0.3
-    return ReportRows(
+    return ReportData(
         time_d=np.asarray(epochs, float),
         science_s=np.ones(n),
         limit_counts=np.full(n, LIMIT_COUNTS),
@@ -132,9 +132,9 @@ def rows(
 def report_term(report_rows=None, *, leaf=LEAF, leaf_exponent=2.0):
     """The report term, with the leaf proposal on by default."""
     return ReportTerm(
-        ReportLaw(threshold=THRESHOLD),
+        ReportRule(threshold=THRESHOLD),
         rows() if report_rows is None else report_rows,
-        TabulatedReportPredictor(table(), 0),
+        PrecomputedReportPredictor(table(), 0),
         leaf_path=leaf,
         leaf_exponent=leaf_exponent,
     )
@@ -319,7 +319,7 @@ def test_report_term_matches_the_stored_golden(fit, name):
     np.testing.assert_allclose(sd, want["sd"], rtol=1e-10)
     np.testing.assert_allclose(log_pi, want["log_pi"], rtol=1e-10)
     if name == "positions":
-        astro = RelativeAstrometryTerm(one.rows.astrometry())
+        astro = RelativeAstrometryTerm(one.data.astrometry())
         joint = _scores(fit, both, one, z, astro)[1]
         np.testing.assert_allclose(joint, want["with_positions"], rtol=1e-10)
     summed = np.logaddexp(sheets[:, 0], sheets[:, 1]) - np.log(2.0)
