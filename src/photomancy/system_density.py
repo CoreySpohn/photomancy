@@ -6,9 +6,17 @@ import equinox as eqx
 import jax.numpy as jnp
 from priorities import AbstractDistribution
 
+from photomancy.infer.fit import AbstractTerm
 from photomancy.infer.model import AbstractLogDensity
 
 __all__ = ["ScalarCoordinate", "SystemLogDensity"]
+
+
+def _score_term(term, system, keywords):
+    """``(value, prediction)`` of a term: a ``Fit`` term scores and predicts apart."""
+    if isinstance(term, AbstractTerm):
+        return term(system, **keywords), term.predict(system)
+    return term(system, **keywords)
 
 
 class ScalarCoordinate(eqx.Module):
@@ -90,8 +98,10 @@ class SystemLogDensity(AbstractLogDensity):
 
     def _terms(self, system, physical):
         results = tuple(
-            term(
-                system, **{name: physical[name] for name in self.term_inputs.get(i, ())}
+            _score_term(
+                term,
+                system,
+                {name: physical[name] for name in self.term_inputs.get(i, ())},
             )
             for i, term in enumerate(self.terms)
         )

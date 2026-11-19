@@ -8,7 +8,7 @@ counts and a position with covariance determined by its own reported observables
 
 import math
 from abc import abstractmethod
-from typing import Self
+from typing import ClassVar, Self
 
 import equinox as eqx
 import jax
@@ -18,7 +18,7 @@ from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Transmission
 
-from photomancy.infer.terms import AbstractTerm
+from photomancy.infer.fit import AbstractTerm
 
 __all__ = [
     "AbstractReportPredictor",
@@ -284,6 +284,7 @@ class ReportTerm(AbstractTerm):
     lod_arcsec: jax.Array | None = eqx.field(
         default=None, converter=lambda x: None if x is None else _float64(x)
     )
+    reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
         """Require row diffraction scales for an exact predictor."""
@@ -346,12 +347,15 @@ class ReportTerm(AbstractTerm):
         value = jnp.where(outcome_nan, jnp.nan, value)
         return jnp.where(rows.is_valid, value, 0.0), prediction
 
-    def __call__(self, model) -> tuple[jax.Array, ReportPrediction]:
+    def __call__(self, model) -> jax.Array:
         """Sum valid null log probabilities and detection joint log densities."""
-        values, prediction = self._row_density(model, self.rows)
-        return jnp.sum(values), prediction
+        return jnp.sum(self._row_density(model, self.rows)[0])
 
-    def sample(self, key, model) -> Self:
+    def predict(self, model) -> ReportPrediction:
+        """Return the predictor's report for every row."""
+        return self._row_density(model, self.rows)[1]
+
+    def draw(self, key, model) -> Self:
         """Draw counts then two position normals per row, preserving padding."""
         rows = self.rows
         valid = rows.is_valid & (rows.science_s > 0) & (rows.limit_counts > 0)

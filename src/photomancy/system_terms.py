@@ -14,7 +14,7 @@ independent star-companion orbits, which gives different predictions.
 """
 
 from collections.abc import Callable
-from typing import Self
+from typing import ClassVar, Self
 
 import equinox as eqx
 import jax
@@ -23,7 +23,7 @@ from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Transmission
 from orbix.system import System
 
-from photomancy.infer.terms import AbstractTerm
+from photomancy.infer.fit import AbstractTerm
 from photomancy.orbit._photometry import system_separation_dmag
 from photomancy.orbit.data import (
     ImagingData,
@@ -150,9 +150,9 @@ class RelativeAstrometryTerm(AbstractTerm):
 
     data: RelativeAstromData
     select: Callable = _identity
+    reads: ClassVar[tuple[str, ...]] = ()
 
-    def __call__(self, model):
-        """Return the log-likelihood and each row's planet at its own epoch."""
+    def _score(self, model):
         valid = self.data.is_valid
         # Sanitize before propagation and division: masking a NaN result alone
         # does not prevent NaN derivatives from flowing through its operands.
@@ -171,9 +171,17 @@ class RelativeAstrometryTerm(AbstractTerm):
         east, north = prediction
         return loglike_relative_astrom(east, north, data), prediction
 
-    def sample(self, key, model) -> Self:
+    def __call__(self, model):
+        """Return the scalar log-likelihood."""
+        return self._score(model)[0]
+
+    def predict(self, model):
+        """Return each row's planet offset at its own epoch, ``(2, T)``."""
+        return self._score(model)[1]
+
+    def draw(self, key, model) -> Self:
         """Copy with correlated Gaussian positions at the same epochs."""
-        return _sample_radec(key, self, self(model)[1])
+        return _sample_radec(key, self, self.predict(model))
 
 
 class StellarAstrometryTerm(AbstractTerm):
@@ -187,9 +195,9 @@ class StellarAstrometryTerm(AbstractTerm):
 
     data: StellarAstromData
     select: Callable = _identity
+    reads: ClassVar[tuple[str, ...]] = ()
 
-    def __call__(self, model):
-        """Return the log-likelihood and stellar east/north path, ``(2, T)``."""
+    def _score(self, model):
         valid = self.data.is_valid
         data = StellarAstromData(
             times=jnp.where(valid, self.data.times, 0.0),
@@ -204,9 +212,17 @@ class StellarAstrometryTerm(AbstractTerm):
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         return loglike_stellar_astrom(*prediction, data), prediction
 
-    def sample(self, key, model) -> Self:
+    def __call__(self, model):
+        """Return the scalar log-likelihood."""
+        return self._score(model)[0]
+
+    def predict(self, model):
+        """Return the stellar east/north path, ``(2, T)``."""
+        return self._score(model)[1]
+
+    def draw(self, key, model) -> Self:
         """Copy with correlated Gaussian positions at the same epochs."""
-        return _sample_radec(key, self, self(model)[1])
+        return _sample_radec(key, self, self.predict(model))
 
 
 class RadialVelocityTerm(AbstractTerm):
@@ -221,6 +237,7 @@ class RadialVelocityTerm(AbstractTerm):
     data: RVData
     select: Callable = _identity
     jitters: jnp.ndarray | None = None
+    reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
         """Require one jitter per instrument when supplied."""
@@ -237,8 +254,7 @@ class RadialVelocityTerm(AbstractTerm):
             raise ValueError("jitters must have shape (data.n_inst,)")
         return jitters
 
-    def __call__(self, model, *, jitter_m_per_s=None):
-        """Score RVs with fixed or sampled per-instrument jitter (m/s)."""
+    def _score(self, model, jitter_m_per_s=None):
         valid = self.data.is_valid
         data = RVData(
             times=jnp.where(valid, self.data.times, 0.0),
@@ -267,7 +283,19 @@ class RadialVelocityTerm(AbstractTerm):
         )
         return value, prediction
 
-    def sample(self, key, model, *, jitter_m_per_s=None) -> Self:
+    def __call__(self, model, *, jitter_m_per_s=None):
+        """Score RVs with fixed or sampled per-instrument jitter (m/s).
+
+        The keyword is for a caller that samples the jitter as its own coordinate; a
+        ``Fit`` calls with the model alone and so uses the term's fixed ``jitters``.
+        """
+        return self._score(model, jitter_m_per_s)[0]
+
+    def predict(self, model):
+        """Return the stellar radial velocity at each epoch (m/s), invalid rows zero."""
+        return self._score(model)[1]
+
+    def draw(self, key, model, *, jitter_m_per_s=None) -> Self:
         """Draw Gaussian RV noise with zero instrument offsets.
 
         The score marginalizes offsets against a flat measure and is therefore
@@ -280,7 +308,7 @@ class RadialVelocityTerm(AbstractTerm):
         ids = jnp.where(valid, data.inst_ids, 0)
         jitter = self._jitters(jitter_m_per_s)
         sigma = jnp.sqrt(jnp.where(valid, data.rv_err, 1.0) ** 2 + jitter[ids] ** 2)
-        draw = self(model)[1] + sigma * jax.random.normal(
+        draw = self.predict(model) + sigma * jax.random.normal(
             key, data.rv.shape, dtype=jnp.float64
         )
         sampled = eqx.tree_at(lambda d: d.rv, data, jnp.where(valid, draw, data.rv))
@@ -299,14 +327,14 @@ class ProperMotionAnomalyTerm(AbstractTerm):
 
     data: PMAnomalyData
     select: Callable = _identity
+    reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
         """Require enough samples to define a slope."""
         if self.data.n_epochs < 2:
             raise ValueError("n_epochs must be at least two")
 
-    def __call__(self, model):
-        """Return the log-likelihood and proper-motion anomaly, ``(2,)``."""
+    def _score(self, model):
         valid = self.data.is_valid
         data = PMAnomalyData(
             t_hip=jnp.where(valid, self.data.t_hip, 0.0),
@@ -331,12 +359,20 @@ class ProperMotionAnomalyTerm(AbstractTerm):
         )
         return loglike_pm_anomaly(prediction, data), prediction
 
-    def sample(self, key, model) -> Self:
+    def __call__(self, model):
+        """Return the scalar log-likelihood."""
+        return self._score(model)[0]
+
+    def predict(self, model):
+        """Return the proper-motion anomaly, ``(2,)``."""
+        return self._score(model)[1]
+
+    def draw(self, key, model) -> Self:
         """Copy with a full-covariance Gaussian proper-motion anomaly."""
         valid = self.data.is_valid
         covariance = jnp.where(valid, self.data.pm_anomaly_cov, jnp.eye(2))
         eps = jax.random.normal(key, (2,), dtype=jnp.float64)
-        draw = self(model)[1] + jnp.linalg.cholesky(covariance) @ eps
+        draw = self.predict(model) + jnp.linalg.cholesky(covariance) @ eps
         data = eqx.tree_at(
             lambda d: d.pm_anomaly,
             self.data,
@@ -402,14 +438,14 @@ class PhotometryTerm(AbstractTerm):
     quadrature: Quadrature
     bandpasses: tuple[Transmission, ...]
     select: Callable = _identity
+    reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
         """Require a bandpass for contrast prediction."""
         if len(self.bandpasses) != len(self.quadrature.bands):
             raise ValueError("PhotometryTerm needs one bandpass per quadrature band")
 
-    def __call__(self, model):
-        """Return the log-likelihood and each row's linear contrast, ``(T,)``."""
+    def _score(self, model):
         valid = self.data.is_valid
         data = PhotometryData(
             times=jnp.where(valid, self.data.times, 0.0),
@@ -435,7 +471,15 @@ class PhotometryTerm(AbstractTerm):
         rows = jnp.where(data.is_upper_limit, norm.logcdf(z), detection)
         return jnp.sum(jnp.where(valid, rows, 0.0)), prediction
 
-    def sample(self, key, model) -> Self:
+    def __call__(self, model):
+        """Return the scalar log-likelihood."""
+        return self._score(model)[0]
+
+    def predict(self, model):
+        """Return each row's linear contrast, ``(T,)``."""
+        return self._score(model)[1]
+
+    def draw(self, key, model) -> Self:
         """Draw Gaussian contrasts, censoring at each stored upper limit.
 
         An upper-limit row retains its threshold and flag when the draw lies
@@ -445,7 +489,7 @@ class PhotometryTerm(AbstractTerm):
         data = self.data
         valid = data.is_valid
         sigma = jnp.where(valid, data.contrast_err, 1.0)
-        draw = self(model)[1] + sigma * jax.random.normal(
+        draw = self.predict(model) + sigma * jax.random.normal(
             key, data.contrast.shape, dtype=jnp.float64
         )
         censored = data.is_upper_limit & (draw < data.contrast)

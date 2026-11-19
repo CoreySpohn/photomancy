@@ -35,6 +35,7 @@ from photomancy.infer.diagnostics import (
     weighted_quantile,
 )
 from photomancy.infer.evidence import sigma_from_log_bayes_factor
+from photomancy.infer.fit import AbstractTerm, Fit
 from photomancy.infer.model import (
     AbstractLogDensity,
     build_gaussian_fit,
@@ -49,13 +50,14 @@ from photomancy.infer.posterior import (
 )
 from photomancy.infer.posterior_utils import project_samples, sample_capped
 from photomancy.infer.priors import IndependentPrior
-from photomancy.infer.terms import AbstractTerm, TermLogDensity
+from photomancy.infer.terms import TermLogDensity
 
 __all__ = [
     "AbstractBackend",
     "AbstractLogDensity",
     "AbstractPosterior",
     "AbstractTerm",
+    "Fit",
     "GaussianPosterior",
     "IndependentPrior",
     "JaxnsBackend",

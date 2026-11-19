@@ -20,6 +20,7 @@ from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
+from term_utils import both
 
 from photomancy import RelativeAstrometryTerm, SystemLogDensity
 from photomancy.orbit.data import RelativeAstromData
@@ -270,15 +271,13 @@ def test_support_and_masks(fits):
         clean,
     )
     poisoned = eqx.tree_at(lambda d: d.planet_id, poisoned, jnp.array([0, 0, 999]))
-    score = eqx.filter_jit(
-        jax.value_and_grad(lambda x, term: term(density.build(x))[0])
-    )
+    score = eqx.filter_jit(jax.value_and_grad(lambda x, term: term(density.build(x))))
     clean_value, clean_grad = score(x, RelativeAstrometryTerm(clean))
     bad_value, bad_grad = score(x, RelativeAstrometryTerm(poisoned))
     np.testing.assert_allclose(bad_value, clean_value, rtol=0, atol=_floor(clean_value))
     np.testing.assert_allclose(bad_grad, clean_grad, rtol=0, atol=_floor(clean_grad))
     assert np.isfinite(bad_grad).all()
-    prediction = RelativeAstrometryTerm(poisoned)(density.build(x))[1]
+    prediction = RelativeAstrometryTerm(poisoned).predict(density.build(x))
     np.testing.assert_array_equal(prediction[:, -1], 0.0)
     all_masked = eqx.tree_at(lambda d: d.is_valid, poisoned, jnp.zeros(3, dtype=bool))
     value, gradient = score(x, RelativeAstrometryTerm(all_masked))
@@ -297,7 +296,7 @@ def test_aux_jit_gradient_and_prior_only(fits):
         x = points[1]
         value, aux = density.value_and_aux(x)
         np.testing.assert_allclose(density(x), value, rtol=0, atol=_floor(value))
-        term_value, prediction = density.terms[0](density.build(x))
+        term_value, prediction = both(density.terms[0], density.build(x))
         np.testing.assert_array_equal(aux["term_values"], (term_value,))
         np.testing.assert_array_equal(aux["predictions"][0], prediction)
         compiled = eqx.filter_jit(density)
@@ -322,12 +321,15 @@ def test_aux_jit_gradient_and_prior_only(fits):
     )
     counted = SystemLogDensity(
         Mock(wraps=lambda params: density.build(params["orbit"])),
-        (Mock(wraps=density.terms[0]), Mock(wraps=second_term)),
+        (
+            Mock(side_effect=lambda system: both(density.terms[0], system)),
+            Mock(side_effect=lambda system: both(second_term, system)),
+        ),
         Mock(wraps=density.prior),
         Mock(wraps=lambda params: density.log_volume(params["orbit"])),
     )
     total, aux = counted.value_and_aux({"orbit": x})
-    second_value, second_prediction = second_term(density.build(x))
+    second_value, second_prediction = both(second_term, density.build(x))
     np.testing.assert_allclose(
         total, value + second_value, rtol=0, atol=_floor(value, second_value)
     )
@@ -360,8 +362,8 @@ def test_bare_system_matches_scene(fits):
         ),
         system,
     )
-    bare_value, bare_prediction = density.terms[0](system)
-    scene_value, scene_prediction = density.terms[0](scene)
+    bare_value, bare_prediction = both(density.terms[0], system)
+    scene_value, scene_prediction = both(density.terms[0], scene)
     np.testing.assert_allclose(
         bare_prediction,
         scene_prediction,

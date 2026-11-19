@@ -304,7 +304,7 @@ def test_independent_pair_scores(two_planets):
     def compare(data, pairs):
         rv, *others = _dynamical_terms(data)
         return jnp.stack(
-            [rv(pairs, jitter_m_per_s=jitter)[0], *(term(pairs)[0] for term in others)]
+            [rv(pairs, jitter_m_per_s=jitter), *(term(pairs) for term in others)]
         )
 
     scores, expected = compare(data, pairs), jnp.asarray(_PAIR_FACTORS)
@@ -344,7 +344,9 @@ def test_jacobi_predictions(two_planets):
         fit[1] - (ends[:, 1] - ends[:, 0]) / (pm.t_gaia - pm.t_hip),
     )
     terms = _dynamical_terms(data)
-    actual = eqx.filter_jit(lambda model: tuple(t(model)[1] for t in terms))(jacobi)
+    actual = eqx.filter_jit(lambda model: tuple(t.predict(model) for t in terms))(
+        jacobi
+    )
     for name, prediction, target, floor in zip(
         DYNAMICAL, actual, expected, (1e-12, 1e-14, 1e-18, 1e-20), strict=True
     ):
@@ -354,12 +356,12 @@ def test_jacobi_predictions(two_planets):
         np.testing.assert_allclose(observed, target, rtol=1e-12, atol=floor)
     scene_ids = 1 - data.relative_astrom.planet_id[:-1]
     np.testing.assert_allclose(
-        terms[1](scene)[1][:, :-1],
+        terms[1].predict(scene)[:, :-1],
         relative[:, scene_ids, jnp.arange(time_d.size - 1)],
         rtol=1e-12,
         atol=1e-14,
     )
-    pair_positions = terms[1](pairs)[1]
+    pair_positions = terms[1].predict(pairs)
     assert (
         np.max(np.abs(actual[1] - pair_positions)) > 1e-7
     )  # arcsec, resolved physics change

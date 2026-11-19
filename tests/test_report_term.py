@@ -113,8 +113,8 @@ def test_sampler_law(report_case):
     # Move row zero's count mean near threshold to exercise both outcomes.
     model = eqx.tree_at(lambda m: m.contrast, model, jnp.array(0.025))
     keys = jax.random.split(jax.random.key(0), 2000)
-    samples = eqx.filter_jit(jax.vmap(lambda key: term.sample(key, model)))(keys).rows
-    prediction = term(model)[1]
+    samples = eqx.filter_jit(jax.vmap(lambda key: term.draw(key, model)))(keys).rows
+    prediction = term.predict(model)
     n, s, limit = map(
         float,
         (
@@ -154,7 +154,7 @@ def test_sampler_law(report_case):
         np.testing.assert_array_equal(
             np.asarray(getattr(samples, name))[:, 0][~detected], 0.0
         )
-    assert np.isfinite(term.sample(keys[0], model)(model)[0])
+    assert np.isfinite(term.draw(keys[0], model)(model))
 
 
 def test_surrogate_and_routing(report_case):
@@ -165,7 +165,7 @@ def test_surrogate_and_routing(report_case):
     """
     model, planned = report_case
     table = planned.predictor.table
-    term = planned.sample(jax.random.key(0), model)
+    term = planned.draw(jax.random.key(0), model)
     exact = ReportTerm(
         term.law,
         term.rows,
@@ -175,9 +175,9 @@ def test_surrogate_and_routing(report_case):
     surrogate = exact.surrogate(table, 1)
     assert surrogate.rows is exact.rows
     assert surrogate.law is exact.law
-    np.testing.assert_array_equal(exact(model)[0], surrogate(model)[0])
+    np.testing.assert_array_equal(exact(model), surrogate(model))
     np.testing.assert_array_equal(exact.residual(model, surrogate), 0.0)
-    prediction = surrogate(model)[1]
+    prediction = surrogate.predict(model)
     east = 0.15 + 0.01 * np.asarray(term.rows.time_d)
     rates = [
         np.interp(
@@ -251,7 +251,7 @@ def test_variance_residual(report_case):
     normal log-density difference is checked at 1e-10 absolute (x64 arithmetic).
     """
     model, term = report_case
-    prediction = term(model)[1]
+    prediction = term.predict(model)
     rows = eqx.tree_at(
         lambda r: (r.is_detected, r.counts, r.ra, r.dec, r.ra_err, r.dec_err, r.corr),
         term.rows,
@@ -297,11 +297,11 @@ def test_masks_and_edges(report_case):
         invalid,
     )
     empty = eqx.tree_at(lambda t: t.rows, term, invalid)
-    assert empty(model)[0] == 0.0
+    assert empty(model) == 0.0
     np.testing.assert_array_equal(
-        jax.grad(lambda c: empty(_Scene(c))[0])(model.contrast), 0.0
+        jax.grad(lambda c: empty(_Scene(c)))(model.contrast), 0.0
     )
-    sampled = empty.sample(jax.random.key(0), model)
+    sampled = empty.draw(jax.random.key(0), model)
     for a, b in zip(
         jax.tree.leaves(empty.rows), jax.tree.leaves(sampled.rows), strict=True
     ):
@@ -312,12 +312,12 @@ def test_masks_and_edges(report_case):
         (jnp.full(3, 100.0), jnp.array([1.0, 0.0, 1.0]), jnp.array([2.0, 2.0, 0.0])),
     )
     outside = eqx.tree_at(lambda t: t.rows, term, rows)
-    np.testing.assert_array_equal(outside(model)[1].counts, 0.0)
-    assert np.isfinite(outside(model)[0])
+    np.testing.assert_array_equal(outside.predict(model).counts, 0.0)
+    assert np.isfinite(outside(model))
     np.testing.assert_array_equal(
-        outside.sample(jax.random.key(0), model).rows.is_valid, [True, False, False]
+        outside.draw(jax.random.key(0), model).rows.is_valid, [True, False, False]
     )
-    prediction = outside(model)[1]
+    prediction = outside.predict(model)
     # A detection outside the instrument's table can still be a noise false positive.
     assert np.isfinite(
         term.law.log_counts_density(
@@ -329,14 +329,14 @@ def test_masks_and_edges(report_case):
         term.rows,
         (jnp.ones(3, bool), jnp.ones(3), jnp.ones(3), jnp.ones(3)),
     )
-    assert jnp.isneginf(eqx.tree_at(lambda t: t.rows, term, below)(model)[0])
+    assert jnp.isneginf(eqx.tree_at(lambda t: t.rows, term, below)(model))
     for name in ("counts", "ra", "dec", "ra_err", "dec_err", "corr"):
         poisoned = eqx.tree_at(
             lambda r, name=name: getattr(r, name), term.rows, jnp.full(3, jnp.nan)
         )
-        assert jnp.isnan(eqx.tree_at(lambda t: t.rows, term, poisoned)(model)[0])
+        assert jnp.isnan(eqx.tree_at(lambda t: t.rows, term, poisoned)(model))
     broken = eqx.tree_at(lambda p: p.contrast, model, jnp.array(jnp.nan))
-    assert jnp.isnan(term.sample(jax.random.key(0), broken)(model)[0])
+    assert jnp.isnan(term.draw(jax.random.key(0), broken)(model))
 
 
 def test_transformations_and_gradient(report_case):
@@ -347,7 +347,7 @@ def test_transformations_and_gradient(report_case):
     O(h^2) error; 1e-6 relative tests the analytic gradient away from knots.
     """
     model, term = report_case
-    prediction = term(model)[1]
+    prediction = term.predict(model)
     rows = eqx.tree_at(
         lambda r: (r.is_detected, r.counts, r.ra, r.dec, r.ra_err, r.dec_err),
         term.rows,
@@ -366,9 +366,9 @@ def test_transformations_and_gradient(report_case):
     for a, b in zip(jax.tree.leaves(eager), jax.tree.leaves(compiled), strict=True):
         np.testing.assert_allclose(a, b, rtol=32 * np.finfo(float).eps, atol=1e-14)
     keys = jax.random.split(jax.random.key(0), 3)
-    batched = eqx.filter_jit(jax.vmap(lambda key: term.sample(key, model)))(keys)
+    batched = eqx.filter_jit(jax.vmap(lambda key: term.draw(key, model)))(keys)
     for i, key in enumerate(keys):
-        one = term.sample(key, model)
+        one = term.draw(key, model)
         for a, b in zip(
             jax.tree.leaves(one.rows), jax.tree.leaves(batched.rows), strict=True
         ):
@@ -377,7 +377,7 @@ def test_transformations_and_gradient(report_case):
             )
 
     def score(x):
-        return term(eqx.tree_at(lambda m: m.contrast, model, x * model.contrast))[0]
+        return term(eqx.tree_at(lambda m: m.contrast, model, x * model.contrast))
 
     gradient = jax.grad(score)(jnp.array(1.0))
     central = (score(1.0 + 1e-6) - score(1.0 - 1e-6)) / (2e-6)
@@ -393,4 +393,4 @@ def test_epoch_mismatch_raises(report_case):
     with pytest.raises(ValueError, match="epoch"):
         term(bad)
     same = _Scene(model.contrast, Epoch())
-    assert float(term(same)[0]) == float(term(model)[0])
+    assert float(term(same)) == float(term(model))

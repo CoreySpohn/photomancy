@@ -21,6 +21,7 @@ from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
+from term_utils import both
 
 from photomancy import (
     PhotometryTerm,
@@ -111,7 +112,7 @@ def test_sign_anchor(pa_deg, axis):
     )
     observed = np.array([data.ra[0], data.dec[0]])
     system = _system([1.0, 0.2, np.deg2rad(pa_deg), 0.7, 0.0, 0.0, 0.0])
-    _, prediction = RelativeAstrometryTerm(data)(system)
+    prediction = RelativeAstrometryTerm(data).predict(system)
     for position in (observed, np.asarray(prediction)[:, 0]):
         assert position[axis] > 0
         assert abs(position[1 - axis]) < 1e-14
@@ -181,7 +182,7 @@ def test_system_element_parity():
         Mp=_MASS * Mearth2kg,
     )
     expected = loglike_relative_astrom(*expected_positions, data)
-    actual, prediction = RelativeAstrometryTerm(data)(_system())
+    actual, prediction = both(RelativeAstrometryTerm(data), _system())
     difference = float(actual - expected)
     print(
         f"parity: loglike difference={difference:.17g}; expected={float(expected):.17g}"
@@ -227,7 +228,7 @@ def test_element_gradients_and_padding(padding):
             ),
         )
     term = RelativeAstrometryTerm(data)
-    score = jax.jit(lambda elements: term(_system(elements))[0])
+    score = jax.jit(lambda elements: term(_system(elements)))
     elements = jnp.asarray(_ELEMENTS)
     actual = jax.jit(jax.grad(score))(elements)
     steps = 1e-5 * np.maximum(1.0, np.abs(_ELEMENTS))
@@ -236,12 +237,12 @@ def test_element_gradients_and_padding(padding):
         jax.vmap(score)(elements + offsets) - jax.vmap(score)(elements - offsets)
     ) / (2 * steps)
     np.testing.assert_allclose(actual, central, rtol=2e-6, atol=1e-6)
-    value, prediction = term(_system())
+    value, prediction = both(term, _system())
     assert np.all(np.isfinite(prediction))
     if padding:
 
         def unpadded(x):
-            return RelativeAstrometryTerm(_data())(_system(x))[0]
+            return RelativeAstrometryTerm(_data())(_system(x))
 
         np.testing.assert_allclose(value, unpadded(elements), rtol=1e-12)
         np.testing.assert_allclose(actual, jax.grad(unpadded)(elements), rtol=1e-12)
@@ -251,7 +252,7 @@ def test_element_gradients_and_padding(padding):
         )
 
         def empty_score(x):
-            return empty(_system(x))[0]
+            return empty(_system(x))
 
         assert float(empty_score(elements)) == 0.0
         np.testing.assert_array_equal(jax.grad(empty_score)(elements), 0.0)
@@ -271,7 +272,7 @@ def test_planet_and_epoch_routing():
             return jnp.stack((east, -2 * east))
 
     data = eqx.tree_at(lambda d: d.planet_id, _data(), jnp.array([1, 0, 1, 0]))
-    _, prediction = RelativeAstrometryTerm(data)(LinearSystem())
+    prediction = RelativeAstrometryTerm(data).predict(LinearSystem())
     east = _TIMES + np.array([30.0, 10.0, 30.0, 10.0])
     np.testing.assert_array_equal(prediction, [east, -2 * east])
 
@@ -293,7 +294,7 @@ def test_mixed_sum_and_restriction(with_prior):
     astrometry = RelativeAstrometryTerm(_data(), select=lambda m: m.scene)
     prior = (lambda m: -(m.instrument**2)) if with_prior else None
     ld = TermLogDensity((image, astrometry), prior)
-    parts = [term(model) for term in ld.terms]
+    parts = [both(term, model) for term in ld.terms]
     prior_value = prior(model) if with_prior else 0.0
     value, predictions = ld.value_and_aux(model)
     np.testing.assert_allclose(
@@ -378,7 +379,7 @@ def test_reflex_system_element_parity(kind):
         )
         expected = loglike_pm_anomaly(prediction, data)
         atol = 1e-20
-    actual, result = term(_system())
+    actual, result = both(term, _system())
     print(
         f"{kind} parity: likelihood difference={float(actual - expected):.17g}; "
         f"max prediction difference={float(jnp.max(jnp.abs(result - prediction))):.17g}"
@@ -425,8 +426,9 @@ def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
 
     with monkeypatch.context() as patch:
         patch.setattr(Scene, "ephemeris", record)
-        actual, prediction = term(system)
+        actual = term(system)
     assert len(calls) == 1
+    prediction = term.predict(system)
     data = term.data
     ts = jnp.linspace(
         data.t_gaia - 0.5 * data.gaia_window,
@@ -498,7 +500,7 @@ def _new_term_value_grad(term, parameters):
     """Compile each observable once, reusing data shapes for validity changes."""
 
     def score(x):
-        return term(_system(x[:7], x[7]))
+        return both(term, _system(x[:7], x[7]))
 
     return jax.value_and_grad(score, has_aux=True)(parameters)
 
@@ -588,7 +590,7 @@ def test_contrast_detection_and_limits():
     )
     for i in range(3):
         row = jax.tree.map(lambda x, i=i: x[i : i + 1], data)
-        value, prediction = PhotometryTerm(row, rule, (band,))(system)
+        value, prediction = both(PhotometryTerm(row, rule, (band,)), system)
         np.testing.assert_allclose(prediction, model[i : i + 1], rtol=1e-13)
         if i == 0:
             expected = -0.5 * ((observed[i] - model[i]) / err[i]) ** 2 - np.log(
@@ -661,7 +663,9 @@ def test_photometry_band_planet_epoch_routing():
         band_id=band_ids,
         planet_id=planet_ids,
     )
-    _, prediction = PhotometryTerm(data, rule, bands, select=lambda m: m[0])((system,))
+    prediction = PhotometryTerm(data, rule, bands, select=lambda m: m[0]).predict(
+        (system,)
+    )
     expected = [
         system.band_contrasts(rule.band(b), jnp.array([t]), bandpass=bands[b])[0, p, 0]
         for b, p, t in zip(band_ids, planet_ids, _TIMES, strict=True)
@@ -697,8 +701,10 @@ def test_rv_default_jitter_and_selection():
     jitters add noise, select is ignored, or jitter shape mismatches go unchecked.
     """
     data = _new_term("rv").data
-    expected = RadialVelocityTerm(data, jitters=jnp.zeros(data.n_inst))(_system())
-    actual = RadialVelocityTerm(data, select=lambda m: m[0])((_system(),))
+    zero = RadialVelocityTerm(data, jitters=jnp.zeros(data.n_inst))
+    selected = RadialVelocityTerm(data, select=lambda m: m[0])
+    expected = both(zero, _system())
+    actual = both(selected, (_system(),))
     for a, b in zip(actual, expected, strict=True):
         np.testing.assert_array_equal(a, b)
     with pytest.raises(ValueError, match="jitters"):
@@ -753,14 +759,14 @@ def test_term_sampling_laws(kind):
 
         term = eqx.tree_at(lambda t: t.data, term, jax.tree.map(poison, term.data))
     model = _SamplingSystem()
-    prediction = term(model)[1]
+    prediction = term.predict(model)
     keys = jax.random.split(jax.random.key(0), 2000)
     draws = eqx.tree_at(
         lambda t: t.data,
         term,
-        eqx.filter_jit(jax.vmap(lambda key: term.sample(key, model).data))(keys),
+        eqx.filter_jit(jax.vmap(lambda key: term.draw(key, model).data))(keys),
     )
-    one = term.sample(keys[0], model)
+    one = term.draw(keys[0], model)
     compiled_one = eqx.tree_at(
         lambda t: t.data, term, jax.tree.map(lambda x: x[0], draws.data)
     )
@@ -768,7 +774,7 @@ def test_term_sampling_laws(kind):
         jax.tree.leaves(one.data), jax.tree.leaves(compiled_one.data), strict=True
     ):
         np.testing.assert_allclose(a, b, rtol=32 * np.finfo(float).eps, atol=1e-20)
-    assert np.isfinite(one(model)[0])
+    assert np.isfinite(one(model))
     np.testing.assert_array_equal(one.data.is_valid, term.data.is_valid)
     for a, b in zip(jax.tree.leaves(one.data), jax.tree.leaves(term.data), strict=True):
         assert a.shape == b.shape
@@ -796,7 +802,7 @@ def test_term_sampling_laws(kind):
         ).T
         empty = eqx.tree_at(lambda t: t.data.is_valid, term, jnp.array(False))
         np.testing.assert_array_equal(
-            empty.sample(keys[0], model).data.pm_anomaly, data.pm_anomaly
+            empty.draw(keys[0], model).data.pm_anomaly, data.pm_anomaly
         )
     else:
         # Uncensored rows test Gaussian residuals; censored rows test their event law.
@@ -835,14 +841,12 @@ def test_density_sampling_split_keys():
     draw = density.sample(key, model)
     assert draw.prior is density.prior
     for sampled, subkey in zip(draw.terms, jax.random.split(key, 2), strict=True):
-        np.testing.assert_array_equal(
-            sampled.data.rv, term.sample(subkey, model).data.rv
-        )
+        np.testing.assert_array_equal(sampled.data.rv, term.draw(subkey, model).data.rv)
     assert not np.array_equal(draw.terms[0].data.rv, draw.terms[1].data.rv)
     draws = eqx.filter_jit(
         jax.vmap(lambda k: tuple(t.data for t in density.sample(k, model).terms))
     )(jax.random.split(key, 2000))
     sigma = jnp.sqrt(term.data.rv_err[0] ** 2 + term.jitters[0] ** 2)
-    prediction = term(model)[1][0]
+    prediction = term.predict(model)[0]
     z = [(d.rv[:, 0] - prediction) / sigma for d in draws]
     assert abs(float(jnp.mean(z[0] * z[1]))) < 4 / np.sqrt(2000)

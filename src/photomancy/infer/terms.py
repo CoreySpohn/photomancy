@@ -1,34 +1,21 @@
-"""The term type of a fit and the sum of terms over a shared model PyTree.
+"""The sum of terms over a shared model PyTree, for the flat-vector backends.
 
-A term holds some data and maps the model to ``(log likelihood, prediction)``. An
-image is one kind of term (:mod:`photomancy.exposure`); measurements of a planetary
-system that are not images are others (:mod:`photomancy.system_terms`).
+The term type itself is :class:`photomancy.infer.fit.AbstractTerm`; a term
+maps the model to a scalar log likelihood and predicts separately.
+:class:`TermLogDensity` evaluates both for a backend that wants the value and the
+predictions together.
 """
 
-from abc import abstractmethod
 from collections.abc import Callable
-from typing import Any, Self
+from typing import Self
 
 import equinox as eqx
 import jax
 
+from photomancy.infer.fit import AbstractTerm
 from photomancy.infer.model import AbstractLogDensity
 
-__all__ = ["AbstractTerm", "TermLogDensity"]
-
-
-class AbstractTerm(eqx.Module):
-    """One data contribution evaluated against a shared model."""
-
-    @abstractmethod
-    def __call__(self, model) -> tuple[jax.Array, Any]:
-        """Return a scalar log-likelihood and its prediction PyTree."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def sample(self, key, model) -> Self:
-        """Copy this term with a draw at ``model``, preserving invalid entries."""
-        raise NotImplementedError
+__all__ = ["TermLogDensity"]
 
 
 class TermLogDensity(AbstractLogDensity):
@@ -52,11 +39,11 @@ class TermLogDensity(AbstractLogDensity):
 
     def value_and_aux(self, params):
         """Return ``(log_density, predictions)`` with one prediction per term."""
-        results = [term(params) for term in self.terms]
-        total = results[0][0]
-        for value, _ in results[1:]:
+        values = [term(params) for term in self.terms]
+        total = values[0]
+        for value in values[1:]:
             total = total + value
-        predictions = [prediction for _, prediction in results]
+        predictions = [term.predict(params) for term in self.terms]
         if self.prior is not None:
             total = total + self.prior(params)
         return total, tuple(predictions)
@@ -69,7 +56,7 @@ class TermLogDensity(AbstractLogDensity):
         """Copy with independent draws, splitting the key in term order."""
         keys = jax.random.split(key, len(self.terms))
         terms = tuple(
-            term.sample(subkey, model)
+            term.draw(subkey, model)
             for term, subkey in zip(self.terms, keys, strict=True)
         )
         return eqx.tree_at(lambda density: density.terms, self, terms)

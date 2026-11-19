@@ -103,7 +103,7 @@ def test_target_routing_and_composition(tmp_path):
     terms = loaded.terms(
         system=model["system"], select=lambda m: m["system"], bandpasses=bands
     )
-    expected = sum(term(model)[0] for term in terms)
+    expected = sum(term(model) for term in terms)
     np.testing.assert_allclose(TermLogDensity(terms)(model), expected, rtol=1e-14)
     pending = load_target(path, epoch=_EPOCH, include_pending=True, bandpasses=bands)
     assert pending.band_names == ("L'", "H")
@@ -176,5 +176,5 @@ def test_target_epoch_invariance(tmp_path, include_pending):
         elements[-1] += epochs[0].days_between(data.epoch)
         system = _system(elements, epoch=data.epoch)
         assert system.epoch is data.epoch
-        values.append([term(system)[0] for term in data.terms(system=system)])
+        values.append([term(system) for term in data.terms(system=system)])
     np.testing.assert_allclose(values[0], values[1], rtol=1e-10, atol=0)

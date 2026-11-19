@@ -9,6 +9,7 @@ from hwoutils.epoch import Epoch
 from kinematics import predict_rv
 from orbix.equations import period_to_sma
 from orbix.system import Body, FrameOrbit, SkyFrame, System
+from term_utils import both
 
 from photomancy import RadialVelocityTerm
 from photomancy.orbit.data import RVData
@@ -53,7 +54,7 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
     term = RadialVelocityTerm(rv, jitters=jnp.array([0.01]))
 
     def likelihood(scale):
-        return float(term(_circular_system(periods, masses * scale * Mearth2kg))[0])
+        return float(term(_circular_system(periods, masses * scale * Mearth2kg)))
 
     assert likelihood(1.0) > likelihood(0.5)
     assert likelihood(1.0) > likelihood(2.0)
@@ -276,7 +277,7 @@ def test_rv_term_uses_total_mass():
         n_inst=1,
     )
     term = RadialVelocityTerm(data, jitters=jnp.array([0.01]))
-    value, prediction = term(_circular_system(periods, masses, cos_i))
+    value, prediction = both(term, _circular_system(periods, masses, cos_i))
     np.testing.assert_allclose(prediction, data.rv, rtol=1e-9, atol=1e-9)
     expected = loglike_rv_marginalized(
         data.rv,
