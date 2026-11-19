@@ -9,8 +9,8 @@ never reach a drawn artist.
 """
 
 import numpy as np
+from hwoutils.constants import AU2m, d2s
 
-from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
 from photomancy.viz._require import eyepiece
 
 
@@ -66,7 +66,7 @@ def plot_rv(
     """
     ep = eyepiece()
     t = np.asarray(t_d, float).reshape(-1)
-    curves = _curves(rv_AU_per_d) * RV_AU_PER_DAY_TO_M_PER_S
+    curves = _curves(rv_AU_per_d) * (AU2m / d2s)
 
     if ax is None:
         ax = _new_axes()

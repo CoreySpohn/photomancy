@@ -653,14 +653,15 @@ def cluster_to_mixture(posterior, k, key, *, keys=None, iters=25, cov_floor=1e-6
     Weighted k-means (fixed iterations) assigns the draws, flattened by
     :func:`ravel_samples`, to ``k`` clusters. Each mode is the cluster's weighted mean
     and covariance and its weight is the cluster's mass, so the mixture follows the
-    posterior's modes. The result is a distribution over the flat vector: use it as the
+    posterior's modes; draws of zero weight, such as the NaN dead draws of a proposal,
+    take no part. The result is a distribution over the flat vector: use it as the
     law of one free leaf of shape ``(D,)`` in the next ``Fit``. It has no inverse CDF,
     so it serves the gradient and sample backends and not nested sampling.
 
     Args:
         posterior: An unbatched :class:`Posterior` (one slice; map over worlds).
         k: Number of modes.
-        key: PRNG key for the k-means start.
+        key: PRNG key for the k-means start (``k`` draws picked by weight).
         keys: Entries to cluster, default all.
         iters: k-means iterations.
         cov_floor: Diagonal added to every covariance.
@@ -673,7 +674,9 @@ def cluster_to_mixture(posterior, k, key, *, keys=None, iters=25, cov_floor=1e-6
     x, _ = ravel_samples(posterior, keys)
     n, d = x.shape
     w = jax.nn.softmax(posterior.log_weights)
-    centers = x[jax.random.choice(key, n, (k,), replace=False)]
+    # A dead draw (zero weight, possibly NaN) must not reach the weighted sums.
+    x = jnp.where(w[:, None] > 0, x, 0.0)
+    centers = x[jax.random.choice(key, n, (k,), p=w)]
 
     def assign(centers):
         sq = jnp.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=-1)
@@ -688,7 +691,10 @@ def cluster_to_mixture(posterior, k, key, *, keys=None, iters=25, cov_floor=1e-6
     centers, _ = jax.lax.scan(step, centers, None, length=iters)
     mass_w = assign(centers)
     mass = jnp.sum(mass_w, axis=0)
-    means = (mass_w.T @ x) / jnp.maximum(mass[:, None], 1e-30)
+    # An empty cluster keeps its center, a live draw, rather than the origin.
+    means = jnp.where(
+        mass[:, None] > 0, (mass_w.T @ x) / jnp.maximum(mass[:, None], 1e-30), centers
+    )
 
     def cov(mu, wcol):
         diff = x - mu

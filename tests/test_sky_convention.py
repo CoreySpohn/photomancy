@@ -17,16 +17,12 @@ from orbix.system import (
     FrameOrbit,
     SkyFrame,
     System,
-    periapsis_chart_shape,
     phase_angle_rad,
 )
 from sky_reference import position_au, sky_position
 
-from photomancy.measurements import RelativeAstromData
 from photomancy.measurements.proper_motion import _path_proper_motion
 from photomancy.orbit.eig import _astrometry, _photometry
-from photomancy.orbit.ofti import chart_scale_rotate
-from photomancy.orbit.thiele_innes import thiele_innes_fit
 
 _FORWARD_TIMES = np.array([-120.0, 0.0, 137.0, 690.0])
 _ECCENTRIC_ELEMENTS = (2.7, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)
@@ -233,27 +229,6 @@ def forward_params(params):
     return {k: v for k, v in params.items() if k != "T"}
 
 
-def astrometry(times, positions, ra_err=1e-4, dec_err=3e-4, corr=0.0):
-    """Construct data with explicit east/north coordinates and uncertainties."""
-    n = len(times)
-    return RelativeAstromData(
-        times=jnp.asarray(times),
-        ra=jnp.asarray(positions[0]),
-        dec=jnp.asarray(positions[1]),
-        ra_err=jnp.broadcast_to(ra_err, (n,)),
-        dec_err=jnp.broadcast_to(dec_err, (n,)),
-        corr=jnp.broadcast_to(corr, (n,)),
-        planet_id=jnp.zeros(n, dtype=int),
-        is_valid=jnp.ones(n, dtype=bool),
-    )
-
-
-def fit(data, p):
-    """Fit orientation at the independently known nonlinear parameters."""
-    shape = periapsis_chart_shape(p["T"], p["e"], p["tp"])
-    return thiele_innes_fit(data, p["dist_pc"], *shape)
-
-
 def bare_system(a, e, cos_i, W, cos_w, sin_w, tp, mass_kg, dist_pc):
     """One-planet orbix system for explicit classical elements."""
     orbit = FrameOrbit.from_periapsis_time(
@@ -265,71 +240,6 @@ def bare_system(a, e, cos_i, W, cos_w, sin_w, tp, mass_kg, dist_pc):
         jax.tree.map(lambda leaf: leaf[None], orbit),
         SkyFrame(dist_pc, Epoch()),
     )
-
-
-def sheet_angles_deg(result, index):
-    """Inclination, node and periapsis angles (deg) of one line-of-sight sheet."""
-    elements = jax.tree.map(lambda leaf: leaf[index], result.orbits).to_classical()
-    return (
-        np.rad2deg(
-            np.array(
-                [elements["i_rad"], elements["W_rad"] % (2 * np.pi), elements["w_rad"]]
-            )
-        )
-        % 360
-    )
-
-
-def test_k16_fit_recovers_orientation(k16):
-    """Kervella et al. (2016), A&A 594, A107: recover K16, not its reflection.
-
-    Green (1985), ch. 17: astrometry permits only the simultaneous
-    (Omega + 180, omega + 180) node ambiguity, not i -> 180 - i.
-    """
-    times = np.linspace(0, k16["T"] * 1.4, 32)
-    truth = reference(times, k16)
-    result = fit(astrometry(times, truth), k16)
-    expected = np.array([79.320, 205.064, 232.006])
-    branches = np.array([expected, expected + np.array([0, 180, 180])])
-    for sheet in (0, 1):
-        errors = (sheet_angles_deg(result, sheet) - branches + 180) % 360 - 180
-        match = np.max(np.abs(errors), axis=1)
-        assert np.min(match) < 1e-7, f"Recovered {sheet_angles_deg(result, sheet)} deg"
-    assert float(result.chi2) < 1e-12
-
-    # Both sheets reproduce the truth on the sky.
-    for sheet in (0, 1):
-        orbit = jax.tree.map(lambda leaf, i=sheet: leaf[i], result.orbits)
-        positions, _ = orbit.at(jnp.asarray(times))
-        offsets = np.asarray(positions)[:, :2].T / k16["dist_pc"]
-        np.testing.assert_allclose(offsets, truth, atol=1e-7, rtol=0)
-
-
-def test_ti_fit_ignores_garbage_in_padded_row(k16):
-    """A masked row with invalid inputs leaves the fitted orbit and score unchanged."""
-    times = k16["T"] * np.array([0.0, 0.17, 0.35, 0.79])
-    data = astrometry(times, reference(times, k16), 1e-3, 2e-3, 0.4)
-    padded = RelativeAstromData(
-        times=jnp.append(data.times, jnp.nan),
-        ra=jnp.append(data.ra, 100.0),
-        dec=jnp.append(data.dec, -200.0),
-        ra_err=jnp.append(data.ra_err, -1.0),
-        dec_err=jnp.append(data.dec_err, 0.0),
-        corr=jnp.append(data.corr, 2.0),
-        planet_id=jnp.append(data.planet_id, 0),
-        is_valid=jnp.append(data.is_valid, False),
-    )
-    solve = jax.jit(lambda observations: fit(observations, k16))
-    expected, actual = solve(data), solve(padded)
-    # The extra zero-weight row changes the QR shape, allowing x64 roundoff.
-    for name in ("x", "sky_block", "chi2", "log_likelihood"):
-        np.testing.assert_allclose(
-            getattr(actual, name),
-            getattr(expected, name),
-            rtol=1e-12,
-            atol=1e-12,
-            err_msg=name,
-        )
 
 
 @pytest.mark.parametrize("oracle", ["numpy", "orbix"])
@@ -380,90 +290,6 @@ def test_raw_rows_and_forward_match_classical_ti(k16, cos_i):
     np.testing.assert_allclose(np.cos(beta), expected[2] / radius, atol=1e-12, rtol=0)
     actual = predict_relative_astrometry(times, **forward_params(p))
     np.testing.assert_allclose(actual, expected[:2] / p["dist_pc"], atol=1e-9, rtol=0)
-
-
-@pytest.mark.parametrize("correlated", [False, True])
-def test_ti_axis_uncertainties_and_covariance(k16, correlated):
-    """Brandt et al. (2021), Eqs. 6-9: TI coefficients respect RA/Dec errors.
-
-    Compare fitted sky positions and Gaussian residual statistics to a NumPy
-    generalized least-squares oracle with unequal, epoch-dependent errors.
-    """
-    times = np.linspace(0, 1.2 * k16["T"], 19)
-    sigma_ra = np.linspace(0.001, 0.004, len(times))
-    sigma_dec = np.linspace(0.008, 0.002, len(times))
-    rho = np.linspace(-0.7, 0.6, len(times)) if correlated else np.zeros(len(times))
-    observed = reference(times, k16) + np.random.default_rng(82).normal(
-        size=(2, len(times))
-    ) * [sigma_ra, sigma_dec]
-    data = astrometry(times, observed, sigma_ra, sigma_dec, rho)
-
-    # Span the apparent orbit with independent basis predictions, then whiten
-    # each (RA, Dec) observation by its own Cholesky covariance factor.
-    basis_params = dict(k16, a=k16["dist_pc"], cos_i=1.0, W=0.0, cos_w=1.0, sin_w=0.0)
-    Y, X = reference(times, basis_params)
-    design = np.zeros((len(times), 2, 4))
-    design[:, 0, :2] = np.column_stack([X, Y])
-    design[:, 1, 2:] = np.column_stack([X, Y])
-    cov = np.zeros((len(times), 2, 2))
-    cov[:, 0, 0], cov[:, 1, 1] = sigma_ra**2, sigma_dec**2
-    cov[:, 0, 1] = cov[:, 1, 0] = rho * sigma_ra * sigma_dec
-    chol = np.linalg.cholesky(cov)
-    white_design = np.linalg.solve(chol, design).reshape(-1, 4)
-    white_data = np.linalg.solve(chol, observed.T[..., None]).reshape(-1)
-    coefficients = np.linalg.lstsq(white_design, white_data, rcond=None)[0]
-    expected = (design @ coefficients).T
-    result = fit(data, k16)
-    orbit = jax.tree.map(lambda leaf: leaf[0], result.orbits)
-    fitted = np.asarray(orbit.at(jnp.asarray(times))[0])[:, :2].T / k16["dist_pc"]
-    np.testing.assert_allclose(fitted, expected, atol=1e-8, rtol=0)
-    chi2 = np.sum((white_data - white_design @ coefficients) ** 2)
-    ll = (
-        -0.5 * chi2
-        - 0.5 * np.linalg.slogdet(cov)[1].sum()
-        - len(times) * np.log(2 * np.pi)
-    )
-    np.testing.assert_allclose(result.chi2, chi2, atol=1e-7, rtol=0)
-    np.testing.assert_allclose(result.log_likelihood, ll, atol=1e-7, rtol=0)
-
-
-def test_ofti_hits_independent_target():
-    """Blunt et al. (2017), AJ 153, 229: scale and rotate in sky position angle.
-
-    Green (1985), ch. 17: the node angle runs north through east.
-    """
-    target = np.array([[0.08], [0.03]])
-    times = np.array([31.0])
-    mu = G * Msun2kg
-    orbit = chart_scale_rotate(
-        0.5,
-        0.2,
-        1.0,
-        1.3,
-        *target[:, 0],
-        epoch_d=times[0],
-        mu_AU3_per_d2=mu,
-        dist_pc=10.0,
-    )
-    elements = orbit.to_periapsis_elements()
-    a, e, cos_i, W, cos_w, sin_w, tp = (
-        np.asarray(elements[k])
-        for k in ("a_AU", "e", "cos_i", "W_rad", "cos_w", "sin_w", "tp_d")
-    )
-    period = 2 * np.pi * np.sqrt(a**3 / mu)
-    actual = sky_position(
-        times,
-        T=period,
-        a=a,
-        e=e,
-        cos_i=cos_i,
-        W=W,
-        cos_w=cos_w,
-        sin_w=sin_w,
-        tp=tp,
-        dist_pc=10.0,
-    )
-    np.testing.assert_allclose(actual, target, atol=1e-12, rtol=0)
 
 
 def test_eig_astrometry_east_north(k16):

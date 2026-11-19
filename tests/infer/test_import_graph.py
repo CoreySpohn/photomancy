@@ -107,6 +107,92 @@ DELETED = (
     "jitter_m_per_s",
     "migrate_sky_convention",
     "photomancy.system_density",
+    "PhysicalPriorTarget",
+    "physical_prior_target",
+    "RefitCloud",
+    "ReportData",
+    "loglike_report",
+    "report_log_weights",
+    "draw_report_scale",
+    "ti_to_elements",
+    "collapsed_refit",
+    "scale_rotate_draw",
+    "scale_rotate_refit",
+    "importance_refit",
+    "prior_cloud",
+    "UpdaterStatus",
+    "AbstractUpdateTarget",
+    "ThieleInnesTarget",
+    "AbstractConditioner",
+    "chart_scale_rotate",
+    "scored_orbit",
+    "ScaleAndRotate",
+    "ofti",
+    "MU_SUN",
+    "TI_PARAM_NAMES",
+    "TIBasisModel",
+    "lambert_families",
+    "chart_in_support",
+    "chart_log_prior",
+    "lambert_depth_fit",
+    "admissible_region_fit",
+    "ParamBounds",
+    "chart_box_bounds",
+    "AbstractGridStrategy",
+    "AdaptiveImportanceSampler",
+    "batched_loglike",
+    "grid_search",
+    "OrbitNestedPosterior",
+    "OrbitPriorTransform",
+    "build_chart_nested_model",
+    "orbit_tempered_smc",
+    "orbit_nested_sampling",
+    "roberts_sequence",
+    "map_laplace_fit",
+    "map_laplace_mixture_fit",
+    "ORBIT_ROWS_CHART",
+    "orbit_chart_log_volume",
+    "build_chart_logdensity",
+    "ScalarCoordinate",
+    "SystemLogDensity",
+    "find_init",
+    "TI_CHART_PARAM_NAMES",
+    "TIFitResult",
+    "thiele_innes_fit",
+    "thiele_innes_grid",
+    "thiele_innes_grid_search",
+    "fixed_mass_orbits",
+    "fixed_mass_coordinates",
+    "astrometric_loss",
+    "make_astrometric_evaluator",
+    "RV_AU_PER_DAY_TO_M_PER_S",
+    "LOG_HAAR",
+    "orbit_log_prior",
+    "FactorizedOrbitPrior",
+    "PopulationIntensity",
+    "PopulationPrior",
+    "mode_observables",
+    "sample_physical",
+    "orbits_from_samples",
+    "mode_scalars",
+    "mode_summary",
+    "photomancy.orbit.refit",
+    "photomancy.orbit.updater",
+    "photomancy.orbit.ofti",
+    "photomancy.orbit.few_epoch",
+    "photomancy.orbit.grid_search",
+    "photomancy.orbit.nested",
+    "photomancy.orbit.quasi_random",
+    "photomancy.orbit.laplace",
+    "photomancy.orbit.inference",
+    "photomancy.orbit.system_density",
+    "photomancy.orbit.init",
+    "photomancy.orbit.thiele_innes",
+    "photomancy.orbit.projected",
+    "photomancy.orbit.units",
+    "photomancy.priors",
+    "ChartOrbitProblem",
+    "Updater",
 )
 
 
@@ -124,3 +210,43 @@ def test_no_deleted_name_is_left_in_the_package():
         if pattern.search(path.read_text())
     }
     assert not found, found
+
+
+# Private reaches of ``photomancy.orbit`` that wait for a public home; each entry must
+# still occur, so the list shrinks as they get one.
+WAITING = {
+    "completion.py": {
+        "photomancy.infer.backends._flat",
+        "photomancy.infer.backends._flat.draw_template",
+        "photomancy.measurements.astrometry._dynamics",
+    },
+}
+
+
+def _private_reaches(path):
+    """Imports of ``path`` that are legacy or private to another subpackage."""
+    found = set()
+    for name in _imported_modules(path):
+        parts = name.split(".")
+        if parts[0] != "photomancy" or len(parts) < 2 or parts[1] == "orbit":
+            continue
+        legacy = name.startswith("photomancy.infer.legacy_posterior")
+        if legacy or any(part.startswith("_") for part in parts[1:]):
+            found.add(name)
+    return found
+
+
+def test_orbit_reaches_no_private_or_legacy_name_of_another_subpackage():
+    """Fails if ``photomancy.orbit`` imports a private module or name of a sibling.
+
+    A leading underscore anywhere in the imported path, or the legacy posterior
+    module, counts. The ``WAITING`` entries are the known reaches, and each must still
+    be present.
+    """
+    orbit = ROOT.parent / "orbit"
+    found = {
+        path.name: reaches
+        for path in sorted(orbit.rglob("*.py"))
+        if (reaches := _private_reaches(path))
+    }
+    assert found == WAITING, found

@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import G, Mearth2kg, Msun2kg
+from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, d2s
 from hwoutils.epoch import Epoch
 from kinematics import (
     predict_pm_anomaly,
@@ -47,7 +47,6 @@ from photomancy.measurements import (
     loglike_stellar_astrom,
 )
 from photomancy.measurements.proper_motion import _path_proper_motion
-from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
 
 # a [AU], e, node [rad], inclination [rad], periapsis [rad], M0 [rad], t0 [day].
 _ELEMENTS = np.array([1.7, 0.31, 1.1, 0.8, 0.6, 0.4, 24.0])
@@ -335,20 +334,17 @@ def test_reflex_system_element_parity(kind):
     elif kind == "rv":
         a, e, _, inc, peri, mean, epoch = _ELEMENTS
         motion = np.sqrt(G * (Msun2kg + _MASS * Mearth2kg) / a**3)
-        prediction = (
-            predict_rv(
-                data.times,
-                2 * np.pi / motion,
-                Msun2kg,
-                _MASS * Mearth2kg * np.sin(inc),
-                e,
-                np.cos(peri),
-                np.sin(peri),
-                epoch - mean / motion,
-                Mp=_MASS * Mearth2kg,
-            )
-            * RV_AU_PER_DAY_TO_M_PER_S
-        )
+        prediction = predict_rv(
+            data.times,
+            2 * np.pi / motion,
+            Msun2kg,
+            _MASS * Mearth2kg * np.sin(inc),
+            e,
+            np.cos(peri),
+            np.sin(peri),
+            epoch - mean / motion,
+            Mp=_MASS * Mearth2kg,
+        ) * (AU2m / d2s)
         expected = loglike_rv_marginalized(
             data.rv,
             prediction,

@@ -1,31 +1,25 @@
-"""Null / imaging orbit fitting: gradient-safety, padding, and end-to-end recovery.
+"""Null / imaging likelihoods: gradient safety and padding.
 
 The contrast-curve likelihood interpolates a dMag0 detection limit at the planet's
 predicted separation. The grids are padded (trailing sep=0, dmag0=-inf), which made
 ``jnp.interp`` return a finite value but a nan gradient w.r.t. the separation; these
-tests pin the gradient finite, the padding helpers, and a full joint fit.
+tests pin the gradient finite and the padding helpers.
 """
 
 import jax
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
-import numpy as np  # noqa: E402
 from kinematics import (  # noqa: E402
     predict_photometry,
-    predict_relative_astrometry,
 )
-from orbix.equations import period_to_sma  # noqa: E402
 
-from photomancy.infer.legacy_posterior import MixturePosterior  # noqa: E402
 from photomancy.measurements import (  # noqa: E402
     MAX_CC_PTS,
     MAX_IMG,
     ImagingData,
     NullData,
-    RelativeAstromData,
     loglike_imaging,
     loglike_null,
 )
@@ -135,93 +129,3 @@ def test_imagingdata_pad_produces_max_sized_valid_container():
     assert padded.dmag_obs.shape == (MAX_IMG,)
     assert int(padded.is_valid.sum()) == 2
     assert bool(padded.is_detected[0]) and not bool(padded.is_detected[1])
-
-
-@pytest.mark.slow
-def test_joint_astrom_imaging_fit_recovers_period():
-    """A joint astrometry + imaging fit runs end-to-end and recovers the period.
-
-    Imaging detection epochs pass through the photometry likelihood inside a real
-    fit, and the TI-seeded Laplace mixture recovers the true period to within 10%.
-    """
-    msun, dist, t_days = 1.989e30, 10.0, 1096.0
-    log_p_range = (float(np.log10(600.0)), float(np.log10(1600.0)))
-    e, cos_i, big_omega, little_omega = 0.15, 0.5, 2.3, 0.8
-    a_au = float(period_to_sma(t_days, msun))
-    tp = -1.5 / (2.0 * jnp.pi / t_days)
-    cos_w, sin_w = float(jnp.cos(little_omega)), float(jnp.sin(little_omega))
-    lam = 0.3 * (1e-4) ** 2
-
-    rng = np.random.default_rng(0)
-    aerr = 5.0e-3
-    t_ast = np.sort(rng.uniform(0.0, 3.0 * t_days, 6))
-    ra, dec = predict_relative_astrometry(
-        jnp.asarray(t_ast), a_au, e, cos_i, big_omega, cos_w, sin_w, tp, msun, dist
-    )
-    astrom = RelativeAstromData(
-        times=jnp.asarray(t_ast),
-        ra=jnp.asarray(np.asarray(ra) + rng.normal(0.0, aerr, 6)),
-        dec=jnp.asarray(np.asarray(dec) + rng.normal(0.0, aerr, 6)),
-        ra_err=jnp.full(6, aerr),
-        dec_err=jnp.full(6, aerr),
-        corr=jnp.zeros(6),
-        planet_id=jnp.zeros(6, dtype=int),
-        is_valid=jnp.ones(6, dtype=bool),
-    )
-
-    t_det = jnp.asarray(np.sort(rng.uniform(0.0, 3.0 * t_days, 3)))
-    _, dmag_true = predict_photometry(
-        t_det, a_au, e, cos_i, big_omega, cos_w, sin_w, tp, msun, lam, dist
-    )
-    npts = 40
-    sep = jnp.broadcast_to(jnp.linspace(0.01, 0.6, npts), (3, npts))
-    img = ImagingData.from_detections_and_nulls(
-        det_epochs=t_det,
-        det_dmag_obs=dmag_true,
-        det_dmag_err=jnp.full(3, 0.1),
-        det_sep_grid=sep,
-        det_dmag0_grid=jnp.full((3, npts), 30.0),
-        null_epochs=jnp.zeros((0,)),
-        null_sep_grid=jnp.zeros((0, npts)),
-        null_dmag0_grid=jnp.zeros((0, npts)),
-    )
-
-    from orbix.system import ClassicalChart
-    from priorities import LogUniform
-    from system_helpers import BOUNDS, _scene
-
-    from photomancy import DMagTerm, RelativeAstrometryTerm
-    from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
-    from photomancy.orbit.init import find_init
-    from photomancy.orbit.laplace import map_laplace_mixture_fit
-    from photomancy.orbit.system_density import ScalarCoordinate
-    from photomancy.priors import FactorizedOrbitPrior
-
-    chart = ClassicalChart()
-    density = build_chart_logdensity(
-        chart,
-        _scene,
-        FactorizedOrbitPrior(
-            lambda scene: jax.tree.map(lambda x: x[0], scene.dynamics.orbits),
-            (10.0 ** log_p_range[0], 10.0 ** log_p_range[1]),
-        ),
-        star_mass_kg=msun,
-        terms=(RelativeAstrometryTerm(astrom), DMagTerm(img)),
-        scalars={
-            name: ScalarCoordinate(LogUniform(*bounds))
-            for name, bounds in BOUNDS.items()
-        },
-        body_inputs=("radius_AU", "albedo"),
-    )
-    scalars = dict(mass_Mearth=1.0, radius_AU=1e-4, albedo=0.3)
-    starts, _ = find_init(astrom, msun, dist, k=5, log_T_range=log_p_range, chart=chart)
-    template = {"orbit": starts[0], **{k: jnp.log(v) for k, v in scalars.items()}}
-    problem = ChartOrbitProblem(density, template)
-    inits = jnp.stack([problem.flatten(dict(template, orbit=s)) for s in starts])
-    post = map_laplace_mixture_fit(problem, inits, n_steps=300)
-
-    assert isinstance(post, MixturePosterior)
-    best = post.means[jnp.argmax(post.log_evidences)]
-    phys = problem.to_physical(best)
-    assert abs(float(phys["T"]) - t_days) / t_days < 0.10
-    assert jnp.isfinite(phys["Lambda"]) and float(phys["Lambda"]) > 0.0

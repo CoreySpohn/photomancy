@@ -1,7 +1,7 @@
 """Corner plots over physical orbital parameters: extract, delegate, decorate.
 
 photomancy supplies what eyepiece cannot know: how a fitted posterior turns
-into a physical-sample dict (``sample_physical``), which parameters are
+into a physical-sample dict (``posterior_physical``), which parameters are
 worth showing by default (and that ``ll_total`` never is), the axis-label
 vocabulary, and per-parameter axis ranges -- the one feature whose absence
 kept a third hand-rolled corner implementation alive. The triangle itself
@@ -13,7 +13,7 @@ from collections.abc import Mapping
 import numpy as np
 
 from photomancy.infer import Posterior
-from photomancy.orbit.diagnostics import posterior_physical, sample_physical
+from photomancy.orbit.diagnostics import posterior_physical
 from photomancy.viz._require import eyepiece
 from photomancy.viz.labels import PARAM_LABELS, default_corner_params
 
@@ -23,32 +23,22 @@ def _as_sample_dict(samples):
     return {name: np.asarray(value) for name, value in samples.items()}
 
 
-def _resolve_samples(samples_or_posterior, problem, key, n, orbit_path):
+def _resolve_samples(samples_or_posterior, key, n, orbit_path):
     """Normalize the input to a NumPy physical-sample dict.
 
-    A mapping passes through (the ``sample_physical`` shape, also the door
+    A mapping passes through (the ``posterior_physical`` shape, also the door
     for samples loaded from a file). A :class:`~photomancy.infer.Posterior`
-    needs ``key`` and ``orbit_path``; any other fitted posterior needs
-    ``problem`` and ``key`` to draw from.
+    needs ``key`` and ``orbit_path``.
     """
     if isinstance(samples_or_posterior, Mapping):
         return _as_sample_dict(samples_or_posterior)
-    if isinstance(samples_or_posterior, Posterior):
-        if key is None or orbit_path is None:
-            raise TypeError("plotting a Posterior requires key and orbit_path")
-        return _as_sample_dict(
-            posterior_physical(samples_or_posterior, key, n, orbit_path=orbit_path)
-        )
-    missing = [
-        name for name, val in (("problem", problem), ("key", key)) if val is None
-    ]
-    if missing:
-        raise TypeError(
-            "plotting a posterior requires "
-            + ", ".join(missing)
-            + " to draw physical samples"
-        )
-    return _as_sample_dict(sample_physical(samples_or_posterior, problem, key, n))
+    if not isinstance(samples_or_posterior, Posterior):
+        raise TypeError("plot a physical-sample mapping or a Posterior")
+    if key is None or orbit_path is None:
+        raise TypeError("plotting a Posterior requires key and orbit_path")
+    return _as_sample_dict(
+        posterior_physical(samples_or_posterior, key, n, orbit_path=orbit_path)
+    )
 
 
 def _apply_ranges(axes, params, ranges):
@@ -73,7 +63,6 @@ def _apply_ranges(axes, params, ranges):
 
 def plot_corner(
     samples_or_posterior,
-    problem=None,
     *,
     key=None,
     n=2000,
@@ -90,14 +79,11 @@ def plot_corner(
 
     Args:
         samples_or_posterior: A ``{name: (n,)}`` physical-sample dict (the
-            ``sample_physical`` shape; also the door for samples loaded
-            from a file), a :class:`~photomancy.infer.Posterior`, which
-            requires ``key`` and ``orbit_path``, or a chart-problem posterior,
-            which requires ``problem`` and ``key``.
-        problem: The ``ChartOrbitProblem`` supplying ``to_physical``.
-            Chart-problem posterior door only.
-        key: PRNG key for drawing posterior samples. Posterior doors only.
-        n: Number of posterior samples to draw on the posterior doors.
+            ``posterior_physical`` shape; also the door for samples loaded
+            from a file) or a :class:`~photomancy.infer.Posterior`, which
+            requires ``key`` and ``orbit_path``.
+        key: PRNG key for drawing posterior samples. Posterior door only.
+        n: Number of posterior samples to draw on the posterior door.
         orbit_path: Model path of the batched orbits read from each draw of a
             ``Posterior`` (for example ``"dynamics.orbits"``); row 0 is shown.
         params: Ordered parameter names to show. None uses the curated
@@ -115,7 +101,7 @@ def plot_corner(
         The ``eyepiece.MosaicResult`` from ``corner``.
     """
     ep = eyepiece()
-    samples = _resolve_samples(samples_or_posterior, problem, key, n, orbit_path)
+    samples = _resolve_samples(samples_or_posterior, key, n, orbit_path)
     resolved_params = params or default_corner_params(samples)
     result = ep.plot.corner(
         samples,

@@ -1,8 +1,9 @@
 """Axis-label vocabulary for the physical orbital parameters.
 
 Plain data, importable without the plotting stack: the ASCII label for
-every key ``ChartOrbitProblem.to_physical`` emits, plus the curated default
-ordering corner plots use when the caller does not choose one.
+every physical orbital parameter a corner plot shows (the keys of
+``posterior_physical`` among them), plus the curated default ordering corner
+plots use when the caller does not choose one.
 """
 
 import numpy as np
@@ -31,8 +32,8 @@ PARAM_LABELS = {
 
 # Corner-plot default: the physically meaningful, non-redundant subset in a
 # stable reading order. The log duplicates and the (cos, sin) periapsis pair
-# are reachable explicitly via params=; ll_total (a deterministic site
-# to_physical leaks) is never shown.
+# are reachable explicitly via params=; ll_total (a log-likelihood column a
+# sample dict may carry) is never shown.
 _DEFAULT_CORNER_ORDER = (
     "T",
     "a",
