@@ -17,6 +17,7 @@ from kinematics import (
     predict_stellar_astrometry,
 )
 from optixstuff.spectral import Band, Quadrature, Transmission
+from priorities import Normal
 from scipy import integrate
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
@@ -31,11 +32,8 @@ from photomancy import (
     RadialVelocityTerm,
     RelativeAstrometryTerm,
 )
-from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
-from photomancy.infer import (
-    AbstractTerm,
-    TermLogDensity,
-)
+from photomancy.exposure import ExposureModel, ExposureTerm
+from photomancy.infer import AbstractTerm, Fit
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.measurements import (
     AstrometryData,
@@ -267,13 +265,12 @@ def test_planet_and_epoch_routing():
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-@pytest.mark.parametrize("with_prior", [False, True])
-def test_mixed_sum_and_restriction(with_prior):
-    """Truth source: separately evaluated image/astrometry terms and one prior.
+def test_mixed_terms_sum_in_a_fit():
+    """Truth source: separately evaluated image and astrometry terms and one prior.
 
-    Tolerance basis: rtol 1e-12 for the same scalar addition in x64; predictions
-    and object identities are exact. Fails if: mixed routing, auxiliary order,
-    prior counting, restriction, subclass behavior or empty checks regress.
+    Tolerance basis: rtol 1e-12 for the same scalar addition in x64. Fails if
+    ``Fit`` routes a term to the wrong model, drops or double counts a term, or
+    counts the prior in the likelihood.
     """
     model = ExposureModel(jnp.array(2.0), (jnp.array(3.0),), _system())
     image = ExposureTerm(
@@ -281,36 +278,18 @@ def test_mixed_sum_and_restriction(with_prior):
         gaussian_loglike(jnp.array(15.0), 1.0),
     )
     astrometry = RelativeAstrometryTerm(_data(), system_path="scene")
-    prior = (lambda m: -(m.instrument**2)) if with_prior else None
-    ld = TermLogDensity((image, astrometry), prior)
-    parts = [both(term, model) for term in ld.terms]
-    prior_value = prior(model) if with_prior else 0.0
-    value, predictions = ld.value_and_aux(model)
+    law = Normal(jnp.asarray(2.0), jnp.asarray(1.0))
+    fit = Fit(model, {"instrument": law}, (image, astrometry))
+    x = {"instrument": jnp.asarray(2.0)}
+    parts = [both(term, model)[0] for term in fit.terms]
+    np.testing.assert_allclose(fit.log_likelihood(x), sum(parts), rtol=1e-12)
     np.testing.assert_allclose(
-        value, sum(p[0] for p in parts) + prior_value, rtol=1e-12
+        fit.log_density(x), sum(parts) + law.log_prob(x["instrument"]), rtol=1e-12
     )
-    assert float(ld(model)) == float(value)
-    for i, (part, prediction) in enumerate(parts):
-        view = ld.restrict((i,))
-        assert view.terms[0] is ld.terms[i]
-        assert view.prior is prior
-        np.testing.assert_allclose(view(model), part + prior_value, rtol=1e-12)
-        np.testing.assert_array_equal(predictions[i], prediction)
-        np.testing.assert_array_equal(view.value_and_aux(model)[1][0], prediction)
-    reversed_aux = ld.restrict((1, 0)).value_and_aux(model)[1]
-    np.testing.assert_array_equal(reversed_aux[0], predictions[1])
-    np.testing.assert_array_equal(reversed_aux[1], predictions[0])
     assert isinstance(image, AbstractTerm)
     assert isinstance(astrometry, AbstractTerm)
-    assert isinstance(ExposureLogDensity((image,)).restrict((0,)), ExposureLogDensity)
     with pytest.raises(TypeError):
         AbstractTerm()
-    for factory in (lambda: TermLogDensity(()), lambda: ld.restrict(())):
-        with pytest.raises(ValueError, match="at least one term"):
-            factory()
-    for indices in ((-1,), (2,)):
-        with pytest.raises(IndexError):
-            ld.restrict(indices)
 
 
 @vv.case("scene-fits", "code-verification", basis="equivalence")
@@ -804,27 +783,3 @@ def test_term_sampling_laws(kind):
     z = np.asarray(z)
     assert np.all(np.abs(z.mean(axis=0)) < 4 / np.sqrt(2000))
     assert np.all(np.abs(z.var(axis=0, ddof=1) - 1) < 4 * np.sqrt(2 / 1999))
-
-
-def test_density_sampling_split_keys():
-    """Fails if terms reuse a key or sampling changes the prior.
-
-    Equality with each split subkey is exact algebra. Two identical terms over
-    n=2000 keys have cross moment within 4/sqrt(n) of zero (four MC errors).
-    """
-    term = _new_term("rv")
-    density = TermLogDensity((term, term), prior=lambda model: jnp.array(-2.0))
-    model = _SamplingSystem()
-    key = jax.random.key(0)
-    draw = density.sample(key, model)
-    assert draw.prior is density.prior
-    for sampled, subkey in zip(draw.terms, jax.random.split(key, 2), strict=True):
-        np.testing.assert_array_equal(sampled.data.rv, term.draw(subkey, model).data.rv)
-    assert not np.array_equal(draw.terms[0].data.rv, draw.terms[1].data.rv)
-    draws = eqx.filter_jit(
-        jax.vmap(lambda k: tuple(t.data for t in density.sample(k, model).terms))
-    )(jax.random.split(key, 2000))
-    sigma = jnp.sqrt(term.data.rv_err[0] ** 2 + term.jitters[0] ** 2)
-    prediction = term.predict(model)[0]
-    z = [(d.rv[:, 0] - prediction) / sigma for d in draws]
-    assert abs(float(jnp.mean(z[0] * z[1]))) < 4 / np.sqrt(2000)

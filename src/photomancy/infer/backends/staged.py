@@ -8,8 +8,8 @@ optimizer state. This module holds the pieces a staged fit is described with:
 - :func:`group_labels` names the groups of a parameter PyTree from explicit selectors,
 - :func:`rescaled_transform` runs a transform on ``params / scale`` so a leaf keeps
   its physical units while the steps match a fit in other units,
-- :class:`FitStage` describes one stage and :func:`map_fit` runs the stages,
-- :class:`MAPBackend` packages a staged fit behind the backend protocol.
+- :class:`FitStage` describes one stage and :func:`map_fit` runs the stages (the
+  engine of :class:`MAP`, which runs a staged fit of a ``Fit`` through ``run``).
 
 Every group has its own optimizer state (the transform applied to that group's
 leaves only), so a group's state is exactly what ``optax.multi_transform`` would
@@ -25,12 +25,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from photomancy.infer.backends.base import (
-    AbstractBackend,
-    BackendDraws,
-    LegacyBackend,
-)
-from photomancy.infer.legacy_posterior import PointPosterior
+from photomancy.infer.backends.base import AbstractBackend, BackendDraws
+from photomancy.infer.fit import Fit
 from photomancy.infer.posterior import Posterior
 
 __all__ = [
@@ -38,7 +34,6 @@ __all__ = [
     "UNLABELED",
     "EarlyStopping",
     "FitStage",
-    "MAPBackend",
     "MAPInfo",
     "MAPResult",
     "StageTrace",
@@ -371,8 +366,9 @@ def map_fit(
 
     Args:
         logdensity: A callable ``params -> scalar``, or an object with
-            ``value_and_aux(params) -> (scalar, aux)`` (an
-            :class:`~photomancy.infer.model.AbstractLogDensity`).
+            ``value_and_aux(params) -> (scalar, aux)``. ``aux`` is what a stage's
+            ``closed_form``, the metrics and the callback receive; the duck-typed
+            ``value_and_aux`` is the protocol.
         init: The initial parameter PyTree.
         labels: Group label PyTree from :func:`group_labels` (same structure as
             ``init``).
@@ -684,73 +680,60 @@ def map_fit(
     return MAPResult(params=rebuild(dyn), stages=traces, opt_states=states)
 
 
-@eqx.filter_jit
-def _log_density_at(logdensity, params):
-    return _value_and_aux(logdensity, params)[0]
+class _RealLogProb(eqx.Module):
+    """``u -> fit.real_log_prob(u)`` over the unconstrained entry dict of one draw.
 
-
-class MAPBackend(LegacyBackend):
-    """Staged MAP fit over a PyTree, returning a ``PointPosterior``.
-
-    The backend holds the fit's description; ``run(logdensity, init)`` is
-    :func:`map_fit` followed by one evaluation of ``logdensity`` at the result. Unlike
-    the other backends, ``init`` is the parameter PyTree, not a flat array, and there
-    is no randomness (``key`` is unused). Use :meth:`fit` for the per-stage traces.
-
-    Args:
-        labels: Group label PyTree from :func:`group_labels`.
-        transforms: ``{group: optax.GradientTransformation}``.
-        stages: Tuple of :class:`FitStage`.
-        freeze: ``"hold"``, ``"zero_gradient"`` or ``"drop_update"``; see
-            :func:`map_fit`.
-        metrics: ``{name: fn(params, aux) -> scalar}`` recorded every step.
-        callback: ``callback(StepRecord)`` called every ``callback_every`` steps.
-        callback_every: Steps between callbacks, or a predicate on the global
-            step; see :func:`map_fit`.
+    ``value_and_aux`` also returns the prediction of every term at ``u`` (``None`` for
+    a term without one), the pre-step images a ``closed_form`` reads.
     """
 
-    labels: Any
-    transforms: dict
-    stages: tuple[FitStage, ...]
-    freeze: str = eqx.field(static=True, default="hold")
-    metrics: dict | None = None
-    callback: Callable | None = None
-    callback_every: int | Callable = eqx.field(static=True, default=1)
-
-    def fit(self, logdensity, init):
-        """Run the staged fit and return the :class:`MAPResult` with its traces."""
-        return map_fit(
-            logdensity,
-            init,
-            self.labels,
-            self.transforms,
-            self.stages,
-            freeze=self.freeze,
-            metrics=self.metrics,
-            callback=self.callback,
-            callback_every=self.callback_every,
-        )
-
-    def run(self, logdensity, init, key=None):
-        """Fit from the parameter PyTree ``init``; return a ``PointPosterior``.
-
-        ``PointPosterior.log_density`` is the run-level ``logdensity`` at the result,
-        even when the last stage fitted a restricted view of it.
-        """
-        result = self.fit(logdensity, init)
-        return PointPosterior(
-            params=result.params,
-            log_density=_log_density_at(logdensity, result.params),
-        )
-
-
-class _RealLogProb(eqx.Module):
-    """``u -> fit.real_log_prob(u)`` over the unconstrained entry dict of one draw."""
-
-    fit: object
+    fit: Fit
 
     def __call__(self, u):
         return self.fit.real_log_prob(u)
+
+    def value_and_aux(self, u):
+        """Return ``(real_log_prob(u), per-term predictions)``."""
+        model = self.fit.model_at(self.fit.from_real(u)[0])
+        preds = []
+        for term in self.fit.terms:
+            try:
+                preds.append(term.predict(model))
+            except NotImplementedError:
+                preds.append(None)
+        return self.fit.real_log_prob(u), tuple(preds)
+
+
+def _real_view(view, fit):
+    """Wrap a stage ``Fit`` for the optimizer; refuse a different free set.
+
+    Anything that is not a ``Fit`` (a plain callable, a ``value_and_aux`` object) is
+    returned unchanged.
+    """
+    if not isinstance(view, Fit):
+        return view
+    if set(view.free) != set(fit.free):
+        raise ValueError(
+            "a stage Fit must have the free entries of the run fit; "
+            f"got {sorted(view.free)}, expected {sorted(fit.free)}"
+        )
+    return _RealLogProb(view)
+
+
+def _real_stage(stage, fit):
+    """Copy of ``stage`` whose ``logdensity`` or ``prepare`` result may be a ``Fit``."""
+    if isinstance(stage.logdensity, Fit):
+        stage = eqx.tree_at(
+            lambda s: s.logdensity, stage, _real_view(stage.logdensity, fit)
+        )
+    if stage.prepare is not None:
+        prepare = stage.prepare
+
+        def wrapped(params):
+            return _real_view(prepare(params), fit)
+
+        stage = eqx.tree_at(lambda s: s.prepare, stage, wrapped)
+    return stage
 
 
 class MAPInfo(eqx.Module):
@@ -777,6 +760,18 @@ class MAP(AbstractBackend):
     With no ``stages`` the fit is one stage of ``n_steps`` L-BFGS iterations over every
     parameter. Pass ``labels``, ``transforms`` and ``stages`` as for :func:`map_fit`
     (labels have the structure of ``fit.to_real`` of one draw) for a staged fit.
+
+    The objective of a step is ``value_and_aux(u)``, which returns
+    ``(fit.real_log_prob(u), predictions)`` with ``predictions`` the tuple of
+    ``term.predict(model)`` at the parameters before the step (``None`` for a term
+    that has no prediction). A stage's ``closed_form``,
+    the ``metrics`` and the ``callback`` receive that tuple as ``aux``. ``closed_form``
+    and the metrics see the unconstrained entry dict ``u`` (identity under a ``Normal``
+    law); the prediction is a second call of the term on the same model, so a render is
+    traced twice per stage configuration. A stage's ``logdensity``, or what its
+    ``prepare`` returns, may be a ``Fit`` over a subset of the terms (a view of one
+    exposure, say); it must have the same free entries as the run fit, and a different
+    set raises ``ValueError`` on the host.
 
     Args:
         n_steps: L-BFGS iterations of the default stage.
@@ -825,6 +820,7 @@ class MAP(AbstractBackend):
             stages = (
                 FitStage(self.n_steps, ("all",), solver=optax.lbfgs(), name="lbfgs"),
             )
+        stages = tuple(_real_stage(stage, fit) for stage in stages)
         result = map_fit(
             _RealLogProb(fit),
             start,

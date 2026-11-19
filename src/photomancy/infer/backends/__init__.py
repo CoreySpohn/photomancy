@@ -40,7 +40,7 @@ from photomancy.infer.backends.pathfinder import (
     PathfinderInfo,
     PathfinderMixtureBackend,
 )
-from photomancy.infer.backends.staged import MAP, MAPBackend, MAPInfo, map_fit
+from photomancy.infer.backends.staged import MAP, MAPInfo, map_fit
 
 __all__ = [
     "MAP",
@@ -57,7 +57,6 @@ __all__ = [
     "LaplaceBackend",
     "LaplaceInfo",
     "LaplaceMixtureBackend",
-    "MAPBackend",
     "MAPInfo",
     "MCLMCBackend",
     "MCLMCInfo",
