@@ -18,6 +18,7 @@ from hwoutils.constants import Mearth2kg, Msun2kg, Rearth2AU
 from hwoutils.model_paths import resolve
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
+from orbix.system.core import GM_SUN_AU3_PER_D2
 from priorities import LogUniform, Normal, TruncatedDistribution, Uniform
 from priorities.testing import check_distribution
 from skyscapes.physical_model import LambertianPhysicalModel
@@ -348,6 +349,12 @@ def test_refuses_unknown_paths_and_bad_entries():
         )
 
 
+def test_refuses_an_index_into_an_array_leaf():
+    """``leaf[0]`` into an array is not a path: refused as an unknown path."""
+    with pytest.raises(ValueError, match="unknown model path"):
+        Fit(_scene(), {"planets[0].Rp_Rearth[0]": LogUniform(0.5, 4.0)})
+
+
 def test_refuses_a_changed_free_set():
     """with_priors keeps the free set and the map of a block."""
     fit = Fit(
@@ -597,3 +604,121 @@ def test_exposure_fit_over_an_exposure_model():
     assert fit.model_at(x).exposures[0] == 0.1
     with pytest.raises(ValueError, match="scene"):
         Fit(model, {"scene.nothing": LogUniform(0.5, 2.0)}, (term,))
+
+
+# ----- block and prior-swap behaviour on a Scene ---------------------------------
+
+
+def _two_planet_scene():
+    def planet():
+        return Planet(jnp.ones(1), LambertianPhysicalModel(jnp.array([0.3])))
+
+    return Scene.from_classical(
+        FlatStar(1.0),
+        (planet(), planet()),
+        star_mass_Msun=1.1,
+        planet_mass_Msun=jnp.array([1e3, 3e2]) * Mearth2kg / Msun2kg,
+        dist_pc=10.0,
+        a_AU=jnp.array([1.0, 3.0]),
+        e=jnp.array([0.1, 0.2]),
+        i_rad=jnp.array([0.7, 0.9]),
+        W_rad=jnp.array([0.5, 1.5]),
+        w_rad=jnp.array([1.0, 2.0]),
+        M0_rad=jnp.array([2.0, 0.3]),
+    )
+
+
+def test_thiele_innes_fit_exposes_the_written_star_mass_in_model_at():
+    """The star mass a Thiele-Innes block writes is the enclosed mass minus planets.
+
+    Truth source: ``n^2 a^3 / GM`` of the built row, minus the planet mass, computed
+    here from the model's own orbit.
+    Fails if: ``model_at`` drops the block's second write, or applies it before the
+    orbit it implies.
+    """
+    from orbix.system import ThieleInnesBlock
+
+    scene = _two_planet_scene()
+    block = ThieleInnesBlock(
+        OrbitLaw(period_d=LogUniform(*PERIOD_RANGE), eccentricity=Uniform(0.05, 0.8)),
+        Uniform(0.9, 1.3),
+        rows=(0,),
+        system="dynamics",
+    )
+    fit = Fit(scene, {"dynamics.orbits": block})
+    x = fit.sample_prior(jax.random.key(3))
+    model = fit.model_at(x)
+    star_mass = float(model.dynamics.star.mass_Msun)
+    assert star_mass != float(scene.dynamics.star.mass_Msun)
+    assert 0.9 <= star_mass <= 1.3
+    orbit = model.dynamics.orbits
+    gm = float(orbit.n_rad_per_d[0] ** 2 * orbit.a_AU[0] ** 3)
+    inner = float(model.dynamics.planets.mass_Msun[0])
+    np.testing.assert_allclose(gm / GM_SUN_AU3_PER_D2 - inner, star_mass, rtol=1e-10)
+    held_gm = float(orbit.n_rad_per_d[1] ** 2 * orbit.a_AU[1] ** 3)
+    total = star_mass + float(jnp.sum(model.dynamics.planets.mass_Msun))
+    np.testing.assert_allclose(held_gm / GM_SUN_AU3_PER_D2, total, rtol=1e-10)
+
+
+def test_a_free_star_mass_rates_the_held_row_and_the_freed_row():
+    """A freed star mass moves the mean motion of the held row, not its geometry.
+
+    Truth source: ``orbix.equations.mean_motion`` at ``enclosed_mu`` of the drawn star
+    mass and the planet masses.
+    Fails if: a held row keeps the mean motion of the base star mass.
+    """
+    from orbix.equations import mean_motion
+    from orbix.system import enclosed_mu
+
+    scene = _two_planet_scene()
+    free = {
+        "dynamics.star.mass_Msun": Uniform(0.7, 1.6),
+        "dynamics.orbits": OrbitBlock(
+            ClassicalChart(),
+            OrbitLaw(Uniform(0.05, 0.8), a_AU=LogUniform(0.8, 3.0)),
+            rows=(0,),
+            system="dynamics",
+        ),
+    }
+    fit = Fit(scene, free)
+    x = fit.sample_prior(jax.random.key(5))
+    model = fit.model_at(x)
+    mass = model.dynamics.star.mass_Msun
+    assert float(mass) != float(scene.dynamics.star.mass_Msun)
+    mu = enclosed_mu(mass, model.dynamics.planets.mass_Msun)
+    orbit = model.dynamics.orbits
+    np.testing.assert_allclose(
+        orbit.n_rad_per_d, mean_motion(orbit.a_AU, mu), rtol=1e-12
+    )
+    held = scene.dynamics.orbits
+    np.testing.assert_array_equal(orbit.a_AU[1], held.a_AU[1])
+    assert float(orbit.n_rad_per_d[1]) != float(held.n_rad_per_d[1])
+
+
+def _mean_ratio(old_fit, new_fit, n=40000):
+    """Mean and standard error of ``pi_new / pi_old`` over draws of ``old_fit``."""
+    x = old_fit.sample_prior(jax.random.key(11), (n,))
+    ratio = np.exp(np.asarray(new_fit.log_prior(x) - old_fit.log_prior(x)))
+    return ratio.mean(), ratio.std() / np.sqrt(n)
+
+
+@pytest.mark.parametrize("kind", ["leaf", "orbit"])
+def test_a_prior_swap_ratio_averages_to_one_under_the_old_prior(kind):
+    """``E_old[pi_new / pi_old] = 1`` when the new support lies inside the old.
+
+    Truth source: the identity itself, for normalized densities; the tolerance is four
+    Monte Carlo standard errors of the sample mean (seeded draws).
+    Fails if: a leaf law or an orbit block's density is not normalized, or the swap
+    changes a constant the ratio should cancel.
+    """
+    if kind == "leaf":
+        fit = Fit(_scene(), {"planets[0].Rp_Rearth": LogUniform(0.5, 4.0)})
+        new = fit.with_priors({"planets[0].Rp_Rearth": LogUniform(1.0, 2.0)})
+    else:
+        wide = OrbitLaw(
+            period_d=LogUniform(300.0, 3000.0), eccentricity=kipping_eccentricity()
+        )
+        fit = Fit(_scene(), {"dynamics.orbits": _block(wide)})
+        new = fit.with_priors({"dynamics.orbits": _block()})
+    mean, se = _mean_ratio(fit, new)
+    assert abs(mean - 1.0) < 4.0 * se
