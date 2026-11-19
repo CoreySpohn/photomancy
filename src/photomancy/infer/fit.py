@@ -680,7 +680,7 @@ class Fit(eqx.Module):
                 raise ValueError(f"leaf law {key!r} needs a priorities distribution")
         return Fit(self.model, {**self.free, **priors}, self.terms)
 
-    def append(self, term: AbstractTerm) -> "Fit":
+    def append_term(self, term: AbstractTerm) -> "Fit":
         """Return a fit with one more term; the free set is unchanged."""
         return Fit(self.model, self.free, (*self.terms, term))
 

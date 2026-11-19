@@ -491,7 +491,7 @@ class CompletedProposal(AbstractProposal):
         lw = jnp.where(jnp.isnan(completion.scale_AU), jnp.nan, lw)
         return z, lw - log_q, log_target
 
-    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
         """Refit the base over the orbit shapes of the weighted cloud."""
         completion = self._completion(fit)
         shapes, _ = completion.split(z)
@@ -501,6 +501,6 @@ class CompletedProposal(AbstractProposal):
             log_weights,
             completion,
             n_centers=n_centers,
-            defensive=defensive,
+            defensive_fraction=defensive_fraction,
         )
         return eqx.tree_at(lambda p: p.base, self, base)

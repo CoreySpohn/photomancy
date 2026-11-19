@@ -63,7 +63,7 @@ def test_defensive_share_recovers_both_masses_of_a_two_mode_target():
         (_TwoModes(),),
     )
     backend = AdaptiveImportance(
-        PriorProposal(), n_draws=2000, n_round=2**13, n_rounds=10, n_centers=64
+        PriorProposal(), n_draws=2000, n_adapt_draws=2**13, n_rounds=10, n_centers=64
     )
     mass, log_z, published, khat = [], [], [], []
     for key in jax.random.split(jax.random.key(0), 8):

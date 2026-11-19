@@ -42,12 +42,12 @@ def any_epoch(n_draws=2**16, n_rounds=3, **adaptive):
         n_rounds: Number of rounds (the last is the returned cloud).
         **adaptive: Further settings of
             :class:`~photomancy.infer.AdaptiveImportance` (``n_centers``,
-            ``defensive``).
+            ``defensive_fraction``).
     """
     return AdaptiveImportance(
         CompletedProposal(ShapePriorProposal()),
         n_draws=n_draws,
-        n_round=n_draws,
+        n_adapt_draws=n_draws,
         n_rounds=n_rounds,
         **adaptive,
     )

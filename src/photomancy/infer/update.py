@@ -9,14 +9,14 @@ from photomancy.infer.run import run
 __all__ = ["update"]
 
 
-def _dynamic(post):
+def _dynamic(posterior):
     """The array fields of a posterior (everything but the fit, info and kind)."""
     return (
-        post.samples,
-        post.log_weights,
-        post.log_target,
-        post.log_evidence,
-        post.log_evidence_se,
+        posterior.samples,
+        posterior.log_weights,
+        posterior.log_target,
+        posterior.log_evidence,
+        posterior.log_evidence_se,
     )
 
 
@@ -27,7 +27,7 @@ def _signature(tree):
 
 
 def update(
-    post,
+    posterior,
     term,
     backend,
     key,
@@ -39,7 +39,7 @@ def update(
 ):
     """Move a posterior to one more (or one replaced) term, refitting where it must.
 
-    The cheap move is :meth:`Posterior.append` (``index=None``) or
+    The cheap move is :meth:`Posterior.append_term` (``index=None``) or
     :meth:`Posterior.replace_term` (``index`` given) with the gate arguments. The
     function reads only the result of that gate: a slice whose weights come back NaN
     is refitted by ``run(new_fit, backend, key)`` and every other slice keeps the
@@ -60,14 +60,14 @@ def update(
     ``filter_vmap``. Takes one slice.
 
     Args:
-        post: A :class:`~photomancy.infer.posterior.Posterior` of one slice.
+        posterior: A :class:`~photomancy.infer.posterior.Posterior` of one slice.
         term: The new term, or the replacement when ``index`` is given.
         backend: The backend that refits the new fit on a refusal.
         key: PRNG key for the refit.
         min_n_eff: As in :meth:`Posterior.with_priors`.
         max_khat: As in :meth:`Posterior.with_priors`.
-        index: Position of the term to replace in ``post.fit.terms``, or ``None`` to
-            append.
+        index: Position of the term to replace in ``posterior.fit.terms``, or
+            ``None`` to append.
         batch_size: Draws evaluated at once for the term and for the refit (a
             ``jax.lax.map`` chunk).
 
@@ -75,15 +75,15 @@ def update(
         A :class:`~photomancy.infer.posterior.Posterior` over the new fit.
 
     Raises:
-        ValueError: On the host, as :meth:`Posterior.append`, or for a refit whose
+        ValueError: On the host, as :meth:`Posterior.append_term`, or for a refit whose
             layout differs from the cloud's.
     """
     if index is None:
-        moved = post.append(
+        moved = posterior.append_term(
             term, min_n_eff=min_n_eff, max_khat=max_khat, batch_size=batch_size
         )
     else:
-        moved = post.replace_term(
+        moved = posterior.replace_term(
             index, term, min_n_eff=min_n_eff, max_khat=max_khat, batch_size=batch_size
         )
     refused = jnp.any(jnp.isnan(moved.log_weights))

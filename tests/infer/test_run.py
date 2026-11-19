@@ -346,7 +346,7 @@ _WORLD_BACKENDS = {
     "adaptive": AdaptiveImportance(
         PriorProposal(),
         n_draws=200,
-        n_round=400,
+        n_adapt_draws=400,
         n_rounds=2,
         n_centers=16,
         target_cess=0.05,
@@ -480,7 +480,7 @@ def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
     )
     post = run(
         fit,
-        AdaptiveImportance(seed, n_draws=4000, n_round=2**14),
+        AdaptiveImportance(seed, n_draws=4000, n_adapt_draws=2**14),
         jax.random.key(2),
     )
     assert abs(float(post.log_evidence)) < 3 * float(post.log_evidence_se)
@@ -529,20 +529,20 @@ def test_a_ladder_that_stops_short_of_one_refuses_the_slice():
 
     Truth source: ``_exact_log_z`` for the one-leaf fit. With 2000 draws per round and
     16 centers, a rung needs a Kish size of 1000 and the full step to temperature one
-    leaves about 380: two rounds stop at a temperature below one (NaN evidence,
-    standard error and weights, ``reached`` false, the rung on record); eight rounds
-    reach one and the evidence is within 3 standard errors. Fails if a short ladder
-    returns weights from a proposal fitted at a lower temperature, whose Kish size
-    and k-hat look healthy.
+    leaves about 380: two rounds stop at a temperature below one (NaN evidence, standard
+    error and weights, ``reached_target`` false, the rung on record); eight rounds reach
+    one and the evidence is within 3 standard errors. Fails if a short ladder returns
+    weights from a proposal fitted at a lower temperature, whose Kish size and k-hat
+    look healthy.
     """
     fit = _leaf_fit()
-    settings = {"n_draws": 2000, "n_round": 2000, "n_centers": 16}
+    settings = {"n_draws": 2000, "n_adapt_draws": 2000, "n_centers": 16}
     short = run(
         fit,
         AdaptiveImportance(PriorProposal(), n_rounds=2, **settings),
         jax.random.key(0),
     )
-    assert not bool(short.info.reached)
+    assert not bool(short.info.reached_target)
     assert 0.0 < float(short.info.temperatures[0]) < 1.0
     assert float(short.info.temperatures[-1]) == 1.0
     assert np.isnan(float(short.log_evidence))
@@ -553,7 +553,7 @@ def test_a_ladder_that_stops_short_of_one_refuses_the_slice():
         AdaptiveImportance(PriorProposal(), n_rounds=8, **settings),
         jax.random.key(0),
     )
-    assert bool(full.info.reached)
+    assert bool(full.info.reached_target)
     assert bool(np.all(np.diff(np.asarray(full.info.temperatures)) >= 0))
     se = float(full.log_evidence_se)
     assert abs(float(full.log_evidence) - _exact_log_z()) < 3 * se
@@ -576,10 +576,12 @@ def test_a_seeded_adaptive_run_starts_at_temperature_one():
     )
     post = run(
         fit,
-        AdaptiveImportance(seed, n_draws=2000, n_round=2000, n_rounds=2, n_centers=16),
+        AdaptiveImportance(
+            seed, n_draws=2000, n_adapt_draws=2000, n_rounds=2, n_centers=16
+        ),
         jax.random.key(0),
     )
-    assert bool(post.info.reached)
+    assert bool(post.info.reached_target)
     assert float(post.info.temperatures[0]) == 1.0
 
 
@@ -710,27 +712,31 @@ GOLDEN_LOG_Z = -19.04
 def test_adaptive_importance_on_the_golden_orbit_converges_or_refuses():
     """Adaptive importance from the prior returns the converged evidence or NaN.
 
-    Truth source: the converged evidence -19.04 of a 40-round run (two keys gave
-    -19.046 and -19.039, standard error 0.015). With the default three rounds the
-    ladder cannot reach temperature one on this concentrated posterior, so the slice is
-    NaN with ``reached`` false; the old rule returned -175, -82 and -106 with a standard
+    Truth source: the converged evidence -19.04 of a 40-round run (two keys gave -19.046
+    and -19.039, standard error 0.015). With the default three rounds the ladder cannot
+    reach temperature one on this concentrated posterior, so the slice is NaN with
+    ``reached_target`` false; the old rule returned -175, -82 and -106 with a standard
     error of 1.0 and a k-hat of 0.02. With 40 rounds of 2**13 the evidence is within 3
     standard errors of -19.04 and the k-hat is below 0.7. Fails if a short ladder
     returns a finite number, or a long one converges to a different value.
     """
     fit = _golden_fit()
     short = run(fit, AdaptiveImportance(PriorProposal()), jax.random.key(0))
-    assert not bool(short.info.reached)
+    assert not bool(short.info.reached_target)
     assert np.isnan(float(short.log_evidence))
     assert np.isnan(np.asarray(short.log_weights)).all()
     full = run(
         fit,
         AdaptiveImportance(
-            PriorProposal(), n_draws=2**13, n_round=2**13, n_rounds=40, n_centers=64
+            PriorProposal(),
+            n_draws=2**13,
+            n_adapt_draws=2**13,
+            n_rounds=40,
+            n_centers=64,
         ),
         jax.random.key(0),
     )
-    assert bool(full.info.reached)
+    assert bool(full.info.reached_target)
     se = float(full.log_evidence_se)
     assert abs(float(full.log_evidence) - GOLDEN_LOG_Z) < 3 * max(se, 0.015)
     assert float(pareto_khat(full.log_weights)) < 0.7

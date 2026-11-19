@@ -83,7 +83,7 @@ def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
         info=None,
         kind="monte_carlo",
     )
-    orbit = resolve(posterior.model(1), "dynamics.orbits")
+    orbit = resolve(posterior.model_at(1), "dynamics.orbits")
     expected = {
         "period_d": orbit.period_d[0],
         "e": orbit.e[0],

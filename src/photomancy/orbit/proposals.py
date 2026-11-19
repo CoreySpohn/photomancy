@@ -106,12 +106,12 @@ class ShapePriorProposal(AbstractDensityProposal):
         z = y[:, :3]
         return z, self.log_prob(z, fit)
 
-    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
         """Refit a mixture on the cloud, with this prior as the defensive component."""
         mixture = MixtureProposal.from_cloud(
             key, z, log_weights, n_centers=n_centers, periods=fit.periods()
         )
-        return DefensiveProposal(mixture, defensive, prior=self)
+        return DefensiveProposal(mixture, defensive_fraction, prior=self)
 
 
 def _pad(a):

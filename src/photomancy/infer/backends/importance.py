@@ -55,10 +55,10 @@ class ImportanceInfo(eqx.Module):
         n_rounds: Number of rounds, a static count.
         temperatures: Temperature of each round's weights ``(n_rounds,)``: the ladder
             of the adaptation rounds, then one for the last round.
-        kish_per_round: Kish effective sample size of each round's weights.
-        reached: True when the proposal of the last round was fitted at temperature
-            one (always for ``Importance``). When false, the evidence, its standard
-            error and the log weights of the slice are NaN.
+        n_eff_per_round: Kish effective sample size of each round's weights.
+        reached_target: True when the proposal of the last round was fitted at
+            temperature one (always for ``Importance``). When false, the evidence, its
+            standard error and the log weights of the slice are NaN.
         khat: Pareto k-hat of the returned weights, the value judged against
             ``khat_threshold(n_draws)``. Above it, or NaN, the evidence and its
             standard error are NaN.
@@ -66,8 +66,8 @@ class ImportanceInfo(eqx.Module):
 
     n_rounds: int = eqx.field(static=True)
     temperatures: jax.Array
-    kish_per_round: jax.Array
-    reached: jax.Array
+    n_eff_per_round: jax.Array
+    reached_target: jax.Array
     khat: jax.Array
 
 
@@ -154,7 +154,7 @@ def _temper(log_likelihood, beta):
 class AdaptiveImportance(AbstractBackend):
     """Population Monte Carlo: tempered rounds of refitted Gaussian mixtures.
 
-    Round zero draws ``n_round`` points from ``proposal``. When ``proposal`` is a
+    Round zero draws ``n_adapt_draws`` points from ``proposal``. When ``proposal`` is a
     :class:`~photomancy.infer.proposals.PriorProposal` the target is tempered,
     ``prior * likelihood ** beta`` from ``beta = 0``: each earlier round weights its
     draws to the next temperature, the largest at which the Kish size of the cloud
@@ -162,18 +162,18 @@ class AdaptiveImportance(AbstractBackend):
     size at the current temperature and at or above ``2 * n_centers``
     (:func:`~photomancy.infer.diagnostics.kish_temperature`), and refits the proposal to
     that weighted cloud (``AbstractProposal.adapt``: by default
-    ``MixtureProposal.from_cloud`` mixed with the prior, share ``defensive``). Any other
-    proposal is a seed that already targets the posterior: the rounds start at
+    ``MixtureProposal.from_cloud`` mixed with the prior, share ``defensive_fraction``).
+    Any other proposal is a seed that already targets the posterior: the rounds start at
     temperature one and each refits on the weights of the fit's own density. The last
-    round draws ``n_draws`` points from the final proposal and weights them to the
-    fit's own density, so the returned weights and evidence come from that round alone
-    and are importance estimates from independent draws: the last round is an
+    round draws ``n_draws`` points from the final proposal and weights them to the fit's
+    own density, so the returned weights and evidence come from that round alone and are
+    importance estimates from independent draws: the last round is an
     :class:`Importance` run, whose k-hat refusal of the evidence applies. The round
     count is fixed and there is no early exit.
 
     The ladder needs one rung per factor of the likelihood that the cloud can absorb,
     and a concentrated posterior needs about a dozen. If the last proposal was fitted
-    below temperature one (``info.reached`` false), the slice is refused: the
+    below temperature one (``info.reached_target`` false), the slice is refused: the
     evidence, its standard error and the log weights are NaN, as for ``SMC`` past
     ``max_rungs``, because weights from a proposal that missed the posterior can carry
     one live draw, a small k-hat and a wrong evidence. The default three rounds suit a
@@ -185,19 +185,19 @@ class AdaptiveImportance(AbstractBackend):
         proposal: Proposal of round zero (for example ``PriorProposal()``, or a mixture
             fitted to a Laplace cloud, which starts at temperature one).
         n_draws: Draws of the last round, the returned cloud.
-        n_round: Draws of every earlier round.
+        n_adapt_draws: Draws of every earlier round.
         n_rounds: Total rounds (at least two for any adaptation).
         n_centers: Kernels of each refitted mixture.
-        defensive: Share of the prior in each refitted proposal.
+        defensive_fraction: Share of the prior in each refitted proposal.
         target_cess: Fraction of the Kish size that a rung may keep.
     """
 
     proposal: AbstractProposal
     n_draws: int = eqx.field(static=True, default=2000)
-    n_round: int = eqx.field(static=True, default=2**16)
+    n_adapt_draws: int = eqx.field(static=True, default=2**16)
     n_rounds: int = eqx.field(static=True, default=3)
     n_centers: int = eqx.field(static=True, default=256)
-    defensive: float = eqx.field(static=True, default=0.1)
+    defensive_fraction: float = eqx.field(static=True, default=0.1)
     target_cess: float = eqx.field(static=True, default=0.5)
 
     def __check_init__(self):
@@ -216,7 +216,7 @@ class AdaptiveImportance(AbstractBackend):
         for _ in range(self.n_rounds - 1):
             k_draw, k_fit, key = jax.random.split(key, 3)
             if tempering:
-                z, log_q = proposal.sample(k_draw, fit, self.n_round)
+                z, log_q = proposal.sample(k_draw, fit, self.n_adapt_draws)
                 x, volume = fit.from_flat(z)
                 log_prior = fit.log_prior(x, batch_size=batch_size) + volume
                 log_like = fit.log_likelihood(x, batch_size=batch_size)
@@ -231,7 +231,7 @@ class AdaptiveImportance(AbstractBackend):
                 )
             else:
                 z, log_w, _ = proposal.weigh(
-                    k_draw, fit, self.n_round, batch_size=batch_size
+                    k_draw, fit, self.n_adapt_draws, batch_size=batch_size
                 )
             temperatures.append(beta)
             kish.append(kish_ess(log_w))
@@ -241,13 +241,13 @@ class AdaptiveImportance(AbstractBackend):
                 log_w,
                 fit,
                 n_centers=self.n_centers,
-                defensive=self.defensive,
+                defensive_fraction=self.defensive_fraction,
             )
         last = Importance(proposal, self.n_draws)._run(fit, key, batch_size=batch_size)
         reached = jnp.asarray(True) if self.n_rounds == 1 else beta >= 1.0
         nan = jnp.asarray(jnp.nan)
         temperatures.append(jnp.ones(()))
-        kish.append(last.info.kish_per_round[0])
+        kish.append(last.info.n_eff_per_round[0])
         info = ImportanceInfo(
             self.n_rounds,
             jnp.stack(temperatures),

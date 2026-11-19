@@ -211,6 +211,8 @@ DELETED = (
     "n_constants",
     "n_proposals",
     "posterior_physical",
+    "n_round",
+    "kish_per_round",
 )
 
 

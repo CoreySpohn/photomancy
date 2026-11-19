@@ -7,7 +7,7 @@ where the backend has them. Every backend fills the same fields, so a consumer r
 layout whichever method ran.
 
 Operations. ``sample`` and ``resample`` draw from the cloud, ``with_priors``,
-``append`` and ``replace_term`` reweight it to a changed ``Fit`` (``replace_term``
+``append_term`` and ``replace_term`` reweight it to a changed ``Fit`` (``replace_term``
 evaluates the one old term it removes and no other),
 ``model`` and ``forecast`` read the stored draws through the fit. Each acts on one
 slice (one world) and raises on a batched posterior; map worlds with
@@ -471,8 +471,8 @@ class Posterior(eqx.Module):
     def _term_ratio(self, term, old, batch_size):
         """Per-draw ``term(model) - old(model)`` (just ``term`` when ``old`` is None).
 
-        The one code path of ``append`` and ``replace_term``: each stored draw is built
-        into its model once and both terms read it.
+        The one code path of ``append_term`` and ``replace_term``: each stored draw is
+        built into its model once and both terms read it.
         """
         fit = self.fit
 
@@ -489,13 +489,13 @@ class Posterior(eqx.Module):
         )
         return jnp.where(dead, -jnp.inf, ratio)
 
-    def append(self, term, *, min_n_eff, max_khat, batch_size=None):
+    def append_term(self, term, *, min_n_eff, max_khat, batch_size=None):
         """Add one observation by importance reweighting; no old term is evaluated.
 
-        The new ``Fit`` comes from ``fit.append(term)``. The term is evaluated at the
-        model of every stored draw, weights gain ``+ term``, ``log_target`` follows and
-        the evidence gains ``log sum w exp(term)``, with the standard error updated as
-        in :meth:`with_priors`. The gate is the same, on the combined weights.
+        The new ``Fit`` comes from ``fit.append_term(term)``. The term is evaluated at
+        the model of every stored draw, weights gain ``+ term``, ``log_target`` follows
+        and the evidence gains ``log sum w exp(term)``, with the standard error updated
+        as in :meth:`with_priors`. The gate is the same, on the combined weights.
 
         The result is consistent with bias of order ``1 / N_eff``, not exact, and it
         holds only when (a) the new datum is conditionally independent of the old given
@@ -517,8 +517,8 @@ class Posterior(eqx.Module):
             ValueError: On the host, for a term whose reads meet a free path, a NaN
                 gate limit, or gate arguments that do not match ``kind``.
         """
-        self._require_slice("append")
-        new_fit = self.fit.append(term)
+        self._require_slice("append_term")
+        new_fit = self.fit.append_term(term)
         ratio = self._term_ratio(term, None, batch_size)
         return self._reweighted(new_fit, ratio, min_n_eff, max_khat)
 
@@ -528,15 +528,15 @@ class Posterior(eqx.Module):
         The new ``Fit`` comes from ``fit.replace_term(index, term)``. The weights gain
         ``new(model) - old(model)`` at every stored draw, with ``old`` the term
         ``fit.terms[index]``. The evidence, its standard error, ``log_target`` and the
-        gate are exactly those of :meth:`append`: the combined weights are gated by
+        gate are exactly those of :meth:`append_term`: the combined weights are gated by
         ``min_n_eff`` and ``max_khat``, a NaN ratio refuses the slice, and the same
         conditions (a) to (d) apply, with the datum replaced rather than added.
 
         The use is a padded row: the old term holds the row as invalid padding and the
         new term the same data with the row valid. The structure is unchanged, so a
-        stack of worlds does not recompile, and the result equals ``append`` of that
-        row on an unpadded fit. A draw where both terms are ``-inf`` gives a NaN ratio
-        and refuses the slice. ``index`` is a static Python integer.
+        stack of worlds does not recompile, and the result equals ``append_term`` of
+        that row on an unpadded fit. A draw where both terms are ``-inf`` gives a NaN
+        ratio and refuses the slice. ``index`` is a static Python integer.
 
         Args:
             index: Position of the term to replace in ``fit.terms``.
@@ -547,7 +547,7 @@ class Posterior(eqx.Module):
 
         Raises:
             IndexError: For an ``index`` outside ``fit.terms``.
-            ValueError: As :meth:`append`.
+            ValueError: As :meth:`append_term`.
         """
         self._require_slice("replace_term")
         new_fit = self.fit.replace_term(index, term)
@@ -556,9 +556,9 @@ class Posterior(eqx.Module):
 
     # ----- reading the draws through the fit -------------------------------------
 
-    def model(self, i):
+    def model_at(self, i):
         """Return the model of stored draw ``i``, every held leaf included."""
-        self._require_slice("model")
+        self._require_slice("model_at")
         x = jax.tree.map(lambda a: jnp.take(a, i, axis=0), self.samples)
         return self.fit.model_at(x)
 

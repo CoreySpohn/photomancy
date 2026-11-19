@@ -126,11 +126,12 @@ class AbstractProposal(eqx.Module):
             (``-inf`` at a dead draw).
         """
 
-    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
         """Return the next round's proposal, fitted to a weighted cloud ``z``.
 
-        The default is a kernel mixture on the cloud with a share ``defensive`` of the
-        fit's prior (:meth:`MixtureProposal.from_cloud`, :class:`DefensiveProposal`).
+        The default is a kernel mixture on the cloud with a share ``defensive_fraction``
+        of the fit's prior (:meth:`MixtureProposal.from_cloud`,
+        :class:`DefensiveProposal`).
 
         Args:
             key: PRNG key.
@@ -138,7 +139,7 @@ class AbstractProposal(eqx.Module):
             log_weights: Their log weights, ``(N,)``.
             fit: The fit.
             n_centers: Kernels of the mixture.
-            defensive: Share of the defensive prior component.
+            defensive_fraction: Share of the defensive prior component.
         """
         mixture = MixtureProposal.from_cloud(
             key,
@@ -147,7 +148,7 @@ class AbstractProposal(eqx.Module):
             n_centers=n_centers,
             periods=fit.periods(),
         )
-        return DefensiveProposal(mixture, defensive)
+        return DefensiveProposal(mixture, defensive_fraction)
 
 
 class AbstractDensityProposal(AbstractProposal):
@@ -457,9 +458,14 @@ class DefensiveProposal(AbstractDensityProposal):
         z = jnp.where(pick, z_prior, z_base)
         return z, self.log_prob(z, fit)
 
-    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
+    def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
         """The default refit, keeping this proposal's own prior component."""
         refit = super().adapt(
-            key, z, log_weights, fit, n_centers=n_centers, defensive=defensive
+            key,
+            z,
+            log_weights,
+            fit,
+            n_centers=n_centers,
+            defensive_fraction=defensive_fraction,
         )
         return eqx.tree_at(lambda d: d.prior, refit, self.prior)
