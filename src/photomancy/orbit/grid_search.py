@@ -14,7 +14,7 @@ from hwoutils.constants import G
 from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart, FrameOrbit
 
-from photomancy.infer.particles import normalize_log_weights
+from photomancy.infer.diagnostics import normalize_log_weights
 from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.inference import ORBIT_ROWS_CHART, orbit_chart_log_volume

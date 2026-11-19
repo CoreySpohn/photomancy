@@ -446,7 +446,7 @@ def test_wrap_maps_periodic_coordinates_only():
 @pytest.mark.parametrize("offset", [-1e4, 1e4])
 def test_log_weight_normalization_at_large_offsets(offset):
     """A common offset changes the total without changing proportions or ESS."""
-    from photomancy.infer.particles import kish_ess, normalize_log_weights
+    from photomancy.infer.diagnostics import kish_ess, normalize_log_weights
 
     raw = jnp.array([offset, offset, offset - 1.0, -jnp.inf])
     normalized, log_total, no_support = jax.jit(normalize_log_weights)(raw)

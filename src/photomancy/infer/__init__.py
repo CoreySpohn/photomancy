@@ -23,6 +23,16 @@ from photomancy.infer.backends import (
     PathfinderMixtureBackend,
     SMCBackend,
 )
+from photomancy.infer.diagnostics import (
+    khat_threshold,
+    kish_ess,
+    mc_se,
+    normalize_log_weights,
+    pareto_khat,
+    weighted_cov,
+    weighted_mean,
+    weighted_quantile,
+)
 from photomancy.infer.evidence import sigma_from_log_bayes_factor
 from photomancy.infer.model import (
     AbstractLogDensity,
@@ -62,7 +72,15 @@ __all__ = [
     "TermLogDensity",
     "build_gaussian_fit",
     "build_scene_logdensity",
+    "khat_threshold",
+    "kish_ess",
+    "mc_se",
+    "normalize_log_weights",
+    "pareto_khat",
     "project_samples",
     "sample_capped",
     "sigma_from_log_bayes_factor",
+    "weighted_cov",
+    "weighted_mean",
+    "weighted_quantile",
 ]

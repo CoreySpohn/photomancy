@@ -51,11 +51,8 @@ from orbix.system.observables import distance_AU, phase_angle_rad, separation_ar
 from orbix.system.rotation import rotate
 from skyscapes.population import kipping_eccentricity
 
-from photomancy.infer.particles import (
-    kish_ess,
-    normalize_log_weights,
-    systematic_indices,
-)
+from photomancy.infer.diagnostics import kish_ess, normalize_log_weights
+from photomancy.infer.particles import systematic_indices
 from photomancy.orbit._contrast import interpolate_contrast_curve
 from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
 from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel
