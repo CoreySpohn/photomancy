@@ -429,6 +429,16 @@ class Posterior(eqx.Module):
         the gate (that Kish size, that k-hat and the decision) comes back in ``info``
         as a :class:`ReweightInfo`, for a refused slice too.
 
+        ``min_n_eff`` is an absolute Kish count that the caller states, with no
+        default: it is an accuracy requirement, like a solver tolerance, and it is
+        not a fraction of ``n_draws``. The error of the evidence increment, of a
+        forecast and of the next proposal all scale with the Kish size alone: one
+        evidence increment has a standard error of about ``1 / sqrt(n_eff)`` nat and a
+        forecast probability ``p`` has ``sqrt(p (1 - p) / n_eff)``. A value of 400
+        gives 0.05 nat and at most 0.025 on a probability; 100 gives 0.1 nat and
+        0.05. The k-hat gate does not replace it: a cloud that has collapsed onto one
+        draw can read a small k-hat, and only the count refuses it.
+
         A block whose new law moves the bounds its map carries (an orbit law with other
         size or eccentricity bounds) is another map, so the stored coordinates change
         meaning. Each stored draw is then read through the old block into the model and

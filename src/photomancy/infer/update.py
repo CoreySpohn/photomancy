@@ -66,7 +66,14 @@ def update(
         term: The new term, or the replacement when ``index`` is given.
         backend: The backend that refits the new fit on a refusal.
         key: PRNG key for the refit.
-        min_n_eff: As in :meth:`Posterior.with_priors`.
+        min_n_eff: As in :meth:`Posterior.with_priors`: an absolute Kish count that
+            the caller states, not a fraction of the draw count. The refit is not
+            gated, so read ``kish_ess(new.log_weights)`` on the result, and size the
+            backend so that its cloud clears the same number. For
+            :func:`~photomancy.orbit.any_epoch` that is about 100 draws per unit of
+            ``min_n_eff`` (``n_draws=2**16`` suits ``min_n_eff`` near 650). The
+            expected Kish size of a refit is not known before it runs, so ``update``
+            keeps one criterion and no retry.
         max_khat: As in :meth:`Posterior.with_priors`.
         index: Position of the term to replace in ``posterior.fit.terms``, or
             ``None`` to append.

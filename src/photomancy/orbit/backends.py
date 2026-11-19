@@ -46,6 +46,12 @@ def any_epoch(n_draws=2**16, n_rounds=3, **adaptive):
     smaller ``n_draws`` shrinks the Kish size of the returned cloud in proportion; a
     smaller ``n_adapt_draws`` weakens the fitted proposal.
 
+    The Kish share of the returned cloud rises with the epoch count: a median of
+    about 1 to 10 percent of ``n_draws`` for one to five epochs and about 60 percent
+    at six. To clear a ``min_n_eff`` that the caller states (an absolute Kish count,
+    see :meth:`~photomancy.infer.Posterior.with_priors`), size ``n_draws`` at about
+    100 draws per unit of ``min_n_eff``.
+
     Args:
         n_draws: Draws of the last round, the returned cloud.
         n_rounds: Number of rounds (the last is the returned cloud).
