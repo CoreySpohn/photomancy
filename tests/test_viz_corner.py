@@ -49,7 +49,8 @@ def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
 
     Two prior draws of a one-planet orbit fit, all the weight on the second: every
     corner sample is that draw's orbit, read through the fit at ``dynamics.orbits``
-    (period, eccentricity and cos i to rtol 1e-12), and a missing path is refused.
+    (period, eccentricity, cos i and the argument of periapsis to rtol 1e-12), and a
+    missing path is refused.
     """
     from hwoutils.model_paths import resolve
     from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
@@ -88,6 +89,7 @@ def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
         "period_d": orbit.period_d[0],
         "e": orbit.e[0],
         "cos_i": jnp.cos(orbit.to_classical()["i_rad"][0]),
+        "w_rad": orbit.to_classical()["w_rad"][0],
     }
     physical = classical_elements(
         posterior, jax.random.key(1), 16, orbit_path="dynamics.orbits"
