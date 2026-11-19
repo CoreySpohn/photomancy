@@ -8,12 +8,12 @@ import numpy as np
 import pytest
 import toy_coronagraph as toy
 from image_scene import (
-    Placed,
     make_detector,
     make_exposure,
     make_instrument,
     make_scene,
 )
+from priorities import Uniform
 
 from photomancy.detection import (
     curvature_block,
@@ -22,7 +22,8 @@ from photomancy.detection import (
     measure,
     profile_amplitude,
 )
-from photomancy.image import ImageModel, ImageTerm
+from photomancy.image import ImageTerm
+from photomancy.infer.fit import AbstractTerm, Fit
 from photomancy.infer.likelihoods import (
     gaussian_loglike,
     huber_loglike,
@@ -339,13 +340,54 @@ def test_curvature_block_matches_closed_form_and_finite_difference():
 # ----- detect and measure over an ImageTerm ---------------------------------------
 
 _VARIANCE = 100.0
-_PATHS = {"scene_path": "scene", "instrument_path": "instrument"}
 _PAS = jnp.arange(0.0, 360.0, 30.0)
 _TRUE_PA, _TRUE_AMP = 150.0, 3.0
+_UNIT_CONTRAST = 1e-10
+
+
+class _Sky(eqx.Module):
+    """A point source: amplitude in units of 1e-10 contrast, angle in degrees."""
+
+    amplitude: jax.Array
+    pa_deg: jax.Array
+
+
+class _SkyImage(AbstractTerm):
+    """An ImageTerm on a scene rebuilt from the model's amplitude and position angle.
+
+    Stands in for a sky-position block, which does not exist yet: the model leaves are
+    the two numbers and the scene is derived from them.
+    """
+
+    image: ImageTerm
+    reads = ()
+
+    def _scene(self, model):
+        return make_scene(
+            contrast=model.amplitude * _UNIT_CONTRAST, sky_pa_deg=model.pa_deg
+        )
+
+    def __call__(self, model):
+        return self.image(self._scene(model))
+
+    def predict(self, model):
+        return self.image.predict(self._scene(model))
+
+    def draw(self, key, model):
+        raise NotImplementedError
+
+
+def _sky(amplitude, pa_deg):
+    return _Sky(jnp.asarray(amplitude, jnp.float64), jnp.asarray(pa_deg, jnp.float64))
+
+
+def _fit(term):
+    free = {"amplitude": Uniform(0.0, 10.0), "pa_deg": Uniform(0.0, 360.0)}
+    return Fit(_sky(0.0, 0.0), free, (term,))
 
 
 def _image_problem(kind, seed=11):
-    """A model, an ImageTerm over one frame, and the noise-free mean at the truth.
+    """A fit with both coordinates free, and the noise-free mean at the truth.
 
     The frame is the expected counts of a planet of amplitude 3 (units of contrast
     1e-10) at position angle 150 degrees plus noise from the detector's own law.
@@ -354,18 +396,15 @@ def _image_problem(kind, seed=11):
         kind, **({"variance_e2": _VARIANCE} if kind == "constant" else {})
     )
     instrument = make_instrument(detector)
-    scene = make_scene(contrast=0.0)
-    exposure = make_exposure(scene, instrument)
-    model = ImageModel(scene, instrument)
+    exposure = make_exposure(make_scene(contrast=0.0), instrument)
     shape = (1, *detector.shape)
     blank = ImageTerm(
         jnp.zeros(shape),
         jnp.ones(shape, bool),
+        instrument=instrument,
         exposure=exposure,
-        **_PATHS,
     )
-    truth = Placed()(model, _TRUE_PA, _TRUE_AMP)
-    mean = np.asarray(blank.predict(truth))
+    mean = np.asarray(_SkyImage(blank).predict(_sky(_TRUE_AMP, _TRUE_PA)))
     rng = np.random.default_rng(seed)
     if kind == "constant":
         observed = mean + np.sqrt(_VARIANCE) * rng.normal(size=mean.shape)
@@ -374,10 +413,13 @@ def _image_problem(kind, seed=11):
     mask = np.ones(shape, bool)
     mask[..., :3, :] = False
     mask[..., 10:13, 10:13] = False
-    term = ImageTerm(
-        jnp.asarray(observed), jnp.asarray(mask), exposure=exposure, **_PATHS
+    image = ImageTerm(
+        jnp.asarray(observed),
+        jnp.asarray(mask),
+        instrument=instrument,
+        exposure=exposure,
     )
-    return model, term, mean, mask
+    return _fit(_SkyImage(image)), mean, mask
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -393,33 +435,45 @@ def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame():
     planet at the position (the model is linear in the planet's contrast).
     Tolerance basis: exact-algebra (rtol 1e-9; one Newton step is exact for a
     quadratic, and the data are about 1e3 counts so the residual keeps 12 digits).
-    Fails if: the statistic uses the wrong noise, the mask, the position axis, or the
+    Fails if: the statistic uses the wrong noise, the mask, the trial axis, or the
     Newton step is not exact for a Gaussian term.
     """
-    model, term, _, mask = _image_problem("constant")
-    place = Placed()
-    m0 = np.asarray(term.predict(place(model, 0.0, 0.0)))
-    resid = np.asarray(term.observed_e) - m0
+    fit, _, mask = _image_problem("constant")
+    sky = fit.terms[0]
+    resid = np.asarray(sky.image.observed_e) - np.asarray(sky.predict(_sky(0.0, 0.0)))
     want_a, want_z, want_s = [], [], []
     for pa in np.asarray(_PAS):
-        t = np.asarray(term.predict(place(model, pa, 1.0))) - m0
+        m0 = np.asarray(sky.predict(_sky(0.0, pa)))
+        t = np.asarray(sky.predict(_sky(1.0, pa))) - m0
         w = mask / _VARIANCE
         twt = np.sum(w * t * t)
         twr = np.sum(w * t * resid)
         want_a.append(twr / twt)
         want_z.append(twr / np.sqrt(twt))
         want_s.append(1.0 / np.sqrt(twt))
-    out = detect(term, model, place, _PAS)
+    out = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude")
     np.testing.assert_allclose(out.a_hat, want_a, rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(out.z, want_z, rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(out.sigma, want_s, rtol=1e-9)
     assert int(jnp.argmax(out.z)) == int(np.argmax(np.asarray(_PAS) == _TRUE_PA))
     assert float(out.z.max()) > 5.0
-    batched = detect(term, model, place, _PAS, batch_size=5)
+    batched = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude", batch_size=5)
     np.testing.assert_allclose(batched.z, out.z, rtol=1e-12, atol=1e-12)
 
 
+def test_detect_refuses_a_bad_amplitude_path_or_trial_keys():
+    """The amplitude must be a free one-element leaf law; trials cover the rest."""
+    fit, _, _ = _image_problem("constant")
+    with pytest.raises(ValueError, match="free leaf-law"):
+        detect(fit, {"pa_deg": _PAS}, amplitude="flux")
+    with pytest.raises(ValueError, match="keys"):
+        detect(fit, {"amplitude": _PAS}, amplitude="amplitude")
+    with pytest.raises(ValueError, match="keys"):
+        measure(fit, {"amplitude": jnp.asarray(1.0)})
+
+
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
+@pytest.mark.medium(reason="two Newton depths through the renderer, 5 s cold")
 def test_detect_on_poisson_counts_recovers_the_planet():
     """On Poisson counts the map peaks at the true angle and the amplitude is close.
 
@@ -432,13 +486,12 @@ def test_detect_on_poisson_counts_recovers_the_planet():
     floating-point (rtol 1e-6 between 4 and 8 Newton steps).
     Fails if: the Poisson term is not the one profiled, or Newton diverges.
     """
-    model, term, _, _ = _image_problem("poisson")
-    place = Placed()
-    out = detect(term, model, place, _PAS)
+    fit, _, _ = _image_problem("poisson")
+    out = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude")
     best = int(jnp.argmax(out.z))
     assert float(_PAS[best]) == _TRUE_PA
     assert abs(float(out.a_hat[best]) - _TRUE_AMP) < 4.0 * float(out.sigma[best])
-    more = detect(term, model, place, _PAS, n_newton=8)
+    more = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude", n_newton=8)
     np.testing.assert_allclose(out.a_hat, more.a_hat, rtol=1e-6, atol=1e-9)
 
 
@@ -450,7 +503,8 @@ def test_measure_covariance_matches_the_curvature_block_and_the_fisher_matrix():
     """The covariance is the inverse curvature block, the inverse Fisher at the truth.
 
     At noise-free truth the covariance of amplitude and position angle is the inverse
-    Fisher matrix ``J'WJ``.
+    Fisher matrix ``J'WJ``. The start is the detection at the offset position, as in
+    use.
 
     Truth source: ``curvature_block`` over a record of (amplitude, position angle);
     and NumPy ``J'WJ`` with ``J = [dm/da, dm/dpa]`` from the expected counts,
@@ -459,36 +513,34 @@ def test_measure_covariance_matches_the_curvature_block_and_the_fisher_matrix():
     Tolerance basis: floating-point (rtol 1e-8 against the block, same Hessian; rtol
     1e-4 against the Fisher matrix, the central difference error, about
     (0.01 / 7.6)**2).
-    Fails if: the covariance uses another curvature, the position enters the wrong
-    scalar, or the Newton iteration does not reach the maximum (value check, atol
-    1e-6).
+    Fails if: the covariance uses another curvature, a coordinate enters the wrong
+    row, or the Newton iteration does not reach the maximum (value check, atol 1e-6).
     """
-    model, term, mean, mask = _image_problem("constant")
-    place = Placed()
-    clean = eqx.tree_at(lambda t: t.observed_e, term, jnp.asarray(mean))
-    rows = measure(clean, model, place, jnp.asarray(_TRUE_PA + 2.0), n_newton=10)
-    assert rows.names == ("amplitude", "position/0")
-    np.testing.assert_allclose(rows.value, [_TRUE_AMP, _TRUE_PA], atol=1e-6)
+    fit, mean, mask = _image_problem("constant")
+    sky = fit.terms[0]
+    clean_image = eqx.tree_at(lambda t: t.observed_e, sky.image, jnp.asarray(mean))
+    clean = _SkyImage(clean_image)
+    fit = _fit(clean)
+    start_pa = jnp.asarray([_TRUE_PA + 2.0])
+    peak = detect(fit, {"pa_deg": start_pa}, amplitude="amplitude")
+    start = {"amplitude": peak.a_hat[0], "pa_deg": start_pa[0]}
+    est = measure(fit, start, n_newton=10)
+    np.testing.assert_allclose(est.value["amplitude"], _TRUE_AMP, atol=1e-6)
+    np.testing.assert_allclose(est.value["pa_deg"], _TRUE_PA, atol=1e-6)
 
-    class Source(eqx.Module):
-        amplitude: jax.Array
-        position: jax.Array
-
-    def loglike(src):
-        return clean(place(model, src.position, src.amplitude))
-
-    truth = Source(jnp.asarray(_TRUE_AMP), jnp.asarray(_TRUE_PA))
-    block = curvature_block(loglike, truth, lambda s: (s.amplitude, s.position))
-    np.testing.assert_allclose(rows.cov, np.linalg.inv(block), rtol=1e-8)
-    np.testing.assert_allclose(rows.sigma, np.sqrt(np.diag(rows.cov)))
+    block = curvature_block(
+        clean, _sky(_TRUE_AMP, _TRUE_PA), lambda s: (s.amplitude, s.pa_deg)
+    )
+    np.testing.assert_allclose(est.cov, np.linalg.inv(block), rtol=1e-8)
+    np.testing.assert_allclose(est.sigma, np.sqrt(np.diag(est.cov)))
 
     h = 0.01
-    pred = lambda pa, a: np.asarray(clean.predict(place(model, pa, a)))  # noqa: E731
+    pred = lambda pa, a: np.asarray(clean.predict(_sky(a, pa)))  # noqa: E731
     d_amp = pred(_TRUE_PA, 1.0) - pred(_TRUE_PA, 0.0)
     d_pa = (pred(_TRUE_PA + h, _TRUE_AMP) - pred(_TRUE_PA - h, _TRUE_AMP)) / (2 * h)
     jac = np.stack([d_amp[mask], d_pa[mask]], axis=1)
     fisher = jac.T @ jac / _VARIANCE
-    np.testing.assert_allclose(rows.cov, np.linalg.inv(fisher), rtol=1e-4)
+    np.testing.assert_allclose(est.cov, np.linalg.inv(fisher), rtol=1e-4)
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")

@@ -20,11 +20,12 @@ prediction and a template function, an ``eqx.Module``, so the model that produce
   fixed number of Newton steps.
 - :func:`likelihood_ratio_map` does that at every trial position, for one or several
   exposures that share the amplitude.
-- :func:`detect` is the same map over terms of a model (a
-  :class:`photomancy.image.ImageTerm` or any ``AbstractTerm``): a source is placed in
-  the model at each trial position and its amplitude is profiled, so the noise and the
-  response come from the term itself.
-- :func:`measure` estimates the amplitude and position of a source and takes their
+- :func:`detect` is the same map over a :class:`~photomancy.infer.fit.Fit`: one free
+  path is the amplitude and is profiled at each trial of the others, so the noise and
+  the response come from the fit's terms (a :class:`photomancy.image.ImageTerm` or any
+  ``AbstractTerm``) and the coordinates reach the model as ``Fit.model_at`` writes them.
+- :func:`measure` maximizes the fit's likelihood from a start (a detection peak) and
+  returns a :class:`LikelihoodEstimate`: the value as an entry dictionary and the
   covariance from the curvature block.
 - :func:`curvature_block` gives the negative Hessian of a log-density over one small
   group of parameters, the check that a group is identifiable before it is freed.
@@ -37,10 +38,14 @@ import equinox as eqx
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
+from hwoutils.model_paths import resolve
+from priorities import AbstractDistribution
+
+from photomancy.infer.fit import Fit
 
 __all__ = [
     "DetectionMap",
-    "MeasuredRows",
+    "LikelihoodEstimate",
     "curvature_block",
     "detect",
     "likelihood_ratio_map",
@@ -215,108 +220,109 @@ def likelihood_ratio_map(
     return _run_map(terms, positions, n_newton, batch_size)
 
 
-def _as_terms(term):
-    terms = tuple(term) if isinstance(term, Sequence) else (term,)
-    if not terms:
-        raise ValueError("terms must contain at least one term")
-    return terms
+def _check_entries(entries, who):
+    if set(entries) != set(who):
+        raise ValueError(
+            f"entries must have exactly the keys {sorted(who)}, got {sorted(entries)}"
+        )
 
 
 @eqx.filter_jit
-def _detect(terms, model, place, positions, n_newton, batch_size):
-    def at(position):
+def _detect(fit, trials, amplitude, n_newton, batch_size):
+    shape = jnp.shape(resolve(fit.model, amplitude))
+
+    def at(x):
         def objective(a):
-            placed = place(model, position, a)
-            return sum(jnp.asarray(t(placed), jnp.float64) for t in terms)
+            full = {**x, amplitude: jnp.reshape(a, shape)}
+            return jnp.asarray(fit.log_likelihood(full), jnp.float64)
 
         return _summarize(*_profile(objective, n_newton, jnp.float64))
 
-    a_hat, z, sigma = jax.lax.map(at, positions, batch_size=batch_size)
+    a_hat, z, sigma = jax.lax.map(at, trials, batch_size=batch_size)
     return DetectionMap(a_hat=a_hat, z=z, sigma=sigma)
 
 
 def detect(
-    term, model, place, positions, *, n_newton: int = 4, batch_size: int | None = None
+    fit: Fit,
+    trials: dict,
+    *,
+    amplitude: str,
+    n_newton: int = 4,
+    batch_size: int | None = None,
 ) -> DetectionMap:
-    """Matched-filter map of a source over trial positions, from the terms' likelihood.
+    """Matched-filter map of a source over trial values, from the fit's likelihood.
 
-    At each position ``x`` the source amplitude ``a`` maximizes
-    ``sum_k term_k(place(model, x, a))`` by Newton steps from ``a = 0``, and the map
-    reports ``a_hat``, the signed root ``z = sign(a_hat) sqrt(2 [ell(a_hat) - ell(0)])``
-    and the formal standard error ``1 / sqrt(curvature)``. The noise, the response and
-    the detector come from the terms, so there is no second likelihood. When the model
-    is linear in ``a`` and the likelihood is Gaussian with fixed variance, this is the
-    classical whitened matched filter ``z = t'Wr / sqrt(t'Wt)``. Several terms
-    (exposures) constrain one shared amplitude.
+    At each trial the free path ``amplitude`` is profiled: ``a`` maximizes
+    ``fit.log_likelihood`` by Newton steps from ``a = 0`` while every other free entry
+    is held at the trial value, and the map reports ``a_hat``, the signed root
+    ``z = sign(a_hat) sqrt(2 [ell(a_hat) - ell(0)])`` and the formal standard error
+    ``1 / sqrt(curvature)``. The noise, the response and the detector come from the
+    fit's terms, so there is no second likelihood, and the way coordinates reach the
+    model is the fit's own (``Fit.model_at``: leaf laws, then blocks). Priors play no
+    part. When the model is linear in ``a`` and the likelihood is Gaussian with fixed
+    variance, this is the classical whitened matched filter ``z = t'Wr / sqrt(t'Wt)``.
+    Several terms (exposures) constrain one shared amplitude.
 
     Args:
-        term: One :class:`photomancy.infer.fit.AbstractTerm` or a sequence of them.
-        model: The model without the source: ``place`` at amplitude 0 must leave the
-            terms' value unchanged (the source is absent from ``model`` or has zero
-            flux there).
-        place: ``(model, position, amplitude) -> model``, adding a source of the given
-            amplitude at the position. Make it an ``eqx.Module`` so arrays it holds are
-            traced inputs rather than compiled constants.
-        positions: Trial positions, an array or pytree whose leading axis indexes
-            positions; ``place`` receives one slice.
-        n_newton: Newton steps per position. A Gaussian likelihood linear in the
+        fit: A :class:`~photomancy.infer.fit.Fit` whose model holds the source. At
+            ``amplitude = 0`` the source must be absent (zero flux), so the statistic
+            compares against the model without it.
+        trials: Entry dictionary in the format of the fit's ``x``, one leading trial
+            axis on every entry, with exactly the keys of ``fit.free`` except
+            ``amplitude``.
+        amplitude: The free leaf-law path that is profiled; its leaf has one element.
+        n_newton: Newton steps per trial. A Gaussian likelihood linear in the
             amplitude is exact after one; a Poisson likelihood needs a few.
-        batch_size: Positions per ``jax.lax.map`` batch (which sets peak memory), or
+        batch_size: Trials per ``jax.lax.map`` batch (which sets peak memory), or
             ``None`` for one at a time.
 
     Returns:
-        A :class:`DetectionMap` with leaves of shape ``(n_positions,)``.
+        A :class:`DetectionMap` with leaves of shape ``(n_trials,)``.
 
     Raises:
-        ValueError: If ``term`` is an empty sequence.
+        ValueError: If ``amplitude`` is not a free leaf law of one element, or the
+            keys of ``trials`` are not the other free paths.
     """
-    return _detect(_as_terms(term), model, place, positions, n_newton, batch_size)
+    entry = fit.free.get(amplitude)
+    if not isinstance(entry, AbstractDistribution):
+        raise ValueError(f"amplitude {amplitude!r} must be a free leaf-law path")
+    if jnp.size(resolve(fit.model, amplitude)) != 1:
+        raise ValueError(f"the leaf at {amplitude!r} must have one element")
+    _check_entries(trials, set(fit.free) - {amplitude})
+    return _detect(fit, trials, amplitude, n_newton, batch_size)
 
 
-class MeasuredRows(eqx.Module):
-    """A measurement of a source's amplitude and position with its covariance.
+class LikelihoodEstimate(eqx.Module):
+    """The maximum of a fit's likelihood and the covariance from its curvature.
 
     Attributes:
-        names: One label per scalar: ``"amplitude"``, then ``"position/i"`` for the
-            i-th scalar of the flattened position.
-        value: The estimate, shape ``(n,)``.
+        value: The estimate, an entry dictionary keyed by ``fit.free`` (the format of
+            the fit's ``x``).
         cov: The formal covariance, the inverse of the observed information
-            (:func:`curvature_block` over the same scalars), shape ``(n, n)``.
+            (:func:`curvature_block` over every free scalar), shape ``(D, D)`` with
+            rows in the order of :func:`photomancy.infer.posterior.ravel_samples`
+            (the entries' leaves in ``jax.tree.leaves`` order, each row-major). It is
+            a likelihood-only statement and says nothing about the prior.
     """
 
-    names: tuple[str, ...] = eqx.field(static=True)
-    value: jax.Array
+    value: dict
     cov: jax.Array
 
     @property
     def sigma(self) -> jax.Array:
-        """Formal standard errors, shape ``(n,)``."""
+        """Formal standard errors, shape ``(D,)``."""
         return jnp.sqrt(jnp.diag(self.cov))
 
 
-class _Source(eqx.Module):
-    amplitude: jax.Array
-    position: jax.Array
-
-
 @eqx.filter_jit
-def _measure(terms, model, place, position, amplitude, n_newton):
-    flat, unravel = jax.flatten_util.ravel_pytree(position)
-    flat = flat.astype(jnp.float64)
+def _measure(fit, start, n_newton):
+    start = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), start)
+    flat, unravel = jax.flatten_util.ravel_pytree(start)
 
-    def loglike(source):
-        placed = place(model, unravel(source.position), source.amplitude)
-        return sum(jnp.asarray(t(placed), jnp.float64) for t in terms)
+    def loglike(theta):
+        return jnp.asarray(fit.log_likelihood(unravel(theta)), jnp.float64)
 
-    def of_theta(theta):
-        return loglike(_Source(theta[0], theta[1:]))
-
-    if amplitude is None:
-        amplitude, _, _ = _profile(
-            lambda a: loglike(_Source(a, flat)), n_newton, jnp.float64
-        )
-    theta = jnp.concatenate([jnp.asarray(amplitude, jnp.float64)[None], flat])
-    grad, hess = jax.grad(of_theta), jax.hessian(of_theta)
+    grad, hess = jax.grad(loglike), jax.hessian(loglike)
 
     def step(theta, _):
         g, h = grad(theta), hess(theta)
@@ -324,42 +330,37 @@ def _measure(terms, model, place, position, amplitude, n_newton):
         delta = jnp.linalg.solve(jnp.where(ok, h, -jnp.eye(theta.size)), g)
         return theta - jnp.where(ok, delta, 0.0), None
 
-    theta, _ = jax.lax.scan(step, theta, None, length=n_newton)
-    source = _Source(theta[0], theta[1:])
-    info = curvature_block(loglike, source, lambda s: (s.amplitude, s.position))
-    return theta, jnp.linalg.inv(info)
+    theta, _ = jax.lax.scan(step, flat, None, length=n_newton)
+    info = curvature_block(loglike, theta, lambda t: t)
+    return unravel(theta), jnp.linalg.inv(info)
 
 
-def measure(
-    term, model, place, position, *, amplitude=None, n_newton: int = 4
-) -> MeasuredRows:
-    """Estimate a source's amplitude and position, with the covariance of the estimate.
+def measure(fit: Fit, start: dict, *, n_newton: int = 4) -> LikelihoodEstimate:
+    """Maximize a fit's likelihood from ``start`` and take the covariance there.
 
-    Newton steps on the summed term log likelihood over the amplitude and the position
-    jointly, from ``position`` (a detection peak from :func:`detect`, say) and from
-    ``amplitude`` (profiled at that position when ``None``). A step is skipped while the
+    Newton steps on ``fit.log_likelihood`` over every free scalar jointly, from
+    ``start`` (a detection peak from :func:`detect`, say). A step is skipped while the
     Hessian is not negative definite. The covariance is the inverse of
-    :func:`curvature_block` over the amplitude and position at the estimate, so it is
-    the formal covariance of the maximum-likelihood estimate and is not a statement
-    about the prior. The estimate is only as good as the start: a position far from any
-    peak can leave the Newton iteration on a saddle.
+    :func:`curvature_block` at the estimate, so it is the formal covariance of the
+    maximum-likelihood estimate and is not a statement about the prior. The estimate is
+    only as good as the start: a start far from any peak can leave the Newton iteration
+    on a saddle.
 
     Args:
-        term: One term or a sequence of terms.
-        model: The model without the source, as for :func:`detect`.
-        place: ``(model, position, amplitude) -> model``, as for :func:`detect`.
-        position: Starting position, a float array or pytree of float arrays.
-        amplitude: Starting amplitude, or ``None`` to profile it at ``position``.
-        n_newton: Newton steps, for the amplitude profile and again for the joint fit.
+        fit: A :class:`~photomancy.infer.fit.Fit`.
+        start: Entry dictionary, the format of the fit's ``x`` for one draw, with
+            exactly the keys of ``fit.free``.
+        n_newton: Newton steps.
 
     Returns:
-        A :class:`MeasuredRows` over ``(amplitude, *flattened position)``.
+        A :class:`LikelihoodEstimate`.
+
+    Raises:
+        ValueError: If the keys of ``start`` are not the free paths.
     """
-    terms = _as_terms(term)
-    flat = jax.flatten_util.ravel_pytree(position)[0]
-    theta, cov = _measure(terms, model, place, position, amplitude, n_newton)
-    names = ("amplitude", *(f"position/{i}" for i in range(flat.size)))
-    return MeasuredRows(names=names, value=theta, cov=cov)
+    _check_entries(start, set(fit.free))
+    value, cov = _measure(fit, start, n_newton)
+    return LikelihoodEstimate(value=value, cov=cov)
 
 
 def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:

@@ -179,22 +179,6 @@ def make_exposure(scene, instrument, *, time_s=1.0e4):
     )
 
 
-class Placed(eqx.Module):
-    """``place`` for ``detect``: rebuild the scene with a planet at a sky position."""
-
-    separation_arcsec: float = eqx.field(static=True, default=0.05)
-    unit_contrast: float = eqx.field(static=True, default=1e-10)
-
-    def __call__(self, model, position, amplitude):
-        """The model with a planet of ``amplitude`` (in units of ``unit_contrast``)."""
-        scene = make_scene(
-            contrast=amplitude * self.unit_contrast,
-            sky_pa_deg=position,
-            separation_arcsec=self.separation_arcsec,
-        )
-        return eqx.tree_at(lambda m: m.scene, model, scene)
-
-
 def float_leaves(tree):
     """Count floating array leaves, for a quick structure check."""
     return sum(
