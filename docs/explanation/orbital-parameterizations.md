@@ -1,209 +1,167 @@
 # Orbital parameterizations
 
-Gradient-based inference is only as good as the coordinates it runs in. For
-Keplerian orbits the choice of element set determines whether the posterior
-geometry near common configurations, circular orbits above all, is smooth,
-funneled, or outright non-differentiable. This page records how photomancy
-parameterizes orbits today, what the geometry of those choices is, and the
-direction the library is moving. It is the reference to consult before
-adding a sampler, a prior, or a new orbit forward model.
+An orbit fit is only as good as the coordinates it searches. This page explains how a fit
+holds a planet's orbit, why those coordinates were chosen, and how the two orbit engines
+of `photomancy.orbit` use them. It assumes the vocabulary of
+[Fits and posteriors](fit-and-posterior): a model, its free entries, its terms, and the
+backend that turns them into a `Posterior`.
 
-## Coordinates in the current engine
+## An orbit is a block of the model
 
-The orbit fit and the discovery algorithms use different coordinates:
+The model of an orbit fit is an orbix `System`: a star, the planets, their stacked orbits,
+and the sky frame. One planet at 10 pc around a solar-mass star looks like this.
 
-- **Chart inference** uses an orbix Classical, EccentricityVector, Frame, or
-  Cartesian chart and explicit scalar coordinates. All backends evaluate the
-  same system and data terms.
-- **The discovery tier** (`grid_search`) scans the eccentricity vector
-  $(e_x, e_y) = e(\cos\omega, \sin\omega)$ together with $\log_{10} P$,
-  $\cos i$, $\Omega$, and an epoch fraction. The scan is quasi-random and
-  gradient-free.
-- **The linear tier** (`thiele_innes`) fits the Thiele-Innes constants
-  $(A, B, F, G)$ by ordinary least squares at trial values of the nonlinear
-  parameters. The design matrix stays well conditioned at any eccentricity;
-  the classical angles are extracted only afterwards.
+```python
+import jax
+import jax.numpy as jnp
+from orbix.system import Body, OrbitLaw, SkyFrame, System, ThieleInnesBlock
+from priorities import LogUniform, Uniform
+from skyscapes.population import kipping_eccentricity
 
-## Posterior tracks and time origins
+jax.config.update("jax_enable_x64", True)
 
-`orbits_from_samples(samples, Ms_kg, *, reference_day)` returns an
-`orbix.system.FrameOrbit` batched over the posterior draws. It uses `T`, `e`,
-`cos_i`, `W`, `cos_w`, `sin_w`, and `tp`, plus true planet mass `Mp` when
-present. The semimajor axis follows from `T` and the total mass.
+system = System.from_classical(
+    Body(jnp.asarray(1.0)),  # star mass, solar masses
+    Body(jnp.array([0.0])),  # planet masses, solar masses
+    SkyFrame(jnp.asarray(10.0)),  # distance, pc
+    a_AU=jnp.array([1.5]),
+    e=jnp.array([0.3]),
+    i_rad=jnp.array([0.8]),
+    W_rad=jnp.array([1.2]),
+    w_rad=jnp.array([0.5]),
+    M0_rad=jnp.array([2.0]),
+)
+```
 
-The forward models use days from a common observation-time zero. The sampling
-model defines `tp = -M0 * T / (2*pi)`, with no calendar epoch in the samples.
-Supply `reference_day` as that zero in float days from your `hwoutils.epoch.Epoch`.
-Evaluate tracks with `orbit.at(reference_day + observation_times)`; the returned
-position and velocity arrays have shape `(K, N, 3)` in AU and AU/day, with
-coordinates `(east, north, away)`. Use `reference_day=0.0` when the Epoch already
-matches the observation-time origin. Scalar samples produce an unbatched orbit.
+The orbit is freed by a block, a free entry that owns a node of the model and writes it
+from coordinates of its own. The block holds a law for the orbit (here a log-uniform
+period and the Kipping eccentricity distribution, with isotropic orientation and uniform
+phase), a law for the star mass, the row of the planet it frees, and the path of the
+`System` in the model, which is the root here.
 
-## Fitting in chart coordinates
+```python continuation
+law = OrbitLaw(
+    period_d=LogUniform(100.0, 10_000.0), eccentricity=kipping_eccentricity(0.9)
+)
+block = ThieleInnesBlock(law, Uniform(0.9, 1.1), rows=(0,), system="")
+print(block.coordinate_names)
+print(block.writes)
+```
 
-Construct a one-planet density with
-{py:func}`~photomancy.orbit.inference.build_chart_logdensity`, then pass it and a
-representative parameter dictionary to {py:class}`~photomancy.orbit.ChartOrbitProblem`.
-The dictionary contains an `orbit` vector in the chosen chart and a leaf for
-each sampled body property or instrument nuisance. The same system builder and
-epoch determine the likelihood, posterior predictions, and EIG.
+The block has seven coordinates and writes two paths: the orbits and the star mass. The
+rest of this page explains the seven coordinates one group at a time.
 
-For an interior chart position, `start = problem.flatten(position)` yields the
-flat vector expected by MAP, Laplace, NUTS, MCLMC, and Pathfinder. Pass
-`problem.logdensity` as the scalar callable, for example
-`NUTSBackend().run(problem.logdensity, start, key)`. The orbit Laplace facade
-accepts the problem directly as `map_laplace_fit(problem, start)`.
+## The size and the shape
 
-For normalized prior draws, use {py:class}`~photomancy.priors.FactorizedOrbitPrior`
-and give each independent scalar coordinate an elementwise distribution from `priorities`
-with an inverse CDF, such as `LogUniform(low, high)` or `HalfNormal(scale)`. The sampled
-companion mass enters the two-body orbit in both the prior transform and likelihood.
-`orbit_tempered_smc(problem, SMCBackend(), n_particles=128, key=key)` draws initial
-particles from this prior and tempers the data terms.
-`orbit_nested_sampling(problem, key=key)` integrates those terms over the same
-prior. Both return chart rows. Use `problem.to_physical(posterior.samples[i])`
-to decode row `i` with the original fit's chart and epoch.
+The first three coordinates fix the size and the shape of the orbit.
 
-## Custom likelihoods and planet scales
+The first is the log of the mean motion `n` in radians per day. Because the period law is
+bounded, the block maps the log mean motion from its bounded interval onto the whole real
+line with a logit, and the coordinate takes the prefix `logit_`. Every real value of every
+coordinate is then a valid orbit, so a sampler or an optimizer never meets a wall, and the
+density gains the log derivative of the map.
 
-A custom likelihood is a term. Pass `build_chart_logdensity` a plain callable that
-takes the built system (or scene) and returns `(log_likelihood, aux)`, with no
-prior terms. Planet scales are explicit independent scalar coordinates:
+The next two, `ux` and `uy`, are the eccentricity vector mapped from the unit disk onto
+the plane, `(ex, ey) = u / sqrt(1 + |u|^2)`. The eccentricity vector
+`(ex, ey) = e (cos w, sin w)` is used instead of the pair `(e, w)` because of the circular
+limit. As `e` goes to zero the argument of periapsis loses its meaning, a posterior
+develops a ridge over it, and the map from `(ex, ey)` back to `(e, w)` passes through a
+square root and an `atan2` that are not differentiable at the origin. The Jacobian of that
+map has a condition number that grows as `2 / e`. A Hessian evaluated in `(e, w)` at a
+circular mode is undefined, and a Gaussian pushed into `(e, w)` near the circular limit
+manufactures uncertainty that is not in the data. In the eccentricity vector the circular
+orbit is an ordinary interior point, which is the reparameterization long recommended for
+orbit sampling (Ford 2006).
 
-- `scalars={name: ScalarCoordinate(prior)}`: a sampled radius (`radius_AU`),
-  albedo (`albedo`) or mass (`mass_Mearth`). The default is logarithmic;
-  `ScalarCoordinate(prior, logarithmic=False)` samples the value itself. The prior is
-  a `priorities` distribution or a callable returning the log density; a distribution with an inverse CDF (`LogUniform`, `HalfNormal`) also supports
-  nested sampling.
-- `body_inputs=("radius_AU", "albedo")`: scalars passed to the scene builder.
-- `term_inputs={0: ("radius_AU", "albedo")}`: scalars passed as keyword
-  arguments to the term at that index, so a callable
-  `term(system, *, radius_AU, albedo)` reads the sampled scales directly. Terms
-  never share state, so each closure carries its own data.
+The phase of the orbit needs no coordinate of its own. The orbit is stored at the epoch of
+the model, and the eccentricity vector together with that epoch frame fixes where the
+planet is on its orbit.
 
-Several terms add. A prior-only fit passes `terms=()`. Nested sampling integrates
-the terms over the factorized prior and returns chart rows;
-`problem.to_physical` decodes `Rp`, `Ag`, `Lambda = Ag * Rp**2` and the mass.
+## The four sky constants
 
-## The geometry of the circular limit
+The last four coordinates, `A_AU`, `B_AU`, `F_AU` and `G_AU`, are the Thiele-Innes
+constants: the projection of the orbit's frame onto the sky, in AU. They carry the
+semi-major axis, the inclination and the two angles of the orientation, and with the
+mean motion they imply the total mass, which is why this block also writes the star mass.
 
-The classical pair $(e, \omega)$ degenerates as $e \to 0$: the argument of
-periastron loses meaning, the posterior develops a ridge over $\omega$, and
-any quantity computed through the inverse map $(e_x, e_y) \mapsto
-(e, \omega)$ hits non-differentiable functions ($\sqrt{\cdot}$ and
-$\mathrm{atan2}$) exactly at the origin. Three practical consequences:
+The constants matter because the sky position of the planet is linear in them. At a fixed
+size and shape, the predicted east and north offsets at every epoch are a design matrix
+times the four constants. With Gaussian astrometric errors the likelihood is therefore
+Gaussian in the constants, and their conditional distribution given the shape is known
+exactly. orbix computes the design matrix (`sky_design`) and the exact conditional
+(`linear_gaussian_conditional`), and a measurement term that has this linear form says so
+by its type (`AbstractLinearTerm` in `photomancy.infer`).
 
-1. **Samplers pay a geometry tax.** Hamiltonian samplers spend leapfrog
-   steps exploring the $\omega$ ridge and the periodic seams of the angle
-   coordinates. Reparameterizations that remove these features are a
-   long-standing recommendation in the exoplanet literature (Ford 2006).
-2. **Curvature-based machinery breaks at the mode it needs most.** A
-   Hessian evaluated through the polar chart at a circular
-   maximum a posteriori point is undefined; Laplace approximations,
-   Fisher-information calculations, and information-gain scores built on
-   them inherit the failure precisely for near-circular targets.
-3. **Posterior transport amplifies noise.** The Jacobian of the map from
-   the eccentricity vector to $(e, \omega)$ has a condition number that
-   grows as $2/e$, so pushing a Gaussian posterior into the classical chart
-   near the circular limit manufactures spurious uncertainty. Marginals for
-   $e$ and $\omega$ near zero eccentricity should be reported from samples,
-   not from transformed Gaussians.
+The consequence is that an orbit search never has to explore seven dimensions blindly.
+Only the three coordinates of the size and the shape need a proposal, and the four
+constants can be drawn from their exact conditional at each proposed shape.
 
-Nonsingular element sets that remove the $e = 0$ (and $i = 0$) degeneracies
-date to the early machine-computation era: Cohen and Hubbard (1962)
-introduced a fully nonsingular set, and the equinoctial elements were
-consolidated under that name by Broucke and Cefola (1972). The eccentricity
-vector used by the discovery tier is the in-plane half of that construction.
+## Two engines, named for the data in hand
 
-A subtlety worth stating plainly: the singularities live in **inverse chart
-maps, prior densities, and sampler geometry, not in forward propagation**.
-Forward models built natively from any standard element set, including the
-classical one at exactly $e = 0$, are smooth. Failures appear when a forward
-model is composed through a chart inversion. The design rule is to build the
-forward model directly in the sampling coordinates and to convert between
-element sets only for reporting.
+`photomancy.orbit` provides two configured backends. Each is an ordinary backend of
+`photomancy.infer`, passed to `run`, and the name of each says when to call it.
 
-## Guidance by task
-
-| Task | Coordinates | Reason |
+| Call | When | What it runs |
 |---|---|---|
-| Gradient-based refinement from an informed start | eccentricity vector | smooth through $e = 0$; no angle seams |
-| Laplace, Fisher information, expected information gain | eccentricity vector | finite curvature at circular modes |
-| Blind discovery scans | eccentricity-vector box | gradient-free, uniform coverage |
-| Markov chains started from the prior | classical elements, or temper first | see the caution below |
-| Few-epoch linear fits | Thiele-Innes constants | linear, well conditioned at any $e$ |
-| Nested sampling | whichever chart gives a tractable unit-cube prior transform | slice sampling is gradient-free |
+| `few_epoch()` | one or two astrometric epochs, with the orbit block the only free entry | `Importance(ScaleRotateProposal())` |
+| `any_epoch()` | anything else: any number of epochs, radial velocity, a detection report, another free leaf | `AdaptiveImportance(CompletedProposal(ShapePriorProposal()))` |
 
-**Caution on cold starts.** Decoupled nonsingular coordinates are locally
-clean but globally disconnected: a chain started far from the solution can
-converge into a poor local optimum and stay there. The correlated classical
-angles, usually treated as a defect, act as a connecting ridge during global
-search. Vector-coordinate chains should therefore always be seeded from the
-discovery or linear tier, which is the standard pipeline in photomancy.
+`few_epoch` uses the scale-and-rotate move of Blunt et al. (2017). Each draw takes the
+eccentricity, the inclination, the argument of periapsis and the phase from the prior,
+draws a sky position near one measured epoch, and then solves for the size and the node
+that put the orbit through that position. The draws are exact in the prior, so with one
+epoch every weight is equal, and the engine costs about a quarter of `any_epoch`. As more
+epochs arrive the draws spread over orbits that the later epochs rule out, the weights
+concentrate on a few draws, and the evidence is refused under the k-hat rule of
+[Fits and posteriors](fit-and-posterior). A fit with a free entry other than the orbit
+block is refused by name.
 
-## Direction
+`any_epoch` is the general engine. Round zero draws the size and shape from the block's
+own law (`ShapePriorProposal`), `CompletedProposal` completes each draw with the four sky
+constants from their exact conditional (a collapsed, or Rao-Blackwellized, proposal), and
+`AdaptiveImportance` refits a Gaussian mixture to the weighted cloud over the following
+rounds. The returned draws and the evidence come from the last round alone.
 
-A forward model parameterized natively by the eccentricity vector and the
-mean argument of latitude, with per-orbit coefficients precomputed at
-construction, is planned for the orbit stack. In preliminary internal
-benchmarks it delivers order-of-magnitude gains in effective samples per
-gradient evaluation for near-circular orbits, with exact finite Hessians at
-$e = 0$; reproducible benchmarks will accompany the feature. Two boundary
-cases are known and deliberately deferred: full equinoctial elements are
-singular for exactly retrograde orbits ($i = 180^\circ$), and the quaternion
-elements of Cohen and Hubbard (1962) are the principled remedy should
-face-on retrograde populations become a target.
+## One orbit, two sheets
 
-## Element sets as charts
+Relative astrometry sees the orbit only in projection. An orbit and its reflection
+through the sky plane, the same track traced on the near side instead of the far side,
+predict identical positions at every epoch. The Thiele-Innes coordinates describe one of
+these two sheets, and the block's density is the orbit law summed over both, so the
+fit is normalized whichever sheet the truth is on.
 
-Established orbit-fitting codes such as radvel (Fulton et al. 2018) and
-orbitize! (Blunt et al. 2020) let the user choose among several element
-bases, which is valuable because no single basis serves every task. The
-maintenance cost of that flexibility depends entirely on where the basis
-concept lives in the architecture. photomancy's position:
+A measurement that tells the sheets apart, radial velocity or a phase-dependent
+brightness, must then be averaged over both. `SheetSum` holds such terms and scores them
+on the orbit and on its reflection, and the fit refuses a second `SheetSum` over the same
+planet, because a product of two sheet sums is not the sheet sum of the product. Terms that
+cannot see the sheet, such as relative astrometry, stay outside it.
 
-- **One hub, thin spokes.** The forward model exists in a single internal
-  representation, with per-orbit constants precomputed at construction.
-  A basis is a *chart*: a bijection onto the hub plus a prior density
-  expressed in its own coordinates. Charts convert into the hub, never into
-  each other, so there is no quadratic growth of conversion paths.
-- **Charts end at the problem seam.** A chart is a small builder that
-  assembles the fit problem (logdensity, unflattening, constraints,
-  parameter names). Every sampler backend downstream is chart-blind: it
-  sees a flat vector and a logdensity. Adding a chart therefore touches no
-  backend, no likelihood, and no reporting code.
-- **Charts are compiled away.** Because problems are assembled at trace
-  time and JIT-compiled, a chart adds no runtime dispatch and no per-call
-  conversion cost; the coordinate change fuses into the model graph.
-- **Priors bind to charts explicitly.** Where an exact correspondence
-  exists it is used directly (a Rayleigh eccentricity prior is a pair of
-  independent Gaussians on the eccentricity vector); otherwise the density
-  is reweighted with Jacobians obtained by automatic differentiation, never
-  by hand.
-- **A closed menu.** The supported charts are the ones with a task behind
-  them: classical elements, the eccentricity vector, Thiele-Innes
-  constants, and the discovery-scan box. Preferences about units, epochs,
-  or which parameters to hold fixed are handled by the prior layer and by
-  deterministic transforms, not by new bases.
+## Reading the orbit back
 
-Each chart ships with the same small test contract: an exact round trip
-against the hub, forward-model gradient checks at the degenerate loci
-($e = 0$, $i = 0$, near-retrograde), and prior-equivalence checks against
-the classical chart.
+The coordinates are chosen for the search, not for reading. `classical_elements` draws
+from a posterior, builds the model of each draw through the fit, and returns the classical
+elements of one planet under the keys `period_d`, `a_AU`, `e`, `cos_i`, `W_rad` and
+`M0_rad`. The [orbit fitting example](../examples/orbit_fitting) runs both engines on
+synthetic data and reads the result this way.
+
+## Other charts
+
+The Thiele-Innes coordinates are one chart of several in orbix. A chart is a map between
+an orbit and a vector of real coordinates, with the exact volume of that map, and a block
+combines a chart with an orbit law and a placement in the model. `OrbitBlock` accepts the
+classical, eccentricity-vector, frame and Cartesian charts and reads the star mass from
+the model instead of implying it. Every backend of `photomancy.infer` sees only the flat
+coordinates and the fit's density, so adding a chart touches no backend and no
+measurement term. The engines of `photomancy.orbit` are built on the Thiele-Innes chart,
+because only its coordinates make the astrometry linear.
 
 ## References
 
-- Blunt, S. et al. (2020), "orbitize!: A comprehensive orbit-fitting
-  software package for the high-contrast imaging community",
-  *Astronomical Journal* 159, 89.
-- Broucke, R. A. and Cefola, P. J. (1972), "On the equinoctial orbit
-  elements", *Celestial Mechanics* 5, 303.
-- Fulton, B. J. et al. (2018), "RadVel: the radial velocity modeling
-  toolkit", *PASP* 130, 044504.
-- Cohen, C. J. and Hubbard, E. C. (1962), "A nonsingular set of orbit
-  elements", *Astronomical Journal* 67, 10.
-- Ford, E. B. (2006), "Improving the efficiency of Markov chain Monte Carlo
-  for analyzing the orbits of extrasolar planets", *Astrophysical Journal*
-  642, 505.
-- Kipping, D. M. (2013), "Parametrizing the exoplanet eccentricity
-  distribution with the beta distribution", *MNRAS* 434, L51.
+- Blunt, S. et al. (2017), "Orbits for the impatient: a Bayesian rejection-sampling method
+  for quickly fitting the orbits of long-period exoplanets", *Astronomical Journal* 153, 229.
+- Ford, E. B. (2006), "Improving the efficiency of Markov chain Monte Carlo for analyzing
+  the orbits of extrasolar planets", *Astrophysical Journal* 642, 505.
+- Kipping, D. M. (2013), "Parametrizing the exoplanet eccentricity distribution with the
+  beta distribution", *MNRAS* 434, L51.
+- Vehtari, A. et al. (2024), "Pareto smoothed importance sampling", *Journal of Machine
+  Learning Research* 25, 1.
