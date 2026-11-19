@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 
-from photomancy.infer.posterior import MixturePosterior
+from photomancy.infer.legacy_posterior import MixturePosterior
 from photomancy.infer.posterior_utils import project_samples, sample_capped
 
 

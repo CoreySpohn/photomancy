@@ -8,7 +8,7 @@ import numpy as np
 import optax
 import pytest
 
-from photomancy.infer.backends.base import AbstractBackend
+from photomancy.infer.backends.base import LegacyBackend
 from photomancy.infer.backends.staged import (
     UNLABELED,
     EarlyStopping,
@@ -18,7 +18,7 @@ from photomancy.infer.backends.staged import (
     map_fit,
     rescaled_transform,
 )
-from photomancy.infer.posterior import PointPosterior
+from photomancy.infer.legacy_posterior import PointPosterior
 
 
 class _Tree(eqx.Module):
@@ -610,7 +610,7 @@ def test_map_backend_returns_a_point_posterior_through_the_backend_protocol():
         transforms={"x": optax.sgd(1.0)},
         stages=(FitStage(2, ("x",)),),
     )
-    assert isinstance(backend, AbstractBackend)
+    assert isinstance(backend, LegacyBackend)
     post = backend.run(ld, init)
     assert isinstance(post, PointPosterior)
     np.testing.assert_array_equal(post.params.x, [1.0, 2.0])

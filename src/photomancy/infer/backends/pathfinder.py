@@ -18,8 +18,19 @@ than baking into the compiled kernel as constants.
 import equinox as eqx
 import jax
 
-from photomancy.infer.backends.base import AbstractBackend, import_extra
-from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.backends._flat import (
+    flat_density,
+    mixture_importance,
+    start_points,
+)
+from photomancy.infer.backends.base import (
+    AbstractBackend,
+    BackendDraws,
+    LegacyBackend,
+    import_extra,
+)
+from photomancy.infer.backends.laplace import LaplaceInfo
+from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
 
 
 @eqx.filter_jit
@@ -51,7 +62,7 @@ def pathfinder_fit(logdensity, init, key, maxiter, maxcor):
     return state.position, cov, state.elbo
 
 
-class PathfinderBackend(AbstractBackend):
+class PathfinderBackend(LegacyBackend):
     """BlackJAX Pathfinder variational inference, returning a GaussianPosterior.
 
     A more robust alternative to ``LaplaceBackend`` and a fast initializer for the
@@ -76,7 +87,7 @@ class PathfinderBackend(AbstractBackend):
         return GaussianPosterior(mean=mean, cov=cov, evidence=elbo)
 
 
-class PathfinderMixtureBackend(AbstractBackend):
+class PathfinderMixtureBackend(LegacyBackend):
     """Multi-start Pathfinder: an ELBO-weighted mixture of Gaussians.
 
     Runs single-path Pathfinder from each of ``K`` starts (``init`` has shape
@@ -105,3 +116,50 @@ class PathfinderMixtureBackend(AbstractBackend):
 
         means, covs, elbos = jax.vmap(fit_one)(init, keys)
         return MixturePosterior(means=means, covs=covs, log_evidences=elbos)
+
+
+class Pathfinder(AbstractBackend):
+    """Pathfinder proposals and an importance-weighted posterior.
+
+    As :class:`~photomancy.infer.backends.laplace.Laplace`, with each component fitted
+    by BlackJAX Pathfinder (a Gaussian from the L-BFGS trajectory, steadier than one
+    Hessian when a mode is poorly conditioned) and weighted by its ELBO. The draws are
+    importance weighted to the fit, so the evidence is the importance mean and the
+    proposal quality shows in the weights. The same remark on angle coordinates
+    applies.
+
+    Args:
+        n_draws: Importance draws.
+        n_modes: Number of starts and proposal components.
+        maxiter: Maximum L-BFGS iterations along the path.
+        maxcor: L-BFGS history size.
+        init: ``None`` for prior draws as starts, one constrained draw, or a
+            ``Posterior``.
+    """
+
+    n_draws: int = eqx.field(static=True, default=2000)
+    n_modes: int = eqx.field(static=True, default=1)
+    maxiter: int = eqx.field(static=True, default=50)
+    maxcor: int = eqx.field(static=True, default=10)
+    init: object = None
+
+    def _run(self, fit, key):
+        """Fit the paths, then draw and weight from their mixture."""
+        k_start, k_fit, k_draw = jax.random.split(key, 3)
+        density = flat_density(fit)
+        starts = start_points(fit, self.init, k_start, self.n_modes)
+        keys = jax.random.split(k_fit, self.n_modes)
+        means, covs, elbo = jax.vmap(
+            lambda z0, k: pathfinder_fit(density, z0, k, self.maxiter, self.maxcor)
+        )(starts, keys)
+        x, log_w, evidence, se, comp, proposal = mixture_importance(
+            fit, density, means, covs, elbo, self.n_draws, k_draw
+        )
+        return BackendDraws(
+            samples=x,
+            log_weights=log_w,
+            log_evidence=evidence,
+            log_evidence_se=se,
+            info=LaplaceInfo(means, covs, elbo, comp, proposal),
+            kind="monte_carlo",
+        )

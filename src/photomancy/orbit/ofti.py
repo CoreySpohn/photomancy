@@ -24,7 +24,7 @@ from hwoutils.constants import G
 from orbix.system import ClassicalChart
 from skyscapes.population import kipping_eccentricity
 
-from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.orbit.inference import ORBIT_ROWS_CHART
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 

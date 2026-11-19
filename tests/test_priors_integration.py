@@ -96,7 +96,7 @@ def test_sequential_updating_tightens_posterior():
 
 def test_mixture_prior_from_samples_drives_a_scene_fit():
     """A bimodal SamplePosterior -> to_prior() -> Mixture drives a scene fit."""
-    from photomancy.infer.posterior import SamplePosterior, cluster_to_mixture
+    from photomancy.infer.legacy_posterior import SamplePosterior, cluster_to_mixture
 
     k0, k1 = jax.random.split(jax.random.key(7))
     a = jax.random.normal(k0, (300, 1)) * 0.3 - 3.0

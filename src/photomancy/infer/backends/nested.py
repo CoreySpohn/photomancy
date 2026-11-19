@@ -14,8 +14,14 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from photomancy.infer.backends.base import AbstractBackend, import_extra
-from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.backends._flat import draw_template
+from photomancy.infer.backends.base import (
+    AbstractBackend,
+    BackendDraws,
+    LegacyBackend,
+    import_extra,
+)
+from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.infer.priors import flat_prior
 
 # jaxns is an optional extra and is imported inside the functions below: importing it
@@ -119,7 +125,7 @@ def build_scene_nested_model(scene, forward, likelihood, *, fit_leaves, prior):
     return Model(prior_model=prior_model), unravel
 
 
-class JaxnsBackend(AbstractBackend):
+class JaxnsBackend(LegacyBackend):
     """jaxns nested sampling -> ``SamplePosterior`` carrying the evidence (``log Z``).
 
     ``run`` takes a jaxns ``Model`` (not a flat logdensity); ``init`` is ignored (live
@@ -168,4 +174,106 @@ class JaxnsBackend(AbstractBackend):
             samples=samples,
             log_weights=results.log_dp,
             evidence=results.log_Z_mean,
+        )
+
+
+class NestedInfo(eqx.Module):
+    """Diagnostics of a :class:`NestedSampling` run.
+
+    Attributes:
+        log_likelihood: Log likelihood of each stored point ``(N,)``.
+        ess: jaxns estimate of the Kish effective sample size.
+        n_likelihood_evaluations: Total likelihood evaluations.
+        termination_reason: Zero for convergence, else a hard-stop code (for example
+            the sample buffer filled).
+    """
+
+    log_likelihood: jax.Array
+    ess: jax.Array
+    n_likelihood_evaluations: jax.Array
+    termination_reason: jax.Array
+
+
+class NestedSampling(AbstractBackend):
+    """jaxns nested sampling of a ``Fit``: posterior draws and the evidence.
+
+    Live points fill the unit cube and map to the fit's entries through the inverse
+    CDF of each leaf law (``Fit.from_unit``); a fit with a block entry is refused until
+    its block has a unit-cube map. The draws are the dead points with weights
+    ``L_i dX_i``; the evidence is jaxns's expectation estimate of ``log Z`` and its
+    standard error is the standard deviation of ``log Z`` from the shrinkage
+    distribution. The sampler is jitted internally and runs one fit at a time.
+
+    Args:
+        n_live: Number of independent root chains (jaxns ``root_allocation_degree``);
+            ``None`` uses the jaxns default, ``30 * D``.
+        max_samples: Hard cap on stored samples; jaxns stops early (nonzero
+            ``termination_reason``) if the buffer fills first.
+    """
+
+    n_live: int | None = eqx.field(static=True, default=None)
+    max_samples: int = eqx.field(static=True, default=100_000)
+
+    def _run(self, fit, key):
+        """Run nested sampling on the unit cube of ``fit``."""
+        NestedSampler = import_extra("jaxns.core", "jaxns").NestedSampler
+        Model = import_extra("jaxns.model", "jaxns").Model
+        JaxctxPrior = import_extra("jaxctx.priors", "jaxns").AbstractPrior
+        unit = fit.unit_template()
+        dim = ravel_pytree(unit)[0].shape[0]
+        unravel_u = ravel_pytree(unit)[1]
+        unravel_x = ravel_pytree(draw_template(fit))[1]
+
+        def to_flat_x(u):
+            return ravel_pytree(fit.from_unit(unravel_u(u)))[0]
+
+        class _FitPrior(JaxctxPrior):
+            def __init__(self):
+                super().__init__(name="x")
+
+            def _dtype(self):
+                return jnp.float64
+
+            def _base_shape(self):
+                return (dim,)
+
+            def _shape(self):
+                return (dim,)
+
+            def _forward(self, U):
+                return to_flat_x(U)
+
+            def _inverse(self, X):
+                raise NotImplementedError("the unit-cube inverse is not needed")
+
+            def _log_prob(self, X):
+                return fit.log_prior(unravel_x(X))
+
+        prior = _FitPrior()
+
+        def prior_model():
+            x = prior.realise()
+            return fit.log_likelihood(unravel_x(x))
+
+        ns = NestedSampler(
+            model=Model(prior_model=prior_model),
+            max_samples=int(self.max_samples),
+            root_allocation_degree=self.n_live,
+        )
+        results = ns.run(key=key).to_result().trim()
+        flat = jnp.asarray(results.X_samples["x"]).reshape(-1, dim)
+        return BackendDraws(
+            samples=jax.vmap(unravel_x)(flat),
+            log_weights=jnp.asarray(results.log_dp),
+            log_evidence=jnp.asarray(results.log_Z_mean),
+            log_evidence_se=jnp.asarray(results.log_Z_uncert),
+            info=NestedInfo(
+                log_likelihood=jnp.asarray(results.log_L),
+                ess=jnp.asarray(results.ess),
+                n_likelihood_evaluations=jnp.asarray(
+                    results.total_num_likelihood_evaluations
+                ),
+                termination_reason=jnp.asarray(results.termination_reason),
+            ),
+            kind="monte_carlo",
         )

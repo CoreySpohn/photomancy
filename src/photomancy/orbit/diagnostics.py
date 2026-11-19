@@ -95,7 +95,7 @@ def mode_scalars(posterior, problem, name):
     mode mean and pull one named entry.
 
     Args:
-        posterior: A :class:`~photomancy.infer.posterior.MixturePosterior`.
+        posterior: A :class:`~photomancy.infer.legacy_posterior.MixturePosterior`.
         problem: The fitted orbit problem supplying ``to_physical``.
         name: Physical parameter name (``"T"``, ``"e"``, ...).
 
@@ -116,7 +116,7 @@ def mode_summary(posterior, problem):
     """Per-mode ``weight``, ``log_evidence``, and physical MAP ``params`` (diagnostics).
 
     Args:
-        posterior: A :class:`~photomancy.infer.posterior.MixturePosterior`.
+        posterior: A :class:`~photomancy.infer.legacy_posterior.MixturePosterior`.
         problem: The fitted orbit problem supplying
             ``to_physical``.
 

@@ -524,7 +524,7 @@ def test_declared_nuts_draws_reach_the_eig_and_diagnostics(sampling_problem):
     on the way or a mismatch is read silently.
     """
     from photomancy.infer.backends import NUTSBackend
-    from photomancy.infer.posterior import MixturePosterior, cluster_to_mixture
+    from photomancy.infer.legacy_posterior import MixturePosterior, cluster_to_mixture
     from photomancy.orbit import evaluate_orbit_candidates, sample_physical
 
     problem = sampling_problem

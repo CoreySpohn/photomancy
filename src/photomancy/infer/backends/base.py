@@ -4,6 +4,7 @@ import importlib
 from abc import abstractmethod
 
 import equinox as eqx
+import jax
 
 
 def import_extra(module, extra):
@@ -31,8 +32,57 @@ def import_extra(module, extra):
         ) from error
 
 
+class BackendDraws(eqx.Module):
+    """What a backend hands to :func:`photomancy.infer.run`: native draws, unnormalized.
+
+    ``run`` alone turns this into a :class:`~photomancy.infer.posterior.Posterior`:
+    it normalizes the weights, evaluates ``log_target`` and fixes the dtypes.
+
+    Attributes:
+        samples: Entry dict of the draws, a flat draw axis in stored order (a leaf law
+            leaf is ``(N, *leaf_shape)``, a block entry a dict of ``(N, R)`` arrays).
+        log_weights: Unnormalized log weights ``(N,)`` that make the draws a weighted
+            sample of the fit's density (zero for equal weights).
+        log_evidence: Scalar log marginal likelihood, NaN when the backend has none.
+        log_evidence_se: Scalar standard error of ``log_evidence``, NaN when absent.
+        info: The backend's diagnostics module (chain index, flags, a trace) or None.
+        kind: ``"monte_carlo"`` or ``"quadrature"``.
+    """
+
+    samples: dict
+    log_weights: jax.Array
+    log_evidence: jax.Array
+    log_evidence_se: jax.Array
+    info: eqx.Module | None
+    kind: str = eqx.field(static=True)
+
+
 class AbstractBackend(eqx.Module):
-    """Runs inference on a flat logdensity and returns a Posterior.
+    """Configuration of one inference method, run on a ``Fit`` by ``run``.
+
+    A backend is an ``eqx.Module`` of settings (array leaves, or static counts). It is
+    not callable: ``run(fit, backend, key)`` is the one public spelling, and ``run``
+    builds the :class:`~photomancy.infer.posterior.Posterior`. A backend implements
+    ``_run`` and returns its native draws and unnormalized log weights as
+    :class:`BackendDraws`. It uses only ``Fit`` methods (``real_log_prob``, ``to_real``,
+    ``from_real``, ``sample_prior``, ``log_density``, ``model_at``) and never builds its
+    own density or tests what kind of entry the fit holds.
+
+    Every backend passes the fit to its compiled region as an argument (``filter_jit``),
+    so large arrays inside the terms are traced inputs and not baked-in constants.
+    """
+
+    @abstractmethod
+    def _run(self, fit, key) -> BackendDraws:
+        """Run inference on ``fit``; return native draws and unnormalized weights."""
+
+
+class LegacyBackend(eqx.Module):
+    """Runs inference on a flat logdensity and returns a legacy posterior.
+
+    Superseded by :class:`AbstractBackend` and :func:`photomancy.infer.run`; kept for
+    the orbit engines that still call it.
+
 
     Backends are ``eqx.Module`` config objects (hyperparameters as fields) with a
     pure ``run``. A backend sees only the flat ``logdensity`` -- never the scene or

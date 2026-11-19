@@ -10,7 +10,7 @@ from kinematics import predict_relative_astrometry
 from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart
 
-from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.grid_search import (
     AdaptiveImportanceSampler,

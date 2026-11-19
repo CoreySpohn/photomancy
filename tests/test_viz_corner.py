@@ -60,7 +60,7 @@ def test_plot_corner_samples_door_excludes_ll_total():
 
 def test_plot_corner_posterior_door_requires_problem_and_key():
     """The posterior door draws via sample_physical and names what is missing."""
-    from photomancy.infer.posterior import GaussianPosterior
+    from photomancy.infer.legacy_posterior import GaussianPosterior
     from photomancy.viz import plot_corner
 
     posterior = GaussianPosterior(

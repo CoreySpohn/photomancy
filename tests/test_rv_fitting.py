@@ -16,7 +16,7 @@ from orbit_fit import classical_coordinates, mass_problem  # noqa: E402
 from orbix.equations import period_to_sma  # noqa: E402
 
 from photomancy import RadialVelocityTerm, RelativeAstrometryTerm  # noqa: E402
-from photomancy.infer.posterior import MixturePosterior  # noqa: E402
+from photomancy.infer.legacy_posterior import MixturePosterior  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData, RVData  # noqa: E402
 from photomancy.orbit.init import find_init  # noqa: E402
 from photomancy.orbit.laplace import (  # noqa: E402

@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 from jax.scipy.special import logsumexp
 
-from photomancy.infer.posterior import (
+from photomancy.infer.legacy_posterior import (
     AbstractPosterior,
     GaussianPosterior,
     MixturePosterior,

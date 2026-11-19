@@ -29,7 +29,7 @@ from photomancy.infer.eig import (  # noqa: E402
     null_update,
     probit_gaussian_mass,
 )
-from photomancy.infer.posterior import MixturePosterior  # noqa: E402
+from photomancy.infer.legacy_posterior import MixturePosterior  # noqa: E402
 
 
 def _two_mode_posterior():

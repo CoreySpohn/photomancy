@@ -12,8 +12,8 @@ import jax
 import jax.numpy as jnp
 
 from photomancy.infer.backends import LaplaceBackend
+from photomancy.infer.legacy_posterior import GaussianPosterior
 from photomancy.infer.model import build_scene_logdensity
-from photomancy.infer.posterior import GaussianPosterior
 
 
 class _ToyScene(eqx.Module):

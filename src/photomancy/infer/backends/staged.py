@@ -25,14 +25,20 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from photomancy.infer.backends.base import AbstractBackend
-from photomancy.infer.posterior import PointPosterior
+from photomancy.infer.backends.base import (
+    AbstractBackend,
+    BackendDraws,
+    LegacyBackend,
+)
+from photomancy.infer.legacy_posterior import PointPosterior
 
 __all__ = [
+    "MAP",
     "UNLABELED",
     "EarlyStopping",
     "FitStage",
     "MAPBackend",
+    "MAPInfo",
     "MAPResult",
     "StageTrace",
     "StepRecord",
@@ -682,7 +688,7 @@ def _log_density_at(logdensity, params):
     return _value_and_aux(logdensity, params)[0]
 
 
-class MAPBackend(AbstractBackend):
+class MAPBackend(LegacyBackend):
     """Staged MAP fit over a PyTree, returning a ``PointPosterior``.
 
     The backend holds the fit's description; ``run(logdensity, init)`` is
@@ -734,4 +740,107 @@ class MAPBackend(AbstractBackend):
         return PointPosterior(
             params=result.params,
             log_density=_log_density_at(logdensity, result.params),
+        )
+
+
+class _RealLogProb(eqx.Module):
+    """``u -> fit.real_log_prob(u)`` over the unconstrained entry dict of one draw."""
+
+    fit: object
+
+    def __call__(self, u):
+        return self.fit.real_log_prob(u)
+
+
+class MAPInfo(eqx.Module):
+    """The stage traces of a :class:`MAP` run.
+
+    Attributes:
+        stages: One :class:`StageTrace` per stage, in order.
+    """
+
+    stages: tuple[StageTrace, ...]
+
+
+class MAP(AbstractBackend):
+    """Staged MAP fit of a ``Fit`` in unconstrained coordinates, one draw out.
+
+    The optimized parameters are the entry dict of ``fit.to_real`` for one draw and
+    the objective is ``fit.real_log_prob``, the density in those coordinates with the
+    log volume of the map from the stored coordinates (the density a gradient sampler
+    sees), so the optimum is its mode there. The result is a one-draw posterior at the
+    optimum with weight one, no evidence and ``info = MAPInfo`` (the stage traces).
+    The optimizer is :func:`map_fit` and is host-driven, so ``MAP`` runs one fit at a
+    time and is not mapped over a stack of worlds.
+
+    With no ``stages`` the fit is one stage of ``n_steps`` L-BFGS iterations over every
+    parameter. Pass ``labels``, ``transforms`` and ``stages`` as for :func:`map_fit`
+    (labels have the structure of ``fit.to_real`` of one draw) for a staged fit.
+
+    Args:
+        n_steps: L-BFGS iterations of the default stage.
+        labels: Group label PyTree from :func:`group_labels`, or ``None`` for one
+            group ``"all"`` over every leaf.
+        transforms: ``{group: optax.GradientTransformation}``, or ``None``.
+        stages: Tuple of :class:`FitStage`, or ``None`` for the default stage.
+        freeze: ``"hold"``, ``"zero_gradient"`` or ``"drop_update"``; see
+            :func:`map_fit`.
+        metrics: ``{name: fn(params, aux) -> scalar}`` recorded every step.
+        callback: ``callback(StepRecord)`` called every ``callback_every`` steps.
+        callback_every: Steps between callbacks, or a predicate on the global step.
+        init: ``None`` for a prior draw, one constrained draw (a dict of the fit's
+            entries), or a ``Posterior`` whose highest-``log_target`` draw starts it.
+    """
+
+    n_steps: int = eqx.field(static=True, default=200)
+    labels: Any = None
+    transforms: dict | None = None
+    stages: tuple[FitStage, ...] | None = None
+    freeze: str = eqx.field(static=True, default="hold")
+    metrics: dict | None = None
+    callback: Callable | None = None
+    callback_every: int | Callable = eqx.field(static=True, default=1)
+    init: object = None
+
+    def _start(self, fit, key):
+        if self.init is None:
+            x = fit.sample_prior(key)
+        elif hasattr(self.init, "log_target"):
+            best = jnp.argmax(self.init.log_target)
+            x = jax.tree.map(lambda a: a[best], self.init.samples)
+        else:
+            x = self.init
+        return fit.to_real(x)
+
+    def _run(self, fit, key):
+        """Optimize from the start and return the optimum as a one-draw cloud."""
+        start = self._start(fit, key)
+        labels = self.labels
+        if labels is None:
+            labels = jax.tree.map(lambda _: "all", start)
+        stages = self.stages
+        transforms = self.transforms
+        if stages is None:
+            stages = (
+                FitStage(self.n_steps, ("all",), solver=optax.lbfgs(), name="lbfgs"),
+            )
+        result = map_fit(
+            _RealLogProb(fit),
+            start,
+            labels,
+            {} if transforms is None else transforms,
+            stages,
+            freeze=self.freeze,
+            metrics=self.metrics,
+            callback=self.callback,
+            callback_every=self.callback_every,
+        )
+        x, _ = fit.from_real(result.params)
+        return BackendDraws(
+            samples=jax.tree.map(lambda a: jnp.asarray(a)[None], x),
+            log_weights=jnp.zeros(1),
+            log_evidence=jnp.asarray(jnp.nan),
+            log_evidence_se=jnp.asarray(jnp.nan),
+            info=MAPInfo(stages=result.stages),
+            kind="monte_carlo",
         )

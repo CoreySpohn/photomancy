@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from photomancy.infer.backends import MCLMCBackend, NUTSBackend, SMCBackend
-from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.legacy_posterior import SamplePosterior
 
 # Full sampler runs belong in the nightly tier.
 pytestmark = pytest.mark.slow

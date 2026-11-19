@@ -3,7 +3,7 @@
 import jax
 
 from photomancy.infer.backends.laplace import LaplaceBackend, LaplaceMixtureBackend
-from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
 from photomancy.orbit.inference import ChartOrbitProblem
 
 

@@ -1,310 +1,196 @@
-"""Unified posterior types for photomancy inference backends.
+"""The one posterior type, built only by :func:`photomancy.infer.run`.
 
-A fit returns one Posterior with a uniform query interface -- ``sample``,
-``log_prob``, and ``evidence`` -- backed by a representation-specific subtype
-(Gaussian, mixture, or samples). Consumers (the EIG / scheduling layer, model
-comparison) read this interface and stay agnostic to which backend produced it.
+A :class:`Posterior` is a weighted cloud of draws of a :class:`Fit`
+with the fit it targets: ``samples`` keyed by the fit's free paths, normalized log
+weights, the fit's own log density at each draw, and the evidence and its standard error
+where the backend has them. Every backend fills the same fields, so a consumer reads one
+layout whichever method ran.
+
+Layout. The draw axis is flat and in stored order (chains are concatenated, never an
+axis). Leading axes are batch axes: a stack of worlds is the same type with a longer
+prefix, produced by mapping ``run`` over a stacked fit with ``eqx.filter_vmap``. Shape
+checks read only the trailing axes of ``log_weights`` and the batch prefix they define.
 """
 
-from abc import abstractmethod
+import math
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from equinox import AbstractVar
-from hwoutils.epoch import Epoch
-from jax.scipy.special import logsumexp
-from jax.scipy.stats import multivariate_normal
 from priorities import Mixture, MultivariateNormal
 
+from photomancy.infer.fit import Fit
 
-class AbstractPosterior(eqx.Module):
-    """The uniform posterior interface every backend returns.
+__all__ = ["Posterior", "cluster_to_mixture", "ravel_samples"]
 
-    A posterior answers three queries regardless of its internal representation
-    (Gaussian, evidence-weighted mixture, or weighted samples):
+_KINDS = ("monte_carlo", "quadrature")
 
-    - ``sample(key, n)`` draws ``n`` positions in flat parameter space,
-    - ``log_prob(z)`` scores a flat position (may be unsupported for sample-based
-      posteriors),
-    - ``evidence`` is the scalar log marginal likelihood ``log Z``.
 
-    ``evidence`` is an ``AbstractVar`` so a subtype may back it with a field (the
-    Laplace ``log Z``) or a property (the mixture's ``logsumexp`` over modes). The
-    EIG / scheduling layer and model comparison read this interface and stay
-    agnostic to which backend produced the posterior.
+class Posterior(eqx.Module):
+    """A weighted cloud of draws of a ``Fit`` and the density it targets.
+
+    Attributes:
+        samples: Entry dict with exactly the keys of ``fit.free``. A leaf-law entry is
+            ``(*batch, N, *leaf_shape)``; a block entry is a dict of coordinate arrays
+            ``(*batch, N, R)``. The draw axis is flat, in the backend's stored order.
+        log_weights: Normalized log weights ``(*batch, N)``, float64
+            (``logsumexp`` over ``N`` is zero). A slice that has no support is NaN.
+        log_target: ``fit.log_density`` at the draws ``(*batch, N)``, float64: the
+            normalized prior plus terms against Lebesgue measure on the stored
+            coordinates, exactly ``-inf`` off the prior's support. It is never a
+            proposal density.
+        log_evidence: Log marginal likelihood ``(*batch,)``, float64, NaN when absent
+            (the MCMC backends have none, and no estimate is invented).
+        log_evidence_se: Standard error of ``log_evidence`` ``(*batch,)``, float64, NaN
+            when the backend has none.
+        fit: The ``Fit`` whose density the weights target.
+        info: The backend's diagnostics module (chain index, divergence flags, thin
+            factor, ladder, stage traces), or ``None``. Chain structure lives here and
+            never in ``samples``.
+        kind: ``"monte_carlo"`` (a random estimator) or ``"quadrature"`` (a
+            positive-weight rule whose error is judged by refinement).
     """
 
-    evidence: AbstractVar[jnp.ndarray]
-    chart: str | None = eqx.field(static=True, default=None, kw_only=True)
-    epoch: Epoch | None = eqx.field(static=True, default=None, kw_only=True)
+    samples: dict
+    log_weights: jax.Array
+    log_target: jax.Array
+    log_evidence: jax.Array
+    log_evidence_se: jax.Array
+    fit: Fit
+    info: eqx.Module | None
+    kind: str = eqx.field(static=True)
 
-    def require(self, *, chart=None, epoch=None):
-        """Raise ``ValueError`` if a declared chart or epoch differs from the request.
+    def __check_init__(self):
+        """Refuse a malformed posterior on the host (trailing axes only).
 
-        ``chart`` names the coordinate chart the posterior's columns are in and
-        ``epoch`` is the :class:`~hwoutils.epoch.Epoch` its times are measured from.
-        An undeclared (``None``) field on the posterior never matches a requested
-        value: a consumer that needs a chart or epoch refuses undeclared posteriors.
-        A requested ``None`` is not checked.
+        Raises:
+            ValueError: For a wrong ``kind``, key set, dtype or shape.
         """
-        if chart is not None and self.chart != chart:
-            raise ValueError(f"posterior is in chart {self.chart!r}, not {chart!r}")
-        if epoch is not None and self.epoch != epoch:
-            raise ValueError(f"posterior has epoch {self.epoch}, not {epoch}")
+        if self.kind not in _KINDS:
+            raise ValueError(f"kind must be one of {_KINDS}, got {self.kind!r}")
+        if set(self.samples) != set(self.fit.free):
+            raise ValueError(
+                "samples must have exactly the keys of fit.free: "
+                f"{sorted(self.samples)} against {sorted(self.fit.free)}"
+            )
+        for name in ("log_weights", "log_target", "log_evidence", "log_evidence_se"):
+            dtype = jnp.asarray(getattr(self, name)).dtype
+            if dtype != jnp.float64:
+                raise ValueError(f"{name} must be float64, got {dtype}")
+        shape = jnp.shape(self.log_weights)
+        if not shape:
+            raise ValueError("log_weights needs a draw axis")
+        batch, n = shape[:-1], shape[-1]
+        if jnp.shape(self.log_target) != shape:
+            raise ValueError(
+                f"log_target has shape {jnp.shape(self.log_target)}, "
+                f"log_weights {shape}"
+            )
+        for name in ("log_evidence", "log_evidence_se"):
+            if jnp.shape(getattr(self, name)) != batch:
+                raise ValueError(
+                    f"{name} has shape {jnp.shape(getattr(self, name))}, "
+                    f"expected the batch shape {batch}"
+                )
+        for key, entry in self.samples.items():
+            for leaf in jax.tree.leaves(entry):
+                if jnp.ndim(leaf) < len(batch) + 1 or jnp.shape(leaf)[
+                    : len(batch) + 1
+                ] != (*batch, n):
+                    raise ValueError(
+                        f"samples[{key!r}] has a leaf of shape {jnp.shape(leaf)}; "
+                        f"expected leading axes {(*batch, n)} (batch, then draws)"
+                    )
 
-    @abstractmethod
-    def sample(self, key, n):
-        """Draw ``n`` samples in the posterior's parameter space. Shape ``(n, d)``."""
-        raise NotImplementedError
 
-    @abstractmethod
-    def log_prob(self, z):
-        """Log-density at flat position ``z``."""
-        raise NotImplementedError
+def ravel_samples(posterior, keys=None):
+    """Flatten each draw to a vector: ``(*batch, N, D)`` and an unravel function.
 
-    def to_prior(self):
-        """Convert this posterior into a ``priorities`` distribution over z.
-
-        The exact "this fit's posterior becomes the next fit's prior" conversion for
-        sequential Bayesian updating, implemented where it is closed-form:
-        :class:`GaussianPosterior` -> ``priorities.MultivariateNormal`` and
-        :class:`MixturePosterior` -> a ``priorities.Mixture`` of them. A
-        weighted-sample posterior has no exact prior -- cluster it first with
-        :func:`cluster_to_mixture` and call ``to_prior`` on the resulting mixture.
-        """
-        raise NotImplementedError(
-            "to_prior has no exact form for this posterior; use "
-            "cluster_to_mixture(posterior, k, key=key).to_prior() instead."
-        )
-
-
-class GaussianPosterior(AbstractPosterior):
-    """A Gaussian posterior over the flat parameter position.
-
-    Produced by the Laplace / Pathfinder backends; ``sample`` and ``log_prob``
-    are exact, and ``evidence`` is the (Laplace) log marginal likelihood.
+    The columns are the entries' leaves in the deterministic order of
+    ``jax.tree.leaves`` (sorted keys, then each leaf row-major). ``unravel`` maps an
+    array ``(*lead, D)`` back to the entry dict of those keys, leaves shaped
+    ``(*lead, *leaf_shape)``.
 
     Args:
-        mean: Posterior mean. Shape ``(d,)``.
-        cov: Posterior covariance. Shape ``(d, d)``.
-        evidence: Scalar log marginal likelihood (``log Z``).
+        posterior: A :class:`Posterior`.
+        keys: Entries to flatten, default all of ``posterior.samples``.
     """
+    samples = (
+        posterior.samples
+        if keys is None
+        else {key: posterior.samples[key] for key in keys}
+    )
+    batch = jnp.ndim(posterior.log_weights) - 1
+    leaves, treedef = jax.tree.flatten(samples)
+    trailing = [jnp.shape(leaf)[batch + 1 :] for leaf in leaves]
+    sizes = [math.prod(t) for t in trailing]
+    lead = jnp.shape(posterior.log_weights)
+    flat = jnp.concatenate(
+        [
+            jnp.reshape(leaf, (*lead, size))
+            for leaf, size in zip(leaves, sizes, strict=True)
+        ],
+        axis=-1,
+    )
+    offsets = [sum(sizes[:i]) for i in range(len(sizes) + 1)]
 
-    mean: jnp.ndarray
-    cov: jnp.ndarray
-    evidence: jnp.ndarray
+    def unravel(vector):
+        parts = [
+            jnp.reshape(vector[..., a:b], (*jnp.shape(vector)[:-1], *t))
+            for a, b, t in zip(offsets[:-1], offsets[1:], trailing, strict=True)
+        ]
+        return jax.tree.unflatten(treedef, parts)
 
-    def sample(self, key, n):
-        """Draw ``n`` samples in flat parameter space. Shape ``(n, d)``."""
-        return jax.random.multivariate_normal(key, self.mean, self.cov, (n,))
-
-    def log_prob(self, z):
-        """Exact Gaussian log-density at flat position ``z``."""
-        return multivariate_normal.logpdf(z, self.mean, self.cov)
-
-    def to_prior(self):
-        """Exact ``MultivariateNormal`` over z: this posterior as the next prior."""
-        return MultivariateNormal(self.mean, jnp.linalg.cholesky(self.cov))
-
-
-class PointPosterior(AbstractPosterior):
-    """A point estimate: the parameter PyTree a MAP fit ended at.
-
-    Produced by :class:`~photomancy.infer.backends.staged.MAPBackend`. It carries no
-    uncertainty, so it has no density and no evidence: ``evidence`` is NaN, and
-    ``sample`` and ``log_prob`` raise. The parameters keep the structure of the
-    fitted PyTree (they are not flattened).
-
-    Args:
-        params: The fitted parameter PyTree.
-        log_density: The log-density at ``params``, a scalar.
-    """
-
-    params: object
-    log_density: jnp.ndarray
-
-    @property
-    def evidence(self):
-        """NaN: a point estimate has no marginal likelihood."""
-        return jnp.asarray(jnp.nan)
-
-    def sample(self, key, n):
-        """Unsupported: a point estimate has no distribution to draw from."""
-        raise NotImplementedError(
-            "PointPosterior is a point estimate; use a Laplace or sampling backend "
-            "for uncertainty."
-        )
-
-    def log_prob(self, z):
-        """Unsupported: a point estimate has no density."""
-        raise NotImplementedError("PointPosterior has no density.")
+    return flat, unravel
 
 
-class MixturePosterior(AbstractPosterior):
-    """An evidence-weighted Gaussian mixture posterior (the Laplace mixture).
+def cluster_to_mixture(posterior, k, key, *, keys=None, iters=25, cov_floor=1e-6):
+    """Cluster a posterior into a ``k``-mode Gaussian ``priorities.Mixture``.
 
-    Each mode is a Gaussian; modes are weighted by ``softmax(log_evidences)`` and
-    the total ``evidence`` marginalizes over modes via ``logsumexp(log_evidences)``.
-    This is the substrate the analytic Fisher EIG consumes -- it carries the
-    per-mode Gaussians (``means``, ``covs``).
+    Weighted k-means (fixed iterations) assigns the draws, flattened by
+    :func:`ravel_samples`, to ``k`` clusters. Each mode is the cluster's weighted mean
+    and covariance and its weight is the cluster's mass, so the mixture follows the
+    posterior's modes. The result is a distribution over the flat vector: use it as the
+    law of one free leaf of shape ``(D,)`` in the next ``Fit``. It has no inverse CDF,
+    so it serves the gradient and sample backends and not nested sampling.
 
     Args:
-        means: Per-mode means. Shape ``(K, d)``.
-        covs: Per-mode covariances. Shape ``(K, d, d)``.
-        log_evidences: Per-mode log marginal likelihoods ``log Z_k``. Shape ``(K,)``.
-    """
-
-    means: jnp.ndarray
-    covs: jnp.ndarray
-    log_evidences: jnp.ndarray
-
-    @property
-    def evidence(self):
-        """Total log marginal likelihood, ``logsumexp(log Z_k)``."""
-        return logsumexp(self.log_evidences)
-
-    @property
-    def log_weights(self):
-        """Normalized log mixture weights, ``log softmax(log Z_k)``. Shape ``(K,)``."""
-        return self.log_evidences - logsumexp(self.log_evidences)
-
-    @property
-    def n_modes(self):
-        """Number of mixture modes ``K``."""
-        return self.means.shape[0]
-
-    def best_mode(self):
-        """The highest-evidence mode as a :class:`GaussianPosterior`."""
-        idx = jnp.argmax(self.log_evidences)
-        return GaussianPosterior(
-            mean=self.means[idx],
-            cov=self.covs[idx],
-            evidence=self.log_evidences[idx],
-            chart=self.chart,
-            epoch=self.epoch,
-        )
-
-    def log_prob(self, z):
-        """Mixture log-density at flat position ``z``."""
-        comp_logp = jax.vmap(lambda m, c: multivariate_normal.logpdf(z, m, c))(
-            self.means, self.covs
-        )
-        return logsumexp(self.log_weights + comp_logp)
-
-    def sample(self, key, n):
-        """Draw ``n`` samples: pick a mode by weight, then sample its Gaussian."""
-        k_comp, k_draw = jax.random.split(key)
-        comp = jax.random.categorical(k_comp, self.log_evidences, shape=(n,))
-        keys = jax.random.split(k_draw, n)
-        return jax.vmap(jax.random.multivariate_normal)(
-            keys, self.means[comp], self.covs[comp]
-        )
-
-    def to_prior(self):
-        """Exact ``Mixture`` over z: carries the modes into the next prior.
-
-        The mixture has no inverse CDF, so it serves the gradient and sample
-        backends (Laplace, NUTS, SMC) and not nested sampling.
-        """
-        choleskys = jnp.linalg.cholesky(self.covs)
-        return Mixture(self.log_evidences, MultivariateNormal(self.means, choleskys))
-
-
-class SamplePosterior(AbstractPosterior):
-    """A posterior represented by weighted samples (OFTI, grid_search, NUTS, SMC).
-
-    Columns are named by ``param_names`` -- the space is whatever those names denote
-    (physical for OFTI / grid_search, unconstrained ``z`` for NUTS / SMC). ``sample``
-    resamples particles by weight (inverse-CDF SIR, ``O(n)`` memory); ``log_prob`` is
-    unsupported; ``evidence`` is the backend's ``log Z`` (or ``NaN``).
-
-    Args:
-        samples: Particle rows. Shape ``(n, d)``.
-        log_weights: Per-particle log weights, normalized or not. Shape ``(n,)``.
-        evidence: Scalar log marginal likelihood ``log Z`` (or ``NaN``).
-        param_names: Names of the ``d`` columns. Default ``()``.
-    """
-
-    samples: jnp.ndarray
-    log_weights: jnp.ndarray
-    evidence: jnp.ndarray
-    param_names: tuple[str, ...] = eqx.field(static=True, default=())
-
-    def _resample_idx(self, key, n):
-        cdf = jnp.cumsum(jax.nn.softmax(self.log_weights))
-        u = jax.random.uniform(key, (n,))
-        return jnp.clip(
-            jnp.searchsorted(cdf, u, side="right"), 0, self.samples.shape[0] - 1
-        )
-
-    def sample(self, key, n):
-        """Resample ``n`` particles by weight (inverse-CDF SIR). Shape ``(n, d)``."""
-        return self.samples[self._resample_idx(key, n)]
-
-    def sample_dict(self, key, n):
-        """Resample ``n`` particles and return ``{name: (n,)}`` by ``param_names``."""
-        drawn = self.samples[self._resample_idx(key, n)]
-        return {name: drawn[:, i] for i, name in enumerate(self.param_names)}
-
-    def log_prob(self, z):
-        """Unsupported: a weighted-sample posterior has no closed-form density."""
-        raise NotImplementedError(
-            "SamplePosterior has no closed-form density; cluster_to_mixture or a KDE."
-        )
-
-
-def cluster_to_mixture(posterior, k, *, key, iters=25, cov_floor=1e-6):
-    """Cluster weighted samples into a ``k``-mode Gaussian ``MixturePosterior``.
-
-    Weighted k-means (fixed iterations) assigns particles to ``k`` clusters; each mode
-    is the cluster's weighted mean and covariance, weighted by its mass. The per-mode
-    ``log_evidence`` is the log cluster mass, so ``softmax`` gives the mixture weights
-    (what the EIG alias-breaking term needs). Operates in whatever coordinates the
-    samples are in.
-
-    Args:
-        posterior: A :class:`SamplePosterior`.
-        k: Number of mixture modes.
-        key: PRNG key for k-means initialization.
-        iters: k-means iterations. Default 25.
-        cov_floor: Diagonal added to each covariance for conditioning. Default 1e-6.
+        posterior: An unbatched :class:`Posterior` (one slice; map over worlds).
+        k: Number of modes.
+        key: PRNG key for the k-means start.
+        keys: Entries to cluster, default all.
+        iters: k-means iterations.
+        cov_floor: Diagonal added to every covariance.
 
     Returns:
-        A :class:`MixturePosterior` with ``means (k, d)``, ``covs (k, d, d)``,
-        ``log_evidences (k,)``, and the chart and epoch of ``posterior``.
+        A :class:`priorities.Mixture` of :class:`priorities.MultivariateNormal`.
     """
-    x = posterior.samples
-    w = jax.nn.softmax(posterior.log_weights)
+    if jnp.ndim(posterior.log_weights) != 1:
+        raise ValueError("cluster_to_mixture takes one slice; map it over a batch")
+    x, _ = ravel_samples(posterior, keys)
     n, d = x.shape
+    w = jax.nn.softmax(posterior.log_weights)
     centers = x[jax.random.choice(key, n, (k,), replace=False)]
 
-    def step(centers, _):
+    def assign(centers):
         sq = jnp.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=-1)
-        onehot = jax.nn.one_hot(jnp.argmin(sq, axis=1), k)
-        wmass = onehot * w[:, None]
-        mass = jnp.sum(wmass, axis=0)
-        new = (wmass.T @ x) / jnp.maximum(mass[:, None], 1e-30)
+        return jax.nn.one_hot(jnp.argmin(sq, axis=1), k) * w[:, None]
+
+    def step(centers, _):
+        mass_w = assign(centers)
+        mass = jnp.sum(mass_w, axis=0)
+        new = (mass_w.T @ x) / jnp.maximum(mass[:, None], 1e-30)
         return jnp.where(mass[:, None] > 0, new, centers), None
 
     centers, _ = jax.lax.scan(step, centers, None, length=iters)
+    mass_w = assign(centers)
+    mass = jnp.sum(mass_w, axis=0)
+    means = (mass_w.T @ x) / jnp.maximum(mass[:, None], 1e-30)
 
-    sq = jnp.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=-1)
-    onehot = jax.nn.one_hot(jnp.argmin(sq, axis=1), k)
-    wmass = onehot * w[:, None]
-    mass = jnp.sum(wmass, axis=0)
-    means = (wmass.T @ x) / jnp.maximum(mass[:, None], 1e-30)
-
-    def _cov(mu_k, wcol):
-        diff = x - mu_k
+    def cov(mu, wcol):
+        diff = x - mu
         return (diff * wcol[:, None]).T @ diff / jnp.maximum(jnp.sum(wcol), 1e-30)
 
-    covs = jax.vmap(_cov)(means, wmass.T) + cov_floor * jnp.eye(d)[None]
-    log_evidences = jnp.log(jnp.maximum(mass, 1e-30))
-    return MixturePosterior(
-        means=means,
-        covs=covs,
-        log_evidences=log_evidences,
-        chart=posterior.chart,
-        epoch=posterior.epoch,
-    )
+    covs = jax.vmap(cov)(means, mass_w.T) + cov_floor * jnp.eye(d)[None]
+    log_mass = jnp.log(jnp.maximum(mass, 1e-30))
+    return Mixture(log_mass, MultivariateNormal(means, jnp.linalg.cholesky(covs)))

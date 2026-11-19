@@ -54,7 +54,7 @@ def sample_capped(posterior, key, n, *, max_variance=10.0):
     Capping the eigenvalues at ``max_variance`` keeps draws from saturating prior
     boundaries through downstream constraint transforms (which yields pathological
     points in plots). Operates on any
-    :class:`~photomancy.infer.posterior.MixturePosterior`.
+    :class:`~photomancy.infer.legacy_posterior.MixturePosterior`.
 
     Args:
         posterior: A ``MixturePosterior`` (``means (K, d)``, ``covs (K, d, d)``,

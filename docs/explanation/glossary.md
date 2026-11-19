@@ -149,7 +149,7 @@ Mode
 
 Mixture
    $\sum_k w_k \mathcal{N}(z_k, \Sigma_k)$. The
-   {py:obj}`~photomancy.infer.posterior.MixturePosterior`, which holds several modes
+   {py:obj}`~photomancy.infer.legacy_posterior.MixturePosterior`, which holds several modes
    at once, each weighted by its evidence, $w_k \propto e^{\log Z_k}$. It is what lets
    photomancy represent ambiguity honestly instead of collapsing prematurely onto one
    answer, and it reports `n_modes` and a `best_mode`.

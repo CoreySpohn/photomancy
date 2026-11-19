@@ -25,7 +25,7 @@ from orbix.system import (  # noqa: E402
     System,
 )
 
-from photomancy.infer.posterior import MixturePosterior  # noqa: E402
+from photomancy.infer.legacy_posterior import MixturePosterior  # noqa: E402
 from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 from photomancy.orbit.init import find_init  # noqa: E402
 from photomancy.orbit.laplace import map_laplace_mixture_fit  # noqa: E402
@@ -167,7 +167,7 @@ def test_orbit_fit_through_generic_backend_recovers_period(orbit_problem_and_ini
 def test_orbit_nested_sampling_recovers_period_and_evidence():
     """Nested sampling (jaxns) on the chart density -> SamplePosterior + log Z."""
     from photomancy import RelativeAstrometryTerm
-    from photomancy.infer.posterior import SamplePosterior
+    from photomancy.infer.legacy_posterior import SamplePosterior
     from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
     from photomancy.orbit.nested import orbit_nested_sampling
     from photomancy.priors import FactorizedOrbitPrior

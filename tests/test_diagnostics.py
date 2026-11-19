@@ -86,7 +86,7 @@ def test_orbits_from_samples_matches_two_body_reference():
 
 def test_mode_scalars_pulls_one_value_per_mode():
     """mode_scalars evaluates to_physical at each mode mean with weights."""
-    from photomancy.infer.posterior import MixturePosterior
+    from photomancy.infer.legacy_posterior import MixturePosterior
     from photomancy.orbit import mode_scalars
 
     means = jnp.array([[0.0, 0.0], [1.0, 0.0], [-1.0, 0.0]])

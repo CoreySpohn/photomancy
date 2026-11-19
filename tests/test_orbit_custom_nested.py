@@ -15,7 +15,7 @@ from test_system_priors import BOUNDS, _scene
 
 from photomancy import ScalarCoordinate
 from photomancy.infer.backends import NUTSBackend
-from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
 from photomancy.orbit.nested import OrbitPriorTransform, orbit_nested_sampling
 from photomancy.priors import FactorizedOrbitPrior

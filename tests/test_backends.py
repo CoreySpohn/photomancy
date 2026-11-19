@@ -10,7 +10,7 @@ from photomancy.infer.backends import (
     PathfinderBackend,
     PathfinderMixtureBackend,
 )
-from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
 
 
 def test_laplace_backend_recovers_gaussian_map_and_covariance():

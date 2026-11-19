@@ -54,7 +54,7 @@ from orbix.system import (
     sky_block_geometry,
 )
 
-from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import TI_CHART_PARAM_NAMES
 from photomancy.priors import LOG_HAAR

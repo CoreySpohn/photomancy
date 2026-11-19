@@ -64,7 +64,7 @@ The engine layer is the {py:mod}`photomancy.infer` subpackage and knows no astro
 {py:mod}`~photomancy.infer.model` assembles the
 logdensity, {py:mod}`~photomancy.infer.priors` lays distributions from the `priorities`
 library over the flat parameter vector, {py:mod}`~photomancy.infer.backends` run inference,
-{py:mod}`~photomancy.infer.posterior` and {py:mod}`~photomancy.infer.posterior_utils` carry and
+{py:mod}`~photomancy.infer.legacy_posterior` and {py:mod}`~photomancy.infer.posterior_utils` carry and
 manipulate the result behind one interface, and {py:mod}`~photomancy.infer.eig` scores candidate
 observations as expected information gain about a declared quantity of interest, from
 per-mode Gaussian gains through the exact discrete terms for mode discrimination,
@@ -175,10 +175,10 @@ backends exist today:
   logdensity it was built for, a sum of exposure terms over one shared instrument.
 
 Every backend returns one of four `Posterior` types,
-{py:obj}`~photomancy.infer.posterior.GaussianPosterior`,
-{py:obj}`~photomancy.infer.posterior.MixturePosterior`,
-{py:obj}`~photomancy.infer.posterior.SamplePosterior`, or
-{py:obj}`~photomancy.infer.posterior.PointPosterior` (which has no density or evidence), behind a uniform interface: `sample` draws
+{py:obj}`~photomancy.infer.legacy_posterior.GaussianPosterior`,
+{py:obj}`~photomancy.infer.legacy_posterior.MixturePosterior`,
+{py:obj}`~photomancy.infer.legacy_posterior.SamplePosterior`, or
+{py:obj}`~photomancy.infer.legacy_posterior.PointPosterior` (which has no density or evidence), behind a uniform interface: `sample` draws
 positions, `log_prob` scores a position where a closed form exists, and `evidence`
 reports the log marginal likelihood. Consumers such as the value-of-information layer read
 this interface and stay agnostic to which backend produced the result. A posterior also

@@ -5,7 +5,7 @@ by first locating the star, then adjusting the optics, then holding the optics w
 science exposure is fitted. {class}`~photomancy.infer.backends.staged.MAPBackend` runs that kind
 of fit: a sequence of stages, each of which frees some named groups of parameters, over a
 parameter PyTree that keeps its structure. The result is a point estimate, a
-{class}`~photomancy.infer.posterior.PointPosterior`, with no covariance and no evidence.
+{class}`~photomancy.infer.legacy_posterior.PointPosterior`, with no covariance and no evidence.
 
 ## Name the groups
 

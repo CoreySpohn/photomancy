@@ -18,7 +18,7 @@ from priorities import AbstractDistribution, Uniform
 from photomancy.infer.backends.base import import_extra
 from photomancy.infer.backends.nested import jaxns_prior
 from photomancy.infer.backends.smc import SMCBackend
-from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.orbit.inference import ChartOrbitProblem
 from photomancy.priors import FactorizedOrbitPrior
 

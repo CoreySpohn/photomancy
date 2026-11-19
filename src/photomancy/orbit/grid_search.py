@@ -15,7 +15,7 @@ from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart, FrameOrbit
 
 from photomancy.infer.diagnostics import normalize_log_weights
-from photomancy.infer.posterior import SamplePosterior
+from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.inference import ORBIT_ROWS_CHART, orbit_chart_log_volume
 from photomancy.orbit.likelihoods import loglike_relative_astrom

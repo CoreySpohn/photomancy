@@ -10,7 +10,7 @@ from orbit_fit import chart_problem, classical_coordinates, ecc_law, scale_probl
 from orbix.equations import period_a, period_to_sma
 
 from photomancy import RelativeAstrometryTerm
-from photomancy.infer.posterior import MixturePosterior
+from photomancy.infer.legacy_posterior import MixturePosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.eig import (
     alias_breaking_eig,
@@ -235,7 +235,7 @@ def test_ofti_to_eig_end_to_end():
     """
     from orbix.system import EccentricityVectorChart
 
-    from photomancy.infer.posterior import SamplePosterior, cluster_to_mixture
+    from photomancy.infer.legacy_posterior import SamplePosterior, cluster_to_mixture
     from photomancy.orbit.diagnostics import orbits_from_samples
     from photomancy.orbit.ofti import ofti
 

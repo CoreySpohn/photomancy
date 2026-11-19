@@ -14,8 +14,13 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from photomancy.infer.backends.base import AbstractBackend
-from photomancy.infer.posterior import GaussianPosterior, MixturePosterior
+from photomancy.infer.backends._flat import (
+    flat_density,
+    mixture_importance,
+    start_points,
+)
+from photomancy.infer.backends.base import AbstractBackend, BackendDraws, LegacyBackend
+from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
 
 
 def _map_optimize(neg_logdensity, init, n_steps):
@@ -82,7 +87,7 @@ def laplace_fit(logdensity, init, n_steps, min_eigenvalue):
     return z_map, cov, log_z
 
 
-class LaplaceBackend(AbstractBackend):
+class LaplaceBackend(LegacyBackend):
     """MAP + Laplace approximation: a Gaussian posterior around the mode.
 
     Optimizes the logdensity to its MAP with L-BFGS, takes the eigenvalue-clamped
@@ -108,7 +113,7 @@ class LaplaceBackend(AbstractBackend):
         return GaussianPosterior(mean=z_map, cov=cov, evidence=log_z)
 
 
-class LaplaceMixtureBackend(AbstractBackend):
+class LaplaceMixtureBackend(LegacyBackend):
     """Multi-start MAP + Laplace: an evidence-weighted mixture of Gaussians.
 
     Runs the single-mode Laplace fit from each of ``K`` starts (``init`` has shape
@@ -135,3 +140,77 @@ class LaplaceMixtureBackend(AbstractBackend):
 
         means, covs, log_evidences = jax.vmap(fit_one)(init)
         return MixturePosterior(means=means, covs=covs, log_evidences=log_evidences)
+
+
+class LaplaceInfo(eqx.Module):
+    """The Gaussian mixture proposal of a :class:`Laplace` or :class:`Pathfinder` run.
+
+    Coordinates are the unconstrained flat vector of ``fit.to_real`` (sorted entry
+    keys, each leaf row-major).
+
+    Attributes:
+        means: Component means ``(K, d)``.
+        covs: Component covariances ``(K, d, d)``.
+        mode_log_evidence: Per-component log evidence (Laplace) or ELBO (Pathfinder)
+            that sets the proposal weights ``(K,)``.
+        component: Proposal component each draw came from ``(N,)``.
+        proposal_log_prob: Log density of the proposal at each draw ``(N,)``.
+    """
+
+    means: jax.Array
+    covs: jax.Array
+    mode_log_evidence: jax.Array
+    component: jax.Array
+    proposal_log_prob: jax.Array
+
+
+class Laplace(AbstractBackend):
+    """MAP plus Hessian proposals and an importance-weighted posterior.
+
+    From each of ``n_modes`` starts the density is maximized with L-BFGS and the
+    eigenvalue-clamped inverse Hessian is the covariance, in unconstrained
+    coordinates. The proposal is the mixture of those Gaussians weighted by their
+    Laplace evidences; ``n_draws`` draws are weighted by ``density / proposal``. The
+    evidence is the importance mean, so it is exact in expectation whatever the
+    Gaussian's quality, and the weights carry the non-Gaussian correction.
+    ``log_target`` is the fit's density; the proposal is only in ``info``.
+
+    ``run(fit, Laplace(init=posterior), key)`` is the route to an evidence for a NUTS
+    result. Angle coordinates of an orbit block are plain reals whose density repeats
+    every ``2 pi``; the estimate is the integral over the one copy the proposal covers,
+    so a posterior wider than a cell is not supported.
+
+    Args:
+        n_draws: Importance draws.
+        n_modes: Number of starts and proposal components.
+        n_steps: L-BFGS iterations per start.
+        min_eigenvalue: Floor on the precision eigenvalues.
+        init: ``None`` for prior draws as starts, one constrained draw, or a
+            ``Posterior`` whose weights pick the starts.
+    """
+
+    n_draws: int = eqx.field(static=True, default=2000)
+    n_modes: int = eqx.field(static=True, default=1)
+    n_steps: int = eqx.field(static=True, default=100)
+    min_eigenvalue: float = 1e-10
+    init: object = None
+
+    def _run(self, fit, key):
+        """Fit the modes, then draw and weight from their mixture."""
+        k_start, k_draw = jax.random.split(key)
+        density = flat_density(fit)
+        starts = start_points(fit, self.init, k_start, self.n_modes)
+        means, covs, log_z = jax.vmap(
+            lambda z0: laplace_fit(density, z0, self.n_steps, self.min_eigenvalue)
+        )(starts)
+        x, log_w, evidence, se, comp, proposal = mixture_importance(
+            fit, density, means, covs, log_z, self.n_draws, k_draw
+        )
+        return BackendDraws(
+            samples=x,
+            log_weights=log_w,
+            log_evidence=evidence,
+            log_evidence_se=se,
+            info=LaplaceInfo(means, covs, log_z, comp, proposal),
+            kind="monte_carlo",
+        )

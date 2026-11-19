@@ -112,8 +112,8 @@ from orbix.system import (
 from skyscapes.population import kipping_eccentricity
 
 from photomancy.infer.diagnostics import kish_ess, normalize_log_weights
+from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.infer.particles import systematic_indices
-from photomancy.infer.posterior import SamplePosterior
 from photomancy.orbit.data import RelativeAstromData
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
 from photomancy.orbit.inference import orbit_chart_log_volume

@@ -12,16 +12,26 @@ test of the import graph holds the boundary.
 """
 
 from photomancy.infer.backends import (
+    MAP,
+    MCLMC,
+    NUTS,
+    SMC,
     AbstractBackend,
+    Grid,
     JaxnsBackend,
+    Laplace,
     LaplaceBackend,
     LaplaceMixtureBackend,
     MAPBackend,
     MCLMCBackend,
+    NestedSampling,
     NUTSBackend,
+    Pathfinder,
     PathfinderBackend,
     PathfinderMixtureBackend,
     SMCBackend,
+    gauss_legendre,
+    midpoint,
 )
 from photomancy.infer.diagnostics import (
     khat_threshold,
@@ -36,52 +46,68 @@ from photomancy.infer.diagnostics import (
 )
 from photomancy.infer.evidence import sigma_from_log_bayes_factor
 from photomancy.infer.fit import AbstractTerm, Fit
-from photomancy.infer.model import (
-    AbstractLogDensity,
-    build_gaussian_fit,
-    build_scene_logdensity,
-)
-from photomancy.infer.posterior import (
+from photomancy.infer.legacy_posterior import (
     AbstractPosterior,
     GaussianPosterior,
     MixturePosterior,
     PointPosterior,
     SamplePosterior,
 )
+from photomancy.infer.model import (
+    AbstractLogDensity,
+    build_gaussian_fit,
+    build_scene_logdensity,
+)
+from photomancy.infer.posterior import Posterior, cluster_to_mixture, ravel_samples
 from photomancy.infer.posterior_utils import project_samples, sample_capped
 from photomancy.infer.priors import IndependentPrior
+from photomancy.infer.run import run
 from photomancy.infer.terms import TermLogDensity
 
 __all__ = [
+    "MAP",
+    "MCLMC",
+    "NUTS",
+    "SMC",
     "AbstractBackend",
     "AbstractLogDensity",
     "AbstractPosterior",
     "AbstractTerm",
     "Fit",
     "GaussianPosterior",
+    "Grid",
     "IndependentPrior",
     "JaxnsBackend",
+    "Laplace",
     "LaplaceBackend",
     "LaplaceMixtureBackend",
     "MAPBackend",
     "MCLMCBackend",
     "MixturePosterior",
     "NUTSBackend",
+    "NestedSampling",
+    "Pathfinder",
     "PathfinderBackend",
     "PathfinderMixtureBackend",
     "PointPosterior",
+    "Posterior",
     "SMCBackend",
     "SamplePosterior",
     "TermLogDensity",
     "build_gaussian_fit",
     "build_scene_logdensity",
+    "cluster_to_mixture",
+    "gauss_legendre",
     "khat_threshold",
     "kish_ess",
     "mc_se",
+    "midpoint",
     "normalize_log_weights",
     "pareto_khat",
     "project_samples",
     "ratio_mc_se",
+    "ravel_samples",
+    "run",
     "sample_capped",
     "sigma_from_log_bayes_factor",
     "weighted_cov",
