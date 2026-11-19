@@ -22,8 +22,7 @@ from photomancy.detection import (
     measure,
     profile_amplitude,
 )
-from photomancy.exposure import ExposureModel
-from photomancy.image import ImageTerm
+from photomancy.image import ImageModel, ImageTerm
 from photomancy.infer.likelihoods import (
     gaussian_loglike,
     huber_loglike,
@@ -340,6 +339,7 @@ def test_curvature_block_matches_closed_form_and_finite_difference():
 # ----- detect and measure over an ImageTerm ---------------------------------------
 
 _VARIANCE = 100.0
+_PATHS = {"scene_path": "scene", "instrument_path": "instrument"}
 _PAS = jnp.arange(0.0, 360.0, 30.0)
 _TRUE_PA, _TRUE_AMP = 150.0, 3.0
 
@@ -356,9 +356,14 @@ def _image_problem(kind, seed=11):
     instrument = make_instrument(detector)
     scene = make_scene(contrast=0.0)
     exposure = make_exposure(scene, instrument)
-    model = ExposureModel(instrument, (), scene)
+    model = ImageModel(scene, instrument)
     shape = (1, *detector.shape)
-    blank = ImageTerm(jnp.zeros(shape), jnp.ones(shape, bool), exposure=exposure)
+    blank = ImageTerm(
+        jnp.zeros(shape),
+        jnp.ones(shape, bool),
+        exposure=exposure,
+        **_PATHS,
+    )
     truth = Placed()(model, _TRUE_PA, _TRUE_AMP)
     mean = np.asarray(blank.predict(truth))
     rng = np.random.default_rng(seed)
@@ -369,7 +374,9 @@ def _image_problem(kind, seed=11):
     mask = np.ones(shape, bool)
     mask[..., :3, :] = False
     mask[..., 10:13, 10:13] = False
-    term = ImageTerm(jnp.asarray(observed), jnp.asarray(mask), exposure=exposure)
+    term = ImageTerm(
+        jnp.asarray(observed), jnp.asarray(mask), exposure=exposure, **_PATHS
+    )
     return model, term, mean, mask
 
 

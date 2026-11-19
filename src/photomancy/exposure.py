@@ -19,15 +19,13 @@ science target) against one shared parameter PyTree.
 and a free path names a leaf of that model, so the model must contain every leaf a
 fit frees. The model owns the scene and the instrument (one owner each per fit), and
 :class:`photomancy.image.ImageTerm`, the pixel likelihood over
-``coronagraphoto.expected``, reads them by path. An :class:`ExposureModel` is the
-record that holds them: ``instrument``, ``nuisance`` (one PyTree of per-exposure
-nuisance leaves such as a star position or flux; these are not
-``optixstuff.Exposure`` objects, which an ``ImageTerm`` holds or reads from the model
-by its own path) and ``scene``, so a path is ``"instrument.<leaf>"``,
-``"nuisance[i].<leaf>"`` or ``"scene.<path>"``. A fit that frees scene leaves only may
-use any record with a ``scene`` and an ``instrument``.
+``coronagraphoto.expected``, reads them by path. An :class:`ExposureModel` is the legacy
+record for the render-function terms: ``instrument``, ``exposures`` (one PyTree of
+per-exposure leaves such as a star position or flux) and ``scene``, so a path is
+``"instrument.<leaf>"``, ``"exposures[i].<leaf>"`` or ``"scene.<path>"``. A fit of an
+:class:`~photomancy.image.ImageTerm` uses :class:`photomancy.image.ImageModel`.
 
-Neither shape lets a term build or cache anything from the model, so an image term
+Neither record lets a term build or cache anything from the model, so an image term
 declares no ``reads``; a host build a term holds (an aperture record made from scene
 values) declares the scene paths it read, prefixed with the scene's path in the model.
 The likelihood builders of :mod:`photomancy.infer.likelihoods` are normalized, so an
@@ -51,14 +49,14 @@ class ExposureModel(eqx.Module):
     Attributes:
         instrument: The shared instrument: the band's optical path with its seams, and
             the detector response. Whatever the render functions read from it.
-        nuisance: One nuisance PyTree per exposure block (star position and flux,
+        exposures: One nuisance PyTree per exposure block (star position and flux,
             later drifts), a tuple. Several terms may read the same block.
         scene: The sources: the companions, with their fluxes (a companion fixed at
             flux zero belongs to a group no stage frees).
     """
 
     instrument: Any
-    nuisance: tuple
+    exposures: tuple
     scene: Any
 
 
@@ -74,18 +72,18 @@ class ExposureTerm(AbstractTerm):
             and the boolean mask. ``laplace_loglike`` with scale 1 is an L1 loss,
             ``huber_loglike`` with scale 1 and ``delta=1`` is a smooth-L1 loss, and a
             noise array as the scale gives the noise-weighted kinds.
-        nuisance_index: Which entry of ``ExposureModel.nuisance`` this term reads.
+        exposure_index: Which entry of ``ExposureModel.exposures`` this term reads.
     """
 
     render: Callable
     likelihood: Callable
-    nuisance_index: int = eqx.field(static=True, default=0)
+    exposure_index: int = eqx.field(static=True, default=0)
     reads: ClassVar[tuple[str, ...]] = ()
 
     def predict(self, model):
         """Render this exposure's image from ``model``."""
         return self.render(
-            model.instrument, model.nuisance[self.nuisance_index], model.scene
+            model.instrument, model.exposures[self.exposure_index], model.scene
         )
 
     def _value_and_prediction(self, model):

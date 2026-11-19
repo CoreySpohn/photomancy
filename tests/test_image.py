@@ -10,22 +10,23 @@ from image_scene import make_detector, make_exposure, make_instrument, make_scen
 from priorities import LogUniform
 from scipy import stats
 
-from photomancy.exposure import ExposureModel
-from photomancy.image import ImageTerm
+from photomancy.image import ImageModel, ImageTerm
 from photomancy.infer.fit import Fit
+
+_PATHS = {"scene_path": "scene", "instrument_path": "instrument"}
 
 
 def _setup(kind="poisson", contrast=1e-10):
     instrument = make_instrument(make_detector(kind))
     scene = make_scene(contrast=contrast, sky_pa_deg=40.0)
     exposure = make_exposure(scene, instrument)
-    return ExposureModel(instrument, (), scene), exposure
+    return ImageModel(scene, instrument), exposure
 
 
 def _term(model, exposure, observed, mask=None):
     observed = jnp.asarray(observed)
     mask = jnp.ones(observed.shape, bool) if mask is None else mask
-    return ImageTerm(observed, mask, exposure=exposure)
+    return ImageTerm(observed, mask, exposure=exposure, **_PATHS)
 
 
 def _mean(model, exposure):
@@ -127,18 +128,19 @@ def test_exposure_comes_from_the_model_by_path_or_the_term_not_both():
     observed = jnp.round(_mean(model, exposure))
     held = _term(model, exposure, observed)
     by_path = ImageTerm(
-        observed, jnp.ones(observed.shape, bool), exposure_path="nuisance[0]"
+        observed, jnp.ones(observed.shape, bool), exposure_path="exposures[0]", **_PATHS
     )
-    with_exposure = ExposureModel(model.instrument, (exposure,), model.scene)
+    with_exposure = ImageModel(model.scene, model.instrument, (exposure,))
     np.testing.assert_allclose(by_path(with_exposure), held(model), rtol=1e-12)
     with pytest.raises(ValueError, match="exactly one"):
-        ImageTerm(observed, jnp.ones(observed.shape, bool))
+        ImageTerm(observed, jnp.ones(observed.shape, bool), **_PATHS)
     with pytest.raises(ValueError, match="exactly one"):
         ImageTerm(
             observed,
             jnp.ones(observed.shape, bool),
             exposure=exposure,
-            exposure_path="nuisance[0]",
+            exposure_path="exposures[0]",
+            **_PATHS,
         )
     with pytest.raises(ValueError, match="FramePlan"):
         ImageTerm(
@@ -147,6 +149,33 @@ def test_exposure_comes_from_the_model_by_path_or_the_term_not_both():
             exposure=eqx.tree_at(
                 lambda e: e.plan, exposure, None, is_leaf=lambda x: x is None
             ),
+            **_PATHS,
+        )
+
+
+def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument():
+    """The model may be the scene itself, with the instrument held by the term.
+
+    Truth source: the same frame scored through an ``ImageModel`` with both paths.
+    Tolerance basis: exact (rtol 1e-12; the same renderer on the same leaves).
+    Fails if: the empty scene path does not name the model, or the held instrument is
+    ignored (``Fit(scene, ...)`` is the model of every orbit posterior).
+    """
+    model, exposure = _setup("poisson")
+    observed = jnp.round(_mean(model, exposure))
+    mask = jnp.ones(observed.shape, bool)
+    rooted = ImageTerm(observed, mask, instrument=model.instrument, exposure=exposure)
+    held = _term(model, exposure, observed)
+    np.testing.assert_allclose(rooted(model.scene), held(model), rtol=1e-12)
+    with pytest.raises(ValueError, match="instrument"):
+        ImageTerm(observed, mask, exposure=exposure)
+    with pytest.raises(ValueError, match="instrument"):
+        ImageTerm(
+            observed,
+            mask,
+            instrument=model.instrument,
+            instrument_path="instrument",
+            exposure=exposure,
         )
 
 
@@ -166,11 +195,18 @@ def test_reads_are_the_held_products_reads_under_the_scene_path():
         exposure.plan,
         reads=("star.flux_phot_per_nm_m2", "dynamics.orbits"),
     )
-    term = ImageTerm(observed, jnp.ones(observed.shape, bool), exposure=built)
+    term = ImageTerm(observed, jnp.ones(observed.shape, bool), exposure=built, **_PATHS)
     assert term.reads == (
         "scene.star.flux_phot_per_nm_m2",
         "scene.dynamics.orbits",
     )
+    rooted = ImageTerm(
+        observed,
+        jnp.ones(observed.shape, bool),
+        instrument=model.instrument,
+        exposure=built,
+    )
+    assert rooted.reads == ("star.flux_phot_per_nm_m2", "dynamics.orbits")
 
 
 _CONTRAST = "scene.planets[0].physical_model.contrast_grid"
@@ -189,6 +225,22 @@ def test_an_image_fit_frees_a_scene_leaf_and_gradients_flow():
     assert fit.log_likelihood(x) > fit.log_likelihood(worse)
 
 
+def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene():
+    """A held-instrument term on ``Fit(scene, ...)`` scores like the record model."""
+    model, exposure = _setup("poisson")
+    observed = jnp.round(_mean(model, exposure))
+    mask = jnp.ones(observed.shape, bool)
+    rooted = ImageTerm(observed, mask, instrument=model.instrument, exposure=exposure)
+    path = "planets[0].physical_model.contrast_grid"
+    law = LogUniform(1e-12, 1e-8)
+    grid = model.scene.planets[0].physical_model.contrast_grid
+    on_scene = Fit(model.scene, {path: law}, (rooted,)).log_density({path: grid})
+    on_record = Fit(
+        model, {f"scene.{path}": law}, (_term(model, exposure, observed),)
+    ).log_density({f"scene.{path}": grid})
+    np.testing.assert_allclose(on_scene, on_record, rtol=1e-12)
+
+
 def test_a_free_leaf_that_a_held_build_read_is_refused():
     """A held exposure whose build read the contrast grid refuses to have it freed."""
     model, exposure = _setup("poisson")
@@ -204,7 +256,7 @@ def test_a_free_leaf_that_a_held_build_read_is_refused():
         reads=("planets[0].physical_model.contrast_grid",),
     )
     observed = jnp.zeros((1, *model.instrument.detector.shape))
-    term = ImageTerm(observed, jnp.ones(observed.shape, bool), exposure=built)
+    term = ImageTerm(observed, jnp.ones(observed.shape, bool), exposure=built, **_PATHS)
     with pytest.raises(ValueError, match="reads"):
         Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
 
@@ -222,7 +274,7 @@ def test_a_count_where_the_mean_is_zero_is_minus_infinity_not_nan():
     instrument = make_instrument(dead)
     scene = make_scene(contrast=1e-10, sky_pa_deg=40.0)
     exposure = make_exposure(scene, instrument)
-    model = ExposureModel(instrument, (), scene)
+    model = ImageModel(scene, instrument)
     shape = (1, *dead.shape)
     zero = _term(model, exposure, jnp.zeros(shape))
     one = _term(model, exposure, jnp.zeros(shape).at[0, 5, 5].set(1.0))

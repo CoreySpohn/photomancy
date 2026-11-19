@@ -581,7 +581,7 @@ def test_exposure_fit_over_an_exposure_model():
 
     model = ExposureModel(
         instrument=jnp.array(1.0),
-        nuisance=(jnp.array(0.1),),
+        exposures=(jnp.array(0.1),),
         scene=jnp.array(2.0),
     )
     data = 2.1 * jnp.ones((3, 3))
@@ -590,18 +590,18 @@ def test_exposure_fit_over_an_exposure_model():
         model,
         {
             "instrument": LogUniform(0.5, 2.0),
-            "nuisance[0]": Uniform(-1.0, 1.0),
+            "exposures[0]": Uniform(-1.0, 1.0),
         },
         (term,),
     )
-    x = {"instrument": jnp.array(1.0), "nuisance[0]": jnp.array(0.1)}
+    x = {"instrument": jnp.array(1.0), "exposures[0]": jnp.array(0.1)}
     assert np.isfinite(fit.log_density(x))
     assert fit.log_likelihood(x) > fit.log_likelihood(
         {**x, "instrument": jnp.array(1.6)}
     )
     grad = jax.grad(lambda v: fit.real_log_prob(v))(fit.to_real(x))
     assert all(np.isfinite(g) for g in jax.tree.leaves(grad))
-    assert fit.model_at(x).nuisance[0] == 0.1
+    assert fit.model_at(x).exposures[0] == 0.1
     with pytest.raises(ValueError, match="scene"):
         Fit(model, {"scene.nothing": LogUniform(0.5, 2.0)}, (term,))
 

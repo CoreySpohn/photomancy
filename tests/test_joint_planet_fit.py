@@ -36,9 +36,9 @@ def _cosine(rate, n_steps):
 
 def _window_flux(data, window):
     def update(params, aux):
-        star = params.nuisance[0]
+        star = params.exposures[0]
         flux = star.flux * jnp.sum(window * data) / jnp.sum(window * aux[0])
-        return eqx.tree_at(lambda m: m.nuisance[0].flux, params, flux)
+        return eqx.tree_at(lambda m: m.exposures[0].flux, params, flux)
 
     return update
 
@@ -88,12 +88,12 @@ def _joint_fit(peak_fraction):
     labels = group_labels(
         init,
         {
-            "tilt": lambda m: [e.tilt for e in m.nuisance],
+            "tilt": lambda m: [e.tilt for e in m.exposures],
             "ote": lambda m: m.instrument.ote,
             "si": lambda m: m.instrument.si,
             "offset": lambda m: m.scene.offset,
             "flux": lambda m: m.scene.flux,
-            "star_flux": lambda m: m.nuisance[0].flux,
+            "star_flux": lambda m: m.exposures[0].flux,
         },
     )
 
@@ -150,7 +150,7 @@ def _joint_fit(peak_fraction):
         [(x, y) for x in range(-8, 9) for y in range(-8, 9) if np.hypot(x, y) >= 4.0],
         dtype=float,
     )
-    base = render(h0.instrument, h0.nuisance[0], h0.scene)
+    base = render(h0.instrument, h0.exposures[0], h0.scene)
     detection = likelihood_ratio_map(
         (
             (
@@ -176,7 +176,7 @@ def _joint_fit(peak_fraction):
         "si": seam(_N_FINAL),
         "tilt": optax.adam(_cosine(2e-3, _N_FINAL)),
         "star_flux": rescaled_transform(
-            optax.adam(_cosine(1e-3, _N_FINAL)), float(h0.nuisance[0].flux)
+            optax.adam(_cosine(1e-3, _N_FINAL)), float(h0.exposures[0].flux)
         ),
     }
     h1_stages = [
@@ -214,7 +214,7 @@ def _joint_fit(peak_fraction):
 
 
 def _residual_rms(out, model):
-    image = out["render"](model.instrument, model.nuisance[0], model.scene)
+    image = out["render"](model.instrument, model.exposures[0], model.scene)
     resid = (out["sci_data"] - image) / out["sigma"]
     return float(jnp.sqrt(jnp.mean(jnp.where(out["mask"], resid, 0.0) ** 2)))
 
