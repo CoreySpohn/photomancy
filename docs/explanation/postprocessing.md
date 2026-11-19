@@ -252,14 +252,8 @@ plan = exposure_time(
     post_processing=post_processing,
 )
 value = snr(rates, detector, plan, post_processing=post_processing)
-electrons = detector.electrons(rates.mean)
-mean, variance = detector.mean_and_variance(
-    electrons,
-    plan,
-    n_pix=rates.n_pix,
-    variance_rates=detector.electrons(rates.variance),
-    n_pix_variance=rates.n_pix_variance,
-)
+electrons = detector.electrons(rates)
+mean, variance = detector.mean_and_variance(electrons, plan)
 # For image integrands (one detector pixel per spatial sample):
 image_electrons = detector.electrons(image_rates)
 counts = detector.draw(key, image_electrons, plan)
