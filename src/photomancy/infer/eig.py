@@ -11,10 +11,11 @@ flat position ``z``); the orbit / disk / imaging layers supply their own. This c
 knows no domain.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.scipy.special import xlogy
+from jax.scipy.special import logsumexp, xlogy
 from jax.scipy.stats import norm
 
 
@@ -542,3 +543,159 @@ def evaluate_candidates(
         "predictions": preds,
         "detectability": det_w,
     }
+
+
+class EIGEstimate(eqx.Module):
+    """An information-gain estimate that names its estimator and its bias.
+
+    Attributes:
+        eig: The estimate, in nats.
+        bias_scale: The leading-order size of the estimator's bias,
+            ``Var(p_hat) / (2 p^2)`` from the explicit weighted variance sum
+            ``sum_m w_m^2 (g_m - gbar)^2 / (2 gbar^2)`` over the inner set, averaged
+            over the outer draws. It is the upward bias of the nested form and the
+            size of the downward gap of the contrastive form; it is a leading-order
+            term, so it understates the bias when it is not small (few inner draws, a
+            saturated bound near ``log n_eff``).
+        n_eff: Kish size of the cloud's weights.
+        estimator: ``"nested"`` or ``"contrastive"``.
+        bias: Direction of the bias: ``"upward"`` or ``"downward"`` (a lower bound in
+            expectation).
+    """
+
+    eig: jax.Array
+    bias_scale: jax.Array
+    n_eff: jax.Array
+    estimator: str = eqx.field(static=True)
+    bias: str = eqx.field(static=True)
+
+
+def _require_slice(posterior, name):
+    if jnp.ndim(posterior.log_weights) != 1:
+        raise ValueError(f"{name} takes one slice; map it over the batch")
+
+
+def _outer_draws(posterior, log_obs_density, draw_obs, key, n_outer):
+    """Outer draws ``x_k ~ p``, data ``y_k ~ p(y | x_k)`` and ``log p(y_k | x_k)``."""
+    key_x, key_y = jax.random.split(key)
+    x = posterior.sample(key_x, (n_outer,))
+    models = jax.vmap(posterior.fit.model_at)(x)
+    y = jax.vmap(draw_obs)(jax.random.split(key_y, n_outer), models)
+    return y, jax.vmap(log_obs_density)(y, models)
+
+
+def eig_contrastive(posterior, log_obs_density, draw_obs, key, *, n_outer):
+    """Contrastive (prior-contrastive) expected information gain: a lower bound.
+
+    Estimator: ``mean_k [log p(y_k | x_k) - log sum_m w_m p(y_k | x_m)]`` over
+    ``n_outer`` outer draws ``x_k ~ p`` with ``y_k ~ p(y | x_k)``, the inner sum over
+    every stored draw with its weight, diagonal included (Poole et al. 2019, the
+    noise-contrastive bound). In expectation it is below the true gain and it cannot
+    exceed ``log n_eff``; ``bias_scale`` is the leading-order gap. Cost: ``n_outer * N``
+    evaluations of ``log_obs_density``. Takes one slice (map over a batch).
+
+    Args:
+        posterior: A :class:`~photomancy.infer.posterior.Posterior`.
+        log_obs_density: ``(y, model) -> scalar`` normalized ``log p(y | model)``,
+            every constant that depends on the model included (the exact Poisson pmf
+            at low counts, not a Gaussian).
+        draw_obs: ``(key, model) -> y`` drawing from the same density.
+        key: PRNG key.
+        n_outer: Static number of outer draws.
+
+    Returns:
+        An :class:`EIGEstimate` with ``estimator="contrastive"``, ``bias="downward"``.
+    """
+    _require_slice(posterior, "eig_contrastive")
+    y, log_joint = _outer_draws(posterior, log_obs_density, draw_obs, key, n_outer)
+    models = jax.vmap(posterior.fit.model_at)(posterior.samples)
+    logg = jax.vmap(lambda yk: jax.vmap(lambda m: log_obs_density(yk, m))(models))(y)
+    log_marginal = logsumexp(logg + posterior.log_weights[None, :], axis=1)
+    eig = jnp.mean(log_joint - log_marginal)
+    n_eff = jnp.asarray(1.0 / jnp.sum(jnp.exp(2.0 * posterior.log_weights)))
+    scaled = jnp.exp(logg - jnp.max(logg, axis=1, keepdims=True))
+    w = jnp.exp(posterior.log_weights)[None, :]
+    mean = jnp.sum(w * scaled, axis=1, keepdims=True)
+    relative_variance = jnp.sum((w * (scaled - mean)) ** 2, axis=1) / mean[:, 0] ** 2
+    return EIGEstimate(
+        eig=eig,
+        bias_scale=0.5 * jnp.mean(relative_variance),
+        n_eff=n_eff,
+        estimator="contrastive",
+        bias="downward",
+    )
+
+
+def eig_nested(
+    posterior,
+    log_obs_density,
+    draw_obs,
+    key,
+    n_outer,
+    n_inner,
+    include_diagonal,
+    min_n_eff,
+):
+    """Nested Monte Carlo expected information gain: biased upward at ``O(1/n_inner)``.
+
+    Estimator: ``mean_k [log p(y_k | x_k) - log mean_j p(y_k | x'_kj)]`` with outer
+    draws ``x_k ~ p``, ``y_k ~ p(y | x_k)`` and ``n_inner`` fresh independent draws
+    ``x'_kj ~ p`` (Rainforth et al. 2018). With ``include_diagonal=False`` the inner
+    mean excludes the outer draw (leave-one-out form, upward bias, about
+    ``Var(p_hat) / (2 p^2)``); with ``True`` the outer draw joins the inner set (the
+    contrastive form, a lower bound). ``bias_scale`` is the explicit weighted
+    variance sum ``sum_j u_j^2 (g_j - gbar)^2 / (2 gbar^2)`` with inner weights
+    ``u``, averaged over outer draws: not ``chi^2 / N_eff``, which holds only when the
+    density is independent of the weight size. It is the bias to expect, so the bias
+    falls as ``1 / n_inner``; for chain clouds the inner draws are correlated and the
+    scale understates it.
+
+    The estimate is gated like :meth:`~photomancy.infer.posterior.Posterior.append`:
+    a slice whose weights are NaN or whose Kish size is below ``min_n_eff`` returns
+    NaN. Cost and memory: ``n_outer * n_inner`` models and densities. Takes one slice.
+
+    Args:
+        posterior: A :class:`~photomancy.infer.posterior.Posterior`.
+        log_obs_density: ``(y, model) -> scalar`` normalized ``log p(y | model)``.
+        draw_obs: ``(key, model) -> y`` drawing from the same density.
+        key: PRNG key.
+        n_outer: Static number of outer draws.
+        n_inner: Static number of inner draws per outer draw.
+        include_diagonal: Whether the outer draw joins the inner set.
+        min_n_eff: Smallest acceptable Kish size of the cloud.
+
+    Returns:
+        An :class:`EIGEstimate` with ``estimator="nested"`` and ``bias="upward"``
+        (``"downward"`` with the diagonal).
+    """
+    _require_slice(posterior, "eig_nested")
+    key_outer, key_inner = jax.random.split(key)
+    y, log_joint = _outer_draws(
+        posterior, log_obs_density, draw_obs, key_outer, n_outer
+    )
+    x_inner = posterior.sample(key_inner, (n_outer, n_inner))
+    models = jax.vmap(jax.vmap(posterior.fit.model_at))(x_inner)
+    logg = jax.vmap(lambda yk, mk: jax.vmap(lambda m: log_obs_density(yk, m))(mk))(
+        y, models
+    )
+    if include_diagonal:
+        logg = jnp.concatenate([logg, log_joint[:, None]], axis=1)
+    count = logg.shape[1]
+    log_marginal = logsumexp(logg, axis=1) - jnp.log(count)
+    eig = jnp.mean(log_joint - log_marginal)
+    scaled = jnp.exp(logg - jnp.max(logg, axis=1, keepdims=True))
+    mean = jnp.mean(scaled, axis=1, keepdims=True)
+    relative_variance = jnp.sum((scaled - mean) ** 2, axis=1) / (
+        count**2 * mean[:, 0] ** 2
+    )
+    bias_scale = 0.5 * jnp.mean(relative_variance)
+    n_eff = jnp.asarray(1.0 / jnp.sum(jnp.exp(2.0 * posterior.log_weights)))
+    ok = ~jnp.any(jnp.isnan(posterior.log_weights)) & (n_eff >= min_n_eff)
+    nan = jnp.asarray(jnp.nan)
+    return EIGEstimate(
+        eig=jnp.where(ok, eig, nan),
+        bias_scale=jnp.where(ok, bias_scale, nan),
+        n_eff=n_eff,
+        estimator="nested",
+        bias="downward" if include_diagonal else "upward",
+    )

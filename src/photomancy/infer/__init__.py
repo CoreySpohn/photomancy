@@ -44,7 +44,8 @@ from photomancy.infer.diagnostics import (
     weighted_mean,
     weighted_quantile,
 )
-from photomancy.infer.evidence import sigma_from_log_bayes_factor
+from photomancy.infer.eig import EIGEstimate, eig_contrastive, eig_nested
+from photomancy.infer.evidence import importance_evidence, sigma_from_log_bayes_factor
 from photomancy.infer.fit import AbstractTerm, Fit
 from photomancy.infer.legacy_posterior import (
     AbstractPosterior,
@@ -58,7 +59,12 @@ from photomancy.infer.model import (
     build_gaussian_fit,
     build_scene_logdensity,
 )
-from photomancy.infer.posterior import Posterior, cluster_to_mixture, ravel_samples
+from photomancy.infer.posterior import (
+    Forecast,
+    Posterior,
+    cluster_to_mixture,
+    ravel_samples,
+)
 from photomancy.infer.posterior_utils import project_samples, sample_capped
 from photomancy.infer.priors import IndependentPrior
 from photomancy.infer.run import run
@@ -73,7 +79,9 @@ __all__ = [
     "AbstractLogDensity",
     "AbstractPosterior",
     "AbstractTerm",
+    "EIGEstimate",
     "Fit",
+    "Forecast",
     "GaussianPosterior",
     "Grid",
     "IndependentPrior",
@@ -97,7 +105,10 @@ __all__ = [
     "build_gaussian_fit",
     "build_scene_logdensity",
     "cluster_to_mixture",
+    "eig_contrastive",
+    "eig_nested",
     "gauss_legendre",
+    "importance_evidence",
     "khat_threshold",
     "kish_ess",
     "mc_se",
