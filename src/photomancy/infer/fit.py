@@ -113,6 +113,32 @@ def _sum_leaf(value, leaf_ndim, dist):
     return jnp.sum(value, axis=tuple(range(-n, 0))) if n > 0 else value
 
 
+def _require_same_chart(key, old, new):
+    """Refuse, by name, a block swap that changes more than the law.
+
+    The blocks must be of one type and agree in what they own, read and write; where
+    they carry a ``chart``, ``rows`` or ``system`` those must agree too, so only the
+    law (hence the support the map carries) differs.
+    """
+    if type(old) is not type(new):
+        raise ValueError(
+            f"block {key!r}: a change of block type ({type(old).__name__} to "
+            f"{type(new).__name__}) is not a prior swap"
+        )
+    for attr in ("owns", "reads", "writes", "chart", "rows", "system"):
+        a, b = getattr(old, attr, None), getattr(new, attr, None)
+        if a != b:
+            if attr == "chart":
+                a, b = type(a).__name__, type(b).__name__
+                what = f"chart {a} to {b}"
+            else:
+                what = f"{attr} {a!r} to {b!r}"
+            raise ValueError(
+                f"block {key!r}: a change of {what} is not a prior swap; build a new "
+                "fit and run it"
+            )
+
+
 class Fit(eqx.Module):
     """A normalized log density over the free entries of a model.
 
@@ -469,15 +495,20 @@ class Fit(eqx.Module):
 
     # ----- edits -----------------------------------------------------------------
 
-    def with_priors(self, priors: dict) -> "Fit":
+    def with_priors(self, priors: dict, *, support_change: bool = False) -> "Fit":
         """Return a fit with some entries replaced, the free set unchanged.
 
         A leaf law is replaced by a leaf law and a block by a block that has the same
         map (``old.same_map(new)``), so the swap changes the density and nothing else.
+        With ``support_change`` a block may also move the bounds its map carries (its
+        coordinates then mean something else, so stored draws must be re-expressed:
+        :meth:`Posterior.with_priors` does that); the chart, rows, system and kind of
+        block must still match.
 
         Raises:
             ValueError: For a key outside the free set, a replacement of the other
-                kind, or a block with a different map.
+                kind, a block with a different map, or with ``support_change`` a block
+                of another chart (named in the message).
         """
         extra = set(priors) - set(self.free)
         if extra:
@@ -487,7 +518,14 @@ class Fit(eqx.Module):
         for key, new in priors.items():
             old = self.free[key]
             if isinstance(old, AbstractBlock):
-                if not isinstance(new, AbstractBlock) or not old.same_map(new):
+                if not isinstance(new, AbstractBlock):
+                    raise ValueError(
+                        f"block {key!r} can only be replaced by a block with the same "
+                        "map"
+                    )
+                if support_change:
+                    _require_same_chart(key, old, new)
+                elif not old.same_map(new):
                     raise ValueError(
                         f"block {key!r} can only be replaced by a block with the same "
                         "map"

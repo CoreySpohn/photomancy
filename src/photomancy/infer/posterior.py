@@ -33,6 +33,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.blocks import AbstractBlock
+from hwoutils.model_paths import assign, resolve
+from jax.flatten_util import ravel_pytree
 from priorities import Mixture, MultivariateNormal
 
 from photomancy.infer.diagnostics import kish_ess, mc_se, pareto_khat, weighted_mean
@@ -47,6 +50,7 @@ from photomancy.infer.particles import (
 __all__ = ["Forecast", "Posterior", "cluster_to_mixture", "ravel_samples"]
 
 _KINDS = ("monte_carlo", "quadrature")
+_ROUND_TRIP = 1e-7
 
 
 class Forecast(eqx.Module):
@@ -105,6 +109,60 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
         jnp.where(refuse, nan, log_z_new - log_z_old),
         jnp.where(refuse, nan, increment_se),
     )
+
+
+def _round_trips(block, coords, model):
+    """Whether ``block.forward(coords)`` writes the values ``model`` already holds.
+
+    A draw outside the block's support has no coordinates: the inverse saturates or
+    returns a non-finite value, so the forward map does not give the draw back.
+    """
+    ok = jnp.all(jnp.isfinite(ravel_pytree(coords)[0]))
+    for path, value in block.forward(coords, model).items():
+        for got, held in zip(
+            jax.tree.leaves(value), jax.tree.leaves(resolve(model, path)), strict=True
+        ):
+            ok = ok & jnp.all(jnp.isclose(got, held, rtol=_ROUND_TRIP, atol=1e-9))
+    return ok
+
+
+def _support_swap(old_fit, new_fit, moved):
+    """Per-draw function re-expressing one draw through the ``moved`` new blocks.
+
+    Returns ``one(x) -> (x_new, log_ratio, log_target_ratio)``. ``log_target_ratio`` is
+    the change of the normalized prior at the draw (the target in the new
+    coordinates); ``log_ratio`` adds the log Jacobian of the old-to-new coordinate map,
+    the weight factor of a draw whose cloud density lives in the old coordinates. Both
+    are ``-inf`` where the new support does not hold the draw.
+    """
+
+    def one(x):
+        model = old_fit.model_at(x)
+        x_new = dict(x)
+        logdet = jnp.zeros((), jnp.float64)
+        finite = jnp.asarray(True)
+        for key in moved:
+            old_block, new_block = old_fit.free[key], new_fit.free[key]
+            x_new[key] = new_block.inverse(model)
+            flat, unravel = ravel_pytree(x[key])
+
+            def to_new(v, old_block=old_block, new_block=new_block, unravel=unravel):
+                mapped = model
+                for path, value in old_block.forward(unravel(v), model).items():
+                    mapped = assign(mapped, path, value)
+                return ravel_pytree(new_block.inverse(mapped))[0]
+
+            logdet = logdet + jnp.linalg.slogdet(jax.jacfwd(to_new)(flat))[1]
+            finite = finite & _round_trips(new_block, x_new[key], model)
+        old = old_fit._log_prior_one(x)
+        new = new_fit._log_prior_one(x_new)
+        outside = ~finite | jnp.isneginf(old) | ~jnp.isfinite(logdet)
+        outside = outside | jnp.isneginf(new)
+        target = jnp.where(outside, -jnp.inf, new - old)
+        ratio = jnp.where(outside, -jnp.inf, target + logdet)
+        return x_new, ratio, target
+
+    return one
 
 
 class Posterior(eqx.Module):
@@ -273,7 +331,21 @@ class Posterior(eqx.Module):
         elif not all(given):
             raise ValueError("min_n_eff and max_khat are required for monte_carlo")
 
-    def _reweighted(self, new_fit, log_ratio, min_n_eff, max_khat):
+    def _reweighted(
+        self,
+        new_fit,
+        log_ratio,
+        min_n_eff,
+        max_khat,
+        *,
+        samples=None,
+        log_target_ratio=None,
+    ):
+        """Reweight by ``log_ratio``, gated.
+
+        ``samples`` and ``log_target_ratio`` default to the stored draws and
+        ``log_ratio``; they differ after a change of support.
+        """
         self._check_gate(min_n_eff, max_khat)
         quadrature = self.kind == "quadrature"
         lo = 0.0 if quadrature else min_n_eff
@@ -284,10 +356,11 @@ class Posterior(eqx.Module):
         if quadrature:
             refused = jnp.any(jnp.isnan(new_lw))
             increment_se = jnp.where(refused, jnp.nan, 0.0)
+        target_ratio = log_ratio if log_target_ratio is None else log_target_ratio
         return Posterior(
-            samples=self.samples,
+            samples=self.samples if samples is None else samples,
             log_weights=new_lw,
-            log_target=jnp.asarray(self.log_target, jnp.float64) + log_ratio,
+            log_target=jnp.asarray(self.log_target, jnp.float64) + target_ratio,
             log_evidence=self.log_evidence + increment,
             log_evidence_se=jnp.sqrt(self.log_evidence_se**2 + increment_se**2),
             fit=new_fit,
@@ -317,6 +390,21 @@ class Posterior(eqx.Module):
         k-hat gate (fewer than five tail draws). The size is the plain Kish size:
         multiply by a chain efficiency yourself for correlated draws.
 
+        A block whose new law moves the bounds its map carries (an orbit law with other
+        size or eccentricity bounds) is another map, so the stored coordinates change
+        meaning. Each stored draw is then read through the old block into the model and
+        re-expressed with ``new_block.inverse(model)``; ``samples`` come back in the new
+        coordinates, so ``log_target`` still equals ``fit.log_density`` of the result.
+        The weight gains the ratio of the two laws on the orbit, computed as the new
+        block density plus the log Jacobian of the old-to-new coordinate map (by
+        forward-mode autodiff) minus the old block density. A draw outside the new
+        support has weight ``-inf`` (and ``-inf`` ``log_target``; its stored
+        coordinates are not finite). The evidence gains ``log sum w ratio``, which is
+        the new prior's mass on the cloud's support when the old cloud is the prior.
+        A change of chart, rows, system or block type is refused by name. The
+        Jacobian is taken with the other entries of the draw held, which is exact
+        because the orbit itself does not move.
+
         Where the gate does not apply: k-hat is not valid on nested-sampling clouds
         (pass ``max_khat=jnp.inf`` and gate on ``min_n_eff``) and a ``quadrature``
         cloud has no gate (see below). A ``MAP`` posterior has one draw, so any
@@ -339,11 +427,28 @@ class Posterior(eqx.Module):
                 ``kind``.
         """
         self._require_slice("with_priors")
-        new_fit = self.fit.with_priors(priors)
-        old = self.fit.log_prior(self.samples, batch_size=batch_size)
-        new = new_fit.log_prior(self.samples, batch_size=batch_size)
-        ratio = jnp.where(jnp.isneginf(old), -jnp.inf, new - old)
-        return self._reweighted(new_fit, ratio, min_n_eff, max_khat)
+        new_fit = self.fit.with_priors(priors, support_change=True)
+        moved = tuple(
+            key
+            for key, entry in priors.items()
+            if isinstance(entry, AbstractBlock)
+            and not self.fit.free[key].same_map(entry)
+        )
+        if not moved:
+            old = self.fit.log_prior(self.samples, batch_size=batch_size)
+            new = new_fit.log_prior(self.samples, batch_size=batch_size)
+            ratio = jnp.where(jnp.isneginf(old), -jnp.inf, new - old)
+            return self._reweighted(new_fit, ratio, min_n_eff, max_khat)
+        one = _support_swap(self.fit, new_fit, moved)
+        x_new, ratio, target_ratio = self.fit._over_batch(one, self.samples, batch_size)
+        return self._reweighted(
+            new_fit,
+            ratio,
+            min_n_eff,
+            max_khat,
+            samples=x_new,
+            log_target_ratio=target_ratio,
+        )
 
     def _term_ratio(self, term, old, batch_size):
         """Per-draw ``term(model) - old(model)`` (just ``term`` when ``old`` is None).
