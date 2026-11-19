@@ -8,7 +8,7 @@ mode) and is purpose-built as a fast initializer for the sampling backends. The 
 covariance is reconstructed from the compact L-BFGS factors, and ``evidence`` carries
 the Pathfinder ELBO, a lower bound on the log marginal likelihood, not the Laplace
 ``log Z``. The multi-start variant weights its modes by their ELBO and feeds the
-analytic EIG layer the same way ``LaplaceMixtureBackend`` does.
+analytic EIG layer the same way ``Laplace`` does.
 
 ``pathfinder_fit`` is ``filter_jit``-compiled, so when ``logdensity`` is a
 ``SceneLogDensity`` Module its forward's array leaves thread as traced inputs rather
@@ -22,11 +22,9 @@ import jax.numpy as jnp
 from photomancy.infer.backends._flat import flat_density, start_points
 from photomancy.infer.backends.base import (
     AbstractBackend,
-    LegacyBackend,
     import_extra,
 )
 from photomancy.infer.backends.importance import ImportanceInfo, modes_importance
-from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
 from photomancy.infer.posterior import Posterior
 
 
@@ -57,62 +55,6 @@ def pathfinder_fit(logdensity, init, key, maxiter, maxcor):
     )
     cov = lbfgs.lbfgs_inverse_hessian_formula_1(state.alpha, state.beta, state.gamma)
     return state.position, cov, state.elbo
-
-
-class PathfinderBackend(LegacyBackend):
-    """BlackJAX Pathfinder variational inference, returning a GaussianPosterior.
-
-    A more robust alternative to ``LaplaceBackend`` and a fast initializer for the
-    sampling backends. ``evidence`` is the Pathfinder ELBO, a lower bound on ``log Z``,
-    rather than the Laplace evidence.
-
-    Args:
-        maxiter: Maximum L-BFGS iterations for the optimization path.
-        maxcor: L-BFGS history size (number of correction pairs).
-    """
-
-    maxiter: int = 50
-    maxcor: int = 10
-
-    def run(self, logdensity, init, key=None):
-        """Fit single-path Pathfinder and return a GaussianPosterior."""
-        if key is None:
-            raise ValueError("PathfinderBackend.run requires a PRNG key.")
-        mean, cov, elbo = pathfinder_fit(
-            logdensity, init, key, self.maxiter, self.maxcor
-        )
-        return GaussianPosterior(mean=mean, cov=cov, evidence=elbo)
-
-
-class PathfinderMixtureBackend(LegacyBackend):
-    """Multi-start Pathfinder: an ELBO-weighted mixture of Gaussians.
-
-    Runs single-path Pathfinder from each of ``K`` starts (``init`` has shape
-    ``(K, d)``, one row per start) and assembles a ``MixturePosterior`` whose modes are
-    weighted by their ELBO. Like ``LaplaceMixtureBackend`` this is an EIG /
-    value-of-information substrate, but it trades the single-Hessian Laplace covariance
-    for Pathfinder's trajectory estimate, which is steadier when a mode is poorly
-    conditioned.
-
-    Args:
-        maxiter: L-BFGS iterations per start.
-        maxcor: L-BFGS history size per start.
-    """
-
-    maxiter: int = 50
-    maxcor: int = 10
-
-    def run(self, logdensity, init, key=None):
-        """Fit one Pathfinder mode per start in ``init`` (shape ``(K, d)``)."""
-        if key is None:
-            raise ValueError("PathfinderMixtureBackend.run requires a PRNG key.")
-        keys = jax.random.split(key, init.shape[0])
-
-        def fit_one(z0, k):
-            return pathfinder_fit(logdensity, z0, k, self.maxiter, self.maxcor)
-
-        means, covs, elbos = jax.vmap(fit_one)(init, keys)
-        return MixturePosterior(means=means, covs=covs, log_evidences=elbos)
 
 
 class PathfinderInfo(eqx.Module):

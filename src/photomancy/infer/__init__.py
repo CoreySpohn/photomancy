@@ -1,10 +1,9 @@
 """photomancy.infer: inference machinery with no astronomy in it.
 
-A fit is a log density over a partitioned model PyTree (``model``), optionally a
-sum of data terms (``terms``) scored with residual kernels (``likelihoods``) and
-priors over the fitted leaves (``priors``). A backend (``backends``) turns the
-density into a ``Posterior`` (``posterior``), from which come the evidence
-(``evidence``), weighted-particle statistics (``particles``) and expected
+A ``Fit`` (``fit``) is a model PyTree with leaf laws and a sum of data terms
+(``terms``) scored with residual kernels (``likelihoods``). ``run(fit, backend, key)``
+(``backends``) turns it into a ``Posterior`` (``posterior``), from which come the
+evidence (``evidence``), weighted-particle statistics (``diagnostics``) and expected
 information gain (``eig``).
 
 Nothing here imports an astronomy library or any other part of photomancy; a
@@ -20,18 +19,15 @@ from photomancy.infer.backends import (
     Grid,
     Importance,
     ImportanceInfo,
-    JaxnsBackend,
     Laplace,
-    LaplaceBackend,
     LaplaceInfo,
-    LaplaceMixtureBackend,
-    MCLMCBackend,
+    MAPInfo,
+    MCLMCInfo,
+    NestedInfo,
     NestedSampling,
-    NUTSBackend,
+    NUTSInfo,
     Pathfinder,
-    PathfinderBackend,
     PathfinderInfo,
-    PathfinderMixtureBackend,
     gauss_legendre,
     midpoint,
 )
@@ -57,18 +53,6 @@ from photomancy.infer.fit import (
     LeafConditional,
     LinearForm,
 )
-from photomancy.infer.legacy_posterior import (
-    AbstractPosterior,
-    GaussianPosterior,
-    MixturePosterior,
-    PointPosterior,
-    SamplePosterior,
-)
-from photomancy.infer.model import (
-    AbstractLogDensity,
-    build_gaussian_fit,
-    build_scene_logdensity,
-)
 from photomancy.infer.posterior import (
     Forecast,
     Posterior,
@@ -76,8 +60,6 @@ from photomancy.infer.posterior import (
     cluster_to_mixture,
     ravel_samples,
 )
-from photomancy.infer.posterior_utils import project_samples, sample_capped
-from photomancy.infer.priors import IndependentPrior
 from photomancy.infer.proposals import (
     AbstractDensityProposal,
     AbstractProposal,
@@ -86,7 +68,7 @@ from photomancy.infer.proposals import (
     PriorProposal,
 )
 from photomancy.infer.run import run
-from photomancy.infer.terms import ForwardTerm, TermLogDensity
+from photomancy.infer.terms import ForwardTerm
 from photomancy.infer.update import update
 
 __all__ = [
@@ -97,8 +79,6 @@ __all__ = [
     "AbstractConditionalTerm",
     "AbstractDensityProposal",
     "AbstractLinearTerm",
-    "AbstractLogDensity",
-    "AbstractPosterior",
     "AbstractProposal",
     "AbstractTerm",
     "AdaptiveImportance",
@@ -107,35 +87,24 @@ __all__ = [
     "Fit",
     "Forecast",
     "ForwardTerm",
-    "GaussianPosterior",
     "Grid",
     "Importance",
     "ImportanceInfo",
-    "IndependentPrior",
-    "JaxnsBackend",
     "Laplace",
-    "LaplaceBackend",
     "LaplaceInfo",
-    "LaplaceMixtureBackend",
     "LeafConditional",
     "LinearForm",
-    "MCLMCBackend",
-    "MixturePosterior",
+    "MAPInfo",
+    "MCLMCInfo",
     "MixtureProposal",
-    "NUTSBackend",
+    "NUTSInfo",
+    "NestedInfo",
     "NestedSampling",
     "Pathfinder",
-    "PathfinderBackend",
     "PathfinderInfo",
-    "PathfinderMixtureBackend",
-    "PointPosterior",
     "Posterior",
     "PriorProposal",
     "ReweightInfo",
-    "SamplePosterior",
-    "TermLogDensity",
-    "build_gaussian_fit",
-    "build_scene_logdensity",
     "cluster_to_mixture",
     "eig_contrastive",
     "eig_nested",
@@ -148,11 +117,9 @@ __all__ = [
     "midpoint",
     "normalize_log_weights",
     "pareto_khat",
-    "project_samples",
     "ratio_mc_se",
     "ravel_samples",
     "run",
-    "sample_capped",
     "sigma_from_log_bayes_factor",
     "update",
     "weighted_cov",

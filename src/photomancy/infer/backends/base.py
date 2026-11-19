@@ -1,4 +1,4 @@
-"""The Backend protocol: how inference is run on a logdensity."""
+"""The Backend protocol: how inference is run on a ``Fit``."""
 
 import importlib
 from abc import abstractmethod
@@ -88,36 +88,3 @@ class AbstractBackend(eqx.Module):
         density of a cloud (the importance backends) honors it; a sampler evaluates its
         density per chain or particle inside its own loop and ignores it.
         """
-
-
-class LegacyBackend(eqx.Module):
-    """Runs inference on a flat logdensity and returns a legacy posterior.
-
-    Superseded by :class:`AbstractBackend` and :func:`photomancy.infer.run`; kept for
-    the orbit engines that still call it.
-
-
-    Backends are ``eqx.Module`` config objects (hyperparameters as fields) with a
-    pure ``run``. A backend sees only the flat ``logdensity`` -- never the scene or
-    the forward model -- which is what keeps the engine forward-model agnostic.
-
-    Traced-vs-baked forward arrays: when ``logdensity`` is a ``SceneLogDensity``
-    Module, its array leaves (e.g. a forward's PSF datacube) thread as traced inputs
-    as long as the backend's compiled region receives the logdensity as a
-    ``filter_jit`` argument. Every backend does this -- ``LaplaceBackend`` via the
-    ``filter_jit``'d ``laplace_fit``, and the BlackJAX samplers (NUTS) by
-    ``filter_jit``-wrapping ``run`` -- so a large coronagraph/IFS forward stays an
-    input buffer instead of being baked into the kernel as a constant. A new backend
-    should do the same.
-    """
-
-    @abstractmethod
-    def run(self, logdensity, init, key=None):
-        """Run inference on ``logdensity`` from ``init``, returning a Posterior.
-
-        Args:
-            logdensity: ``z -> scalar`` log-density over the flat parameter position.
-            init: Initial flat position. Shape ``(d,)``.
-            key: PRNG key (unused by deterministic backends such as Laplace).
-        """
-        raise NotImplementedError
