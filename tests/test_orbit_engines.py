@@ -234,7 +234,9 @@ def test_scale_rotate_density_is_normalized_and_matches_the_draws():
     A broad anchor kernel (0.3 arcsec) makes the proposal cover much of the prior. The
     probability that a draw is inside the period bounds, from the proposal's own draws,
     equals the integral of its density estimated with prior draws, within 4 SE; and
-    ``log_q`` of a draw equals ``log_prob`` of it. N = 4000 for a 4 SE of 0.04.
+    ``log_q`` of a draw equals ``log_prob`` of it. N = 4000 for a 4 SE of 0.04. A draw
+    outside the period bounds is NaN with ``log_q = +inf``, and the importance backend
+    weighs it zero, so the evidence stays finite.
     """
     fit = _fit(_term(n_rows=1, err=0.3))
     proposal = ScaleRotateProposal()
@@ -245,6 +247,11 @@ def test_scale_rotate_density_is_normalized_and_matches_the_draws():
     np.testing.assert_allclose(
         proposal.log_prob(z[ok], fit), log_q[ok], rtol=1e-8, atol=1e-8
     )
+    assert 0 < inside.sum() < n
+    assert np.all(np.isnan(np.asarray(z)[~inside][:, :3]))
+    draws = few_epoch(n_proposals=n)._run(fit, jax.random.key(0))
+    np.testing.assert_array_equal(np.isneginf(draws.log_weights), ~inside)
+    assert np.isfinite(float(draws.log_evidence))
     p_draws = inside.mean()
     se_draws = np.sqrt(p_draws * (1 - p_draws) / n)
     xp = fit.sample_prior(jax.random.key(1), (n,))
