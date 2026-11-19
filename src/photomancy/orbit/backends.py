@@ -12,33 +12,39 @@ from photomancy.orbit.proposals import ScaleRotateProposal
 __all__ = ["collapsed", "few_epoch"]
 
 
-def few_epoch(n_draws=4000, n_proposals=2**17):
+def few_epoch(n_proposals=2**17):
     """Importance sampling from scale-and-rotate draws.
 
     Exact in the block's prior, and efficient while one or two astrometric rows
-    constrain the orbit. The returned cloud holds ``max(n_draws, n_proposals)`` weighted
-    draws; the evidence is the importance mean over all of them.
+    constrain the orbit. The returned cloud holds ``n_proposals`` weighted draws and
+    the evidence is the importance mean over all of them; ``Posterior.resample``
+    gives equal-weight draws.
 
     Args:
-        n_draws: Smallest number of draws returned.
-        n_proposals: Draws of the proposal.
+        n_proposals: Draws of the proposal, all returned.
     """
-    return Importance(ScaleRotateProposal(), max(n_draws, n_proposals))
+    return Importance(ScaleRotateProposal(), n_proposals)
 
 
-def collapsed(n_draws=4000, **rounds):
+def collapsed(n_round=2**16, n_rounds=3, **adaptive):
     """Adaptive importance on a proposal that completes the sky constants.
 
     Round zero draws the nonlinear coordinates from the block's own law
     (:class:`ThetaPrior`) and every round refits a kernel mixture on them, with a
-    defensive share of that law. ``rounds`` are the settings of
-    :class:`~photomancy.infer.AdaptiveImportance` (``n_round``, ``n_rounds``,
-    ``n_centers``, ``defensive``).
+    defensive share of that law. Every round, the last included, has ``n_round`` draws,
+    and the returned cloud and the evidence come from the last round alone.
 
     Args:
-        n_draws: Draws of the last round, the returned cloud.
-        **rounds: Round settings passed to ``AdaptiveImportance``.
+        n_round: Draws of every round.
+        n_rounds: Number of rounds (the last is the returned cloud).
+        **adaptive: Further settings of
+            :class:`~photomancy.infer.AdaptiveImportance` (``n_centers``,
+            ``defensive``).
     """
     return AdaptiveImportance(
-        CompletedProposal(ThetaPrior()), n_draws=n_draws, **rounds
+        CompletedProposal(ThetaPrior()),
+        n_draws=n_round,
+        n_round=n_round,
+        n_rounds=n_rounds,
+        **adaptive,
     )

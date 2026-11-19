@@ -21,8 +21,6 @@ The weight of one ``theta`` uses ``n_constants`` draws of the constants from
 ``(theta, c_kept)`` with that weight properly weighted.
 """
 
-from typing import ClassVar
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -36,6 +34,7 @@ from orbix.system import ThieleInnesBlock, linear_gaussian_conditional
 from orbix.system.charts import disk_to_plane
 
 from photomancy.infer import (
+    AbstractDensityProposal,
     AbstractLinearTerm,
     AbstractProposal,
     DefensiveProposal,
@@ -88,15 +87,11 @@ def _block_of(fit):
     return blocks[0]
 
 
-def _support(block):
-    """Chart-coordinate bounds of the block's law (private to orbix; see report)."""
-    return block._support()
-
-
 class _ThetaView(eqx.Module):
-    """What a proposal over ``theta`` reads of the fit: its periods and the block."""
+    """What a proposal over ``theta`` reads of the fit: periods, block and model."""
 
     block: ThieleInnesBlock
+    model: object
     theta_periods: tuple = eqx.field(static=True)
 
     def periods(self):
@@ -189,7 +184,7 @@ class Completion(eqx.Module):
     @property
     def view(self):
         """The object a proposal over ``theta`` is given in place of the fit."""
-        return _ThetaView(self.block, self.theta_periods)
+        return _ThetaView(self.block, self.fit_rest.model, self.theta_periods)
 
     def split(self, z):
         """Return ``(theta, constants)`` of flat vectors ``z (..., d)``."""
@@ -315,12 +310,12 @@ def log_density_e(e, table):
     return jnp.log(jnp.maximum(mass, 0.0)) - jnp.log(grid[k + 1] - grid[k])
 
 
-def block_coordinates(block, y):
+def block_coordinates(block, model, y):
     """Chart coordinates ``x (n, 7)`` and log Jacobian of stored ``y (n, 7)``."""
-    return block.chart.constrain(y, _support(block))
+    return block.chart.constrain(y, block.chart_support(model))
 
 
-class ThetaPrior(AbstractProposal):
+class ThetaPrior(AbstractDensityProposal):
     """The block's own law of ``(ln n, ux, uy)`` as a proposal over those coordinates.
 
     ``ln n`` is uniform on the period bounds, the eccentricity has the law's marginal
@@ -340,8 +335,10 @@ class ThetaPrior(AbstractProposal):
         """Log density of ``z (n, 3)`` in the stored coordinates."""
         self._check(fit)
         block = fit.block
-        x, log_jac = block_coordinates(block, jnp.concatenate([z, _pad(z)], -1))
-        lo, hi = _support(block)["ln_size"]
+        x, log_jac = block_coordinates(
+            block, fit.model, jnp.concatenate([z, _pad(z)], -1)
+        )
+        lo, hi = block.chart_support(fit.model)["ln_size"]
         r2 = x[:, 1] ** 2 + x[:, 2] ** 2
         e = jnp.sqrt(r2 / (1.0 + r2))
         log_pe = log_density_e(e, eccentricity_table(block))
@@ -353,13 +350,15 @@ class ThetaPrior(AbstractProposal):
         self._check(fit)
         block = fit.block
         k_n, k_e, k_a = jax.random.split(key, 3)
-        lo, hi = _support(block)["ln_size"]
+        lo, hi = block.chart_support(fit.model)["ln_size"]
         ln_n = lo + (hi - lo) * jax.random.uniform(k_n, (n,))
         e = draw_eccentricity(k_e, eccentricity_table(block), n)
         ang = two_pi * jax.random.uniform(k_a, (n,))
         evec = jnp.stack([e * jnp.cos(ang), e * jnp.sin(ang)], -1)
         x = jnp.concatenate([ln_n[:, None], disk_to_plane(evec)], -1)
-        y = block.chart.unconstrain(jnp.concatenate([x, _pad(x)], -1), _support(block))
+        y = block.chart.unconstrain(
+            jnp.concatenate([x, _pad(x)], -1), block.chart_support(fit.model)
+        )
         z = y[:, :3]
         return z, self.log_prob(z, fit)
 
@@ -376,40 +375,6 @@ def _pad(a):
     return jnp.zeros((*a.shape[:-1], 4))
 
 
-class CdfMixture(MixtureProposal):
-    """A mixture that picks components by inverse CDF.
-
-    ``jax.random.categorical`` draws ``n * K`` Gumbel variates for ``n`` picks among
-    ``K`` components, which at ``K = 256`` costs more than the rest of an engine round.
-    The inverse CDF takes one uniform per draw; a component of zero weight is never
-    chosen. The density is that of ``MixtureProposal``.
-
-    Fails if the picks are biased: component shares differ from the weights.
-    """
-
-    def _pick(self, key, n):
-        """Component indices by ``searchsorted`` of uniforms on the weight CDF."""
-        cdf = jnp.cumsum(jnp.exp(self.log_pi))
-        u = jax.random.uniform(key, (n,), dtype=cdf.dtype)
-        return jnp.minimum(jnp.searchsorted(cdf, u, side="right"), cdf.shape[0] - 1)
-
-    @classmethod
-    def of(cls, mixture):
-        """The same mixture as a :class:`CdfMixture`."""
-        covs = jnp.einsum("kij,klj->kil", mixture.chols, mixture.chols)
-        return cls(mixture.means, covs, mixture.log_pi, n_images=mixture.n_images)
-
-
-def _fast_picks(proposal):
-    """``proposal`` with the mixture of a defensive refit picking by inverse CDF."""
-    if (
-        isinstance(proposal, DefensiveProposal)
-        and type(proposal.base) is MixtureProposal
-    ):
-        return eqx.tree_at(lambda d: d.base, proposal, CdfMixture.of(proposal.base))
-    return proposal
-
-
 class CompletedProposal(AbstractProposal):
     """Draw ``theta`` from ``base`` and complete the four sky constants.
 
@@ -417,8 +382,9 @@ class CompletedProposal(AbstractProposal):
     that makes ``fit.log_density + volume - log_q`` equal the completed weight
     ``log Z(theta) + log mean_j rest_j - log q(theta)``. That ``log_q`` is not the
     density of the draw (the constants have a mixture density over the kept draw), so
-    ``log_prob`` is undefined and ``temperable`` is false: ``AdaptiveImportance`` refits
-    on the weights of the fit's own density and the refit is over ``theta`` only.
+    no density exists at ``z`` (it is not an ``AbstractDensityProposal``):
+    ``AdaptiveImportance`` refits on the weights of the fit's own density and the refit
+    is over ``theta`` only.
 
     Attributes:
         base: Proposal over ``theta`` (it sees a view with ``periods()`` and
@@ -429,9 +395,7 @@ class CompletedProposal(AbstractProposal):
             :meth:`Completion.from_fit`).
     """
 
-    temperable: ClassVar[bool] = False
-
-    base: AbstractProposal
+    base: AbstractDensityProposal
     n_constants: int = eqx.field(static=True, default=8)
     scale_AU: jax.Array | None = None
 
@@ -449,10 +413,6 @@ class CompletedProposal(AbstractProposal):
         z, lw, log_density = completion.complete(k_c, theta, self.n_constants)
         return z, jnp.where(jnp.isneginf(lw), log_q, log_q + log_density - lw)
 
-    def log_prob(self, z, fit):
-        """Undefined: a completed proposal is properly weighted, not a density."""
-        raise NotImplementedError("a completed proposal has no density; use sample")
-
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive):
         """Refit the base over ``theta`` of the weighted cloud."""
         completion = Completion.from_fit(fit, self.scale_AU)
@@ -465,4 +425,4 @@ class CompletedProposal(AbstractProposal):
             n_centers=n_centers,
             defensive=defensive,
         )
-        return eqx.tree_at(lambda p: p.base, self, _fast_picks(base))
+        return eqx.tree_at(lambda p: p.base, self, base)

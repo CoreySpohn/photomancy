@@ -17,12 +17,11 @@ from hwoutils.model_paths import resolve
 from orbix.system import ClassicalChart
 from orbix.system.core import GM_SUN_AU3_PER_D2
 
-from photomancy.infer import AbstractProposal
+from photomancy.infer import AbstractDensityProposal
 from photomancy.measurements import RelativeAstrometryTerm
 from photomancy.orbit.completion import (
     _block_of,
     _flat_layout,
-    _support,
     block_coordinates,
     draw_eccentricity,
     eccentricity_table,
@@ -34,7 +33,7 @@ __all__ = ["ScaleRotateProposal"]
 _CLASSICAL = ClassicalChart()
 
 
-class ScaleRotateProposal(AbstractProposal):
+class ScaleRotateProposal(AbstractDensityProposal):
     """Orbits through a sky position drawn near one astrometric row.
 
     A draw takes the eccentricity, ``cos i``, the argument of periapsis and the mean
@@ -151,11 +150,12 @@ class ScaleRotateProposal(AbstractProposal):
         final = jnp.stack([log_a, logit_e, jnp.arctanh(cos_i), node, omega, phase], -1)
         orbit = _CLASSICAL.to_orbit(final, mu_AU3_per_d2=mu, epoch_d=epoch)
         x = block.chart.from_orbit(orbit)
-        lo, hi = _support(block)["ln_size"]
+        support = block.chart_support(fit.model)
+        lo, hi = support["ln_size"]
         inside = (x[:, 0] > lo) & (x[:, 0] < hi)
         x = x.at[:, 0].set(jnp.clip(x[:, 0], lo, hi))
-        y = block.chart.unconstrain(x, _support(block))
-        xc, log_jac = block_coordinates(block, y)
+        y = block.chart.unconstrain(x, support)
+        xc, log_jac = block_coordinates(block, fit.model, y)
         log_q = self._density(
             block, data, row, e, t, mass, enclosed, xc, log_jac, table
         )
@@ -170,7 +170,7 @@ class ScaleRotateProposal(AbstractProposal):
         inner = jnp.sum(planets[..., : block.rows[0] + 1], axis=-1)
         epoch = held.epoch_d[..., block.rows[0]]
         y = z[:, jnp.asarray(position)]
-        x, log_jac = block_coordinates(block, y)
+        x, log_jac = block_coordinates(block, fit.model, y)
         r2 = x[:, 1] ** 2 + x[:, 2] ** 2
         e = jnp.sqrt(r2 / (1.0 + r2))
         enclosed = block.chart.implied_mu(x) / GM_SUN_AU3_PER_D2
@@ -189,5 +189,5 @@ class ScaleRotateProposal(AbstractProposal):
             log_jac,
             eccentricity_table(block),
         )
-        lo, hi = _support(block)["ln_size"]
+        lo, hi = block.chart_support(fit.model)["ln_size"]
         return jnp.where((x[:, 0] > lo) & (x[:, 0] < hi), log_q, -jnp.inf)
