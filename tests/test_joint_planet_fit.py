@@ -1,19 +1,26 @@
 """A joint star and planet fit on the toy coronagraph, started from the map peak."""
 
+import json
+from pathlib import Path
+
 import equinox as eqx
 import ineedvalidation as vv
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
 import toy_coronagraph as toy
+from hwoutils.model_paths import resolve
+from priorities import Normal
 
 from photomancy.detection import likelihood_ratio_map
-from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
+from photomancy.exposure import ExposureModel, ExposureTerm
+from photomancy.infer import Fit, run
 from photomancy.infer.backends.staged import (
+    MAP,
     FitStage,
     group_labels,
-    map_fit,
     rescaled_transform,
 )
 from photomancy.infer.likelihoods import gaussian_loglike, huber_loglike
@@ -21,6 +28,10 @@ from photomancy.infer.likelihoods import gaussian_loglike, huber_loglike
 _N_LONG, _N_TILT, _N_PLANET, _N_FINAL = 600, 150, 300, 2500
 _SEAM_NM, _TILT_PX = 1e-3, 2e-2
 _TRUE_OFFSET = (6.3, -4.8)
+_GOLDEN = Path(__file__).parent / "data" / "exposure_staged_golden.json"
+# Wide enough that the prior gradient is below round-off next to the likelihood's
+# (Adam rescales steps by the gradient size, so a narrower law moves the optimum).
+_PRIOR_WIDTH = 1e8
 
 
 class _PointTemplate(eqx.Module):
@@ -34,13 +45,36 @@ def _cosine(rate, n_steps):
     return optax.cosine_decay_schedule(rate, n_steps, alpha=0.01)
 
 
+_STAR_FLUX = "exposures[0].flux"
+_PATHS = (
+    "exposures[0].tilt",
+    _STAR_FLUX,
+    "instrument.ote",
+    "instrument.si",
+    "scene.offset",
+    "scene.flux",
+)
+
+
 def _window_flux(data, window):
-    def update(params, aux):
-        star = params.exposures[0]
-        flux = star.flux * jnp.sum(window * data) / jnp.sum(window * aux[0])
-        return eqx.tree_at(lambda m: m.exposures[0].flux, params, flux)
+    """Closed-form star flux from the pre-step prediction, on the entry dict."""
+
+    def update(u, aux):
+        flux = u[_STAR_FLUX] * jnp.sum(window * data) / jnp.sum(window * aux[0])
+        return {**u, _STAR_FLUX: flux}
 
     return update
+
+
+def _entries(model):
+    """The entry dict of ``model``: the value at each free path."""
+    return {path: jnp.asarray(resolve(model, path)) for path in _PATHS}
+
+
+def _run_map(fit, backend):
+    """Run ``backend`` on ``fit`` and return the model at the optimum."""
+    posterior = run(fit, backend, jax.random.key(0))
+    return fit.model_at(jax.tree.map(lambda a: a[0], posterior.samples))
 
 
 def _joint_fit(peak_fraction):
@@ -73,27 +107,34 @@ def _joint_fit(peak_fraction):
     window = jnp.asarray(np.hypot(xx, yy) < 8.0) & mask
     n_used = int(mask.sum())
     sigma = 0.1 * float(jnp.median(ref_data))
-    density = ExposureLogDensity(
-        (
-            ExposureTerm(render, huber_loglike(ref_data, sigma, mask), 0),
-            ExposureTerm(render, huber_loglike(sci_data, sigma, mask), 0),
-        )
+    terms = (
+        ExposureTerm(render, huber_loglike(ref_data, sigma, mask), 0),
+        ExposureTerm(render, huber_loglike(sci_data, sigma, mask), 0),
     )
-    ref, sci = density.restrict((0,)), density.restrict((1,))
     init = ExposureModel(
         instrument,
         (toy.Star(jnp.zeros(2), 0.8 * ref_star.flux),),
         absent,
     )
+    # a wide Normal per entry: the MAP-only stand-in for a flat prior
+    free = {
+        path: Normal(
+            jnp.zeros(jnp.shape(resolve(init, path))),
+            _PRIOR_WIDTH * jnp.ones(jnp.shape(resolve(init, path))),
+        )
+        for path in _PATHS
+    }
+    fit = Fit(init, free, terms)
+    ref, sci = Fit(init, free, terms[:1]), Fit(init, free, terms[1:])
     labels = group_labels(
-        init,
+        fit.to_real(_entries(init)),
         {
-            "tilt": lambda m: [e.tilt for e in m.exposures],
-            "ote": lambda m: m.instrument.ote,
-            "si": lambda m: m.instrument.si,
-            "offset": lambda m: m.scene.offset,
-            "flux": lambda m: m.scene.flux,
-            "star_flux": lambda m: m.exposures[0].flux,
+            "tilt": lambda u: u["exposures[0].tilt"],
+            "ote": lambda u: u["instrument.ote"],
+            "si": lambda u: u["instrument.si"],
+            "offset": lambda u: u["scene.offset"],
+            "flux": lambda u: u["scene.flux"],
+            "star_flux": lambda u: u[_STAR_FLUX],
         },
     )
 
@@ -144,7 +185,15 @@ def _joint_fit(peak_fraction):
             name="science exit seam",
         ),
     ]
-    h0 = map_fit(density, init, labels, first, h0_stages).params
+    h0 = _run_map(
+        fit,
+        MAP(
+            labels=labels,
+            transforms=first,
+            stages=tuple(h0_stages),
+            init=_entries(init),
+        ),
+    )
 
     grid = np.array(
         [(x, y) for x in range(-8, 9) for y in range(-8, 9) if np.hypot(x, y) >= 4.0],
@@ -196,7 +245,15 @@ def _joint_fit(peak_fraction):
             name="planet and exit seam",
         ),
     ]
-    h1 = map_fit(density, start, labels, planet_lr, h1_stages).params
+    h1 = _run_map(
+        fit,
+        MAP(
+            labels=labels,
+            transforms=planet_lr,
+            stages=tuple(h1_stages),
+            init=_entries(start),
+        ),
+    )
     return {
         "truth": truth,
         "true_flux": true_flux,
@@ -248,6 +305,11 @@ def test_planet_freed_after_the_map_recovers_flux_and_offset():
     (0.03) and the control must stay above 0.3 and 3e-2. The H1 exit-seam error is
     not bounded: the seam is weakly identified by the image, so where the fit stops on
     it depends on the platform (8.3e-3 on macOS, 3.3e-2 on the Linux runner).
+    Golden: ``exposure_staged_golden.json`` holds the H0 and H1 parameters of the same
+    fits through the legacy staged path (no prior) before the port to ``MAP``. H0 and
+    H1 agree to 5e-14 relative on the capture platform; H0 is held to rtol 1e-6, H1 to
+    rtol 1e-2 on the offset and flux because that fit stops before round-off and its
+    optimum moves with the platform (see above).
     Fails if: the map's amplitude or position is not a usable start, a stage that frees
     the planet leaves the star position or flux fixed so the planet cannot explain its
     own light, or the frozen-companion control absorbs the planet.
@@ -263,3 +325,11 @@ def test_planet_freed_after_the_map_recovers_flux_and_offset():
     assert float(jnp.linalg.norm(h1.scene.offset - out["true_offset"])) < 1e-2
     assert abs(float(h1.scene.flux) / out["true_flux"] - 1.0) < 1e-2
     assert _residual_rms(out, h1) < 3e-2
+    golden = json.loads(_GOLDEN.read_text())["joint_fit"]
+    for name, model in (("h0", h0), ("h1", h1)):
+        want = golden[name]
+        rtol = 1e-6 if name == "h0" else 1e-2
+        np.testing.assert_allclose(model.scene.offset, want["offset"], rtol=rtol)
+        np.testing.assert_allclose(model.scene.flux, want["flux"], rtol=rtol, atol=0)
+    np.testing.assert_allclose(h0.instrument.si, golden["h0"]["si"], rtol=1e-6)
+    np.testing.assert_allclose(h0.instrument.ote, golden["h0"]["ote"], rtol=1e-6)

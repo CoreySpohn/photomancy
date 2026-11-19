@@ -1,21 +1,30 @@
-"""Exposure log-density: term routing, restriction and a staged self-fit."""
+"""Exposure terms: routing in a ``Fit`` and a staged self-fit through ``MAP``."""
+
+import json
+from pathlib import Path
 
 import equinox as eqx
 import ineedvalidation as vv
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
 import toy_coronagraph as toy
+from hwoutils.model_paths import resolve
+from priorities import Normal
 
-from photomancy.exposure import ExposureLogDensity, ExposureModel, ExposureTerm
+from photomancy.exposure import ExposureModel, ExposureTerm
+from photomancy.infer import Fit, run
 from photomancy.infer.backends.staged import (
+    MAP,
     FitStage,
     group_labels,
-    map_fit,
     rescaled_transform,
 )
 from photomancy.infer.likelihoods import huber_loglike, laplace_loglike
+
+_GOLDEN = Path(__file__).parent / "data" / "exposure_staged_golden.json"
 
 
 def _affine_render(instrument, exposure, scene):
@@ -23,15 +32,15 @@ def _affine_render(instrument, exposure, scene):
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-def test_terms_read_their_exposure_block_and_restrict_gives_a_view():
-    """Value is the sum over terms, aux the images in order, ``restrict`` a sub-view.
+def test_terms_read_their_exposure_block_and_a_fit_sums_them():
+    """The fit sums the terms; each term reads its own exposure block.
 
     Truth source: hand-summed Laplace log-likelihoods of the affine images
     ``instrument * exposure[k] + scene`` (two terms on block 0, one on block 1).
     Tolerance basis: exact-algebra (rtol 1e-12; the same expression).
-    Fails if: a term reads the wrong exposure block, the prior is dropped or counted
-    per term, ``restrict`` reorders predictions or loses the prior, or an empty view
-    is accepted.
+    Fails if: a term reads the wrong exposure block, a term is dropped or counted
+    twice, a subset of the terms (a stage view) scores more than its own terms, or
+    ``predict`` returns an image other than the one the term scores.
     """
     model = ExposureModel(
         instrument=jnp.asarray([1.0, 2.0]),
@@ -43,7 +52,6 @@ def test_terms_read_their_exposure_block_and_restrict_gives_a_view():
         ExposureTerm(_affine_render, laplace_loglike(d, 1.0), idx)
         for d, idx in zip(data, (0, 1, 0), strict=True)
     )
-    ld = ExposureLogDensity(terms, prior=lambda m: -2.0)
     images = [
         np.asarray([3.5, 6.5]),
         np.asarray([-0.5, -1.5]),
@@ -53,20 +61,16 @@ def test_terms_read_their_exposure_block_and_restrict_gives_a_view():
         float(-np.sum(np.abs(img - np.asarray(d))) - 2.0 * np.log(2.0))
         for img, d in zip(images, data, strict=True)
     ]
-    value, aux = ld.value_and_aux(model)
-    np.testing.assert_allclose(value, sum(expected) - 2.0, rtol=1e-12)
-    for got, want in zip(aux, images, strict=True):
-        np.testing.assert_array_equal(got, want)
-    np.testing.assert_allclose(ld(model), value, rtol=1e-12)
-    view = ld.restrict((2, 1))
-    view_value, view_aux = view.value_and_aux(model)
-    np.testing.assert_allclose(view_value, expected[2] + expected[1] - 2.0, rtol=1e-12)
-    np.testing.assert_array_equal(view_aux[0], images[2])
-    np.testing.assert_array_equal(view_aux[1], images[1])
-    with pytest.raises(IndexError):
-        ld.restrict((3,))
-    with pytest.raises(ValueError, match="at least one term"):
-        ld.restrict(())
+    free = {"scene": Normal(jnp.zeros(2), jnp.ones(2))}
+    x = {"scene": model.scene}
+    fit = Fit(model, free, terms)
+    np.testing.assert_allclose(fit.log_likelihood(x), sum(expected), rtol=1e-12)
+    for term, want in zip(terms, images, strict=True):
+        np.testing.assert_array_equal(term.predict(model), want)
+    view = Fit(model, free, (terms[2], terms[1]))
+    np.testing.assert_allclose(
+        view.log_likelihood(x), expected[2] + expected[1], rtol=1e-12
+    )
 
 
 _N_STEPS = 1000  # optimizer steps of the long reference and science stages
@@ -88,15 +92,43 @@ def _cosine(rate, n_steps):
     return optax.cosine_decay_schedule(rate, n_steps, alpha=0.01)
 
 
-def _window_flux(index, data, window):
-    """Closed-form flux: the window ratio of data to the pre-step prediction."""
+_STAR_FLUX = "exposures[0].flux"
 
-    def update(params, aux):
-        star = params.exposures[0]
-        flux = star.flux * jnp.sum(window * data) / jnp.sum(window * aux[index])
-        return eqx.tree_at(lambda m: m.exposures[0].flux, params, flux)
+
+def _window_flux(index, data, window):
+    """Closed-form flux: the window ratio of data to the pre-step prediction.
+
+    It reads the unconstrained entry dict (the identity under a ``Normal`` law) and
+    ``aux[index]``, the prediction of term ``index`` before the optimizer step.
+    """
+
+    def update(u, aux):
+        flux = u[_STAR_FLUX] * jnp.sum(window * data) / jnp.sum(window * aux[index])
+        return {**u, _STAR_FLUX: flux}
 
     return update
+
+
+# Wide enough that its gradient is below round-off next to the likelihood's. Adam
+# rescales the step by the gradient size, so near the optimum a width of 1e3 (prior
+# gradient 1e-6 per unit) moves the seam coefficients by about 1e-2 relative.
+_PRIOR_WIDTH = 1e8
+
+
+def _wide_laws(model, paths):
+    """A ``Normal`` of width ``_PRIOR_WIDTH`` per path, the law of a MAP-only fit."""
+    return {
+        path: Normal(
+            jnp.zeros(jnp.shape(resolve(model, path))),
+            _PRIOR_WIDTH * jnp.ones(jnp.shape(resolve(model, path))),
+        )
+        for path in paths
+    }
+
+
+def _entries(model, paths):
+    """The entry dict of ``model``: the value at each free path."""
+    return {path: jnp.asarray(resolve(model, path)) for path in paths}
 
 
 def _self_fit(companion_peak):
@@ -136,24 +168,26 @@ def _self_fit(companion_peak):
     window = jnp.asarray(np.hypot(xx, yy) < 8.0) & mask
     n_used = int(mask.sum())
     sigma = 0.1 * float(jnp.median(ref_data))
-    density = ExposureLogDensity(
-        (
-            ExposureTerm(render, huber_loglike(ref_data, sigma, mask), 0),
-            ExposureTerm(render, huber_loglike(sci_data, sigma, mask), 0),
-        )
+    terms = (
+        ExposureTerm(render, huber_loglike(ref_data, sigma, mask), 0),
+        ExposureTerm(render, huber_loglike(sci_data, sigma, mask), 0),
     )
     init = ExposureModel(
         instrument,
         (toy.Star(jnp.zeros(2), 0.8 * ref_star.flux),),
         toy.Companion(offset, jnp.asarray(0.0)),
     )
+    # the companion flux stays at its model value (zero): it is not a free entry
+    paths = ("exposures[0].tilt", _STAR_FLUX, "instrument.ote", "instrument.si")
+    free = _wide_laws(init, paths)
+    fit = Fit(init, free, terms)
+    x0 = _entries(init, paths)
     labels = group_labels(
-        init,
+        fit.to_real(x0),
         {
-            "tilt": lambda m: [e.tilt for e in m.exposures],
-            "ote": lambda m: m.instrument.ote,
-            "si": lambda m: m.instrument.si,
-            "companion": lambda m: m.scene.flux,
+            "tilt": lambda u: u["exposures[0].tilt"],
+            "ote": lambda u: u["instrument.ote"],
+            "si": lambda u: u["instrument.si"],
         },
     )
     n_long = _N_STEPS
@@ -170,7 +204,7 @@ def _self_fit(companion_peak):
         "tilt": optax.adam(_cosine(_TILT_PX, _TILT_STEPS)),
         "si": seam(n_long),
     }
-    ref, sci = density.restrict((0,)), density.restrict((1,))
+    ref, sci = Fit(init, free, terms[:1]), Fit(init, free, terms[1:])
     stages = [
         FitStage(
             _TILT_STEPS,
@@ -205,8 +239,11 @@ def _self_fit(companion_peak):
             name="science exit seam",
         ),
     ]
-    fit = map_fit(density, init, labels, first, stages)
-    return truth_instrument, sci_star, render, fit, log
+    backend = MAP(labels=labels, transforms=first, stages=tuple(stages), init=x0)
+    n_before = len(log)
+    posterior = run(fit, backend, jax.random.key(0))
+    model = fit.model_at(jax.tree.map(lambda a: a[0], posterior.samples))
+    return truth_instrument, sci_star, render, model, log, n_before
 
 
 def _relative_error(fit, truth):
@@ -223,31 +260,51 @@ def test_self_fit_recovers_the_seams_and_leaves_the_companion_out():
     from them with no noise, so recovery is limited by the optimizer and by the faint
     companion in the science frame (peak 3e-6, the per-pixel scale of the likelihood,
     0.03 percent of the brightest reference speckle), which the model cannot
-    represent because its flux sits in a group no stage frees.
+    represent because its flux is not a free entry.
     Tolerance basis: spike, measured before the tolerances were fixed. Relative seam
     error (coefficient norm): with no companion ``ote`` 6.5e-3 and ``si`` 1.2e-2;
     with the companion ``ote`` 6.5e-3 and ``si`` 6.4e-3. Science star position error
     1.8e-4 pixel and flux error 1.6e-4 (relative). The tolerances are about 3 times
     the worst of each: seams 2e-2 (``ote``) and 4e-2 (``si``), position 5e-4 pixel,
     flux 5e-4.
+    Golden: ``exposure_staged_golden.json`` holds the final parameters of the same fit
+    run through the legacy staged path (a density object with per-stage restrictions,
+    no prior) before this port. The port agrees to 8e-14 relative at a prior width of
+    1e8 (and to 1e-2 at 1e3, where Adam amplifies the prior gradient); the golden
+    tolerance, rtol 1e-6, leaves room for a platform's round-off along 3000 Adam steps
+    and still fails for a closed form that reads the post-update image.
     Fails if: a stage frees the wrong group, donated parameters or optimizer states
     are mixed across a stage boundary, the closed-form flux lags a step, a fresh
     transform table does not restart its clock, the step recompiles (the render is
-    traced once per stage configuration, four times), or the companion flux is touched
-    (it must stay exactly zero and the science model exactly the star-only model).
+    traced twice per stage configuration, once in the value and once in the
+    prediction, four configurations, plus the two terms that ``run`` scores at the
+    optimum), or the companion flux is touched (it must stay exactly zero and the
+    science model exactly the star-only model).
     """
-    n_data_renders = 2  # the two eager renders that make the frames
+    golden = json.loads(_GOLDEN.read_text())["self_fit"]
+    stage_configurations, traces_per_configuration = 4, 2
+    n_scored_at_the_optimum = 2  # run evaluates both terms for log_target
     for peak in (0.0, 3e-6):
-        truth, sci_star, render, fit, log = _self_fit(peak)
-        instrument = fit.params.instrument
+        truth, sci_star, render, model, log, n_before = _self_fit(peak)
+        instrument = model.instrument
         assert _relative_error(instrument.ote, truth.ote) < 2e-2
         assert _relative_error(instrument.si, truth.si) < 4e-2
-        star = fit.params.exposures[0]
+        star = model.exposures[0]
         assert float(jnp.linalg.norm(star.tilt - sci_star.tilt)) < 5e-4
         assert float(abs(star.flux / sci_star.flux - 1.0)) < 5e-4
-        assert len(log) - n_data_renders == 4
-        assert float(fit.params.scene.flux) == 0.0
+        assert len(log) - n_before == (
+            stage_configurations * traces_per_configuration + n_scored_at_the_optimum
+        )
+        assert float(model.scene.flux) == 0.0
         np.testing.assert_array_equal(
-            render(instrument, star, fit.params.scene),
+            render(instrument, star, model.scene),
             toy.star_only_image(instrument, star),
         )
+        want = golden[repr(peak)]
+        for name, got in (
+            ("ote", instrument.ote),
+            ("si", instrument.si),
+            ("tilt", star.tilt),
+            ("flux", star.flux),
+        ):
+            np.testing.assert_allclose(got, want[name], rtol=1e-6)

@@ -1,4 +1,4 @@
-"""A log-density over a set of exposures that share one instrument.
+"""Terms over a set of exposures that share one instrument.
 
 The structure of a multi-exposure coronagraph fit (Ferrer-Chavez et al. 2026): an
 instrument whose seams (optical path differences, a detector flat) are the same in
@@ -9,11 +9,11 @@ scene)`` to a predicted image. Which parameters are fitted, in which order, is t
 business of the staged backend, not of this module; the render function is injected,
 so no optics library is imported here.
 
-``ExposureModel`` is the parameter PyTree, ``ExposureTerm`` one exposure's render and
-likelihood, and ``ExposureLogDensity`` the sum over terms, with the per-term
-predictions as auxiliary output. ``restrict`` gives a view over some of the terms,
-which is how a staged fit scores one exposure at a time (the reference star, then the
-science target) against one shared parameter PyTree.
+``ExposureModel`` is the parameter PyTree and ``ExposureTerm`` one exposure's render and
+likelihood. The fit is ``run(Fit(ExposureModel(...), free, terms), MAP(...))``; a stage
+that scores one exposure at a time (the reference star, then the science target)
+gives ``FitStage`` a ``Fit`` over a subset of the terms with the same free entries, and
+a closed-form update reads the per-term predictions from before the step.
 
 **The model of an image fit.** A term reads the model it is given and nothing else,
 and a free path names a leaf of that model, so the model must contain every leaf a
@@ -38,9 +38,8 @@ from typing import Any, ClassVar, Self
 import equinox as eqx
 
 from photomancy.infer.fit import AbstractTerm
-from photomancy.infer.terms import TermLogDensity
 
-__all__ = ["ExposureLogDensity", "ExposureModel", "ExposureTerm"]
+__all__ = ["ExposureModel", "ExposureTerm"]
 
 
 class ExposureModel(eqx.Module):
@@ -86,11 +85,6 @@ class ExposureTerm(AbstractTerm):
             model.instrument, model.exposures[self.exposure_index], model.scene
         )
 
-    def _value_and_prediction(self, model):
-        """Return the log-likelihood and the image, rendering once."""
-        image = self.predict(model)
-        return self.likelihood(image), image
-
     def __call__(self, model):
         """Return the scalar log-likelihood of the data at ``model``."""
         return self.likelihood(self.predict(model))
@@ -106,22 +100,3 @@ class ExposureTerm(AbstractTerm):
             raise TypeError("image likelihood must implement sample(key, predicted)")
         likelihood = self.likelihood.sample(key, self.predict(model))
         return eqx.tree_at(lambda term: term.likelihood, self, likelihood)
-
-
-class ExposureLogDensity(TermLogDensity):
-    """Sum of exposure terms plus an optional prior, over an :class:`ExposureModel`.
-
-    ``value_and_aux`` returns the total and the tuple of per-term predictions (in term
-    order), so a caller that needs both the value and the images (a closed-form flux
-    update, a progress callback) renders each exposure once.
-
-    Attributes:
-        terms: Tuple of :class:`ExposureTerm`.
-        prior: ``model -> scalar`` log-prior, or ``None`` for a flat one.
-    """
-
-    terms: tuple[ExposureTerm, ...]
-    prior: Callable | None = None
-
-    def _results(self, params):
-        return [term._value_and_prediction(params) for term in self.terms]
