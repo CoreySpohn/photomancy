@@ -10,8 +10,6 @@ from system_helpers import ecc_law
 
 from photomancy import RelativeAstrometryTerm
 from photomancy.orbit.inference import ChartOrbitProblem, build_chart_logdensity
-from photomancy.orbit.init import find_init
-from photomancy.orbit.laplace import map_laplace_fit
 from photomancy.orbit.system_density import ScalarCoordinate
 from photomancy.priors import FactorizedOrbitPrior, orbit_log_prior
 
@@ -55,31 +53,6 @@ def chart_problem(
         terms=(RelativeAstrometryTerm(astrom),) if terms is None else terms,
     )
     return ChartOrbitProblem(density, params)
-
-
-def blind_fit(
-    astrom, *, star_mass_kg, dist_pc, log_T_range, k=1, n_steps=100, period_range_d=None
-):
-    """MAP and Laplace fit from the blind Thiele-Innes initializer.
-
-    Returns ``(posterior, problem)`` with the chart posterior declared.
-    """
-    chart = ClassicalChart()
-    starts, _ = find_init(
-        astrom, star_mass_kg, dist_pc, k=k, log_T_range=log_T_range, chart=chart
-    )
-    if period_range_d is None:
-        period_range_d = tuple(float(10.0**x) for x in log_T_range)
-    problem = chart_problem(
-        astrom,
-        {"orbit": starts[0]},
-        star_mass_kg=star_mass_kg,
-        dist_pc=dist_pc,
-        chart=chart,
-        period_range_d=period_range_d,
-    )
-    init = problem.flatten({"orbit": starts[0]})
-    return map_laplace_fit(problem, init, n_steps=n_steps), problem
 
 
 def mass_problem(
