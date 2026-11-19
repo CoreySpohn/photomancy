@@ -42,7 +42,6 @@ from photomancy.orbit.laplace import (
     map_laplace_fit,
     map_laplace_mixture_fit,
 )
-from photomancy.orbit.migration import migrate_sky_convention
 from photomancy.orbit.nested import (
     OrbitPriorTransform,
     build_chart_nested_model,
@@ -91,7 +90,6 @@ __all__ = [
     "make_astrometric_evaluator",
     "map_laplace_fit",
     "map_laplace_mixture_fit",
-    "migrate_sky_convention",
     "mode_observables",
     "mode_scalars",
     "mode_summary",

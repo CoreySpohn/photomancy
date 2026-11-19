@@ -1,4 +1,4 @@
-"""``photomancy.infer`` stays free of the astronomy stack.
+"""``photomancy.infer`` stays free of the astronomy stack; deleted names stay gone.
 
 Every module under ``photomancy.infer`` is parsed, so imports inside functions
 count too. The subpackage may import the numerical stack and its own modules,
@@ -6,6 +6,7 @@ never an astronomy library or the rest of photomancy.
 """
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -93,3 +94,33 @@ def test_scan_catches_function_level_and_relative_imports(tmp_path, monkeypatch)
         "skyscapes.scene",
         "skyscapes.scene.Scene",
     ]
+
+
+# Names removed from the package with no replacement under the same name.
+DELETED = (
+    "OrbitUpdater",
+    "UpdaterBelief",
+    "UpdaterRecord",
+    "UpdaterDiagnostics",
+    "ConjugateGaussianTarget",
+    "FixedMassTarget",
+    "jitter_m_per_s",
+    "migrate_sky_convention",
+    "photomancy.system_density",
+)
+
+
+def test_no_deleted_name_is_left_in_the_package():
+    """Fails if a deleted class, keyword, function or module path reappears in src.
+
+    Every ``.py`` file of the package is searched for each name as a whole word, in
+    code, docstrings and comments alike, so a stale cross-reference fails too.
+    """
+    package = ROOT.parent
+    pattern = re.compile(r"\b(" + "|".join(map(re.escape, DELETED)) + r")\b")
+    found = {
+        str(path.relative_to(package)): sorted(set(pattern.findall(path.read_text())))
+        for path in sorted(package.rglob("*.py"))
+        if pattern.search(path.read_text())
+    }
+    assert not found, found
