@@ -40,13 +40,14 @@ def _floor(requirement):
 
 
 def test_runtime_floors_are_declared():
-    """The runtime dependencies on orbix and skyscapes carry the sky-chart floors."""
+    """The runtime dependencies on the sibling libraries carry the sky-chart floors."""
     floors = {
         req.name: _floor(req)
         for group, req in _requirements()
         if group == "dependencies" and req.name in SKY_FLOORS
     }
     assert floors == {
+        "coronagraphoto": SKY_FLOORS["coronagraphoto"],
         "orbix": SKY_FLOORS["orbix"],
         "skyscapes": SKY_FLOORS["skyscapes"],
     }
@@ -61,7 +62,6 @@ def test_every_sibling_pin_is_at_or_above_the_sky_chart_release():
             floor = _floor(req)
             assert floor is not None, f"{req.name} is unpinned in {group}"
             assert floor >= SKY_FLOORS[req.name], f"{req.name} floor in {group}"
-    # coronagraphoto appears only in the docs extra, for the post-processing example.
     assert {"orbix", "skyscapes", "coronagraphoto"} <= seen
 
 

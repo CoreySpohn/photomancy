@@ -17,6 +17,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Astronomy",
 ]
 dependencies = [
+    # The pixel likelihood renders expected electrons with coronagraphoto.expected.
+    "coronagraphoto>=4.2.0",
     "equinox>=0.13.2",
     "hwoutils[jax]>=1.15.0",
     "jax>=0.8.1",
@@ -50,8 +52,7 @@ docs = [
     "hwostyle>=1.7.0",
     "matplotlib>=3.11",
     "eyepiece>=0.1.0",
-    # The post-processing example renders a scene through coronagraphoto and a yippy coronagraph.
-    "coronagraphoto>=4.2.0",
+    # The post-processing example builds a template provider from a yippy coronagraph.
     "yippy>=2.0",
     # The example notebooks run the sampler backends.
     "blackjax>=1.6",
