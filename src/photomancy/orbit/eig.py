@@ -15,8 +15,8 @@ from photomancy.infer.eig import (
     geometric_eig,
 )
 from photomancy.infer.eig import evaluate_candidates as _eval_candidates
-from photomancy.orbit._contrast import interpolate_contrast_curve
-from photomancy.orbit._photometry import system_separation_dmag
+from photomancy.measurements import interpolate_contrast_curve, system_separation_dmag
+from photomancy.measurements._observables import _sky_positions
 
 __all__ = [
     "alias_breaking_eig",
@@ -28,9 +28,6 @@ __all__ = [
 
 
 def _astrometry(system, t, planet):
-    # The system terms import this orbit package through their data containers.
-    from photomancy.system_terms import _sky_positions
-
     positions = _sky_positions(system, jnp.atleast_1d(t))
     count = positions.shape[1]
     if not 0 <= planet < count:

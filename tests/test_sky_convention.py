@@ -22,11 +22,11 @@ from orbix.system import (
 )
 from sky_reference import position_au, sky_position
 
-from photomancy.orbit.data import RelativeAstromData
+from photomancy.measurements import RelativeAstromData
+from photomancy.measurements.proper_motion import _path_proper_motion
 from photomancy.orbit.eig import _astrometry, _photometry
 from photomancy.orbit.ofti import chart_scale_rotate
 from photomancy.orbit.thiele_innes import thiele_innes_fit
-from photomancy.system_terms import _path_proper_motion
 
 _FORWARD_TIMES = np.array([-120.0, 0.0, 137.0, 690.0])
 _ECCENTRIC_ELEMENTS = (2.7, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)

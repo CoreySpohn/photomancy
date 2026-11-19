@@ -1,5 +1,6 @@
 """Target TOML routing, conversions, and composition against a system."""
 
+import equinox as eqx
 import ineedvalidation as vv
 import numpy as np
 import pytest
@@ -9,6 +10,11 @@ from test_terms import _ELEMENTS, _system
 
 from photomancy import load_target
 from photomancy.infer import TermLogDensity
+
+
+class _Model(eqx.Module):
+    system: object
+
 
 _EPOCH = Epoch(2451545.0)
 
@@ -99,17 +105,15 @@ def test_target_routing_and_composition(tmp_path):
         loaded.terms()
     with pytest.raises(ValueError, match="L'"):
         loaded.terms(bandpasses={"H": bands["H"]})
-    model = {"system": _system()}
-    terms = loaded.terms(
-        system=model["system"], select=lambda m: m["system"], bandpasses=bands
-    )
+    model = _Model(_system())
+    terms = loaded.terms(system=model.system, system_path="system", bandpasses=bands)
     expected = sum(term(model) for term in terms)
     np.testing.assert_allclose(TermLogDensity(terms)(model), expected, rtol=1e-14)
     pending = load_target(path, epoch=_EPOCH, include_pending=True, bandpasses=bands)
     assert pending.band_names == ("L'", "H")
     assert pending.relative_astrometry.times.size == 2
     np.testing.assert_array_equal(pending.photometry.is_upper_limit, [False, True])
-    assert len(pending.terms(system=model["system"])) == 2
+    assert len(pending.terms(system=model.system)) == 2
     assert len(pending.comparisons["astrometry"]) == 1
     assert pending.comparisons["photometry"] == []
 

@@ -23,12 +23,12 @@ from kinematics import (  # noqa: E402
 from priorities import Uniform  # noqa: E402
 
 from photomancy.infer import LaplaceBackend, build_scene_logdensity  # noqa: E402
-from photomancy.orbit import (  # noqa: E402
+from photomancy.measurements import (  # noqa: E402
+    RelativeAstromData,
     StellarAstromData,
     loglike_relative_astrom,
     loglike_stellar_astrom,
 )
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
 
 MSUN_KG = 1.989e30
 DIST_PC = 10.0

@@ -114,10 +114,9 @@ from skyscapes.population import kipping_eccentricity
 from photomancy.infer.diagnostics import kish_ess, normalize_log_weights
 from photomancy.infer.legacy_posterior import SamplePosterior
 from photomancy.infer.particles import systematic_indices
-from photomancy.orbit.data import RelativeAstromData
+from photomancy.measurements import RelativeAstromData, loglike_relative_astrom
 from photomancy.orbit.few_epoch import TI_PARAM_NAMES, TIBasisModel
 from photomancy.orbit.inference import orbit_chart_log_volume
-from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.priors import orbit_log_prior
 
 _EV_CHART = EccentricityVectorChart()
@@ -188,7 +187,7 @@ class UpdaterStatus(enum.IntEnum):
 class UpdaterRecord(eqx.Module):
     """One relative astrometric record, possibly a padding slot.
 
-    Field names follow :class:`~photomancy.orbit.data.RelativeAstromData`, into
+    Field names follow :class:`~photomancy.measurements.RelativeAstromData`, into
     whose buffer an accepted record is written. The conjugate Gaussian target
     reads ``(ra, dec)`` as its two-dimensional measurement and ``ra_err``,
     ``dec_err`` as its known noise scales.
@@ -290,7 +289,7 @@ class AbstractUpdateTarget(eqx.Module):
     - :meth:`predict`: the predicted ``(ra, dec)`` (arcsec) at given epochs.
 
     The likelihood is the astrometric likelihood
-    :func:`~photomancy.orbit.likelihoods.loglike_relative_astrom` of the
+    :func:`~photomancy.measurements.loglike_relative_astrom` of the
     predictions against the valid entries of a record buffer.
 
     A target may declare a linear block, ``linear_index`` (class constant):

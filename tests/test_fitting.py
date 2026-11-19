@@ -13,8 +13,10 @@ from orbix.kepler import Halley, kepler
 from orbix.system import ClassicalChart
 from sky_reference import sky_position
 
-from photomancy.orbit.data import NullData, RelativeAstromData, RVData
-from photomancy.orbit.likelihoods import (
+from photomancy.measurements import (
+    NullData,
+    RelativeAstromData,
+    RVData,
     loglike_null,
     loglike_relative_astrom,
     loglike_rv_marginalized,

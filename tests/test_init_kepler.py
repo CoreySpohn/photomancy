@@ -17,9 +17,8 @@ from kinematics import predict_relative_astrometry
 from orbix.equations import period_to_sma
 from orbix.system import ClassicalChart, EccentricityVectorChart, periapsis_chart_shape
 
-from photomancy.orbit.data import RelativeAstromData
+from photomancy.measurements import RelativeAstromData, loglike_relative_astrom
 from photomancy.orbit.init import find_init
-from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import fixed_mass_coordinates, thiele_innes_fit
 
 MSUN = 1.98892e30

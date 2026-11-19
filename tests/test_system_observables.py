@@ -10,28 +10,26 @@ import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg, two_pi
 from orbix.system import Body, ClassicalChart, EccentricityVectorChart, System
 from skyscapes.scene import Scene
+from term_utils import null_dmag_term
 from test_system_density import _floor
 from test_system_priors import _orbits, _scale_coordinates, _scene
 from test_terms import _data, _new_term
 
-from photomancy.orbit.data import (
+from photomancy.measurements import (
+    DMagTerm,
     ImagingData,
     NullData,
     PMAnomalyData,
+    ProperMotionAnomalyTerm,
+    RadialVelocityTerm,
     RelativeAstromData,
+    RelativeAstrometryTerm,
     RVData,
     StellarAstromData,
+    StellarAstrometryTerm,
 )
 from photomancy.orbit.inference import build_chart_logdensity
 from photomancy.priors import orbit_log_prior
-from photomancy.system_terms import (
-    DMagTerm,
-    NullTerm,
-    ProperMotionAnomalyTerm,
-    RadialVelocityTerm,
-    RelativeAstrometryTerm,
-    StellarAstrometryTerm,
-)
 
 DYNAMICAL = ("rv", "relative_astrom", "stellar_astrom", "pm_anomaly")
 CHANNELS = (*DYNAMICAL, "null", "imaging", "custom")
@@ -177,7 +175,7 @@ def test_all_channels_and_reference_measure(data):
 
     terms = (
         *_dynamical_terms(data),
-        NullTerm(data.null),
+        null_dmag_term(data.null),
         DMagTerm(data.imaging),
         custom_term,
     )
@@ -365,7 +363,7 @@ def test_jacobi_predictions(two_planets):
     assert (
         np.max(np.abs(actual[1] - pair_positions)) > 1e-7
     )  # arcsec, resolved physics change
-    for term in (NullTerm(data.null), DMagTerm(data.imaging)):
+    for term in (null_dmag_term(data.null), DMagTerm(data.imaging)):
         with pytest.raises(ValueError, match=r"(?i)multi-planet"):
             term(jacobi, area_AU2=1e-8)
 
@@ -382,10 +380,11 @@ def test_radiative_padding_and_dark_limit(data):
     log_area = jnp.log(0.32 * 0.00012**2)
 
     def score(log_area, term):
-        return term(model, area_AU2=jnp.exp(log_area))
+        area = jnp.exp(log_area)
+        return term(model, area_AU2=area), term.predict(model, area_AU2=area)
 
     evaluate = eqx.filter_jit(jax.value_and_grad(score, has_aux=True))
-    for term in (DMagTerm(data.imaging), NullTerm(data.null)):
+    for term in (DMagTerm(data.imaging), null_dmag_term(data.null)):
         poisoned_data = jax.tree.map(
             lambda a: (
                 a.at[-1].set(jnp.nan) if jnp.issubdtype(a.dtype, jnp.floating) else a
@@ -407,5 +406,5 @@ def test_radiative_padding_and_dark_limit(data):
         (value, prediction), gradient = evaluate(log_area, masked)
         np.testing.assert_array_equal(jnp.stack(prediction), 0.0)
         np.testing.assert_array_equal([value, gradient], 0.0)
-        _, (_, dark_dmag) = term(model, area_AU2=0.0)
+        _, dark_dmag = term.predict(model, area_AU2=0.0)
         np.testing.assert_allclose(dark_dmag[:-1], 750.0, rtol=0, atol=1e-12)

@@ -1241,7 +1241,7 @@ def astrometry(world, epochs, mask=None):
     """The first ``epochs`` records as ``RelativeAstromData`` (optional mask)."""
     import jax.numpy as jnp
 
-    from photomancy.orbit.data import RelativeAstromData
+    from photomancy.measurements import RelativeAstromData
 
     valid = jnp.ones(epochs, bool) if mask is None else jnp.asarray(mask)
     return RelativeAstromData(
@@ -1860,8 +1860,7 @@ RECORD_MODULES = (
     "photomancy.infer.particles",
     "photomancy.orbit.few_epoch",
     "photomancy.orbit.ofti",
-    "photomancy.orbit.data",
-    "photomancy.orbit.likelihoods",
+    "photomancy.measurements.astrometry",
     "photomancy.orbit.thiele_innes",
     "photomancy.infer.posterior",
 )

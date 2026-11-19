@@ -21,7 +21,7 @@ import pytest  # noqa: E402
 from hwoutils.constants import mas2arcsec  # noqa: E402
 from scipy import special  # noqa: E402
 
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.measurements import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import TIBasisModel, lambert_depth_fit  # noqa: E402
 from photomancy.orbit.updater import (  # noqa: E402
     AbstractUpdateTarget,

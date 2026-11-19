@@ -9,8 +9,11 @@ import numpy as np
 from hwoutils.epoch import Epoch
 from optixstuff.spectral import Band, Quadrature
 
-from photomancy.orbit.data import PhotometryData, RelativeAstromData
-from photomancy.system_terms import PhotometryTerm, RelativeAstrometryTerm, _identity
+from photomancy.measurements.astrometry import (
+    RelativeAstromData,
+    RelativeAstrometryTerm,
+)
+from photomancy.measurements.photometry import PhotometryData, PhotometryTerm
 
 __all__ = ["TargetData", "load_target"]
 
@@ -34,10 +37,11 @@ class TargetData:
     epoch: Epoch
     _bandpasses: Mapping | None = field(default=None, repr=False, compare=False)
 
-    def terms(self, select=_identity, bandpasses=None, *, system=None):
+    def terms(self, system_path="", bandpasses=None, *, system=None):
         """Build terms for present data, using filter-name to bandpass mappings.
 
-        ``select`` defaults to the identity, accepting a system directly.
+        ``system_path`` is the model path of the system the terms read; the empty
+        default is the model itself.
         An explicit mapping overrides the mapping supplied to ``load_target``.
         Photometric terms require the concrete reference system to split the
         integration at its spectral breaks before tracing the likelihood.
@@ -45,7 +49,7 @@ class TargetData:
         """
         result = []
         if self.relative_astrometry is not None:
-            result.append(RelativeAstrometryTerm(self.relative_astrometry, select))
+            result.append(RelativeAstrometryTerm(self.relative_astrometry, system_path))
         if self.photometry is not None:
             mapping = self._bandpasses if bandpasses is None else bandpasses
             missing = [
@@ -64,7 +68,7 @@ class TargetData:
             curves = tuple(mapping[name] for name in self.band_names)
             bands = tuple(Band(curve.low_nm, curve.high_nm) for curve in curves)
             rule = Quadrature.build(bands, system, *curves)
-            result.append(PhotometryTerm(self.photometry, rule, curves, select))
+            result.append(PhotometryTerm(self.photometry, rule, curves, system_path))
         return tuple(result)
 
 

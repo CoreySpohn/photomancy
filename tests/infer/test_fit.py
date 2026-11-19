@@ -33,7 +33,7 @@ from photomancy import (
     StellarAstrometryTerm,
 )
 from photomancy.infer import AbstractTerm, Fit
-from photomancy.orbit.data import (
+from photomancy.measurements import (
     PhotometryData,
     PMAnomalyData,
     RelativeAstromData,
@@ -382,10 +382,13 @@ def test_refuses_a_changed_free_set():
 
 def test_refuses_a_term_that_is_not_an_abstract_term():
     """A term on the old protocol cannot enter a fit: TypeError names the index."""
-    from photomancy.system_terms import NullTerm
+    with pytest.raises(TypeError, match=r"terms\[1\] is a _LegacyTerm"):
+        _simple_fit(terms=(_ReadsNothing(), _LegacyTerm()))
 
-    with pytest.raises(TypeError, match=r"terms\[1\] is a NullTerm"):
-        _simple_fit(terms=(_ReadsNothing(), NullTerm(None)))
+
+class _LegacyTerm(eqx.Module):
+    def __call__(self, model):
+        return jnp.zeros(()), None
 
 
 class _ReadsNothing(AbstractTerm):

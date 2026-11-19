@@ -46,8 +46,11 @@ from orbix.system import FrameOrbit
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 from skyscapes.population import kipping_eccentricity
 
-from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
-from photomancy.orbit.data import RelativeAstromData
+from photomancy.measurements import (
+    RelativeAstromData,
+    lambertian_dmag,
+    lambertian_from_area,
+)
 from photomancy.orbit.few_epoch import MU_SUN
 from photomancy.orbit.refit import (
     ReportData,

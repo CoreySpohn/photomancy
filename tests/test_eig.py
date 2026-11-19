@@ -11,7 +11,7 @@ from orbix.equations import period_a, period_to_sma
 
 from photomancy import RelativeAstrometryTerm
 from photomancy.infer.legacy_posterior import MixturePosterior
-from photomancy.orbit.data import RelativeAstromData
+from photomancy.measurements import RelativeAstromData
 from photomancy.orbit.eig import (
     alias_breaking_eig,
     detectability_eig,

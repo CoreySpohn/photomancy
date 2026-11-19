@@ -25,8 +25,8 @@ from orbix.system import ClassicalChart
 from skyscapes.population import kipping_eccentricity
 
 from photomancy.infer.legacy_posterior import SamplePosterior
+from photomancy.measurements import loglike_relative_astrom
 from photomancy.orbit.inference import ORBIT_ROWS_CHART
-from photomancy.orbit.likelihoods import loglike_relative_astrom
 
 # Output rows match grid_search column order for cross-tier compatibility.
 PARAM_NAMES = ("a", "e", "cos_i", "W", "cos_w", "sin_w", "tp")

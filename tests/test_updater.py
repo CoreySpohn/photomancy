@@ -17,9 +17,11 @@ from hwoutils.constants import G, Msun2kg  # noqa: E402
 from kinematics import predict_relative_astrometry  # noqa: E402
 from scipy import stats  # noqa: E402
 
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.measurements import (  # noqa: E402
+    RelativeAstromData,
+    loglike_relative_astrom,
+)
 from photomancy.orbit.few_epoch import TIBasisModel  # noqa: E402
-from photomancy.orbit.likelihoods import loglike_relative_astrom  # noqa: E402
 from photomancy.orbit.updater import (  # noqa: E402
     ConjugateGaussianTarget,
     FixedMassTarget,

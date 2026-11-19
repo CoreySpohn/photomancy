@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from photomancy.orbit._contrast import interpolate_contrast_curve
+from photomancy.measurements import interpolate_contrast_curve
 
 
 def test_padded_contrast_values_and_gradients():

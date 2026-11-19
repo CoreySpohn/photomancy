@@ -21,7 +21,7 @@ from kinematics import predict_relative_astrometry  # noqa: E402
 from orbix.equations.orbit import thiele_innes_constants  # noqa: E402
 from skyscapes.population import kipping_eccentricity  # noqa: E402
 
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.measurements import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import MU_SUN  # noqa: E402
 from photomancy.orbit.refit import (  # noqa: E402
     ReportData,

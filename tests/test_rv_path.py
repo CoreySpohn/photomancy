@@ -12,7 +12,7 @@ from orbix.system import Body, FrameOrbit, SkyFrame, System
 from term_utils import both
 
 from photomancy import RadialVelocityTerm
-from photomancy.orbit.data import RVData
+from photomancy.measurements import RVData
 
 jax.config.update("jax_enable_x64", True)
 
@@ -87,7 +87,7 @@ def test_sampled_rv_jitter_matches_instrument_count(n_inst):
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
 def test_invalid_rv_rows_have_finite_likelihood_and_gradient(invalid_value):
     """Invalid observations, predictions, errors, and jitters cannot poison sums."""
-    from photomancy.orbit.likelihoods import loglike_rv_marginalized
+    from photomancy.measurements import loglike_rv_marginalized
 
     def evaluate(obs, model, err, jitter):
         return loglike_rv_marginalized(
@@ -127,7 +127,7 @@ def test_invalid_rv_rows_have_finite_likelihood_and_gradient(invalid_value):
 
 def test_single_rv_observation_integrates_to_one():
     """Integrating the sole observation's flat offset leaves log likelihood zero."""
-    from photomancy.orbit.likelihoods import loglike_rv_marginalized
+    from photomancy.measurements import loglike_rv_marginalized
 
     result = loglike_rv_marginalized(
         jnp.array([7.0]),
@@ -147,7 +147,7 @@ def test_rv_offset_marginalization_matches_quadrature(n_inst):
     import numpy as np
     from scipy.integrate import quad
 
-    from photomancy.orbit.likelihoods import loglike_rv_marginalized
+    from photomancy.measurements import loglike_rv_marginalized
 
     obs = np.array([1.4, -0.3, 2.1])
     model = np.array([0.2, -0.7, 1.0])
@@ -257,7 +257,7 @@ def test_rv_term_uses_total_mass():
     """
     from hwoutils.constants import two_pi
 
-    from photomancy.orbit.likelihoods import loglike_rv_marginalized
+    from photomancy.measurements import loglike_rv_marginalized
 
     times = jnp.array([0.0, 100.0, 200.0, 350.0])
     periods = jnp.array([400.0])

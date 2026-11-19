@@ -22,7 +22,7 @@ import pytest  # noqa: E402
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi  # noqa: E402
 from scipy import integrate, special, stats  # noqa: E402
 
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.measurements import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import MU_SUN  # noqa: E402
 from photomancy.orbit.refit import (  # noqa: E402
     ReportData,

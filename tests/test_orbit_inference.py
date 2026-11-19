@@ -26,7 +26,7 @@ from orbix.system import (  # noqa: E402
 )
 
 from photomancy.infer.legacy_posterior import MixturePosterior  # noqa: E402
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.measurements import RelativeAstromData  # noqa: E402
 from photomancy.orbit.init import find_init  # noqa: E402
 from photomancy.orbit.laplace import map_laplace_mixture_fit  # noqa: E402
 

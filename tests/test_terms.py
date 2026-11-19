@@ -36,25 +36,29 @@ from photomancy.infer import (
     TermLogDensity,
 )
 from photomancy.infer.likelihoods import gaussian_loglike
-from photomancy.orbit.data import (
+from photomancy.measurements import (
     PhotometryData,
     PMAnomalyData,
     RelativeAstromData,
     RVData,
     StellarAstromData,
-)
-from photomancy.orbit.likelihoods import (
     loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
     loglike_stellar_astrom,
 )
+from photomancy.measurements.proper_motion import _path_proper_motion
 from photomancy.orbit.units import RV_AU_PER_DAY_TO_M_PER_S
-from photomancy.system_terms import _path_proper_motion
 
 # a [AU], e, node [rad], inclination [rad], periapsis [rad], M0 [rad], t0 [day].
 _ELEMENTS = np.array([1.7, 0.31, 1.1, 0.8, 0.6, 0.4, 24.0])
 _TIMES = np.array([31.0, 120.0, 290.0, 470.0])
+
+
+class _Holder(eqx.Module):
+    """A model that holds the system one path step below the root."""
+
+    system: object
 
 
 _MASS = 317.8
@@ -291,7 +295,7 @@ def test_mixed_sum_and_restriction(with_prior):
         lambda instrument, exposure, scene: instrument * exposure + scene.dist_pc,
         gaussian_loglike(jnp.array(15.0), 1.0),
     )
-    astrometry = RelativeAstrometryTerm(_data(), select=lambda m: m.scene)
+    astrometry = RelativeAstrometryTerm(_data(), system_path="scene")
     prior = (lambda m: -(m.instrument**2)) if with_prior else None
     ld = TermLogDensity((image, astrometry), prior)
     parts = [both(term, model) for term in ld.terms]
@@ -663,8 +667,8 @@ def test_photometry_band_planet_epoch_routing():
         band_id=band_ids,
         planet_id=planet_ids,
     )
-    prediction = PhotometryTerm(data, rule, bands, select=lambda m: m[0]).predict(
-        (system,)
+    prediction = PhotometryTerm(data, rule, bands, system_path="system").predict(
+        _Holder(system)
     )
     expected = [
         system.band_contrasts(rule.band(b), jnp.array([t]), bandpass=bands[b])[0, p, 0]
@@ -695,16 +699,17 @@ def test_dmag_contrast_error_propagation():
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_rv_default_jitter_and_selection():
-    """Truth source: explicit zero jitters versus the default with a model selector.
+    """Truth source: explicit zero jitters versus the default with a model path.
 
     Tolerance basis: exact equality for identical arithmetic. Fails if: default
-    jitters add noise, select is ignored, or jitter shape mismatches go unchecked.
+    jitters add noise, the system path is ignored, or a jitter shape mismatch goes
+    unchecked.
     """
     data = _new_term("rv").data
     zero = RadialVelocityTerm(data, jitters=jnp.zeros(data.n_inst))
-    selected = RadialVelocityTerm(data, select=lambda m: m[0])
+    selected = RadialVelocityTerm(data, system_path="system")
     expected = both(zero, _system())
-    actual = both(selected, (_system(),))
+    actual = both(selected, _Holder(_system()))
     for a, b in zip(actual, expected, strict=True):
         np.testing.assert_array_equal(a, b)
     with pytest.raises(ValueError, match="jitters"):

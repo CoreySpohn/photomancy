@@ -36,9 +36,11 @@ jax.config.update("jax_enable_x64", True)
 from orbix.system import FrameOrbit  # noqa: E402
 from skyscapes.population import kipping_eccentricity  # noqa: E402
 
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.measurements import (  # noqa: E402
+    RelativeAstromData,
+    loglike_relative_astrom,
+)
 from photomancy.orbit.few_epoch import TIBasisModel, lambert_depth_fit  # noqa: E402
-from photomancy.orbit.likelihoods import loglike_relative_astrom  # noqa: E402
 from photomancy.orbit.ofti import ScaleAndRotate  # noqa: E402
 
 DIST_PC = 10.0

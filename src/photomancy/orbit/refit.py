@@ -53,8 +53,13 @@ from skyscapes.population import kipping_eccentricity
 
 from photomancy.infer.diagnostics import kish_ess, normalize_log_weights
 from photomancy.infer.particles import systematic_indices
-from photomancy.orbit._contrast import interpolate_contrast_curve
-from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
+from photomancy.measurements import (
+    ReportLaw,
+    ReportPrediction,
+    interpolate_contrast_curve,
+    lambertian_dmag,
+    lambertian_from_area,
+)
 from photomancy.orbit.few_epoch import MU_SUN, TIBasisModel
 from photomancy.orbit.ofti import scored_orbit
 from photomancy.orbit.updater import (
@@ -64,7 +69,6 @@ from photomancy.orbit.updater import (
     _rest_log_prior,
 )
 from photomancy.priors import LOG_HAAR, orbit_log_prior
-from photomancy.report import ReportLaw, ReportPrediction
 
 ELEMENT_NAMES = (
     "ln_period",
@@ -115,7 +119,7 @@ class PhysicalPriorTarget(ThieleInnesTarget):
     model's support.
 
     The photometric scale ``ln(Ag Rp^2)`` (AU^2, the ``Lambda`` of
-    :func:`~photomancy.orbit._photometry.lambertian_from_area`) is uniform in its
+    :func:`~photomancy.measurements.lambertian_from_area`) is uniform in its
     logarithm over ``[ln_lam_lo, ln_lam_hi]`` and is integrated out of the report
     likelihood in closed form (:func:`report_log_weights`). The default range is
     an Earth twin (albedo 0.3, one Earth radius) plus or minus one in the log.
@@ -341,7 +345,7 @@ def loglike_report(alpha_pred, dMag_pred, data):
     ``s^2 = limit^2 + N``, which includes the planet's shot noise. ``N`` follows
     from the predicted delta magnitude and the detection limit at the predicted
     separation. With ``limit`` large against ``N`` this tends to
-    :func:`~photomancy.orbit.likelihoods.loglike_null`.
+    :func:`~photomancy.measurements.loglike_null`.
 
     Args:
         alpha_pred: Predicted separations (arcsec). Shape ``(N,)``.

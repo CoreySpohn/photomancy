@@ -10,8 +10,8 @@ from hwoutils.constants import G, two_pi
 from orbix.system import FrameOrbit
 from orbix.system.observables import distance_AU, phase_angle_rad, separation_arcsec
 
-from photomancy.orbit._photometry import lambertian_dmag, lambertian_from_area
-from photomancy.system_terms import _proper_motion_anomaly
+from photomancy.measurements import lambertian_dmag, lambertian_from_area
+from photomancy.measurements.proper_motion import _proper_motion_anomaly
 
 
 def predict_relative_astrometry(

@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 from orbix.system import EccentricityVectorChart
 
-from photomancy.orbit.likelihoods import loglike_relative_astrom
+from photomancy.measurements import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import fixed_mass_orbits, thiele_innes_grid
 
 

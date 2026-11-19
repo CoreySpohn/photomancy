@@ -1,23 +1,13 @@
-"""Orbit fitting: data containers, likelihoods, chart problems and initializers.
+"""Orbit fitting: chart problems and initializers.
 
-The orbit-domain plug-ins for the photomancy inference engine: data containers,
-pure-JAX likelihoods, one-planet chart problems every backend consumes, blind
-initializers (Thiele-Innes grid search, OFTI, adaptive importance sampling), the
-MAP + Laplace / EIG machinery, and a fixed-capacity sequential updater
-(``OrbitUpdater``) that assimilates one record at a time. Predictions come from
-the explicit system terms and orbix observables. Built on orbix geometry
+The orbit-domain plug-ins for the photomancy inference engine: one-planet chart
+problems every backend consumes, blind initializers (Thiele-Innes grid search, OFTI,
+adaptive importance sampling), the MAP + Laplace / EIG machinery, and a fixed-capacity
+sequential updater (``OrbitUpdater``) that assimilates one record at a time. Data,
+likelihoods and terms live in ``photomancy.measurements``. Built on orbix geometry
 (``orbix.equations``, ``orbix.kepler``, ``orbix.system``).
 """
 
-from photomancy.orbit.data import (
-    ImagingData,
-    NullData,
-    PhotometryData,
-    PMAnomalyData,
-    RelativeAstromData,
-    RVData,
-    StellarAstromData,
-)
 from photomancy.orbit.diagnostics import (
     mode_observables,
     mode_scalars,
@@ -50,14 +40,6 @@ from photomancy.orbit.init import find_init
 from photomancy.orbit.laplace import (
     map_laplace_fit,
     map_laplace_mixture_fit,
-)
-from photomancy.orbit.likelihoods import (
-    loglike_imaging,
-    loglike_null,
-    loglike_pm_anomaly,
-    loglike_relative_astrom,
-    loglike_rv_marginalized,
-    loglike_stellar_astrom,
 )
 from photomancy.orbit.migration import migrate_sky_convention
 from photomancy.orbit.nested import (
@@ -96,18 +78,10 @@ __all__ = [
     "ChartOrbitProblem",
     "ConjugateGaussianTarget",
     "FixedMassTarget",
-    "ImagingData",
-    "NullData",
     "OrbitPriorTransform",
     "OrbitUpdater",
-    "PMAnomalyData",
     "ParamBounds",
-    "PhotometryData",
-    # Data containers
-    "RVData",
-    "RelativeAstromData",
     "ScaleAndRotate",
-    "StellarAstromData",
     "TIBasisModel",
     # Thiele-Innes fitter
     "TIFitResult",
@@ -129,13 +103,6 @@ __all__ = [
     "geometric_eig",
     "grid_search",
     "lambert_depth_fit",
-    "loglike_imaging",
-    "loglike_null",
-    "loglike_pm_anomaly",
-    "loglike_relative_astrom",
-    # Likelihoods
-    "loglike_rv_marginalized",
-    "loglike_stellar_astrom",
     "make_astrometric_evaluator",
     "map_laplace_fit",
     "map_laplace_mixture_fit",

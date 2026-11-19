@@ -18,7 +18,7 @@ from orbix.equations import period_to_sma
 from orbix.equations.orbit import mean_anomaly_tp, mean_motion
 
 from photomancy.infer.legacy_posterior import SamplePosterior
-from photomancy.orbit.data import RelativeAstromData
+from photomancy.measurements import RelativeAstromData
 from photomancy.orbit.inference import ORBIT_ROWS_CHART
 from photomancy.orbit.ofti import (
     PARAM_NAMES,

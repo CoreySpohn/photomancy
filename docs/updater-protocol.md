@@ -308,7 +308,7 @@ $$
 + \ln(2\pi\sigma^2)\right],
 $$
 
-which is `photomancy.orbit.likelihoods.loglike_relative_astrom` with zero
+which is `photomancy.measurements.loglike_relative_astrom` with zero
 correlation. There is no detection selection, association ambiguity or nuisance
 calibration, and the distance is fixed.
 

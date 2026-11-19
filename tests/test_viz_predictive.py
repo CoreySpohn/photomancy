@@ -24,7 +24,7 @@ def _close_figures():
 
 def test_plot_rv_converts_au_per_day_to_m_per_s():
     """Curves convert to m/s; pad rows are never drawn."""
-    from photomancy.orbit.data import RVData
+    from photomancy.measurements import RVData
     from photomancy.viz import plot_rv
 
     t = np.linspace(0.0, 300.0, 50)
@@ -58,7 +58,7 @@ def test_plot_rv_fan_alpha():
 
 def _imaging_data():
     """Two detections and one null, padded, with a tiny contrast grid."""
-    from photomancy.orbit.data import ImagingData
+    from photomancy.measurements import ImagingData
 
     grid = jnp.linspace(0.05, 0.4, 8)
     limit = jnp.full(8, 24.0)
@@ -146,7 +146,7 @@ def test_plot_detectability_inverts_idempotently():
 
 def test_plot_rv_preserves_observed_m_per_s():
     """Observed m/s velocities and uncertainties are drawn without conversion."""
-    from photomancy.orbit.data import RVData
+    from photomancy.measurements import RVData
     from photomancy.viz import plot_rv
 
     data = RVData.pad(

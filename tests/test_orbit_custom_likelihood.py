@@ -7,10 +7,14 @@ import pytest
 from hwoutils.constants import Msun2kg
 from kinematics import predict_photometry, predict_relative_astrometry
 from orbit_fit import classical_coordinates, scale_problem
+from term_utils import null_dmag_term
 
-from photomancy import NullTerm
-from photomancy.orbit.data import NullData, RelativeAstromData
-from photomancy.orbit.likelihoods import loglike_null, loglike_relative_astrom
+from photomancy.measurements import (
+    NullData,
+    RelativeAstromData,
+    loglike_null,
+    loglike_relative_astrom,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -82,7 +86,7 @@ def test_custom_null_matches_builtin_logdensity():
         dmag0_grid=jnp.full((2, 2), 23.0),
     )
     kwargs = dict(star_mass_kg=Msun2kg, dist_pc=DIST_PC)
-    builtin = scale_problem((NullTerm(data),), ORBIT, **kwargs)
+    builtin = scale_problem((null_dmag_term(data),), ORBIT, **kwargs)
     custom = scale_problem(
         (_custom_null(data),),
         ORBIT,

@@ -30,7 +30,7 @@ from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import FlatStar, Planet, Scene
 
 from photomancy import RadialVelocityTerm, SystemLogDensity
-from photomancy.orbit.data import RVData
+from photomancy.measurements import RVData
 from photomancy.orbit.inference import (
     build_chart_logdensity,
     orbit_chart_log_volume,

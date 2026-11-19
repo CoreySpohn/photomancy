@@ -15,7 +15,7 @@ from orbix.system import (  # noqa: E402
 )
 from orbix.system.rotation import rotate  # noqa: E402
 
-from photomancy.orbit.data import RelativeAstromData  # noqa: E402
+from photomancy.measurements import RelativeAstromData  # noqa: E402
 from photomancy.orbit.few_epoch import (  # noqa: E402
     MU_SUN,
     TI_PARAM_NAMES,

@@ -11,7 +11,7 @@ from orbix.equations import period_to_sma
 from orbix.system import EccentricityVectorChart
 
 from photomancy.infer.legacy_posterior import SamplePosterior
-from photomancy.orbit.data import RelativeAstromData
+from photomancy.measurements import RelativeAstromData, loglike_relative_astrom
 from photomancy.orbit.grid_search import (
     AdaptiveImportanceSampler,
     ParamBounds,
@@ -22,7 +22,6 @@ from photomancy.orbit.grid_search import (
     grid_search,
 )
 from photomancy.orbit.inference import ORBIT_ROWS_CHART, orbit_chart_log_volume
-from photomancy.orbit.likelihoods import loglike_relative_astrom
 from photomancy.orbit.quasi_random import roberts_sequence
 
 TWO_PI = 2.0 * jnp.pi

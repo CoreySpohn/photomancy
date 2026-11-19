@@ -55,7 +55,7 @@ from orbix.system import (
 )
 
 from photomancy.infer.legacy_posterior import SamplePosterior
-from photomancy.orbit.likelihoods import loglike_relative_astrom
+from photomancy.measurements import loglike_relative_astrom
 from photomancy.orbit.thiele_innes import TI_CHART_PARAM_NAMES
 from photomancy.priors import LOG_HAAR
 

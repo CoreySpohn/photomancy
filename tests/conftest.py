@@ -67,7 +67,7 @@ def fitted_orbit_mixture():
     from orbix.system import ClassicalChart
     from sky_reference import sky_position
 
-    from photomancy.orbit.data import RelativeAstromData
+    from photomancy.measurements import RelativeAstromData
     from photomancy.orbit.init import find_init
     from photomancy.orbit.laplace import map_laplace_mixture_fit
 

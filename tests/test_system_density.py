@@ -23,7 +23,7 @@ from skyscapes.scene.star import FlatStar
 from term_utils import both
 
 from photomancy import RelativeAstrometryTerm, SystemLogDensity
-from photomancy.orbit.data import RelativeAstromData
+from photomancy.measurements import RelativeAstromData
 from photomancy.orbit.nested import orbit_tempered_smc
 from photomancy.priors import orbit_log_prior
 

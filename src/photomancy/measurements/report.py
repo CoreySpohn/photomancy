@@ -19,6 +19,10 @@ from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Transmission
 
 from photomancy.infer.fit import AbstractTerm
+from photomancy.measurements._observables import (
+    _band_contrasts,
+    _relative_positions,
+)
 
 __all__ = [
     "AbstractReportPredictor",
@@ -218,9 +222,6 @@ class TabulatedReportPredictor(AbstractReportPredictor):
 
     def __call__(self, model, rows: ReportRows) -> ReportPrediction:
         """Predict linear-interpolated counts and sky positions for all rows."""
-        # System terms use orbit likelihoods, which also import the report law.
-        from photomancy.system_terms import _band_contrasts, _relative_positions
-
         if model.epoch != self.table.epoch:
             raise ValueError(
                 f"report table epoch {self.table.epoch} differs from "
