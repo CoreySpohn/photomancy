@@ -260,6 +260,15 @@ def _sum_leaf(value, leaf_ndim, dist):
     return jnp.sum(value, axis=tuple(range(-n, 0))) if n > 0 else value
 
 
+def _to_cell(block, coordinates):
+    """Reduce every periodic coordinate of a block entry to its cell ``[0, period)``."""
+    period = dict(zip(block.coordinate_names, block.periods, strict=True))
+    return {
+        name: value if period[name] is None else jnp.mod(value, period[name])
+        for name, value in coordinates.items()
+    }
+
+
 class Fit(eqx.Module):
     """A normalized log density over the free entries of a model.
 
@@ -507,13 +516,7 @@ class Fit(eqx.Module):
                 ndim = jnp.ndim(resolve(self.model, key))
                 volume = volume + _sum_leaf(vol, ndim, entry)
             else:
-                period = dict(zip(entry.coordinate_names, entry.periods, strict=True))
-                x[key] = {
-                    name: value
-                    if period[name] is None
-                    else jnp.mod(value, period[name])
-                    for name, value in u[key].items()
-                }
+                x[key] = _to_cell(entry, u[key])
         return x, jnp.broadcast_to(volume, self._batch_shape(u))
 
     def periods(self) -> tuple[float | None, ...]:
@@ -555,6 +558,30 @@ class Fit(eqx.Module):
         z = jnp.asarray(z)
         u = jax.vmap(unravel)(z.reshape(-1, z.shape[-1]))
         return jax.tree.map(lambda a: a.reshape(*z.shape[:-1], *a.shape[1:]), u)
+
+    def to_flat(self, x: dict) -> jax.Array:
+        """Flat unconstrained vectors ``z (..., d)`` of stored entries ``x``.
+
+        The inverse of :meth:`from_flat`: :meth:`to_real` of every draw, with each
+        periodic block coordinate reduced to its cell ``[0, period)``, raveled in the
+        order :meth:`unravel` reads (see :meth:`periods`). ``x`` may carry leading
+        batch axes, which come before the flat axis of the result. It places a cloud
+        (``posterior.samples``) in the coordinates of a proposal's ``adapt`` or of
+        ``MixtureProposal.from_cloud``.
+        """
+        batch = self._batch_shape(x)
+        n = int(np.prod(batch, dtype=int))
+        one_axis = jax.tree.map(lambda a: a.reshape(n, *a.shape[len(batch) :]), x)
+
+        def flat_one(one):
+            u = self.to_real(one)
+            for key, entry in self.free.items():
+                if not isinstance(entry, AbstractDistribution):
+                    u[key] = _to_cell(entry, u[key])
+            return ravel_pytree(u)[0]
+
+        z = jax.vmap(flat_one)(one_axis)
+        return z.reshape(*batch, z.shape[-1])
 
     def from_flat(self, z) -> tuple[dict, jax.Array]:
         """Stored entries and the log volume of the map from flat vectors ``z``.

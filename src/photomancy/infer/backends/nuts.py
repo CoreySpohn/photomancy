@@ -142,7 +142,8 @@ class NUTS(AbstractBackend):
         thin: Keep every ``thin``-th transition; ``NUTSInfo.thin`` records it.
         dense_mass_matrix: Adapt a dense (default) or diagonal mass matrix.
         init: ``None`` for prior draws, one constrained draw (a dict of the fit's
-            entries), or a ``Posterior`` whose weights pick the starts.
+            entries), or a ``Posterior`` whose weights pick the starts; the starts are
+            placed in the flat vector by ``fit.to_flat``.
     """
 
     n_warmup: int = eqx.field(static=True, default=500)

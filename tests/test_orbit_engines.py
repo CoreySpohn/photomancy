@@ -13,7 +13,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.model_paths import resolve  # noqa: F401
-from jax.flatten_util import ravel_pytree
 from orbix.system import OrbitLaw, System, ThieleInnesBlock
 from orbix.system.core import Body, SkyFrame
 from priorities import LogUniform, Uniform
@@ -74,10 +73,6 @@ def _fit(term=None):
     return Fit(_system(), {"orbits": _block()}, (term or _term(),))
 
 
-def _flat(fit, x):
-    return jax.vmap(lambda one: ravel_pytree(one)[0])(fit.to_real(x))
-
-
 @pytest.fixture(scope="module")
 def fit():
     """The shared four-row fit."""
@@ -94,7 +89,7 @@ def test_completion_identity_pins_the_linear_form(fit):
     """
     comp = Completion.from_fit(fit)
     x = fit.sample_prior(jax.random.key(0), (3,))
-    shape, c = comp.split(_flat(fit, x))
+    shape, c = comp.split(fit.to_flat(x))
     for i in range(3):
         mean, chol, log_z = comp.conditional(shape[i])
         diff = chol.T @ (c[i] - mean)
@@ -284,7 +279,7 @@ def test_scale_rotate_density_is_normalized_and_matches_the_draws():
     p_draws = inside.mean()
     se_draws = np.sqrt(p_draws * (1 - p_draws) / n)
     xp = fit.sample_prior(jax.random.key(1), (n,))
-    zp = _flat(fit, xp)
+    zp = fit.to_flat(xp)
     log_w = proposal.log_prob(zp, fit) - fit.log_prior(xp)
     w = np.exp(np.asarray(log_w))
     se_prior = w.std() / np.sqrt(n)

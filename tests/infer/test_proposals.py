@@ -69,6 +69,38 @@ def test_periods_follow_the_flat_vector_by_coordinate_name():
     assert leaf.periods() == (None,)
 
 
+def test_to_flat_inverts_from_flat_on_a_leaf_law_and_an_orbit_block():
+    """``fit.from_flat(fit.to_flat(x))[0]`` is ``x``, with the batch axes kept.
+
+    Truth source: the round trip itself, to 1e-12, on a leaf-law fit and on an
+    orbit-block fit with periodic coordinates; an angle shifted by whole periods gives
+    the flat vector of the stored angle. Fails if: the order of ``to_flat`` differs from
+    that of ``unravel``, a periodic coordinate is not reduced to its cell, or a batch
+    axis is lost.
+    """
+    leaf = Fit(_scene(), {"planets[0].Rp_Rearth": Uniform(0.5, 4.0)}, ())
+    orbit = _orbit_fit()
+    for fit in (leaf, orbit):
+        x = fit.sample_prior(jax.random.key(0), (2, 3))
+        z = fit.to_flat(x)
+        assert z.shape == (2, 3, len(fit.periods()))
+        back, _ = fit.from_flat(z)
+        jax.tree.map(
+            lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12),
+            back,
+            x,
+        )
+    x = orbit.sample_prior(jax.random.key(0), (4,))
+    block = orbit.free["dynamics.orbits"]
+    shifted = dict(x["dynamics.orbits"])
+    for name, period in zip(block.coordinate_names, block.periods, strict=True):
+        if period is not None:
+            shifted[name] = shifted[name] + 3 * period
+    np.testing.assert_allclose(
+        orbit.to_flat({"dynamics.orbits": shifted}), orbit.to_flat(x), atol=1e-12
+    )
+
+
 def test_from_real_reduces_periodic_coordinates_to_one_cell():
     """A shifted angle is stored in ``[0, period)`` and has the same density.
 

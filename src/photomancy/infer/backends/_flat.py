@@ -53,15 +53,13 @@ def start_points(fit, init, key, n):
         n: Number of starts.
     """
     if init is None:
-        u = fit.to_real(fit.sample_prior(key, (n,)))
+        x = fit.sample_prior(key, (n,))
     elif isinstance(init, Posterior):
         index = jax.random.categorical(key, init.log_weights, shape=(n,))
-        u = fit.to_real(jax.tree.map(lambda a: a[index], init.samples))
+        x = jax.tree.map(lambda a: a[index], init.samples)
     else:
-        u = fit.to_real(
-            jax.tree.map(lambda a: jnp.broadcast_to(a, (n, *a.shape)), init)
-        )
-    return jax.vmap(lambda one: ravel_pytree(one)[0])(u)
+        x = jax.tree.map(lambda a: jnp.broadcast_to(a, (n, *a.shape)), init)
+    return fit.to_flat(x)
 
 
 class FlatDensity(eqx.Module):

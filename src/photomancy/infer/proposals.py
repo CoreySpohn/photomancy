@@ -135,7 +135,8 @@ class AbstractProposal(eqx.Module):
 
         Args:
             key: PRNG key.
-            z: Draws of this proposal in the flat vector, ``(N, d)``.
+            z: Draws in the flat vector, ``(N, d)``: this proposal's, or
+                ``fit.to_flat(posterior.samples)`` for a cloud of another run.
             log_weights: Their log weights, ``(N,)``.
             fit: The fit.
             n_centers: Kernels of the mixture.
@@ -215,8 +216,7 @@ class PriorProposal(AbstractDensityProposal):
             flat, unravel = ravel_pytree(template)
             cube = _roberts(key, n, flat.shape[0])
             x = jax.vmap(lambda c: fit.from_unit(unravel(c)))(cube)
-        z = jax.vmap(lambda one: ravel_pytree(one)[0])(fit.to_real(x))
-        z = _wrap_cell(z, fit.periods())
+        z = fit.to_flat(x)
         return z, self.log_prob(z, fit)
 
     def log_prob(self, z, fit):

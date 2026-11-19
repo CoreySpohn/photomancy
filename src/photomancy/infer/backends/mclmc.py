@@ -162,7 +162,8 @@ class MCLMC(AbstractBackend):
         n_draws: Transitions per chain after tuning.
         n_chains: Number of chains, vectorized.
         thin: Keep every ``thin``-th transition; ``MCLMCInfo.thin`` records it.
-        init: ``None`` for prior draws, one constrained draw, or a ``Posterior``.
+        init: ``None`` for prior draws, one constrained draw, or a ``Posterior``;
+            the starts are placed in the flat vector by ``fit.to_flat``.
     """
 
     n_tune: int = eqx.field(static=True, default=2000)

@@ -470,7 +470,7 @@ def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
     """
     fit = _prior_only_orbit_fit()
     laplace = run(fit, Laplace(n_draws=4000), jax.random.key(0))
-    flat = _flat_samples(fit, laplace.samples)
+    flat = fit.to_flat(laplace.samples)
     seed = MixtureProposal.from_cloud(
         jax.random.key(1),
         flat,
@@ -485,11 +485,6 @@ def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
     )
     assert abs(float(post.log_evidence)) < 3 * float(post.log_evidence_se)
     assert float(pareto_khat(post.log_weights)) < 0.7
-
-
-def _flat_samples(fit, samples):
-    """Flat unconstrained vectors ``(n, d)`` of the stored samples."""
-    return jax.vmap(lambda x: ravel_pytree(fit.to_real(x))[0])(samples)
 
 
 @pytest.mark.parametrize("sequence", ["random", "roberts"])
@@ -569,7 +564,7 @@ def test_a_seeded_adaptive_run_starts_at_temperature_one():
     laplace = run(fit, Laplace(n_draws=2000), jax.random.key(0))
     seed = MixtureProposal.from_cloud(
         jax.random.key(1),
-        _flat_samples(fit, laplace.samples),
+        fit.to_flat(laplace.samples),
         laplace.log_weights,
         n_centers=16,
         periods=fit.periods(),

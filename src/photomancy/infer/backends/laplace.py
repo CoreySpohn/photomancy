@@ -233,7 +233,8 @@ class Laplace(AbstractBackend):
        mode, and a mode near a zero-density region of a block.
     5. In those cases the cloud is a seed for
        ``AdaptiveImportance(MixtureProposal.from_cloud(key, z, log_weights,
-       n_centers=...), n_draws)``, with ``z`` the flat vectors of the cloud.
+       n_centers=...), n_draws)``, with ``z = fit.to_flat(posterior.samples)`` the
+       flat vectors of the cloud.
     6. Started from the prior, the modes found can miss the posterior: on a concentrated
        orbit fit two of four keys kept only modes whose cloud had a Kish size near 1
        and a k-hat above 3 (log evidence about 1200 nats low), and the other two a
@@ -268,7 +269,8 @@ class Laplace(AbstractBackend):
             fit.
         max_decrement: Largest Newton decrement, in nats, of a mode that is kept.
         init: ``None`` for prior draws as starts, one constrained draw, or a
-            ``Posterior`` whose weights pick the starts.
+            ``Posterior`` whose weights pick the starts; the starts are placed in the
+            flat vector by ``fit.to_flat``.
     """
 
     n_draws: int = eqx.field(static=True, default=2000)
