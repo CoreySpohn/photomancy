@@ -1,9 +1,12 @@
-"""Joint counts and astrometry reports, with an interchangeable count predictor.
+"""Counts reports of planned exposures, with an interchangeable count predictor.
 
 Times are days from the selected system's epoch; a report table carries that epoch
 and a predictor refuses a model whose epoch differs. Positions, errors and diffraction
 scales are in arcsec. A null is a censored counts measurement; a detection carries
-counts and a position with covariance determined by its own reported observables.
+counts and a position whose covariance is a function of its reported counts. Those
+counts are data, so the joint density of a detection factorizes into the counts, which
+``ReportTerm`` scores, and a Gaussian position with a data-fixed covariance, which a
+``RelativeAstrometryTerm`` on ``ReportRows.astrometry()`` scores.
 """
 
 import math
@@ -25,6 +28,7 @@ from photomancy.measurements._observables import (
     _band_contrasts,
     _relative_positions,
 )
+from photomancy.measurements.astrometry import RelativeAstromData
 
 __all__ = [
     "AbstractReportPredictor",
@@ -145,6 +149,26 @@ class ReportRows(eqx.Module):
             rows.ra_err,
             rows.dec_err,
             rows.corr,
+        )
+
+    def astrometry(self, planet: int = 0) -> RelativeAstromData:
+        """The positions of the detected rows, as relative astrometry data.
+
+        ``ReportTerm`` scores the counts; a ``RelativeAstrometryTerm`` on these data
+        scores the positions. Rows that are not valid detections are padding.
+
+        Args:
+            planet: Index of the planet the rows report (the predictor's ``planet``).
+        """
+        return RelativeAstromData(
+            times=self.time_d,
+            ra=self.ra,
+            dec=self.dec,
+            ra_err=self.ra_err,
+            dec_err=self.dec_err,
+            corr=self.corr,
+            planet_id=jnp.full(self.time_d.shape, planet, int),
+            is_valid=self.is_valid & self.is_detected,
         )
 
 
@@ -321,12 +345,18 @@ def _scale_fit(counts, limit, rows, law):
 
 
 class ReportTerm(AbstractConditionalTerm):
-    """An exact or tabulated joint report law on the same observed rows.
+    """An exact or tabulated counts report law on the observed rows.
+
+    The term scores the counts of every valid row: a null is the probability of counts
+    below the threshold, a detection the density of its counts on the detection region.
+    The position of a detection is not scored here; ``rows.astrometry()`` gives the data
+    of the ``RelativeAstrometryTerm`` that scores it. ``draw`` generates the whole
+    report, positions and their errors included.
 
     For a tabulated predictor, diffraction scales always come from
     ``predictor.table.lod_arcsec[rows.mode]``. For any other predictor,
-    ``lod_arcsec`` is required and has shape (R,). It is used only for sampling;
-    scoring always uses the errors and correlation stored in each observed row.
+    ``lod_arcsec`` is required and has shape (R,). It is used only for sampling the
+    position errors.
 
     The term is the exact likelihood at the model: it reads the planet's photometric
     leaf from the model and holds no integral over it. With ``orbit_path`` it also sums
@@ -383,31 +413,8 @@ class ReportTerm(AbstractConditionalTerm):
         clean = _prediction_rows(rows)
         prediction = self.predictor(model, clean)
         detected = rows.is_valid & rows.is_detected
-        # Safe operands keep the unused position branch differentiable on nulls.
-        sx = jnp.where(detected, rows.ra_err, 1.0)
-        sy = jnp.where(detected, rows.dec_err, 1.0)
-        rho = jnp.where(detected, rows.corr, 0.0)
-        dx = jnp.where(detected, rows.ra, 0.0) - jnp.where(detected, prediction.ra, 0.0)
-        dy = jnp.where(detected, rows.dec, 0.0) - jnp.where(
-            detected, prediction.dec, 0.0
-        )
-        has_errors = (sx > 0) & (sy > 0) & (jnp.abs(rho) < 1)
-        sx = jnp.where(has_errors, sx, 1.0)
-        sy = jnp.where(has_errors, sy, 1.0)
-        rho = jnp.where(has_errors, rho, 0.0)
-        one_minus = 1 - rho**2
-        position = (
-            -0.5
-            * ((dx / sx) ** 2 + (dy / sy) ** 2 - 2 * rho * dx * dy / (sx * sy))
-            / one_minus
-        )
-        position -= jnp.log(2 * jnp.pi * sx * sy * jnp.sqrt(one_minus))
-        position = jnp.where(has_errors, position, -jnp.inf)
         counts = jnp.where(detected, rows.counts, 0.0)
-        detection = (
-            self.law.log_counts_density(counts, clean.limit_counts, prediction)
-            + position
-        )
+        detection = self.law.log_counts_density(counts, clean.limit_counts, prediction)
         null = self.law.log_null_probability(clean.limit_counts, prediction)
         value = jnp.where(rows.is_detected, detection, null)
         outcome_nan = jnp.any(
@@ -440,7 +447,7 @@ class ReportTerm(AbstractConditionalTerm):
         return jnp.sum(self._row_density(model, self.rows)[0])
 
     def __call__(self, model) -> jax.Array:
-        """Sum valid null log probabilities and detection joint log densities.
+        """Sum valid null log probabilities and detection counts log densities.
 
         With ``orbit_path`` the value is the log of the mean of the two sheets'
         likelihoods.

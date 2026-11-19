@@ -44,7 +44,7 @@ BAND = Band(550.0, 650.0)
 THRESHOLD = 5.0
 LIMIT_COUNTS = 100.0
 # Two astrometric epochs and a report of two detections and a null at 410 d; the
-# detections carry no position information (an error of 1000 arcsec).
+# report scores counts only, so the positions of the detections are the two records.
 REC_TIMES = np.array([0.0, 200.0])
 REC_RA = np.array([-0.08128829720329389, 0.09146848442849184])
 REC_DEC = np.array([-0.04738471947299113, 0.059272793717665855])
@@ -91,11 +91,26 @@ def table():
     )
 
 
-def rows(counts=REP_COUNTS, detected=REP_DETECTED, valid=REP_VALID, epochs=REP_EPOCHS):
-    """Report rows; a detection gets a position error of 1000 arcsec."""
+def rows(
+    counts=REP_COUNTS,
+    detected=REP_DETECTED,
+    valid=REP_VALID,
+    epochs=REP_EPOCHS,
+    *,
+    positions=False,
+):
+    """Report rows; with ``positions`` the detections carry the astrometric records.
+
+    The two detections are at the epochs of the records, so with ``positions`` their
+    positions are the records with errors of 3.5 and 5 mas and a correlation of 0.3.
+    """
     n = len(epochs)
     det = np.asarray(detected) & np.asarray(valid)
-    err = np.where(det, 1.0e3, 0.0)
+    ra, dec = np.zeros(n), np.zeros(n)
+    err_ra, err_dec, corr = np.zeros(n), np.zeros(n), np.zeros(n)
+    if positions:
+        ra[:2], dec[:2] = REC_RA, REC_DEC
+        err_ra[:], err_dec[:], corr[:] = 0.0035, 0.005, 0.3
     return ReportRows(
         time_d=np.asarray(epochs, float),
         science_s=np.ones(n),
@@ -104,11 +119,11 @@ def rows(counts=REP_COUNTS, detected=REP_DETECTED, valid=REP_VALID, epochs=REP_E
         is_valid=np.asarray(valid),
         is_detected=det,
         counts=np.where(det, counts, 0.0),
-        ra=np.zeros(n),
-        dec=np.zeros(n),
-        ra_err=err,
-        dec_err=err,
-        corr=np.zeros(n),
+        ra=np.where(det, ra, 0.0),
+        dec=np.where(det, dec, 0.0),
+        ra_err=np.where(det, err_ra, 0.0),
+        dec_err=np.where(det, err_dec, 0.0),
+        corr=np.where(det, corr, 0.0),
     )
 
 
@@ -236,19 +251,26 @@ REPORTS = {
     "fixture": {},
     "censored": dict(counts=np.array([1711.03, 300.0, 0.0, 0.0, 0.0])),
     "null_only": dict(detected=np.zeros(5, bool)),
+    "positions": dict(positions=True),
 }
 
 
 @eqx.filter_jit
-def _scores(fit, both, one, z):
-    """Two-sheet value, both single sheets and the leaf record at flat draws ``z``."""
+def _scores(fit, both, one, z, astro=None):
+    """Two-sheet value, both single sheets and the leaf record at flat draws ``z``.
+
+    With ``astro`` the sheets are of ``one`` plus ``astro``.
+    """
     _, unravel = ravel_pytree(fit.to_real(draw_template(fit)))
 
     def per(zi):
         x, _ = fit.from_real(unravel(zi))
         model = fit.model_at(x)
         record = both.leaf_conditional(model)
-        sheets = jnp.stack([one(model), one(both._reflected(model))])
+        pair = (model, both._reflected(model))
+        sheets = jnp.stack(
+            [one(m) + (0.0 if astro is None else astro(m)) for m in pair]
+        )
         return both(model), sheets, record.mean, record.sd, record.log_pi
 
     return jax.vmap(per)(z)
@@ -259,15 +281,17 @@ def _scores(fit, both, one, z):
 def test_report_term_matches_the_stored_golden(fit, name):
     """Fails if the report law, the sheet reflection or the leaf record drifts.
 
-    Values at six stored draws (two from the prior, four from the posterior) of three
+    Values at six stored draws (two from the prior, four from the posterior) of four
     reports: the fixture (two detections, a null, two padded rows), a detection under
-    the threshold (``-inf`` everywhere), and a null-only report (in the last two the
-    record has no peak). The stored sheets of the fixture agree with the previous report
-    scorer to 4e-5 nat above -150 nat (it interpolates a different table). Checks, at
-    rtol 1e-10: the
-    two-sheet value, each sheet alone, the record; and exactly: the two-sheet value
-    is ``logaddexp`` of the sheets minus ``log 2``, and padded rows holding garbage
-    change nothing.
+    the threshold (``-inf`` everywhere), a null-only report (in these two the record
+    has no peak), and the fixture with real detection positions. The stored sheets of
+    the fixture agree with the previous report scorer to 4e-5 nat above -150 nat (it
+    interpolates a different table). Checks, at rtol 1e-10 (compiled against the
+    eager values stored): the two-sheet value, each sheet alone, the record; for the
+    report with positions, the counts-only sheets plus ``RelativeAstrometryTerm`` on
+    ``rows.astrometry()`` against the stored values of the term that also scored the
+    position; and exactly: the two-sheet value is ``logaddexp`` of the sheets minus
+    ``log 2``, and padded rows holding garbage change nothing.
     """
     golden = json.loads(GOLDEN.read_text())
     want = golden["reports"][name]
@@ -280,15 +304,21 @@ def test_report_term_matches_the_stored_golden(fit, name):
     np.testing.assert_allclose(mean, want["mean"], rtol=1e-10)
     np.testing.assert_allclose(sd, want["sd"], rtol=1e-10)
     np.testing.assert_allclose(log_pi, want["log_pi"], rtol=1e-10)
+    if name == "positions":
+        astro = RelativeAstrometryTerm(both.rows.astrometry())
+        joint = _scores(fit, both, one, z, astro)[1]
+        np.testing.assert_allclose(joint, want["with_positions"], rtol=1e-10)
     summed = np.logaddexp(sheets[:, 0], sheets[:, 1]) - np.log(2.0)
     np.testing.assert_allclose(two, summed, rtol=1e-14)
     counts = np.where(REP_VALID, kw.get("counts", REP_COUNTS), 999.0)
     epochs = np.where(REP_VALID, REP_EPOCHS, 12345.0)
     detected = np.where(REP_VALID, kw.get("detected", REP_DETECTED), True)
-    garbage = report_term(rows(counts, detected, epochs=epochs))
+    garbage = report_term(
+        rows(counts, detected, epochs=epochs, positions=kw.get("positions", False))
+    )
     np.testing.assert_array_equal(_scores(fit, garbage, one, z)[0], two)
     if name == "censored":
         assert np.all(np.isneginf(np.asarray(two)))
     # a peak only where every detection is above the threshold
     peaks = np.isfinite(np.asarray(log_pi))
-    assert np.any(peaks) if name == "fixture" else not np.any(peaks)
+    assert np.any(peaks) if name in ("fixture", "positions") else not np.any(peaks)
