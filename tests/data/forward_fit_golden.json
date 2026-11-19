@@ -1,0 +1,60 @@
+{
+  "base_sha": "9a5219a",
+  "note": "Legacy build_*_logdensity values (unnormalized Gaussian likelihood plus default prior); subtract the Gaussian normalization before comparing.",
+  "disk": {
+    "points": {
+      "init": {
+        "sma": 56.0,
+        "alpha_in": 4.0,
+        "alpha_out": -6.0,
+        "ksi0": 1.3,
+        "incl": 48.0,
+        "pa": 22.0
+      },
+      "truth": {
+        "sma": 50.0,
+        "alpha_in": 5.0,
+        "alpha_out": -5.0,
+        "ksi0": 1.0,
+        "incl": 55.0,
+        "pa": 30.0
+      },
+      "between": {
+        "sma": 52.5,
+        "alpha_in": 4.6,
+        "alpha_out": -5.4,
+        "ksi0": 1.1,
+        "incl": 52.0,
+        "pa": 27.0
+      }
+    },
+    "legacy_log_density": {
+      "init": -84246.54727873544,
+      "truth": -1312.9176351685944,
+      "between": -22939.602336003307
+    },
+    "n_pixels": 2601
+  },
+  "atmosphere": {
+    "points": {
+      "init": [
+        -0.1931471805599453,
+        -2.1094379124341005
+      ],
+      "truth": [
+        -0.6931471805599453,
+        -1.6094379124341003
+      ],
+      "between": [
+        -1.0,
+        -1.9
+      ]
+    },
+    "legacy_log_density": {
+      "init": -1582.2808802045079,
+      "truth": -13.770144083122663,
+      "between": -307.09657724621644
+    },
+    "n_points": 24
+  }
+}
