@@ -9,12 +9,7 @@ and terms live in ``photomancy.measurements``. Built on orbix geometry
 
 from photomancy.orbit.completion import CompletedProposal, Completion, ThetaPrior
 from photomancy.orbit.diagnostics import posterior_physical
-from photomancy.orbit.eig import (
-    alias_breaking_eig,
-    alias_breaking_eig_from_covariances,
-    evaluate_orbit_candidates,
-    geometric_eig,
-)
+from photomancy.orbit.eig import evaluate_orbit_candidates
 from photomancy.orbit.proposals import ScaleRotateProposal
 
 __all__ = [
@@ -22,10 +17,6 @@ __all__ = [
     "Completion",
     "ScaleRotateProposal",
     "ThetaPrior",
-    # Bayesian experimental design
-    "alias_breaking_eig",
-    "alias_breaking_eig_from_covariances",
     "evaluate_orbit_candidates",
-    "geometric_eig",
     "posterior_physical",
 ]

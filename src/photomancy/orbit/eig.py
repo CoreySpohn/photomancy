@@ -1,38 +1,56 @@
-"""Orbit-domain Expected Information Gain (a thin wrapper over the generic layer).
+"""Expected information gain of a planet's next astrometric epoch.
 
-Chart-space mixtures use the system terms' sky positions and Lambertian dMag
-predictions. Candidate scoring applies the contrast
-curve and delegates the analytic EIG to :mod:`photomancy.infer.eig`.
+The posterior's draws are clustered into Gaussian modes over the flat vector of its
+entries (:func:`~photomancy.infer.cluster_to_mixture`); each mode builds the model
+through the posterior's ``Fit`` and is linearized about its mean. Candidate scoring
+applies an optional contrast curve and delegates the analytic EIG to
+:func:`photomancy.infer.eig.evaluate_candidates`.
 """
+
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from hwoutils.model_paths import resolve
+from orbix.system import System
 
-from photomancy.infer.eig import (
-    alias_breaking_eig,
-    alias_breaking_eig_from_covariances,
-    detectability_eig,
-    geometric_eig,
+from photomancy.infer import cluster_to_mixture, ravel_samples
+from photomancy.infer.eig import evaluate_candidates
+from photomancy.measurements import (
+    RelativeAstromData,
+    RelativeAstrometryTerm,
+    interpolate_contrast_curve,
+    system_separation_dmag,
 )
-from photomancy.infer.eig import evaluate_candidates as _eval_candidates
-from photomancy.measurements import interpolate_contrast_curve, system_separation_dmag
-from photomancy.measurements._observables import _sky_positions
 
-__all__ = [
-    "alias_breaking_eig",
-    "alias_breaking_eig_from_covariances",
-    "detectability_eig",
-    "evaluate_orbit_candidates",
-    "geometric_eig",
-]
+__all__ = ["evaluate_orbit_candidates"]
+
+
+class _Modes(NamedTuple):
+    """Gaussian modes of a posterior in the layout ``evaluate_candidates`` reads."""
+
+    means: jnp.ndarray
+    covs: jnp.ndarray
+    log_weights: jnp.ndarray
 
 
 def _astrometry(system, t, planet):
-    positions = _sky_positions(system, jnp.atleast_1d(t))
-    count = positions.shape[1]
+    """East and north offsets (arcsec) of one planet at one epoch, as a row predicts."""
+    count = system.orbits.a_AU.size if isinstance(system, System) else system.n_planets
     if not 0 <= planet < count:
         raise ValueError(f"Planet index {planet} outside system of {count} planets")
-    return positions[:, planet, 0]
+    one = jnp.ones(1)
+    row = RelativeAstromData(
+        times=jnp.atleast_1d(t),
+        ra=0.0 * one,
+        dec=0.0 * one,
+        ra_err=one,
+        dec_err=one,
+        corr=0.0 * one,
+        planet_id=jnp.array([planet]),
+        is_valid=jnp.ones(1, dtype=bool),
+    )
+    return RelativeAstrometryTerm(row).predict(system)[:, 0]
 
 
 def _photometry(system, t, area_AU2):
@@ -40,21 +58,76 @@ def _photometry(system, t, area_AU2):
     return jnp.stack((sep[0], dmag[0]))
 
 
-# ---------------------------------------------------------------------------
-# High-level batch evaluation (delegates to photomancy.infer.eig)
-# ---------------------------------------------------------------------------
+def _modes(posterior, n_modes, key):
+    """Cluster the draws into ``n_modes`` Gaussian modes over the flat entries."""
+    mixture = cluster_to_mixture(posterior, n_modes, key)
+    components = mixture.component_distribution
+    tril = components.scale_tril
+    return _Modes(
+        means=components.loc,
+        covs=tril @ jnp.swapaxes(tril, -1, -2),
+        log_weights=jax.nn.log_softmax(mixture.mixing_logits),
+    )
 
 
-def _orbit_evaluate(
+def evaluate_orbit_candidates(
     posterior,
-    candidate_epochs,
+    time_d,
     obs_variance,
-    forward,
-    photometry,
-    contrast_curve,
-    iwa_arcsec,
+    *,
+    key,
+    n_modes=4,
+    system_path="",
+    planet=0,
+    contrast_curve=None,
+    area_AU2=None,
+    iwa_arcsec=0.0,
 ):
-    """Score east/north measurements with optional dMag selection at each mode."""
+    """Score a planet's relative astrometry at candidate days from the system epoch.
+
+    The draws of ``posterior`` are clustered into ``n_modes`` Gaussian modes over the
+    flat vector of all its entries. At each mode mean the model is built through
+    ``posterior.fit`` and the system at ``system_path`` predicts the east and north
+    offsets of planet ``planet``, linearized about the mean. The zero-based ``planet``
+    index follows scene order for a scene and Jacobi chain order for a bare orbix
+    system.
+
+    Each reported measurement has variance ``obs_variance`` in arcsec squared. An
+    optional ``(sep_arcsec, dMag_limit)`` curve makes a mode report only when its
+    planet is above the inner working angle and brighter than the curve (one-planet
+    systems). The Lambertian scale is the scene's albedo times squared radius;
+    ``area_AU2`` supplies a fixed scale, which a bare orbix system needs.
+
+    Args:
+        posterior: An unbatched :class:`~photomancy.infer.Posterior`.
+        time_d: Candidate epochs, days from the system's epoch, shape ``(N,)``.
+        obs_variance: Measurement variance (arcsec squared).
+        key: PRNG key of the clustering.
+        n_modes: Number of Gaussian modes.
+        system_path: Model path of the scored system; the empty path is the model.
+        planet: Planet index.
+        contrast_curve: Optional ``(sep_arcsec, dMag_limit)`` arrays.
+        area_AU2: Optional geometric albedo times radius squared (AU^2).
+        iwa_arcsec: Inner working angle (arcsec) of the detection model.
+
+    Returns:
+        The dict of :func:`~photomancy.infer.eig.evaluate_candidates` (``total_eig``,
+        ``geometric_eig``, ``alias_eig``, ``predictions``, ``detectability``) plus
+        ``separation`` and ``dMag``, shape ``(N, n_modes)``, at each mode mean (zero
+        without a contrast curve).
+    """
+    modes = _modes(posterior, n_modes, key)
+    _, unravel = ravel_samples(posterior)
+
+    def system_at(z):
+        return resolve(posterior.fit.model_at(unravel(z)), system_path)
+
+    def forward(z, t):
+        return _astrometry(system_at(z), t, planet)
+
+    def photometry(z, t):
+        return _photometry(system_at(z), t, area_AU2)
+
     detectable = None
     detectable_args = ()
     if contrast_curve is not None:
@@ -67,19 +140,18 @@ def _orbit_evaluate(
             )[0]
             return ((sep > iwa_arcsec) & (dmag < dmag_limit)).astype(sep.dtype)
 
-    epochs = jnp.asarray(candidate_epochs)
-    res = _eval_candidates(
-        posterior,
+    epochs = jnp.asarray(time_d)
+    res = evaluate_candidates(
+        modes,
         epochs,
         forward,
         obs_variance,
         detectable=detectable,
         detectable_args=detectable_args,
     )
-
     if contrast_curve is not None:
         sep_dmag = jax.vmap(
-            lambda t: jax.vmap(photometry, in_axes=(0, None))(posterior.means, t)
+            lambda t: jax.vmap(photometry, in_axes=(0, None))(modes.means, t)
         )(epochs)
         res["separation"] = sep_dmag[..., 0]
         res["dMag"] = sep_dmag[..., 1]
@@ -87,49 +159,3 @@ def _orbit_evaluate(
         res["separation"] = jnp.zeros_like(res["detectability"])
         res["dMag"] = jnp.zeros_like(res["detectability"])
     return res
-
-
-def evaluate_orbit_candidates(
-    posterior,
-    problem,
-    time_d,
-    obs_variance,
-    *,
-    planet=0,
-    contrast_curve=None,
-    area_AU2=None,
-    iwa_arcsec=0.0,
-):
-    """Score a planet's relative astrometry at days from the system epoch.
-
-    The mixture means and covariances are in the flat chart coordinates of the
-    fitted ``ChartOrbitProblem``. Its density builds the physical system, including
-    sampled body properties.
-    The zero-based ``planet`` index follows scene order for a scene system and
-    Jacobi chain order for a bare orbix system.
-
-    Each reported measurement has variance ``obs_variance`` in arcsec squared.
-    An optional ``(sep_arcsec, dMag_limit)`` curve enables mode-wise
-    detection for a single planet above the inner working angle.
-    The Lambert scale defaults to the scene's albedo times squared radius.
-    Supply ``area_AU2`` to use a fixed scale, including with a bare orbix system.
-
-    The posterior must declare the problem's chart and epoch (``problem.run`` and
-    ``problem.declare`` stamp them); ``time_d`` is days from that epoch. A posterior
-    in another chart, or an undeclared one, raises ``ValueError``.
-    """
-    problem.require(posterior)
-
-    def forward(z, t):
-        return _astrometry(
-            problem.density.build_system(problem.unflatten(z)), t, planet
-        )
-
-    def photometry(z, t):
-        return _photometry(
-            problem.density.build_system(problem.unflatten(z)), t, area_AU2
-        )
-
-    return _orbit_evaluate(
-        posterior, time_d, obs_variance, forward, photometry, contrast_curve, iwa_arcsec
-    )
