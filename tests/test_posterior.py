@@ -182,9 +182,9 @@ def test_sample_posterior_to_prior_via_clustering():
     prior = cluster_to_mixture(post, 2, key=jax.random.key(4)).to_prior()
     assert isinstance(prior, Mixture)
     # the two clusters survive as two modes with ~equal weight
-    centers = jnp.sort(prior.components.loc[:, 0])
+    centers = jnp.sort(prior.component_distribution.loc[:, 0])
     assert jnp.allclose(centers, jnp.array([0.0, 6.0]), atol=0.5)
-    w = jax.nn.softmax(prior.log_weights)
+    w = jax.nn.softmax(prior.mixing_logits)
     assert jnp.allclose(jnp.sort(w), jnp.array([0.5, 0.5]), atol=0.1)
 
 
