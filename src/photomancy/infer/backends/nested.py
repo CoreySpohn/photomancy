@@ -202,8 +202,10 @@ class NestedSampling(AbstractBackend):
     with a block that has no unit-cube map is refused. The draws are the dead points
     with weights ``L_i dX_i``; the evidence is jaxns's expectation estimate of
     ``log Z`` and its standard error is the standard deviation of ``log Z`` from the
-    shrinkage distribution. The sampler is jitted internally and runs one fit at a
-    time.
+    shrinkage distribution. That error is the shrinkage error only: on a concentrated
+    seven-coordinate orbit fit the evidence scattered by about 1 nat over keys against
+    a reported 0.3, so read it as good to about 1 nat at the defaults. The sampler is
+    jitted internally and runs one fit at a time.
 
     Args:
         n_live: Number of independent root chains (jaxns ``root_allocation_degree``);

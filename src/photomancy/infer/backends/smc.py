@@ -158,8 +158,12 @@ class SMC(AbstractBackend):
     temperature ladder placed so the effective sample size holds at ``target_ess``;
     inner NUTS steps rejuvenate them. The evidence is the sum of the per-rung
     increments. If the ladder does not reach one in ``max_rungs`` rungs the evidence is
-    NaN and ``SMCInfo.reached`` is false. The standard error is NaN. Under
-    ``eqx.filter_vmap`` the loop runs to the slowest slice.
+    NaN and ``SMCInfo.reached`` is false. The standard error is NaN, so
+    nothing in the result flags a poor run. The defaults (1000 particles, 10 inner
+    steps) suit a smooth, low-dimensional posterior: on a concentrated seven-coordinate
+    orbit fit with log evidence about -19 they gave -40 to -60. Raise ``n_particles``
+    and ``n_mcmc_steps`` until the evidence stops moving. Under ``eqx.filter_vmap`` the
+    loop runs to the slowest slice.
 
     Args:
         n_particles: Number of particles.

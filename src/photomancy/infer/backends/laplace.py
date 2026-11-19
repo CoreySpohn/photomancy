@@ -232,7 +232,11 @@ class Laplace(AbstractBackend):
     5. In those cases the cloud is a seed for
        ``AdaptiveImportance(MixtureProposal.from_cloud(key, z, log_weights,
        n_centers=...), n_draws)``, with ``z`` the flat vectors of the cloud.
-    6. Widening the covariance is not a remedy: it makes the weights worse.
+    6. Started from the prior, the modes found can miss the posterior: on a concentrated
+       orbit fit two of four keys kept only modes whose cloud had a Kish size near 1
+       and a k-hat above 3 (log evidence about 1200 nats low). Gate on those, or start
+       from a draw that is already near the posterior.
+    7. Widening the covariance is not a remedy: it makes the weights worse.
 
     A mode is dropped from the proposal when it is not a mode: when the unregularized
     Hessian has an eigenvalue below ``-min_eigenvalue`` (an indefinite point, as where
