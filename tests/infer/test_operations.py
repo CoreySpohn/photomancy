@@ -307,6 +307,29 @@ def test_an_identity_swap_on_a_heavy_tailed_cloud_is_refused():
     assert np.all(np.isnan(out.log_weights))
 
 
+def test_the_gate_accepts_bounded_near_plateau_weights():
+    """Bounded combined weights with the cutoff in a plateau pass the k-hat gate.
+
+    Truth source: ``pareto_khat`` read 1 to 3 on weights like these before the
+    Pareto max bound (largest ratio 1.5 times the cutoff). An identity swap keeps
+    the combined weights equal to the cloud's own.
+    Fails if: the cap is removed from the k-hat.
+    """
+    n = 1000
+    rng = np.random.default_rng(0)
+    u = rng.uniform(size=n)
+    w = rng.uniform(0.05, 0.67, size=n)
+    plateau = u < 0.25
+    w[plateau] = 0.67 * (1.0 + 1e-4 * rng.standard_normal(plateau.sum()))
+    above = u > 0.97
+    w[above] = rng.uniform(0.67, 1.0, size=above.sum())
+    base = _gaussian_cloud(1.0, n=n)
+    flat = eqx.tree_at(lambda p: p.log_weights, base, jax.nn.log_softmax(jnp.log(w)))
+    assert float(pareto_khat(flat.log_weights)) <= 0.7
+    out = flat.with_priors({KEY: Normal(0.0, 1.0)}, min_n_eff=500, max_khat=0.7)
+    assert np.all(np.isfinite(out.log_weights))
+
+
 def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):
     """Missing thresholds raise on the host; a NaN term value refuses its slice."""
     with pytest.raises(ValueError, match="required"):

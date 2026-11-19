@@ -35,6 +35,9 @@ __all__ = [
 
 _KHAT_PRIOR_COUNT = 10.0
 _MIN_EXCEEDANCES = 5
+# Level of the upper confidence bound that the largest exceedance puts on a
+# Pareto tail index: the bound is below the true index with this probability.
+_MAX_BOUND_LEVEL = 1e-3
 # Two log weights closer than this many float epsilons (relative, floored at
 # one) are tied: values that went through logsumexp or a subtraction differ by
 # rounding even when they are mathematically equal.
@@ -119,7 +122,10 @@ def _tail_size(n):
 
 
 def _khat(log_weights):
-    """PSIS tail shape of one slice (Zhang and Stephens 2009, Vehtari et al. 2024)."""
+    """PSIS tail shape of one slice (Zhang and Stephens 2009, Vehtari et al. 2024).
+
+    Capped by the Pareto bound of the largest exceedance.
+    """
     lw = jnp.where(jnp.isnan(log_weights), -jnp.inf, log_weights)
     lw = jnp.where(lw == jnp.inf, -jnp.inf, lw)
     n_draws = lw.shape[0]
@@ -171,6 +177,13 @@ def _khat(log_weights):
     shape = jnp.sum(jnp.where(valid, jnp.log1p(-theta_hat * ascending), 0.0)) / count
     shape = (count * shape + _KHAT_PRIOR_COUNT * 0.5) / (count + _KHAT_PRIOR_COUNT)
 
+    # A Pareto tail of index k puts the largest of count exceedances at or
+    # below r times the cutoff with probability (1 - r**(-1/k))**count, so the
+    # observed maximum bounds the index from above.
+    level = _MAX_BOUND_LEVEL ** (1.0 / count)
+    bound = (top - cutoff_lw) / -jnp.log1p(-level)
+    shape = jnp.minimum(shape, bound)
+
     # Rounding-flat weights have no tail at all; a tail with fewer than five
     # distinct exceedances cannot be fitted and fails closed.
     low = jnp.min(jnp.where(jnp.isfinite(lw), lw, jnp.inf))
@@ -196,6 +209,17 @@ def pareto_khat(log_weights):
     another over the whole slice are flat and return ``-inf``, and draws within
     that tolerance of the cutoff are left out of the fit (discrete weight
     levels such as quadrature or bin-probability weights).
+
+    The fitted shape is capped by the bound that the largest ratio puts on a
+    Pareto tail: with ``n`` distinct exceedances, cutoff ``u`` and largest ratio
+    ``w_max``, a tail of index ``k`` gives ``w_max / u <= r`` with probability
+    ``(1 - r**(-1/k))**n``, so ``log(w_max / u) / -log(1 - 0.001**(1/n))`` is a
+    99.9 percent upper bound on the index. The cap matters when the cutoff
+    falls inside a cluster of nearly equal ratios: the exceedances then span
+    many decades and the fit alone reads a heavy tail on bounded weights. The
+    cap tests a Pareto tail in the ratios themselves; a heavy component whose
+    scale is far below the cutoff can pass, and carries a correspondingly small
+    share of the total weight.
 
     Valid for the raw ratios of iid proposal draws (an importance reweight or a
     Laplace-IS cloud), not for nested-sampling dead points or a grid. A slice

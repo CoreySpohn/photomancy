@@ -1,11 +1,15 @@
 """Free diagnostics: khat against a reference fit, mc_se, batching, quantiles."""
 
+import math
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from photomancy.infer import (
+    diagnostics,
     khat_threshold,
     kish_ess,
     mc_se,
@@ -50,14 +54,132 @@ def _pareto_log_ratios(rng, size, xi):
     return -xi * np.log(rng.uniform(size=size))
 
 
+def _max_bound(log_w, level=1e-3):
+    """Pareto max bound ``(lw_max - lw_cut) / -log(1 - level**(1/n))`` in NumPy."""
+    lw = np.sort(log_w[np.isfinite(log_w)])[::-1]
+    s = len(lw)
+    m = int(np.ceil(min(s / 5, 3 * np.sqrt(s))))
+    n = int(np.sum(lw[:m] > lw[m]))
+    return (lw[0] - lw[m]) / -math.log1p(-(level ** (1.0 / n)))
+
+
+def _near_plateau(seed, n=1000, jitter=1e-4):
+    """Bounded weights: a near-plateau at 0.67 of the maximum under the cutoff."""
+    rng = np.random.default_rng(seed)
+    u = rng.uniform(size=n)
+    w = rng.uniform(0.05, 0.67, size=n)
+    plateau = u < 0.25
+    w[plateau] = 0.67 * (1.0 + jitter * rng.standard_normal(plateau.sum()))
+    above = u > 0.97
+    w[above] = rng.uniform(0.67, 1.0, size=above.sum())
+    return np.log(w)
+
+
 @pytest.mark.parametrize("xi", [0.2, 0.6, 1.1])
 def test_pareto_khat_matches_reference_fit(xi):
-    """Khat equals an independent Zhang-Stephens fit of the same tail."""
+    """Khat equals an independent Zhang-Stephens fit of the same tail.
+
+    The max bound is slack in each case, so the comparison is of the fit itself.
+    """
     rng = np.random.default_rng(3)
     log_w = _pareto_log_ratios(rng, 4000, xi)
     log_w[::7] = -np.inf
+    assert _max_bound(log_w) > _reference_khat(log_w)
     got = float(pareto_khat(jnp.asarray(log_w)))
     np.testing.assert_allclose(got, _reference_khat(log_w), rtol=0, atol=1e-9)
+
+
+def test_the_max_bound_clears_a_near_plateau_of_bounded_weights(monkeypatch):
+    """Bounded weights with the cutoff inside a plateau pass the gate.
+
+    Truth source: the fit alone (the cap switched off) reads a heavy tail on
+    these weights, which have a largest ratio of 1.5 times the cutoff.
+    Fails if: the cap is removed from ``_khat``.
+    """
+    log_w = jnp.asarray(_near_plateau(0))
+    assert float(pareto_khat(log_w)) <= 0.7
+    monkeypatch.setattr(diagnostics, "_MAX_BOUND_LEVEL", 0.0)
+    assert float(diagnostics._khat(log_w)) > 1.0
+
+
+def test_khat_equals_the_pareto_max_bound_where_the_bound_binds():
+    """The reported value is ``(lw_max - lw_cut) / -log(1 - 1e-3**(1/n))``.
+
+    Fails if: the level or the exponent ``1/n`` is wrong.
+    """
+    log_w = _near_plateau(0)
+    np.testing.assert_allclose(
+        float(pareto_khat(jnp.asarray(log_w))), _max_bound(log_w), rtol=1e-12, atol=0
+    )
+
+
+def test_a_heavy_tail_behind_a_plateau_is_still_refused():
+    """Pareto k = 1.2 ratios floored at their 0.95 quantile still fail the gate.
+
+    Fails if: the cap is replaced by a mean of log exceedances.
+    """
+    rng = np.random.default_rng(4)
+    log_w = _pareto_log_ratios(rng, 1000, 1.2)
+    floor = -1.2 * math.log(0.05)
+    low = log_w < floor
+    log_w[low] = floor + 1e-4 * rng.uniform(size=low.sum())
+    assert float(pareto_khat(jnp.asarray(log_w))) > khat_threshold(1000)
+
+
+def test_the_max_bound_misses_a_true_pareto_tail_rarely():
+    """For exact Pareto k = 0.8 ratios the bound is below 0.8 in at most 2 of 200 seeds.
+
+    Fails if: the level or the exponent ``1/n`` is wrong.
+    """
+    rng = np.random.default_rng(5)
+    log_w = _pareto_log_ratios(rng, (200, 1000), 0.8)
+    bound = np.array([_max_bound(row) for row in log_w])
+    assert np.sum(bound < 0.8) <= 2
+    khat = np.asarray(pareto_khat(jnp.asarray(log_w)))
+    assert np.all(khat <= bound + 1e-12)
+
+
+def test_khat_edge_cases_with_the_max_bound():
+    """Flat weights give -inf, a short tail NaN, an exact plateau a finite value."""
+    assert pareto_khat(jnp.zeros(200)) == -jnp.inf
+    short = np.zeros(500)
+    short[:4] = [1.0, 2.0, 3.0, 4.0]
+    assert jnp.isnan(pareto_khat(jnp.asarray(short)))
+    plateau = np.zeros(500)
+    plateau[:6] = [0.5, 0.8, 1.1, 1.4, 1.7, 2.0]
+    got = float(pareto_khat(jnp.asarray(plateau)))
+    assert np.isfinite(got) and got <= _max_bound(plateau) + 1e-12
+    pair = jnp.stack([jnp.asarray(plateau), jnp.asarray(_near_plateau(1, n=500))])
+    np.testing.assert_allclose(
+        pareto_khat(pair), [pareto_khat(row) for row in pair], rtol=1e-12
+    )
+
+
+def test_khat_jits_and_batches_on_the_near_plateau():
+    """``jit`` and a vmapped batch equal the eager value."""
+    log_w = jnp.asarray(_near_plateau(0))
+    eager = float(pareto_khat(log_w))
+    np.testing.assert_allclose(float(jax.jit(pareto_khat)(log_w)), eager, rtol=1e-12)
+    batch = jax.vmap(pareto_khat)(jnp.stack([log_w, log_w]))
+    np.testing.assert_allclose(batch, [eager, eager], rtol=1e-12)
+
+
+_EXAMPLES = Path(__file__).parents[1] / "data" / "khat_examples"
+
+
+@pytest.mark.parametrize(("star", "want"), [(29, 0.147), (125, 0.152), (0, -0.204)])
+def test_khat_on_the_consumer_example_weights(star, want):
+    """Three combined weight vectors from a 150-star survey (1,000 draws each).
+
+    Stars 29 and 125 were refused (k-hat 1.9 and 1.7) at ratios of at most 2.3
+    to the mean; star 0 is the control that always passed.
+    Fails if: the cap is removed (stars 29 and 125 read above 1.6 again).
+    """
+    log_w = jnp.asarray(np.load(_EXAMPLES / f"log_weights_star{star}.npy"))
+    assert log_w.shape == (1000,)
+    got = float(pareto_khat(log_w))
+    assert got == pytest.approx(want, abs=1e-3)
+    assert got <= 0.7
 
 
 def test_pareto_khat_recovers_known_shape():
