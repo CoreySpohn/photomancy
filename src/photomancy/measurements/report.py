@@ -88,7 +88,7 @@ class ReportData(eqx.Module):
     """One planet slot per exposure; all fields have shape (R,).
 
     ``planned`` stores valid exposure metadata with zero placeholders for outcomes.
-    Call ``sample`` on a term to realize these rows before treating them as data.
+    Call ``ReportTerm.draw`` to realize these rows before treating them as data.
     Null outcome floats are zero. Padding may contain arbitrary stored values.
     """
 

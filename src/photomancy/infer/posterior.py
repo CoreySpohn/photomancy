@@ -9,16 +9,15 @@ layout whichever method ran.
 Operations. ``sample`` and ``resample`` draw from the cloud, ``with_priors``,
 ``append_term`` and ``replace_term`` reweight it to a changed ``Fit`` (``replace_term``
 evaluates the one old term it removes and no other),
-``model`` and ``forecast`` read the stored draws through the fit. Each acts on one
+``model_at`` and ``forecast`` read the stored draws through the fit. Each acts on one
 slice (one world) and raises on a batched posterior; map worlds with
 ``eqx.filter_vmap``. A refusal is a NaN slice, never a raise on a traced value.
 
-Stored block coordinates are not reduced to a cell: the angle coordinates of an orbit
-chart (``W_rad``, ``w_rad``, ``M0_rad``) are plain reals whose density repeats every
-``2 pi``, so a sampler can wander across cells. Take no moment, quantile or covariance
-of such a coordinate (read the orbit through ``model`` instead). For the same reason
-the importance evidence of ``Laplace`` and ``Pathfinder`` on such a block is wrong
-unless the proposal sits well inside one cell; ``SMC`` evidence is not affected.
+Stored block coordinates are reduced to their cell (``Fit.from_real``): the angle
+coordinates of an orbit chart (``W_rad``, ``w_rad``, ``M0_rad``) lie in ``[0, 2 pi)``
+and their density repeats every ``2 pi``, so a cloud near the cell edge is split across
+it. Take no plain moment, quantile or covariance of such a coordinate (read the orbit
+through ``model_at`` instead).
 
 Layout. The draw axis is flat and in stored order (chains are concatenated, never an
 axis). Leading axes are batch axes: a stack of worlds is the same type with a longer
