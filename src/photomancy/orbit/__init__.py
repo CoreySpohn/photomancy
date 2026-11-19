@@ -2,9 +2,8 @@
 
 The orbit-domain plug-ins for the photomancy inference engine: one-planet chart
 problems every backend consumes, blind initializers (Thiele-Innes grid search, OFTI,
-adaptive importance sampling), the MAP + Laplace / EIG machinery, and a fixed-capacity
-sequential updater (``OrbitUpdater``) that assimilates one record at a time. Data,
-likelihoods and terms live in ``photomancy.measurements``. Built on orbix geometry
+adaptive importance sampling) and the MAP + Laplace / EIG machinery. Data, likelihoods
+and terms live in ``photomancy.measurements``. Built on orbix geometry
 (``orbix.equations``, ``orbix.kepler``, ``orbix.system``).
 """
 
@@ -57,33 +56,17 @@ from photomancy.orbit.thiele_innes import (
     thiele_innes_fit,
     thiele_innes_grid_search,
 )
-from photomancy.orbit.updater import (
-    AbstractUpdateTarget,
-    ConjugateGaussianTarget,
-    FixedMassTarget,
-    OrbitUpdater,
-    ThieleInnesTarget,
-    UpdaterBelief,
-    UpdaterDiagnostics,
-    UpdaterRecord,
-    UpdaterStatus,
-)
 
 __all__ = [
     # OFTI (Orbits For The Impatient) rejection sampler
     "AbstractConditioner",
     # Grid-search (adaptive importance sampling)
     "AbstractGridStrategy",
-    # Fixed-capacity sequential updater
-    "AbstractUpdateTarget",
     "AdaptiveImportanceSampler",
     "ChartOrbitProblem",
     "CompletedProposal",
     "Completion",
-    "ConjugateGaussianTarget",
-    "FixedMassTarget",
     "OrbitPriorTransform",
-    "OrbitUpdater",
     "ParamBounds",
     "ScaleAndRotate",
     "ScaleRotateProposal",
@@ -91,11 +74,6 @@ __all__ = [
     # Thiele-Innes fitter
     "TIFitResult",
     "ThetaPrior",
-    "ThieleInnesTarget",
-    "UpdaterBelief",
-    "UpdaterDiagnostics",
-    "UpdaterRecord",
-    "UpdaterStatus",
     # Bayesian experimental design
     # Exact few-epoch fitters
     "admissible_region_fit",

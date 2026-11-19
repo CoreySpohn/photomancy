@@ -16,7 +16,6 @@ from hwoutils.epoch import Epoch
 from orbix.system import (
     CartesianChart,
     ClassicalChart,
-    EccentricityVectorChart,
     FrameChart,
 )
 from priorities import HalfNormal, LogUniform, TruncatedDistribution
@@ -30,7 +29,6 @@ from photomancy.orbit.inference import (
     build_chart_logdensity,
     orbit_chart_log_volume,
 )
-from photomancy.orbit.updater import FixedMassTarget
 from photomancy.priors import (
     LOG_HAAR,
     PopulationPrior,
@@ -188,66 +186,6 @@ def test_independent_nuisance_inputs():
         value,
         -0.5 * 0.3**2 + stats.norm.logpdf(-0.7) + stats.halfnorm.logpdf(2.0, scale=1.5),
     )
-
-
-def test_fixed_mass_reference_across_charts():
-    """Remove each chart's Jacobian at identical orbits, including truncation.
-
-    The reference is the closed-form fixed-mass element density against
-    e de d(cos i) dW dw dM d(ln a): the truncated Beta law of e over e, 1/2 for
-    cos i, 1/(2 pi) per angle and 1/ln(a_hi/a_lo), written with SciPy and no
-    photomancy code. The updater's fixed-mass target is one more chart of it.
-    """
-    target = FixedMassTarget(e_max=0.7)
-    orbits = _orbits()
-    e = np.asarray(orbits.e)
-    ln_a_range = 2.0 / 3.0 * np.log(5000.0 / 50.0)
-    reference = (
-        stats.beta.logpdf(e, 0.867, 3.03)
-        - stats.beta.logcdf(0.7, 0.867, 3.03)
-        - np.log(e)
-        - np.log(2.0)
-        - 3.0 * np.log(two_pi)
-        - np.log(ln_a_range)
-    )
-    reference = np.where(e < 0.7, reference, -np.inf)
-    assert np.isneginf(reference[-1])
-    point = EccentricityVectorChart().from_orbit(orbits)
-    fixed = jax.vmap(target.log_prior)(point)
-    assert np.isneginf(fixed[-1])
-    _check(
-        "FixedMassTarget",
-        fixed[:-1]
-        - jax.vmap(EccentricityVectorChart().log_volume)(point)[:-1]
-        - LOG_HAAR,
-        reference[:-1],
-    )
-    for chart in (
-        ClassicalChart(),
-        EccentricityVectorChart(),
-        CartesianChart(scale_AU=2.1),
-        FrameChart(),
-        FrameChart(gauge_sd=None),
-    ):
-        density = build_chart_logdensity(
-            chart,
-            lambda o: o,
-            partial(
-                orbit_log_prior,
-                period_range_d=(50, 5000),
-                eccentricity=TruncatedDistribution(ecc_law("kipping13"), high=0.7),
-            ),
-            star_mass_kg=Msun2kg,
-        )
-        params = {"orbit": chart.from_orbit(orbits)}
-        values, aux = eqx.filter_jit(eqx.filter_vmap(density.value_and_aux))(params)
-        assert aux == {"term_values": (), "predictions": ()}
-        assert np.isneginf(values[-1])
-        physical = values - jax.vmap(density.log_volume)(params)
-        _check(type(chart).__name__, physical[:-1], reference[:-1])
-        if isinstance(chart, (ClassicalChart, EccentricityVectorChart)):
-            outside = params["orbit"][0].at[-1].add(two_pi)
-            assert np.isneginf(density({"orbit": outside}))
 
 
 def test_frame_gauge_integral():

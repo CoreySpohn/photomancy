@@ -41,8 +41,6 @@ exclude_patterns = [
     "jupyter_execute",
     "Thumbs.db",
     ".DS_Store",
-    # The updater panel folder holds data files and a README read in the repository.
-    "updater-development-panel",
 ]
 
 autoapi_dirs = ["../src"]
