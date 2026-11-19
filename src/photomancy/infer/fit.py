@@ -339,7 +339,10 @@ class Fit(eqx.Module):
         """Map unconstrained coordinates to ``x`` and the log volume of the map.
 
         The volume sums the leaf laws' ``priorities.from_real`` volumes over the leaf
-        axes (zero for a block entry) and has the batch shape of ``u``.
+        axes (zero for a block entry) and has the batch shape of ``u``. A block
+        coordinate with a period is reduced to its cell ``[0, period)``, so stored
+        angles never leave one cell; the block density is periodic, so the reduction
+        changes no density.
         """
         x, volume = {}, jnp.zeros(())
         for key, entry in self.free.items():
@@ -348,8 +351,38 @@ class Fit(eqx.Module):
                 ndim = jnp.ndim(resolve(self.model, key))
                 volume = volume + _sum_leaf(vol, ndim, entry)
             else:
-                x[key] = u[key]
+                period = dict(zip(entry.coordinate_names, entry.periods, strict=True))
+                x[key] = {
+                    name: value
+                    if period[name] is None
+                    else jnp.mod(value, period[name])
+                    for name, value in u[key].items()
+                }
         return x, jnp.broadcast_to(volume, self._batch_shape(u))
+
+    def periods(self) -> tuple[float | None, ...]:
+        """Period of every entry of the flat unconstrained vector, ``None`` if none.
+
+        The flat vector is the ``ravel_pytree`` of one draw of :meth:`to_real` (sorted
+        entry keys; inside a block, sorted coordinate names), so the tuple is assembled
+        per block through its ``coordinate_names`` and never by position. A leaf-law
+        entry is never periodic. The tuple is static (host values) and has the length of
+        the flat vector.
+        """
+        shapes = eqx.filter_eval_shape(
+            lambda k: self.to_real(self.sample_prior(k)), jax.random.key(0)
+        )
+        out: list[float | None] = []
+        for key in sorted(self.free):
+            entry = self.free[key]
+            if isinstance(entry, AbstractDistribution):
+                out += [None] * int(np.prod(shapes[key].shape, dtype=int))
+                continue
+            period = dict(zip(entry.coordinate_names, entry.periods, strict=True))
+            for name in sorted(shapes[key]):
+                size = int(np.prod(shapes[key][name].shape, dtype=int))
+                out += [period[name]] * size
+        return tuple(out)
 
     def real_log_prob(self, u: dict) -> jax.Array:
         """Return the density in ``u``: the density of ``from_real(u)`` plus volume."""
@@ -388,19 +421,24 @@ class Fit(eqx.Module):
     # ----- unit cube -------------------------------------------------------------
 
     def unit_template(self) -> dict:
-        """Zeros of one unit-cube draw: each entry has the shape of its model leaf.
+        """Zeros of one unit-cube draw.
+
+        A leaf-law entry has the shape of its model leaf; a block entry has shape
+        ``(unit_size,)``, the length of the cube vector its ``from_unit`` consumes.
 
         Raises:
-            ValueError: For a block entry (a block has no unit-cube map yet) or a leaf
-                law with no inverse CDF (a mixture).
+            ValueError: For a block with no unit-cube map (``unit_size`` is ``None``) or
+                a leaf law with no inverse CDF (a mixture).
         """
         out = {}
         for key, entry in self.free.items():
-            if not isinstance(entry, AbstractDistribution):
-                raise ValueError(
-                    f"block {key!r} has no unit-cube map; nested sampling needs "
-                    "leaf laws with an inverse CDF"
-                )
+            if isinstance(entry, AbstractBlock):
+                if entry.unit_size is None:
+                    raise ValueError(
+                        f"block {key!r} ({type(entry).__name__}) has no unit-cube map"
+                    )
+                out[key] = jnp.zeros((entry.unit_size,))
+                continue
             if not entry.has_icdf:
                 raise ValueError(
                     f"law at {key!r} ({type(entry).__name__}) has no inverse CDF"
@@ -409,14 +447,25 @@ class Fit(eqx.Module):
         return out
 
     def from_unit(self, u: dict) -> dict:
-        """Map unit-cube coordinates to entries through each leaf law's inverse CDF.
+        """Map unit-cube coordinates to entries.
+
+        Leaf laws map through their inverse CDF and are written first; each block then
+        maps its cube vector through ``from_unit`` on the running model, in block order,
+        so a block that reads what an earlier block writes (a star mass) sees it.
 
         Args:
             u: One draw, each entry shaped like :meth:`unit_template`, values in
                 ``(0, 1)``.
         """
         self.unit_template()
-        return {key: entry.icdf(u[key]) for key, entry in self.free.items()}
+        x = {key: entry.icdf(u[key]) for key, entry in self.leaf_laws.items()}
+        model = self._assign_leaf_laws(x, self.model)
+        blocks = self.blocks
+        for key in self.block_order:
+            x[key] = blocks[key].from_unit(u[key], model)
+            for path, value in blocks[key].forward(x[key], model).items():
+                model = assign(model, path, value)
+        return {key: x[key] for key in self.free}
 
     # ----- edits -----------------------------------------------------------------
 

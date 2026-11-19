@@ -25,6 +25,7 @@ __all__ = [
     "khat_threshold",
     "kish_ess",
     "mc_se",
+    "next_temperature",
     "normalize_log_weights",
     "pareto_khat",
     "ratio_mc_se",
@@ -379,3 +380,56 @@ def ratio_mc_se(log_weights, numerator, denominator, *, r_eff=None):
     return _over_batch_r_eff(
         _ratio_mc_se, log_weights, numerator, denominator, r_eff=r_eff
     )
+
+
+def _conditional_ess_fraction(log_weights, log_increment, delta):
+    """CESS / N of weights ``W`` moved by ``exp(delta * log_increment)``."""
+    first = logsumexp(log_weights + delta * log_increment)
+    second = logsumexp(log_weights + 2.0 * delta * log_increment)
+    return jnp.exp(2.0 * first - second)
+
+
+def next_temperature(log_increment, log_weights, beta, target_cess, n_bisect=60):
+    """Return the next tempering parameter by a conditional-ESS bisection.
+
+    A tempered target is ``prior * likelihood ** beta``. Particles weighted for the
+    temperature ``beta`` (``log_weights``, normalized here) move to ``beta + delta``
+    with the factor ``exp(delta * log_increment)``, where ``log_increment`` is the log
+    likelihood of each particle. The conditional effective sample size of the moved
+    weights, ``(sum W a) ** 2 / sum (W a ** 2)`` as a fraction of ``N`` with
+    ``a = exp(delta * log_increment)``, falls from one as ``delta`` grows. The result
+    is the largest temperature at which it is still at least ``target_cess``, found by
+    bisection on ``delta``; it is ``1`` when the full step to one keeps the fraction
+    at or above the target. One slice (draw axis last); a ``-inf`` log weight or
+    increment is a particle with zero weight, and NaN propagates to a NaN temperature.
+
+    Args:
+        log_increment: Log likelihood of each particle ``(N,)``.
+        log_weights: Log weights ``(N,)`` at temperature ``beta``.
+        beta: Current temperature in ``[0, 1]``.
+        target_cess: Required conditional ESS as a fraction of ``N`` in ``(0, 1]``.
+        n_bisect: Bisection steps (a static count).
+
+    Returns:
+        The new temperature in ``[beta, 1]``.
+    """
+    log_increment = jnp.asarray(log_increment)
+    log_weights = jnp.asarray(log_weights)
+    log_weights = log_weights - logsumexp(log_weights)
+    span = 1.0 - beta
+
+    def fraction(delta):
+        return _conditional_ess_fraction(log_weights, log_increment, delta)
+
+    def body(_, bounds):
+        low, high = bounds
+        mid = 0.5 * (low + high)
+        ok = fraction(mid) >= target_cess
+        return jnp.where(ok, mid, low), jnp.where(ok, high, mid)
+
+    low, _ = jax.lax.fori_loop(0, n_bisect, body, (jnp.zeros(()), span))
+    full = fraction(span) >= target_cess
+    nan = jnp.isnan(fraction(span))
+    step = jnp.where(full, span, low)
+    new = jnp.where(nan, jnp.nan, jnp.clip(beta + step, beta, 1.0))
+    return jnp.where(span <= 0.0, beta, new)
