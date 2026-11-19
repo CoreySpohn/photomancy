@@ -229,7 +229,11 @@ def test_a_nan_score_refuses_the_slice(fit):
     NaN), never a finite cloud that dropped the broken draws as zero weights.
     """
     broken = Fit(fit.model, fit.free, (*fit.terms, _NanTerm()))
-    post = run(broken, any_epoch(n_draws=2**12, n_rounds=2, n_centers=64), KEY)
+    post = run(
+        broken,
+        any_epoch(n_draws=2**12, n_adapt_draws=2**12, n_rounds=2, n_centers=64),
+        KEY,
+    )
     assert np.all(np.isnan(np.asarray(post.log_weights)))
     assert np.isnan(float(post.log_evidence))
 
@@ -296,12 +300,17 @@ def test_any_epoch_and_few_epoch_agree_and_vmap_equals_the_loop():
     completed run over three worlds under ``filter_vmap`` equal the per-world loop at
     rtol 1e-9 (shared key). The third world has no valid row, so no data scale: its
     slice is refused (NaN weights) in both, and the other two keep live weights.
+    ``any_epoch(n_draws)`` sizes the returned cloud only: the adaptation rounds keep
+    their own size, so the two can be passed together.
     """
+    sizes = any_epoch(n_draws=4000, n_adapt_draws=2**16)
+    assert (sizes.n_draws, sizes.n_adapt_draws) == (4000, 2**16)
+    assert any_epoch().n_draws == any_epoch().n_adapt_draws == 2**16
     fit = _fit(_term(n_rows=1))
     exact = few_epoch(n_draws=2**12)._run(fit, jax.random.key(0))
-    adaptive = any_epoch(n_draws=2**12, n_rounds=2, n_centers=64)._run(
-        fit, jax.random.key(0)
-    )
+    adaptive = any_epoch(
+        n_draws=2**12, n_adapt_draws=2**12, n_rounds=2, n_centers=64
+    )._run(fit, jax.random.key(0))
     gap = abs(float(exact.log_evidence) - float(adaptive.log_evidence))
     assert gap < 4 * float(adaptive.log_evidence_se) + 1e-6
 
