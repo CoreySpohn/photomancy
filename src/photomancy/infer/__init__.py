@@ -52,7 +52,14 @@ from photomancy.infer.diagnostics import (
 )
 from photomancy.infer.eig import EIGEstimate, eig_contrastive, eig_nested
 from photomancy.infer.evidence import importance_evidence, sigma_from_log_bayes_factor
-from photomancy.infer.fit import AbstractLinearTerm, AbstractTerm, Fit, LinearForm
+from photomancy.infer.fit import (
+    AbstractConditionalTerm,
+    AbstractLinearTerm,
+    AbstractTerm,
+    Fit,
+    LeafConditional,
+    LinearForm,
+)
 from photomancy.infer.legacy_posterior import (
     AbstractPosterior,
     GaussianPosterior,
@@ -90,6 +97,7 @@ __all__ = [
     "NUTS",
     "SMC",
     "AbstractBackend",
+    "AbstractConditionalTerm",
     "AbstractDensityProposal",
     "AbstractLinearTerm",
     "AbstractLogDensity",
@@ -111,6 +119,7 @@ __all__ = [
     "LaplaceBackend",
     "LaplaceInfo",
     "LaplaceMixtureBackend",
+    "LeafConditional",
     "LinearForm",
     "MAPBackend",
     "MCLMCBackend",

@@ -39,7 +39,14 @@ from hwoutils.blocks import AbstractBlock, block_order, check_writers
 from hwoutils.model_paths import assign, paths_overlap, resolve
 from priorities import AbstractDistribution, from_real, to_real
 
-__all__ = ["AbstractLinearTerm", "AbstractTerm", "Fit", "LinearForm"]
+__all__ = [
+    "AbstractConditionalTerm",
+    "AbstractLinearTerm",
+    "AbstractTerm",
+    "Fit",
+    "LeafConditional",
+    "LinearForm",
+]
 
 
 class AbstractTerm(eqx.Module):
@@ -105,6 +112,61 @@ class AbstractLinearTerm(AbstractTerm):
     @abstractmethod
     def linear_form(self, model, row: int = 0) -> LinearForm:
         """The term as a Gaussian in the sky constants of orbit ``row`` of ``model``."""
+
+
+class LeafConditional(eqx.Module):
+    """A proposal density for one free model leaf, as a mixture of Gaussians in its log.
+
+    A record of what a term can say about a leaf given the rest of the model: component
+    ``k`` is a Gaussian of ``ln(leaf)`` with mean ``mean[k]`` and standard deviation
+    ``sd[k]``, and the components carry log masses ``log_pi`` (not normalized; all
+    ``-inf`` means the term has no peak to offer). ``low`` and ``high`` bound
+    ``ln(leaf)`` where the term itself knows a bound (``-inf`` and ``inf`` otherwise);
+    the proposal also stays inside the support of the leaf's own law.
+
+    **This record is a proposal density and never a target.** It describes an
+    approximation of the conditional of the leaf, built from fixed variances or a frozen
+    nuisance. Only the exact term enters a fit density, and a consumer corrects a draw
+    from this record by the exact density over the density of the draw.
+
+    Attributes:
+        path: Model path of the positive leaf this record is about.
+        mean: Component means of ``ln(leaf)``, shape ``(K,)``.
+        sd: Component standard deviations, shape ``(K,)``.
+        log_pi: Log mass of each component, shape ``(K,)``.
+        low: Lower bound of ``ln(leaf)`` the term knows, scalar.
+        high: Upper bound of ``ln(leaf)`` the term knows, scalar.
+    """
+
+    path: str = eqx.field(static=True)
+    mean: jax.Array
+    sd: jax.Array
+    log_pi: jax.Array
+    low: jax.Array
+    high: jax.Array
+
+
+class AbstractConditionalTerm(AbstractTerm):
+    """A term that can propose one of the leaves it reads from its own data.
+
+    The capability is the type: a proposal that completes leaves selects terms with
+    ``isinstance``. ``leaf_conditional`` is approximate by contract; see
+    :class:`LeafConditional`. It never enters a target.
+
+    Attributes:
+        leaf_path: Path of the positive model leaf the term offers a conditional for,
+            or ``None`` when it offers none.
+    """
+
+    leaf_path: eqx.AbstractVar[str | None]
+
+    @abstractmethod
+    def leaf_conditional(self, model) -> LeafConditional:
+        """The proposal record of ``leaf_path`` given everything else in ``model``.
+
+        The value of the leaf in ``model`` is read only to scale the prediction; the
+        record does not depend on it.
+        """
 
 
 def _sum_leaf(value, leaf_ndim, dist):
