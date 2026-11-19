@@ -609,7 +609,7 @@ def eig_contrastive(posterior, term, key, *, n_outer, batch_size=None):
     fit = posterior.fit
     log_weights = posterior.log_weights
     key_x, key_y = jax.random.split(key)
-    idx = categorical_indices(log_weights, key_x, (n_outer,))
+    idx = categorical_indices(key_x, log_weights, (n_outer,))
     outer = take_draws(posterior.samples, idx)
     if batch_size is None:
         models = jax.vmap(fit.model_at)(posterior.samples)
@@ -689,7 +689,7 @@ def eig_nested(posterior, term, key, *, n_outer, n_inner, min_n_eff, batch_size=
     log_weights = posterior.log_weights
     n_draws = log_weights.shape[0]
     key_x, key_y, key_i = jax.random.split(key, 3)
-    idx = categorical_indices(log_weights, key_x, (n_outer,))
+    idx = categorical_indices(key_x, log_weights, (n_outer,))
     outer = take_draws(posterior.samples, idx)
 
     def one(key_k, key_j, index_k, x_k):
@@ -698,7 +698,7 @@ def eig_nested(posterior, term, key, *, n_outer, n_inner, min_n_eff, batch_size=
         rest = jnp.where(jnp.arange(n_draws) == index_k, -jnp.inf, log_weights)
         rest = rest - logsumexp(rest)
         inner = take_draws(
-            posterior.samples, categorical_indices(rest, key_j, (n_inner,))
+            posterior.samples, categorical_indices(key_j, rest, (n_inner,))
         )
         if batch_size is None:
             scored = jax.vmap(drawn)(jax.vmap(fit.model_at)(inner))

@@ -219,6 +219,21 @@ def test_systematic_resampling_uses_one_grid_for_any_output_size(n):
         assert np.all(np.abs(counts - n * weights) <= 1.0)
 
 
+def test_both_resampling_schemes_take_the_key_first():
+    """Fails if ``categorical_indices`` and ``systematic_indices`` disagree on order.
+
+    Both take ``(key, log_weights, ...)``; a swapped call fails in JAX with an opaque
+    dtype error, so the order is pinned by a draw that must avoid a zero-weight source.
+    """
+    from photomancy.infer.particles import categorical_indices, systematic_indices
+
+    log_weights = jnp.log(jnp.array([0.2, 0.0, 0.5, 0.3]))
+    key = jax.random.key(0)
+    idx = categorical_indices(key, log_weights, (500,))
+    assert idx.shape == (500,) and not np.any(np.asarray(idx) == 1)
+    assert not np.any(np.asarray(systematic_indices(key, log_weights, 20)) == 1)
+
+
 def test_systematic_resampling_excludes_zero_mass_at_float32_endpoint():
     """The final grid point can round to one with float32 arithmetic."""
     from photomancy.infer.particles import systematic_indices

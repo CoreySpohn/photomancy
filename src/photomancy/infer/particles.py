@@ -1,4 +1,9 @@
-"""Systematic resampling for JAX particle clouds."""
+"""Resampling of JAX particle clouds, with the key first.
+
+``systematic_indices`` draws ``n`` indices from one random offset;
+``categorical_indices`` draws independent indices with replacement. Both take
+``(key, log_weights, ...)``.
+"""
 
 import math
 
@@ -22,7 +27,7 @@ def systematic_indices(key, log_weights, n):
     return jnp.clip(jnp.searchsorted(cdf, grid, side="right"), 0, cdf.shape[0] - 1)
 
 
-def categorical_indices(log_weights, key, shape=()):
+def categorical_indices(key, log_weights, shape=()):
     """Draw indices of one slice with replacement, inverse CDF on the weights.
 
     ``log_weights`` is ``(N,)`` and normalized; memory is linear in ``N``. A slice

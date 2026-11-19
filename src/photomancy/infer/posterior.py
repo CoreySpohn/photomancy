@@ -215,7 +215,7 @@ class Posterior(eqx.Module):
         sample_shape = tuple(sample_shape)
         lw = jnp.asarray(self.log_weights)
         none = jnp.any(jnp.isnan(lw))
-        idx = categorical_indices(lw, key, sample_shape)
+        idx = categorical_indices(key, lw, sample_shape)
         out = take_draws(self.samples, idx)
         return jax.tree.map(lambda leaf: jnp.where(none, jnp.nan, leaf), out)
 
