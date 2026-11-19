@@ -18,7 +18,6 @@ FORBIDDEN = {
     "optixstuff",
     "yippy",
     "physicaloptix",
-    "coronalyze",
 }
 ROOT = Path(photomancy.infer.__file__).parent
 

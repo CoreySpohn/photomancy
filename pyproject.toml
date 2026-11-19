@@ -50,6 +50,9 @@ docs = [
     "hwostyle>=1.7.0",
     "matplotlib>=3.11",
     "eyepiece>=0.1.0",
+    # The post-processing example renders a scene through coronagraphoto and a yippy coronagraph.
+    "coronagraphoto>=4.2.0",
+    "yippy>=2.0",
     # The example notebooks run the sampler backends.
     "blackjax>=1.6",
     "jaxctx>=1.2.0",
@@ -75,6 +78,8 @@ test = [
     "blackjax>=1.6",
     "jaxctx>=1.2.0",
     "jaxns>=3.0.0",
+    # The post-processing tests build a template provider from a yippy coronagraph.
+    "yippy>=2.0",
 ]
 # Sampler backends. The Laplace and staged MAP backends need neither.
 # >=1.6: the MCLMC tuner requires logdensity_fn from 1.6 on, and 1.5 does
@@ -83,7 +88,6 @@ blackjax = ["blackjax>=1.6"]  # NUTS, MCLMC, Pathfinder and tempered SMC
 # jaxctx supplies the prior interface the jaxns 3 adapter subclasses.
 jaxns = ["jaxctx>=1.2.0", "jaxns>=3.0.0"]  # nested sampling
 samplers = ["blackjax>=1.6", "jaxctx>=1.2.0", "jaxns>=3.0.0"]
-imaging = ["coronalyze>=1.2.0"]  # differentiable detection/extraction likelihood helpers
 # eyepiece>=0.1.0 carries every interface photomancy.viz calls (corner,
 # corner_overlay, sky_fan, cov_ellipse, save_fig, PlotResult); checked by
 # interface in the test suite rather than by version string.
@@ -165,7 +169,6 @@ optional_dependencies_dev_groups = ["dev", "docs", "test"]
 DEP002 = [
     "jaxlib",  # JAX loads its compiled backend; retain the explicit version floor.
     "skyscapes",  # Disk and atmosphere fits consume user-supplied skyscapes models.
-    "coronalyze",  # The imaging extra supplies user-defined detection forwards.
     # The sampler extras are imported by name when a backend runs.
     "blackjax",
     "jaxctx",

@@ -1,7 +1,7 @@
 # Dependency floors
 
 Floors were checked with Python 3.12 and a scratch environment using
-`uv pip install --resolution lowest-direct -e ".[test,docs,dev,imaging]"` with
+`uv pip install --resolution lowest-direct -e ".[test,docs,dev]"` with
 `--override .github/sibling-pins.txt`. Build dependencies were also constrained to
 the versions below for an editable build. Each test file runs in its own pytest
 process with warnings treated as errors.
@@ -16,7 +16,7 @@ self-version constraint on shallow VCS checkouts.
 | Dependency | Declared floor | Resolved version | Groups |
 | --- | --- | --- | --- |
 | blackjax | >=1.6 | 1.6 | blackjax, samplers, docs, test |
-| coronalyze | >=1.2.0 | 1.1.2.dev52+g541a25c86 | imaging |
+| coronagraphoto | >=4.2.0 | not run at the floor | docs |
 | equinox | >=0.13.2 | 0.13.2 | runtime |
 | eyepiece | >=0.1.0 | 0.16.1.dev25+gc7a4bea5a | docs, test, viz |
 | hatch-fancy-pypi-readme | >=24.1.0 | 24.1.0 | build |

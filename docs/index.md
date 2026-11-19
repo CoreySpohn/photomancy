@@ -105,6 +105,7 @@ image-domain fitting against a coronagraph forward is the next major target. See
 explanation/architecture
 explanation/mathematical-foundations
 explanation/orbital-parameterizations
+explanation/postprocessing
 explanation/glossary
 ```
 
@@ -116,6 +117,7 @@ explanation/glossary
 how-to/migrate-sky-convention
 how-to/staged-map-fit
 how-to/likelihood-ratio-map
+how-to/calibrate-detection
 ```
 
 ```{toctree}
@@ -135,6 +137,9 @@ updater-panel-grading
 examples/walkthrough
 examples/orbit_fitting
 examples/eig_scheduling
+examples/postproc_quickstart
+examples/postproc_snr_methods
+examples/postproc_coronagraphoto_pipeline
 ```
 
 ```{toctree}

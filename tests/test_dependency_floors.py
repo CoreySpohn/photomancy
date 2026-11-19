@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
@@ -18,7 +19,6 @@ SKY_FLOORS = {
     "orbix": Version("4.1.0"),  # 4.1.0: the system dynamics API
     "skyscapes": Version("4.0.0"),  # 4.0.0: times are days from the scene epoch
     "coronagraphoto": Version("4.2.0"),
-    "coronalyze": Version("1.2.0"),
 }
 
 
@@ -61,5 +61,13 @@ def test_every_sibling_pin_is_at_or_above_the_sky_chart_release():
             floor = _floor(req)
             assert floor is not None, f"{req.name} is unpinned in {group}"
             assert floor >= SKY_FLOORS[req.name], f"{req.name} floor in {group}"
-    # The imaging extra is the only place coronalyze appears.
-    assert {"orbix", "skyscapes", "coronalyze"} <= seen
+    # coronagraphoto appears only in the docs extra, for the post-processing example.
+    assert {"orbix", "skyscapes", "coronagraphoto"} <= seen
+
+
+def test_python_floor_matches_coronagraphoto():
+    """The package must not admit an interpreter coronagraphoto cannot run on."""
+    project = tomllib.loads(PYPROJECT.read_text())["project"]
+    spec = SpecifierSet(project["requires-python"])
+    assert "3.11" not in spec, f"requires-python {spec} admits Python 3.11"
+    assert "3.12" in spec
