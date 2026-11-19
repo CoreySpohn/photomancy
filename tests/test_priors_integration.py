@@ -1,121 +1,124 @@
-"""Integration: one prior over z across backends, and posterior-as-prior updating.
+"""Integration: a posterior carries into the next fit, by a new term or as a prior.
 
-These exercise the P1 payoff: one photomancy prior drives both the Laplace
-(``log_prob``) and jaxns (``_JaxnsPrior``) paths, and a Gaussian posterior folds into
-the next fit's prior (``to_prior``) so information accumulates across data batches.
+Two routes for information to accumulate across data batches on a one-parameter
+model: ``Posterior.append_term`` folds a new observation into a stored cloud, and
+``cluster_to_mixture`` turns a cloud into the law of the next fit's leaf.
 """
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
-from priorities import Normal
-
-from photomancy.infer.backends import (
-    JaxnsBackend,
-    LaplaceBackend,
-    build_scene_nested_model,
-)
-from photomancy.infer.model import build_scene_logdensity
-from photomancy.infer.priors import IndependentPrior
+from priorities import Mixture, Normal, Uniform
 
 jax.config.update("jax_enable_x64", True)
+
+from photomancy.infer import (  # noqa: E402
+    Fit,
+    ForwardTerm,
+    Grid,
+    Laplace,
+    cluster_to_mixture,
+    run,
+    weighted_cov,
+    weighted_mean,
+)
+from photomancy.infer.backends.grid import midpoint  # noqa: E402
+from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
+
+SIGMA = 0.4
 
 
 class _Toy(eqx.Module):
     theta: jnp.ndarray
-    label: str = eqx.field(static=True)
 
 
-@pytest.mark.slow
-def test_same_prior_drives_laplace_and_jaxns_consistently():
-    """One IndependentPrior drives a Laplace fit and a jaxns fit (adapter)."""
-    data = jnp.array([0.5])
-    sigma = 0.3
-    scene = _Toy(theta=jnp.zeros(1), label="t")
+class _Identity(eqx.Module):
+    """Forward ``model -> theta``."""
 
-    def forward(s):
-        return s.theta
+    def __call__(self, model):
+        return model.theta
 
-    def likelihood(pred):
-        return -0.5 * jnp.sum(((pred - data) / sigma) ** 2)
 
-    prior = IndependentPrior((Normal(jnp.zeros(1), jnp.full((1,), 5.0)),))
+def _term(data):
+    return ForwardTerm(_Identity(), gaussian_loglike(data, SIGMA))
 
-    # Laplace path: the prior is folded in as log_prob(z).
-    logdensity, z0, _ = build_scene_logdensity(scene, forward, likelihood, prior)
-    lap = LaplaceBackend().run(logdensity, z0)
 
-    # jaxns path: the SAME prior, via the _JaxnsPrior adapter.
-    model, _ = build_scene_nested_model(
-        scene, forward, likelihood, fit_leaves=lambda s: [s.theta], prior=prior
+def _fit(*data):
+    prior = {"theta": Normal(jnp.zeros(1), jnp.full((1,), 5.0))}
+    return Fit(_Toy(jnp.zeros(1)), prior, tuple(_term(d) for d in data))
+
+
+def _moments(post):
+    theta = post.samples["theta"]
+    return (
+        float(weighted_mean(post.log_weights, theta)[0]),
+        float(weighted_cov(post.log_weights, theta)[0, 0]),
     )
-    ns = JaxnsBackend(max_samples=3e4).run(model, key=jax.random.key(0))
-    ns_mean = jnp.sum(ns.samples * jax.nn.softmax(ns.log_weights)[:, None], axis=0)
-
-    # broad prior -> both recover the data, and the two backends agree.
-    assert jnp.allclose(lap.mean, data, atol=0.05)
-    assert jnp.allclose(ns_mean, lap.mean, atol=0.05)
 
 
-def test_sequential_updating_tightens_posterior():
-    """A Laplace posterior -> to_prior() -> next fit beats either data batch alone."""
-    sigma = 0.4
-    d1 = jnp.array([0.5])
-    d2 = jnp.array([0.7])
-    scene = _Toy(theta=jnp.zeros(1), label="t")
+# Medium: three cold compiles (two fits and the appended term) in one test.
+@pytest.mark.medium
+def test_appending_a_term_tightens_the_posterior():
+    """A cloud plus one more observation beats the cloud alone and matches the refit.
 
-    def forward(s):
-        return s.theta
+    Fails if the appended term replaces the old likelihood instead of adding to it, is
+    dropped, or is evaluated off the stored draws (the variance would stay at one
+    batch, or the mean would sit at one batch estimate).
+    """
+    d1, d2 = jnp.array([0.5]), jnp.array([0.7])
+    laplace = Laplace(n_draws=4000)
+    p1 = run(_fit(d1), laplace, jax.random.key(0))
+    p_seq = p1.append_term(_term(d2), min_n_eff=500, max_khat=0.7)
+    joint = run(_fit(d1, d2), laplace, jax.random.key(2))
 
-    def lik(data):
-        def likelihood(pred):
-            return -0.5 * jnp.sum(((pred - data) / sigma) ** 2)
-
-        return likelihood
-
-    broad = IndependentPrior((Normal(jnp.zeros(1), jnp.full((1,), 5.0)),))
-
-    def fit(prior, data):
-        ld, z0, _ = build_scene_logdensity(scene, forward, lik(data), prior)
-        return LaplaceBackend().run(ld, z0)
-
-    p1 = fit(broad, d1)  # batch 1 alone
-    p2_alone = fit(broad, d2)  # batch 2 alone
-    p_seq = fit(p1.to_prior(), d2)  # batch 1 posterior as prior, then batch 2
-
-    v1 = float(p1.cov[0, 0])
-    v2 = float(p2_alone.cov[0, 0])
-    v_seq = float(p_seq.cov[0, 0])
-    # information accumulates: the sequential posterior is tighter than either batch.
-    assert v_seq < v1
-    assert v_seq < v2
-    # and its mean sits between the two batch estimates.
-    assert d1[0] - 0.05 < float(p_seq.mean[0]) < d2[0] + 0.05
+    _, v1 = _moments(p1)
+    m_seq, v_seq = _moments(p_seq)
+    # information accumulates: the sequential posterior is tighter than the first batch.
+    assert v_seq < 0.75 * v1
+    # its mean sits between the two batch estimates, and it agrees with the joint fit.
+    assert d1[0] - 0.05 < m_seq < d2[0] + 0.05
+    m_joint, v_joint = _moments(joint)
+    assert abs(m_seq - m_joint) < 0.02
+    np.testing.assert_allclose(v_seq, v_joint, rtol=0.1)
 
 
-def test_mixture_prior_from_samples_drives_a_scene_fit():
-    """A bimodal SamplePosterior -> to_prior() -> Mixture drives a scene fit."""
-    from photomancy.infer.legacy_posterior import SamplePosterior, cluster_to_mixture
+def test_mixture_from_a_cloud_is_the_law_of_the_next_leaf():
+    """A bimodal cloud clustered into a Mixture drives a fit through its leaf law.
 
-    k0, k1 = jax.random.split(jax.random.key(7))
-    a = jax.random.normal(k0, (300, 1)) * 0.3 - 3.0
-    b = jax.random.normal(k1, (300, 1)) * 0.3 + 3.0
-    samples = jnp.concatenate([a, b], axis=0)
-    post = SamplePosterior(
-        samples=samples, log_weights=jnp.zeros(600), evidence=jnp.asarray(jnp.nan)
+    Fails if the mixture loses a mode or its weights (a mode of the density would
+    drop below the gap between modes), or does not serve as a ``(1,)`` leaf law.
+    """
+
+    class _TwoBumps(eqx.Module):
+        def __call__(self, model):
+            return model.theta
+
+    def bumps(pred):
+        z = (pred - jnp.array([-3.0, 3.0])) / 0.3
+        return jax.scipy.special.logsumexp(-0.5 * z**2)
+
+    fit = Fit(
+        _Toy(jnp.zeros(1)),
+        {"theta": Uniform(jnp.full((1,), -6.0), jnp.full((1,), 6.0))},
+        (ForwardTerm(_TwoBumps(), bumps),),
     )
-    prior = cluster_to_mixture(post, 2, key=jax.random.key(8)).to_prior()  # bimodal
+    cloud = run(fit, Grid({"theta": midpoint(-6.0, 6.0, 1200)}), jax.random.key(0))
+    law = cluster_to_mixture(cloud, 2, jax.random.key(1))
+    assert isinstance(law, Mixture)
+    np.testing.assert_allclose(
+        np.sort(np.asarray(law.component_distribution.loc).ravel()),
+        [-3.0, 3.0],
+        atol=0.05,
+    )
+    np.testing.assert_allclose(jax.nn.softmax(law.mixing_logits), [0.5, 0.5], atol=0.02)
 
-    scene = _Toy(theta=jnp.zeros(1), label="t")
+    # With no data the next fit's density is the law itself: both modes survive.
+    nxt = Fit(_Toy(jnp.zeros(1)), {"theta": law})
 
-    def forward(s):
-        return s.theta
+    def density(x):
+        return float(nxt.log_density({"theta": jnp.array([x])}))
 
-    def flat_likelihood(pred):
-        return 0.0  # isolate the prior's bimodality in the logdensity
-
-    logdensity, _z0, _ = build_scene_logdensity(scene, forward, flat_likelihood, prior)
-    # the two prior modes survive into the logdensity (mode > between-modes).
-    assert float(logdensity(jnp.array([3.0]))) > float(logdensity(jnp.array([0.0])))
-    assert float(logdensity(jnp.array([-3.0]))) > float(logdensity(jnp.array([0.0])))
+    assert density(3.0) > density(0.0)
+    assert density(-3.0) > density(0.0)
