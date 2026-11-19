@@ -87,7 +87,7 @@ from photomancy.infer.proposals import (
     PriorProposal,
 )
 from photomancy.infer.run import run
-from photomancy.infer.terms import TermLogDensity
+from photomancy.infer.terms import ForwardTerm, TermLogDensity
 from photomancy.infer.update import update
 
 __all__ = [
@@ -107,6 +107,7 @@ __all__ = [
     "EIGEstimate",
     "Fit",
     "Forecast",
+    "ForwardTerm",
     "GaussianPosterior",
     "Grid",
     "Importance",

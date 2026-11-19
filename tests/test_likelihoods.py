@@ -20,7 +20,7 @@ from photomancy.infer.likelihoods import (
     residual_basis,
     student_t_loglike,
 )
-from photomancy.infer.model import build_gaussian_fit
+from photomancy.infer.terms import ForwardTerm
 
 BUILDERS = {
     "gaussian": gaussian_loglike,
@@ -390,34 +390,31 @@ def test_residual_basis_rejects_invalid_inputs(residuals, rank, mask, message):
         residual_basis(residuals, rank, mask)
 
 
-@vv.case("scene-fits", "code-verification", basis="exact-algebra")
-def test_build_gaussian_fit_default_is_unchanged_and_accepts_a_likelihood():
-    """The default fit is the bare Gaussian sum; likelihood= and mask= swap it in.
+class _Mu(eqx.Module):
+    """Forward ``scene -> scene.mu``."""
 
-    Tolerance basis: exact-algebra (the default value is compared bitwise).
-    Fails if: the default path changed (numbers or ordering), the builder is not
-    called with the noise sigma and mask, or mask is silently ignored without a
-    likelihood.
+    def __call__(self, scene):
+        return scene.mu
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_forward_term_scores_the_builder_on_the_forward():
+    """A ForwardTerm is the builder applied to the forward, mask and sigma included.
+
+    Tolerance basis: exact-algebra (the values are compared bitwise).
+    Fails if: the term changes the builder's number or ordering, or drops the mask or
+    the per-element sigma the builder was given.
     """
     obs = jnp.array([1.0, 2.0, 3.0])
     sigma = jnp.array([0.1, 0.2, 0.3])
-    scene = _ToyScene(mu=jnp.zeros(3))
-    kwargs = {
-        "fit_leaves": lambda s: [s.mu],
-        "noise_sigma": sigma,
-        "forward": lambda s: s.mu,
-    }
-    z = jnp.array([0.5, 2.5, 2.0])
-
-    ld, _, _ = build_gaussian_fit(scene, obs, **kwargs)
-    assert float(ld(z)) == float(-0.5 * jnp.sum((z - obs) ** 2 * (1.0 / sigma**2)))
-
+    scene = _ToyScene(mu=jnp.array([0.5, 2.5, 2.0]))
     mask = np.array([True, True, False])
-    robust, _, _ = build_gaussian_fit(
-        scene, obs, **kwargs, likelihood=huber_loglike, mask=mask
-    )
-    expected = huber_loglike(obs, sigma, mask)(z)
-    assert float(robust(z)) == float(expected)
 
-    with pytest.raises(ValueError, match="mask requires"):
-        build_gaussian_fit(scene, obs, **kwargs, mask=mask)
+    for builder in (gaussian_loglike, huber_loglike):
+        for use in (None, mask):
+            likelihood = builder(obs, sigma, use)
+            term = ForwardTerm(_Mu(), likelihood)
+            assert float(term(scene)) == float(likelihood(scene.mu))
+    masked = ForwardTerm(_Mu(), huber_loglike(obs, sigma, mask))
+    moved = _ToyScene(mu=scene.mu.at[2].set(1e6))
+    assert float(masked(moved)) == float(masked(scene))
