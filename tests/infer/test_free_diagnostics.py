@@ -173,3 +173,63 @@ def test_no_support_gives_nan_and_zero_weight_values_are_ignored():
     poisoned = jnp.array([1.0, jnp.nan, 3.0])
     log_w = jnp.array([0.0, -jnp.inf, 0.0])
     assert weighted_mean(log_w, poisoned) == 2.0
+
+
+def test_mc_se_ratio_estimator_matches_stand_in_form():
+    """With g, the error is the ratio-estimator form and inf without condition mass."""
+    rng = np.random.default_rng(8)
+    n = 400
+    log_w = rng.normal(size=n)
+    g = rng.uniform(size=n)
+    h = g * rng.normal(size=n)
+    w = np.exp(log_w - log_w.max())
+    w /= w.sum()
+    den = w @ g
+    q = (w @ h) / den
+    want = np.sqrt(np.sum(w**2 * (h - q * g) ** 2)) / den
+    got = mc_se(jnp.asarray(log_w), jnp.asarray(h), g=jnp.asarray(g))
+    np.testing.assert_allclose(got, want, rtol=1e-12)
+    np.testing.assert_allclose(
+        mc_se(jnp.asarray(log_w), jnp.asarray(h), g=jnp.asarray(g), r_eff=0.5),
+        want * np.sqrt(2),
+        rtol=1e-12,
+    )
+    assert jnp.isinf(mc_se(jnp.asarray(log_w), jnp.asarray(h), g=jnp.zeros(n)))
+    lw2 = jnp.stack([jnp.asarray(log_w)] * 2)
+    both = mc_se(
+        lw2, jnp.stack([jnp.asarray(h)] * 2), g=jnp.stack([jnp.asarray(g)] * 2)
+    )
+    np.testing.assert_allclose(both, [want, want], rtol=1e-12)
+
+
+def test_khat_rounding_flat_weights_are_flat():
+    """Weights that differ only by logsumexp rounding return -inf."""
+    rng = np.random.default_rng(6)
+    raw = rng.normal(size=500)
+    log_w = raw - np.log(np.sum(np.exp(raw))) + np.log(np.sum(np.exp(raw)))
+    jitter = 4 * np.finfo(float).eps * rng.uniform(-1, 1, size=500)
+    assert pareto_khat(jnp.asarray(np.full(500, -6.2) + jitter)) == -jnp.inf
+    assert pareto_khat(jnp.asarray(log_w)) > -jnp.inf
+
+
+@pytest.mark.parametrize("levels", [2, 3, 4])
+def test_khat_discrete_weight_levels_fail_closed_or_pass(levels):
+    """A few discrete levels leave fewer than five distinct exceedances: NaN."""
+    rng = np.random.default_rng(levels)
+    log_w = np.log(np.arange(1, levels + 1))[rng.integers(0, levels, size=1000)]
+    log_w = log_w + 1e-15 * rng.uniform(size=1000)
+    out = pareto_khat(jnp.asarray(log_w))
+    assert jnp.isnan(out) or out == -jnp.inf
+    assert not bool(out <= 0.7) or out == -jnp.inf
+
+
+def test_khat_bin_probability_reweight_levels():
+    """Reweighting by a per-bin probability ratio (few levels, big plateau)."""
+    rng = np.random.default_rng(9)
+    ratio = np.array([0.2, 0.5, 1.0, 2.0, 5.0, 9.0])
+    log_w = np.log(ratio[rng.integers(0, 6, size=2000)])
+    # The top plateau holds the whole tail: no draw exceeds the cutoff.
+    assert pareto_khat(jnp.asarray(log_w)) == -jnp.inf
+    # A continuous perturbation on top restores a fittable, light tail.
+    noisy = log_w + 0.05 * rng.normal(size=2000)
+    assert float(pareto_khat(jnp.asarray(noisy))) < 0.7

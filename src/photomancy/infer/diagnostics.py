@@ -33,6 +33,17 @@ __all__ = [
 ]
 
 _KHAT_PRIOR_COUNT = 10.0
+_MIN_EXCEEDANCES = 5
+# Two log weights closer than this many float epsilons (relative, floored at
+# one) are tied: values that went through logsumexp or a subtraction differ by
+# rounding even when they are mathematically equal.
+_TIE_ULPS = 64
+
+
+def _tied(diff, value):
+    """Whether a nonnegative log-weight difference is zero within rounding."""
+    eps = jnp.finfo(diff.dtype).eps
+    return diff <= _TIE_ULPS * eps * jnp.maximum(1.0, jnp.abs(value))
 
 
 def _over_batch(fn, log_weights, *values, **kwargs):
@@ -117,13 +128,18 @@ def _khat(log_weights):
     tail = jnp.clip(_tail_size(n_finite.astype(lw.dtype)), 1, tail_max).astype(int)
 
     descending = jnp.sort(lw)[::-1]
-    ratios = jnp.exp(descending - descending[0])
-    cutoff = ratios[tail]
-    exceed = ratios[:tail_max] - cutoff
+    top = descending[0]
+    # Draws tied with the cutoff within rounding carry no exceedance.
+    cutoff_lw = descending[tail]
+    tail_lw = descending[:tail_max]
     slot = jnp.arange(tail_max)
-    valid = slot < tail
-    ascending = jnp.where(valid, exceed[jnp.clip(tail - 1 - slot, 0, None)], 0.0)
-    count = tail.astype(ascending.dtype)
+    exceeds = (slot < tail) & ~_tied(tail_lw - cutoff_lw, tail_lw)
+    n_fit = jnp.sum(exceeds)
+    exceed = jnp.where(exceeds, jnp.exp(tail_lw - top) - jnp.exp(cutoff_lw - top), 0.0)
+    valid = slot < n_fit
+    ascending = jnp.where(valid, exceed[jnp.clip(n_fit - 1 - slot, 0, None)], 0.0)
+    count = jnp.maximum(n_fit, 1).astype(ascending.dtype)
+    tail = jnp.maximum(n_fit, 1)
 
     x_max = ascending[tail - 1]
     quartile = ascending[
@@ -154,9 +170,15 @@ def _khat(log_weights):
     shape = jnp.sum(jnp.where(valid, jnp.log1p(-theta_hat * ascending), 0.0)) / count
     shape = (count * shape + _KHAT_PRIOR_COUNT * 0.5) / (count + _KHAT_PRIOR_COUNT)
 
-    # Bounded ratios (no spread in the tail) have no heavy tail at all.
-    shape = jnp.where(x_max > 0, shape, -jnp.inf)
-    return jnp.where(n_finite >= 5, shape, jnp.nan)
+    # Rounding-flat weights have no tail at all; a tail with fewer than five
+    # distinct exceedances cannot be fitted and fails closed.
+    low = jnp.min(jnp.where(jnp.isfinite(lw), lw, jnp.inf))
+    flat = _tied(top - low, jnp.maximum(jnp.abs(top), jnp.abs(low)))
+    return jnp.select(
+        [n_finite < 1, flat | (n_fit == 0), n_fit < _MIN_EXCEEDANCES],
+        [jnp.nan, -jnp.inf, jnp.nan],
+        shape,
+    )
 
 
 def pareto_khat(log_weights):
@@ -169,11 +191,17 @@ def pareto_khat(log_weights):
     log weights are dropped. A value below 0.5 means finite variance, at or
     below ``khat_threshold(S)`` usable, and at or above 1 no finite mean.
 
+    Rounding ties count as ties: log weights within 64 float epsilons of one
+    another over the whole slice are flat and return ``-inf``, and draws within
+    that tolerance of the cutoff are left out of the fit (discrete weight
+    levels such as quadrature or bin-probability weights).
+
     Valid for the raw ratios of iid proposal draws (an importance reweight or a
     Laplace-IS cloud), not for nested-sampling dead points or a grid. A slice
-    with fewer than five finite entries returns NaN; a tail with no spread
-    returns ``-inf``. Both compare as "not heavy" only for ``-inf``: gate on
-    ``~(khat <= limit)`` to refuse NaN. Leading axes are batch axes.
+    with no finite entry, or fewer than five distinct exceedances, returns NaN
+    (the fit fails closed); flat weights return ``-inf``. Gate on
+    ``~(khat <= limit)`` so that NaN refuses and ``-inf`` passes. Leading axes
+    are batch axes.
     """
     return _over_batch(_khat, log_weights)
 
@@ -261,32 +289,54 @@ def weighted_quantile(log_weights, values, q):
     return _over_batch(_quantile, log_weights, values, q=q)
 
 
-def _mc_se(log_weights, values, *, r_eff):
+def _mc_se(log_weights, values, g, *, r_eff):
     weights, no_support, values = _prepare(log_weights, values)
-    mean = _mean(log_weights, values)
     expanded = _event_shape_mask(weights, values)
-    centered = jnp.where(expanded > 0, values - mean, 0.0)
-    var = jnp.sum((expanded * centered) ** 2, axis=0)
+    if g is None:
+        mean = _mean(log_weights, values)
+        centered = jnp.where(expanded > 0, values - mean, 0.0)
+        var = jnp.sum((expanded * centered) ** 2, axis=0)
+        bad = no_support
+    else:
+        g = jnp.broadcast_to(jnp.asarray(g, dtype=weights.dtype), weights.shape)
+        den = weights @ g
+        bad = no_support | ~(den > 0)
+        safe = jnp.where(bad, 1.0, den)
+        q = jnp.sum(jnp.where(expanded > 0, expanded * values, 0.0), axis=0) / safe
+        gx = g.reshape(g.shape + (1,) * (values.ndim - 1))
+        resid = jnp.where(expanded > 0, values - q * gx, 0.0)
+        var = jnp.sum((expanded * resid) ** 2, axis=0) / safe**2
     if r_eff is not None:
         var = var / r_eff
-    return jnp.where(no_support, jnp.nan, jnp.sqrt(var))
+    return jnp.where(bad, jnp.where(no_support, jnp.nan, jnp.inf), jnp.sqrt(var))
 
 
-def mc_se(log_weights, values, *, r_eff=None):
-    """Return the Monte Carlo standard error of the weighted mean of ``values``.
+def mc_se(log_weights, values, *, g=None, r_eff=None):
+    """Return the Monte Carlo standard error of a weighted mean of ``values``.
 
-    The delta-method error of a self-normalized importance estimate for iid
-    draws, ``sqrt(sum w^2 (f - mean)^2)`` with normalized weights ``w``. With
-    ``r_eff=None`` this is the iid error and it understates the error of
-    correlated (MCMC) draws; a given ``r_eff`` (the relative efficiency,
-    effective draws over total draws, scalar or broadcastable over the batch
-    prefix) divides the variance by ``r_eff``. The result has shape
-    ``(*batch, *event)``.
+    Without ``g``: the delta-method error of a self-normalized importance
+    estimate for iid draws, ``sqrt(sum w^2 (f - mean)^2)`` with normalized
+    weights ``w``. With ``g`` (per-draw probability of a condition, shape
+    ``(*batch, S)``, ``values`` then the joint ``h`` of condition and value):
+    the ratio estimator ``q = sum w h / sum w g`` has error
+    ``sqrt(sum w^2 (h - q g)^2) / sum w g``, and the result is ``inf`` when the
+    condition has zero weight (``sum w g = 0``). With ``r_eff=None`` the result
+    is the iid error and it understates the error of correlated (MCMC) draws;
+    a given ``r_eff`` (effective draws over total draws, scalar or with the
+    batch shape) divides the variance by ``r_eff``. The result has shape
+    ``(*batch, *event)``; a slice without support gives NaN.
     """
-    if r_eff is not None:
-        r_eff = jnp.asarray(r_eff)
-        if r_eff.ndim:
-            return _over_batch(
-                lambda lw, v, r: _mc_se(lw, v, r_eff=r), log_weights, values, r_eff
-            )
-    return _over_batch(_mc_se, log_weights, values, r_eff=r_eff)
+    batch_r = r_eff is not None and jnp.asarray(r_eff).ndim > 0
+
+    def one(lw, v, gg, rr):
+        return _mc_se(lw, v, gg, r_eff=rr if r_eff is not None else None)
+
+    r = jnp.asarray(r_eff) if r_eff is not None else jnp.zeros(())
+    g_arr = None if g is None else jnp.asarray(g)
+    log_weights = jnp.asarray(log_weights)
+    fn = one
+    nb = log_weights.ndim - 1
+    in_axes = (0, 0, None if g is None else 0, 0 if batch_r else None)
+    for _ in range(nb):
+        fn = jax.vmap(fn, in_axes=in_axes)
+    return fn(log_weights, jnp.asarray(values), g_arr, r)
