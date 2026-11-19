@@ -37,6 +37,7 @@ from photomancy.orbit.inference import (
 )
 from photomancy.orbit.updater import FixedMassTarget
 from photomancy.priors import (
+    LOG_HAAR,
     PopulationPrior,
     orbit_log_prior,
 )
@@ -243,7 +244,9 @@ def test_fixed_mass_reference_across_charts():
     assert np.isneginf(fixed[-1])
     _check(
         "FixedMassTarget",
-        fixed[:-1] - jax.vmap(EccentricityVectorChart().log_volume)(point)[:-1],
+        fixed[:-1]
+        - jax.vmap(EccentricityVectorChart().log_volume)(point)[:-1]
+        - LOG_HAAR,
         reference[:-1],
     )
     for chart in (
@@ -449,7 +452,7 @@ def test_fixed_count_population_intensity():
     values = eqx.filter_jit(eqx.filter_vmap(density))(params)
     _check(
         "population per log mass",
-        values - chart.log_volume(params["orbit"]),
+        values - chart.log_volume(params["orbit"]) - LOG_HAAR,
         expected + jnp.log(mass),
     )
     scene = jax.tree.map(lambda x: x[0], scenes)
