@@ -237,6 +237,12 @@ as the cloud, the same number of draws and the same kind of posterior, so the ba
 built with the posterior's draw count. Because the choice between the two branches is one
 `jax.lax.cond`, `update` can be traced and mapped over a stack of fits.
 
+The `info` of the result is an `UpdateInfo`. Its `reweight` field holds the gate reading
+(`n_eff`, `khat`, `refused`), where `refused` is true exactly when the refit ran. Its
+`refit` field is the backend's own info, the same as `run(...).info` where the refit ran
+and filled with NaN, zero or false elsewhere, so `info.refit.proposal_valid` says whether
+the refit's proposal could vouch for its weights.
+
 ## The backends
 
 Every backend is passed to `run` in the same way and returns a `Posterior`. They differ in

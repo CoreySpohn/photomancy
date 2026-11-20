@@ -18,7 +18,14 @@ from orbix.system.core import Body, SkyFrame
 from priorities import LogUniform, Uniform
 from skyscapes.population import kipping_eccentricity
 
-from photomancy.infer import AbstractTerm, AdaptiveImportance, Fit, Importance, run
+from photomancy.infer import (
+    AbstractTerm,
+    AdaptiveImportance,
+    Fit,
+    Importance,
+    run,
+    update,
+)
 from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
 from photomancy.orbit.backends import any_epoch, few_epoch
 from photomancy.orbit.completion import (
@@ -402,3 +409,17 @@ def test_the_pool_reading_gates_the_evidence_and_matches_a_direct_one(fit):
     assert not bool(draws.info.proposal_valid)
     assert np.isnan(float(draws.log_evidence))
     assert np.all(np.isfinite(draws.log_weights) | np.isneginf(draws.log_weights))
+    # A refused refit through ``update`` keeps the pool reading in ``info.refit``.
+    refused = update(
+        run(fit, Importance(proposal, n), jax.random.key(3)),
+        fit.terms[0],
+        Importance(proposal, n),
+        jax.random.key(4),
+        index=0,
+        min_n_eff=1e9,
+        max_khat=jnp.inf,
+    )
+    assert bool(refused.info.reweight.refused)
+    assert not bool(refused.info.refit.proposal_valid)
+    assert np.isnan(float(refused.log_evidence))
+    assert np.all(np.isfinite(refused.log_weights) | np.isneginf(refused.log_weights))
