@@ -90,7 +90,7 @@ times the four constants. With Gaussian astrometric errors the likelihood is the
 Gaussian in the constants, and their conditional distribution given the shape is known
 exactly. orbix computes the design matrix (`sky_design`) and the exact conditional
 (`linear_gaussian_conditional`), and a measurement term that has this linear form says so
-by its type (`AbstractLinearTerm` in `photomancy.infer`).
+by its type (`AbstractLinearGaussianTerm` in `photomancy.infer`).
 
 The consequence is that an orbit search never has to explore seven dimensions blindly.
 Only the three coordinates of the size and the shape need a proposal, and the four

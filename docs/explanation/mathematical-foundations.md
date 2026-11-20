@@ -106,7 +106,7 @@ decomposes exactly by the chain rule of mutual information,
 $$ I\big((M, z); Y\big) = I(M; Y) + \sum_k w_k \, I(z; Y \mid M = k), $$
 
 a between-mode discrete term plus an evidence-weighted within-mode continuous term. The
-terms below are the estimators of these pieces, and `evaluate_candidates` assembles them.
+terms below are the estimators of these pieces, and `eig_linearized` assembles them.
 
 **Continuous-parameter gain.** For an observation linearized about a mode,
 $y = J z + \varepsilon$ with Jacobian $J = \partial y / \partial z$ and measurement
@@ -137,13 +137,13 @@ $$ \mathrm{EIG}_{\mathrm{marg}} = \tfrac{1}{2}\big(\log|\Phi \Sigma_{\mathrm{old
 - \log|\Phi \Sigma_{\mathrm{new}} \Phi^\top|\big), $$
 
 so an observation that only sharpens a nuisance parameter books no gain (the
-`qoi_projection` of `geometric_eig`). The full-vector log-determinant would reward
+`qoi_projection` of `eig_geometric`). The full-vector log-determinant would reward
 nuisance shrinkage indiscriminately.
 
 **Mode-discrimination gain.** When several modes survive, they predict different
 observations, and an observation that separates them sharpens the weights. The mode
 information $I(M; Y)$ has no closed form for a Gaussian mixture, so the library reports an
-upper bound on it, the intersection of two bounds, which `alias_breaking_eig_from_covariances`
+upper bound on it, the intersection of two bounds, which `eig_alias_breaking_from_covariances`
 returns. Each mode predicts the observation as $\mathcal{N}(y_k, S_k)$, where the full
 predictive covariance $S_k = J_k \Sigma_k J_k^\top + R$ carries the within-mode spread and its
 correlations as well as the measurement noise. Because $I(M; Y) = H(Y) - \sum_k w_k H(Y \mid k)$
@@ -165,7 +165,7 @@ zero in these coordinates and $0.553$ after a $45^\circ$ rotation of the same ex
 full-determinant form is invariant under any invertible linear change of observable basis.
 The result is an upper bound rather than an estimate: it is tight when the modes are resolved
 (the $H(w)$ cap) or identical (zero), and it overstates the information of partially
-overlapping modes. The variance interface `alias_breaking_eig` is the diagonal special case,
+overlapping modes. The variance interface `eig_alias_breaking` is the diagonal special case,
 for predictive covariances known to be diagonal. This is the part of the gain that the Fisher
 information cannot describe, a property of the discrete spread across modes rather than the
 local curvature within one, so the chain rule above partitions the total into a within-mode
@@ -177,9 +177,9 @@ detection probability $d_k \in [0, 1]$, and the binary outcome $D$ carries exact
 $$ \mathrm{EIG}_{\mathrm{det}} = I(D; M) = H_b\Big(\sum_k w_k d_k\Big) - \sum_k w_k H_b(d_k),
 \qquad H_b(p) = -p \log p - (1 - p)\log(1 - p), $$
 
-the closed-form mutual information of the detection channel (`detectability_eig`). It
+the closed-form mutual information of the detection channel (`eig_detectability`). It
 saturates at $\min\big(H_b(\bar d),\, H(w)\big)$: once every mode agrees on
-detectability, the detection bit teaches nothing more. `evaluate_candidates` combines this
+detectability, the detection bit teaches nothing more. `eig_linearized` combines this
 bit with the continuous value under a restricted reporting model, in which mode $k$ is
 reported with probability $d_k$ independently of the Gaussian value within that mode, and a
 nondetection carries no value. The chain rule then gives
@@ -204,9 +204,9 @@ $$ I(C; Y) = H\Big(\sum_k w_k P(\cdot \mid k)\Big)
 - \mathbb{E}_{y \sim \bar p}\Big[ H\Big(\sum_k w_k(y)\, P(\cdot \mid k)\Big) \Big],
 \qquad w_k(y) \propto w_k \, \mathcal{N}\big(y;\, y_k,\, s_k^2\big), $$
 
-by stratified draws from the mixture predictive $\bar p$ (`class_eig`); for a
+by stratified draws from the mixture predictive $\bar p$ (`eig_class`); for a
 detection-only observation the posterior reweighting is closed-form
-(`detection_class_eig`). The gain is bounded by the class entropy $H(C)$, so it
+(`eig_detection_class`). The gain is bounded by the class entropy $H(C)$, so it
 saturates by construction: a settled classification scores zero no matter how much more
 precise further data would make the parameters. When modes are class-pure the data
 processing inequality gives $I(C; Y) \le I(M; Y)$, so the capped mode-discrimination

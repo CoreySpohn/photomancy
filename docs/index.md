@@ -73,7 +73,7 @@ log_bayes_factor = posterior_with.log_evidence - posterior_without.log_evidence
 sigma = sigma_from_log_bayes_factor(log_bayes_factor)
 ```
 
-{func}`~photomancy.infer.evidence.sigma_from_log_bayes_factor` inverts the
+{func}`~photomancy.infer.sigma_from_log_bayes_factor` inverts the
 Sellke, Bayarri and Berger (2001) bound in log space and accepts scalars or arrays
 under JAX transformations. Negative log Bayes factors return NaN; zero returns the
 finite branch endpoint at `p = 1/e`. Bayes factors below about 2.5 (about 2 sigma)
