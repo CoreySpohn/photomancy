@@ -354,10 +354,20 @@ def test_map_finds_the_mode():
 
 
 def test_nested_sampling_recovers_the_evidence():
-    """Jaxns gives the exact evidence within its standard deviation."""
+    """Jaxns gives the exact evidence within its standard deviation.
+
+    A run cut by ``max_samples`` (jaxns termination reason 1) keeps its samples and
+    weights but has no evidence: fails if a finite value comes back from a run that
+    stopped before convergence.
+    """
     pytest.importorskip("jaxns")
     fit = _leaf_fit()
+    cut = run(fit, NestedSampling(max_samples=120), jax.random.key(0))
+    assert int(cut.info.termination_reason) == 1
+    assert np.isnan(float(cut.log_evidence)) and np.isnan(float(cut.log_evidence_se))
+    assert cut.log_weights.shape == (120,) and np.all(np.isfinite(cut.log_weights))
     post = run(fit, NestedSampling(max_samples=20000), jax.random.key(0))
+    assert int(post.info.termination_reason) == 0
     _check_contract(post, fit)
     se = float(post.log_evidence_se)
     assert abs(float(post.log_evidence) - _exact_log_z()) < 5 * max(se, 0.02)
