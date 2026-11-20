@@ -34,7 +34,6 @@ class GaussianCoronagraph(AbstractTableCoronagraph):
     sky_trans: Image
     uniform_sky_profile: SampledProfile
     bandpass: Band | None = None
-    outer_working_angle_lod: object = None
 
     def __init__(self, n=N_PIX, step=STEP_LOD):
         """Build an n x n focal grid with the given lambda/D step."""

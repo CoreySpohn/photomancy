@@ -34,7 +34,6 @@ class SyntheticCoronagraph(AbstractTableCoronagraph):
     grid: PixelGrid
 
     bandpass: Band
-    outer_working_angle_lod: None = None
 
     @property
     def sky_trans(self):
