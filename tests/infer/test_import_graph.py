@@ -10,6 +10,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 import photomancy.infer
 
 FORBIDDEN = {
@@ -254,6 +256,27 @@ DELETED = (
     "epochs=",
     "det_epochs",
     "null_epochs",
+    # Renamed public names: the old spellings are not importable and not mentioned.
+    "LeafConditional",
+    "AbstractConditionalTerm",
+    "leaf_conditional",
+    "LinearForm",
+    "linear_form",
+    "AbstractLinearTerm",
+    "evaluate_orbit_candidates",
+    "evaluate_candidates",
+    "FitStage",
+    "n_tune",
+    "gauss_legendre",
+    "geometric_eig",
+    "alias_breaking_eig",
+    "alias_breaking_eig_from_covariances",
+    "detectability_eig",
+    "detection_class_eig",
+    "detection_channel_eig",
+    "class_eig",
+    "planet_id",
+    "_flat_layout",
 )
 
 
@@ -334,3 +357,138 @@ def test_update_info_is_exported_from_infer():
     """Fails if ``UpdateInfo`` leaves ``photomancy.infer`` or its ``__all__``."""
     assert "UpdateInfo" in photomancy.infer.__all__
     assert photomancy.infer.UpdateInfo.__name__ == "UpdateInfo"
+
+
+PUBLIC_NAMES = (
+    "MAP",
+    "MCLMC",
+    "NUTS",
+    "AbstractBackend",
+    "AbstractDensityProposal",
+    "AbstractLinearGaussianTerm",
+    "AbstractProposal",
+    "AbstractProposingTerm",
+    "AbstractTerm",
+    "AdaptiveImportance",
+    "DefensiveProposal",
+    "EIGEstimate",
+    "EarlyStopping",
+    "Fit",
+    "Forecast",
+    "ForwardTerm",
+    "Grid",
+    "Importance",
+    "ImportanceInfo",
+    "Laplace",
+    "LaplaceInfo",
+    "LeafProposal",
+    "LinearGaussian",
+    "LinearizedEIG",
+    "MAPInfo",
+    "MAPStage",
+    "MCLMCInfo",
+    "MixtureProposal",
+    "NUTSInfo",
+    "NestedInfo",
+    "NestedSampling",
+    "Pathfinder",
+    "PathfinderInfo",
+    "Posterior",
+    "PriorProposal",
+    "ReweightInfo",
+    "UpdateInfo",
+    "cluster_to_mixture",
+    "eig_contrastive",
+    "eig_linearized",
+    "eig_nested",
+    "gauss_legendre_rule",
+    "group_labels",
+    "importance_evidence",
+    "khat_threshold",
+    "kish_ess",
+    "kish_temperature",
+    "mc_se",
+    "midpoint_rule",
+    "normalize_log_weights",
+    "pareto_khat",
+    "ratio_mc_se",
+    "ravel_samples",
+    "rescaled_transform",
+    "run",
+    "sigma_from_log_bayes_factor",
+    "update",
+    "weighted_cov",
+    "weighted_mean",
+    "weighted_quantile",
+)
+
+
+def test_infer_all_is_the_pinned_public_surface():
+    """Fails if a name enters or leaves ``photomancy.infer.__all__`` unannounced.
+
+    ``infer.__all__`` holds every name needed to state a fit, run it and read the
+    result; each name resolves, and ``backends`` does not export the staged engine.
+    """
+    assert sorted(photomancy.infer.__all__) == sorted(PUBLIC_NAMES)
+    for name in PUBLIC_NAMES:
+        assert hasattr(photomancy.infer, name), name
+    from photomancy.infer import backends
+
+    assert "map_fit" not in backends.__all__
+    assert "MAPResult" not in backends.__all__
+
+
+def test_the_two_public_submodules_declare_an_all():
+    """Fails if ``infer.eig`` or ``infer.likelihoods`` loses its ``__all__``.
+
+    Every listed name resolves, every public (non-underscore) function or class
+    defined there is listed, and every estimator of ``eig`` follows ``eig_<method>``.
+    """
+    import inspect
+
+    from photomancy.infer import eig, likelihoods
+
+    for module in (eig, likelihoods):
+        listed = set(module.__all__)
+        assert all(hasattr(module, name) for name in listed)
+        defined = {
+            name
+            for name, obj in vars(module).items()
+            if (inspect.isfunction(obj) or inspect.isclass(obj))
+            and obj.__module__ == module.__name__
+            and not name.startswith("_")
+        }
+        assert defined == listed, defined ^ listed
+    functions = [name for name in eig.__all__ if inspect.isfunction(getattr(eig, name))]
+    assert functions and all(name.startswith("eig_") for name in functions)
+
+
+def test_docs_import_no_private_module_of_infer():
+    """Fails if a page, notebook or the README imports below ``photomancy.infer``.
+
+    Documentation imports from ``photomancy.infer`` itself, except the two public
+    submodules ``eig`` and ``likelihoods``; ``photomancy.infer.backends`` and the
+    private modules never appear in an import or a cross-reference.
+    """
+    root = ROOT.parent.parent.parent
+    pages = [
+        *root.joinpath("docs").rglob("*.md"),
+        *root.joinpath("docs").rglob("*.ipynb"),
+        root / "README.md",
+    ]
+    pages = [page for page in pages if page.is_file()]
+    if not pages:
+        pytest.skip("the documentation is not part of this installation")
+    pattern = re.compile(r"photomancy\.infer\.(\w+)")
+    allowed = {"eig", "likelihoods"}
+    found = {}
+    for page in pages:
+        text = page.read_text()
+        bad = {
+            name
+            for name in pattern.findall(text)
+            if name not in allowed and name not in set(photomancy.infer.__all__)
+        }
+        if bad:
+            found[str(page.relative_to(root))] = sorted(bad)
+    assert not found, found

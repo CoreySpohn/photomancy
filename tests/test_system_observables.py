@@ -261,7 +261,7 @@ def two_planets(data):
         body_index=(1, 0),
     )
     data = eqx.tree_at(
-        lambda d: d.relative_astrom.planet_id, data, jnp.array([0, 1, 0, 1, 0])
+        lambda d: d.relative_astrom.planet, data, jnp.array([0, 1, 0, 1, 0])
     )
     return data, pairs, scene
 
@@ -314,7 +314,7 @@ def test_jacobi_predictions(two_planets):
     ends = jnp.stack(jacobi.solve(end_times).offset_arcsec(0, "barycenter"))
     expected = (
         eph.radial_velocity_m_per_s(0, "barycenter")[:-1],
-        relative[:, data.relative_astrom.planet_id, jnp.arange(time_d.size)][:, :-1],
+        relative[:, data.relative_astrom.planet, jnp.arange(time_d.size)][:, :-1],
         jnp.stack(eph.offset_arcsec(0, "barycenter"))[:, :-1],
         fit[1] - (ends[:, 1] - ends[:, 0]) / (pm.t_gaia - pm.t_hip),
     )
@@ -329,7 +329,7 @@ def test_jacobi_predictions(two_planets):
         error = np.max(np.abs(observed - target))
         print(f"Jacobi {name}: max_error={error:.7g}, atol={floor:g}, rtol=1e-12")
         np.testing.assert_allclose(observed, target, rtol=1e-12, atol=floor)
-    scene_ids = 1 - data.relative_astrom.planet_id[:-1]
+    scene_ids = 1 - data.relative_astrom.planet[:-1]
     np.testing.assert_allclose(
         terms[1].predict(scene)[:, :-1],
         relative[:, scene_ids, jnp.arange(time_d.size - 1)],

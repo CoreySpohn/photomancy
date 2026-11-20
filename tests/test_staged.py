@@ -15,7 +15,7 @@ from photomancy.infer.backends.staged import (
     MAP,
     UNLABELED,
     EarlyStopping,
-    FitStage,
+    MAPStage,
     group_labels,
     map_fit,
     rescaled_transform,
@@ -137,7 +137,7 @@ def test_hold_leaves_frozen_leaves_and_moments_bitwise_unchanged():
     init = _toy_init()
     labels = group_labels(init, _TOY_GROUPS)
     kwargs = dict(labels=labels, transforms=_toy_transforms(), freeze="hold")
-    after_a = map_fit(_toy_logdensity, init, stages=[FitStage(20, ("a",))], **kwargs)
+    after_a = map_fit(_toy_logdensity, init, stages=[MAPStage(20, ("a",))], **kwargs)
     np.testing.assert_array_equal(after_a.params.b, init.b)
     np.testing.assert_array_equal(after_a.params.fixed, init.fixed)
     fresh_b_state = _toy_transforms()["b"].init(init.b)
@@ -152,13 +152,13 @@ def test_hold_leaves_frozen_leaves_and_moments_bitwise_unchanged():
     both = map_fit(
         _toy_logdensity,
         init,
-        stages=[FitStage(20, ("a",)), FitStage(15, ("b",)), FitStage(10, ("a",))],
+        stages=[MAPStage(20, ("a",)), MAPStage(15, ("b",)), MAPStage(10, ("a",))],
         **kwargs,
     )
     mid = map_fit(
         _toy_logdensity,
         init,
-        stages=[FitStage(20, ("a",)), FitStage(15, ("b",))],
+        stages=[MAPStage(20, ("a",)), MAPStage(15, ("b",))],
         **kwargs,
     )
     # Stage three freezes b, so it equals b after stage two; the trace lengths follow.
@@ -186,7 +186,7 @@ def test_map_fit_does_not_consume_init_and_reaches_the_optimum():
         init,
         labels,
         {"a": optax.adam(0.05), "b": optax.adam(0.05)},
-        [FitStage(600, ("a", "b"))],
+        [MAPStage(600, ("a", "b"))],
     )
     np.testing.assert_allclose(result.params.a, [1.0, 2.0, 3.0], atol=1e-3)
     np.testing.assert_allclose(result.params.b, [0.5, -0.5], atol=1e-3)
@@ -257,7 +257,7 @@ def test_legacy_freeze_policies_match_a_hand_written_optax_loop(policy):
     """
     init = _toy_init()
     labels = group_labels(init, _TOY_GROUPS)
-    stages = [FitStage(n, free) for n, free in _STAGES]
+    stages = [MAPStage(n, free) for n, free in _STAGES]
     got = map_fit(
         _toy_logdensity, init, labels, _legacy_transforms(), stages, freeze=policy
     )
@@ -287,8 +287,8 @@ def test_freeze_policies_differ_where_they_should():
     """
     init = _toy_init()
     labels = group_labels(init, _TOY_GROUPS)
-    one = [FitStage(10, ("a",))]
-    two = [*one, FitStage(5, ("b",))]
+    one = [MAPStage(10, ("a",))]
+    two = [*one, MAPStage(5, ("b",))]
     runs = {}
     for policy in ("hold", "zero_gradient", "drop_update"):
         args = (_toy_logdensity, init, labels, _toy_transforms())
@@ -355,7 +355,7 @@ def test_closed_form_sees_the_pre_step_aux_and_runs_after_the_update():
         return eqx.tree_at(lambda t: t.y, params, aux)
 
     run = lambda n: map_fit(  # noqa: E731
-        ld, init, labels, tx, [FitStage(n, ("x",), closed_form=closed_form)]
+        ld, init, labels, tx, [MAPStage(n, ("x",), closed_form=closed_form)]
     )
     short, full = run(4), run(5)
     np.testing.assert_array_equal(full.params.y, short.params.x)
@@ -380,13 +380,13 @@ def test_early_stopping_ends_a_stage_at_the_expected_step():
 
     def run(check_every):
         stages = [
-            FitStage(
+            MAPStage(
                 50,
                 ("x",),
                 early_stopping=EarlyStopping(3, check_every=check_every),
                 name="s1",
             ),
-            FitStage(2, ("x",), name="s2"),
+            MAPStage(2, ("x",), name="s2"),
         ]
         return map_fit(ld, init, labels, tx, stages)
 
@@ -415,15 +415,15 @@ def test_callbacks_metrics_scale_and_stage_logdensity():
     labels = group_labels(init, _Q_GROUPS)
     seen = []
     stages = [
-        FitStage(2, ("x",), objective_scale=0.5, name="first"),
-        FitStage(
+        MAPStage(2, ("x",), objective_scale=0.5, name="first"),
+        MAPStage(
             2,
             ("x",),
-            logdensity=_PreStepAux(jnp.asarray([4.0, 4.0])),
+            fit=_PreStepAux(jnp.asarray([4.0, 4.0])),
             objective_scale=0.5,
             name="second",
         ),
-        FitStage(1, ("x",), objective_scale=0.5, name="third"),
+        MAPStage(1, ("x",), objective_scale=0.5, name="third"),
     ]
     result = map_fit(
         _PreStepAux(jnp.asarray([2.0, 2.0])),
@@ -494,12 +494,12 @@ def test_prepare_uses_current_host_parameters_and_reuses_the_step(
     solver = optax.with_extra_args_support(tx["x"]) if solver_stage else None
     zero = _PreStepAux(jnp.zeros(2))
     stages = [
-        FitStage(1, ("x",), solver=solver),
-        FitStage(1, ("x",), solver=solver, prepare=prepare),
-        FitStage(1, ("x",), solver=solver),
-        FitStage(1, ("x",), solver=solver, prepare=prepare),
-        FitStage(1, ("x",), solver=solver, logdensity=zero),
-        FitStage(1, ("x",), solver=solver),
+        MAPStage(1, ("x",), solver=solver),
+        MAPStage(1, ("x",), solver=solver, prepare=prepare),
+        MAPStage(1, ("x",), solver=solver),
+        MAPStage(1, ("x",), solver=solver, prepare=prepare),
+        MAPStage(1, ("x",), solver=solver, fit=zero),
+        MAPStage(1, ("x",), solver=solver),
     ]
     result = map_fit(
         zero,
@@ -543,7 +543,7 @@ def test_first_step_group_rates_match_the_analytic_adam_step():
         "x": optax.adam(lr_x),
         "y": rescaled_transform(optax.adam(lr_y), scale),
     }
-    got = map_fit(ld, init, labels, tx, [FitStage(1, ("x", "y"))])
+    got = map_fit(ld, init, labels, tx, [MAPStage(1, ("x", "y"))])
     gx, gy = np.asarray(init.x) - 1.0, np.asarray(init.y) + 1.0
     want_x = np.asarray(init.x) - lr_x * gx / (np.abs(gx) + eps)
     want_y = np.asarray(init.y) - scale * lr_y * (scale * gy) / (
@@ -575,22 +575,22 @@ def test_one_compile_per_stage_configuration_and_fresh_transforms():
     labels = group_labels(init, {"x": lambda t: t.x, "y": lambda t: t.y})
     tx = {"x": optax.adam(0.1), "y": optax.adam(0.1)}
     stages = [
-        FitStage(4, ("x",)),
-        FitStage(3, ("y",)),
-        FitStage(6, ("x",), objective_scale=0.5),
-        FitStage(2, ("x", "y")),
+        MAPStage(4, ("x",)),
+        MAPStage(3, ("y",)),
+        MAPStage(6, ("x",), objective_scale=0.5),
+        MAPStage(2, ("x", "y")),
     ]
     map_fit(ld, init, labels, tx, stages)
     assert len(traces) == 4 - 1  # (x), (y), (x, y): the third stage repeats the first
 
     fresh = {"x": optax.adam(0.1), "y": optax.adam(0.1)}
-    cont = map_fit(ld, init, labels, tx, [FitStage(3, ("x",)), FitStage(1, ("x",))])
+    cont = map_fit(ld, init, labels, tx, [MAPStage(3, ("x",)), MAPStage(1, ("x",))])
     restarted = map_fit(
         ld,
         init,
         labels,
         tx,
-        [FitStage(3, ("x",)), FitStage(1, ("x",), transforms=fresh)],
+        [MAPStage(3, ("x",)), MAPStage(1, ("x",), transforms=fresh)],
     )
     count = lambda r: int(r.opt_states["x"][0].count)  # noqa: E731
     assert count(cont) == 4 and count(restarted) == 1
@@ -658,16 +658,16 @@ def test_map_stage_fit_view_equals_a_hand_restriction():
     fit = _bowl_fit()
     view = Fit(fit.model, fit.free, fit.terms[:1])
     key = jax.random.key(0)
-    viewed = run(fit, _bowl_backend(FitStage(20, ("x",), logdensity=view)), key)
-    alone = run(view, _bowl_backend(FitStage(20, ("x",))), key)
-    full = run(fit, _bowl_backend(FitStage(20, ("x",))), key)
+    viewed = run(fit, _bowl_backend(MAPStage(20, ("x",), fit=view)), key)
+    alone = run(view, _bowl_backend(MAPStage(20, ("x",))), key)
+    full = run(fit, _bowl_backend(MAPStage(20, ("x",))), key)
     np.testing.assert_allclose(
         viewed.samples["x"][0], alone.samples["x"][0], rtol=1e-12
     )
     assert not np.allclose(viewed.samples["x"][0], full.samples["x"][0], rtol=1e-3)
     via_prepare = run(
         fit,
-        _bowl_backend(FitStage(20, ("x",), prepare=lambda params: view)),
+        _bowl_backend(MAPStage(20, ("x",), prepare=lambda params: view)),
         key,
     )
     np.testing.assert_allclose(
@@ -682,16 +682,37 @@ def test_map_refuses_a_stage_fit_with_a_different_free_set():
     Truth source: the free dicts written in the test.
     Tolerance basis: exact-algebra (an exception).
     Fails if: the stage view is accepted with a different parameter set (the
-    optimizer would score a dict that misses an entry), for ``logdensity`` or for the
+    optimizer would score a dict that misses an entry), for ``fit`` or for the
     result of ``prepare``.
     """
     fit = _bowl_fit()
     other = Fit(fit.model, {"x": fit.free["x"]}, fit.terms[:1])
     key = jax.random.key(0)
     with pytest.raises(ValueError, match="free entries"):
-        run(fit, _bowl_backend(FitStage(2, ("x",), logdensity=other)), key)
+        run(fit, _bowl_backend(MAPStage(2, ("x",), fit=other)), key)
     with pytest.raises(ValueError, match="free entries"):
-        run(fit, _bowl_backend(FitStage(2, ("x",), prepare=lambda p: other)), key)
+        run(fit, _bowl_backend(MAPStage(2, ("x",), prepare=lambda p: other)), key)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_map_refuses_a_stage_density_that_is_not_a_fit():
+    """A stage density other than a ``Fit`` raises ``TypeError`` before any step.
+
+    Truth source: the callable written in the test.
+    Tolerance basis: exact-algebra (an exception).
+    Fails if: a plain callable is passed through as a stage density of ``MAP``, for
+    ``fit`` or for the result of ``prepare``.
+    """
+    fit = _bowl_fit()
+    key = jax.random.key(0)
+    with pytest.raises(TypeError, match="must be a Fit"):
+        run(fit, _bowl_backend(MAPStage(2, ("x",), fit=lambda u: 0.0)), key)
+    with pytest.raises(TypeError, match="must be a Fit"):
+        run(
+            fit,
+            _bowl_backend(MAPStage(2, ("x",), prepare=lambda p: lambda u: 0.0)),
+            key,
+        )
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -712,7 +733,7 @@ def test_map_closed_form_receives_the_pre_step_predictions():
 
     post = run(
         fit,
-        _bowl_backend(FitStage(1, ("x",), closed_form=closed_form)),
+        _bowl_backend(MAPStage(1, ("x",), closed_form=closed_form)),
         jax.random.key(0),
     )
     assert float(post.samples["y"][0]) == 4.0
@@ -778,7 +799,7 @@ def test_solver_stage_reaches_the_mode_of_an_ill_conditioned_coupled_quadratic()
             init,
             labels,
             _toy_transforms(),
-            [FitStage(n, ("a", "b"), solver=optax.lbfgs())],
+            [MAPStage(n, ("a", "b"), solver=optax.lbfgs())],
         )
 
     mid = solve(30)
@@ -797,7 +818,7 @@ def test_solver_stage_reaches_the_mode_of_an_ill_conditioned_coupled_quadratic()
         init,
         labels,
         _toy_transforms(),
-        [FitStage(60, ("a", "b"))],
+        [MAPStage(60, ("a", "b"))],
     )
     assert np.max(np.abs(np.concatenate([adam.params.a, adam.params.b]) - _MODE)) > 0.1
     assert solved.stages[0].loss.shape == (60,)
@@ -817,13 +838,13 @@ def test_solver_stage_leaves_other_groups_and_their_transform_states_untouched()
     init = _toy_init()
     labels = group_labels(init, _TOY_GROUPS)
     kwargs = dict(labels=labels, transforms=_toy_transforms(), freeze="drop_update")
-    before = map_fit(_toy_logdensity, init, stages=[FitStage(10, ("a",))], **kwargs)
+    before = map_fit(_toy_logdensity, init, stages=[MAPStage(10, ("a",))], **kwargs)
     after = map_fit(
         _toy_logdensity,
         init,
         stages=[
-            FitStage(10, ("a",)),
-            FitStage(8, ("b",), solver=optax.lbfgs()),
+            MAPStage(10, ("a",)),
+            MAPStage(8, ("b",), solver=optax.lbfgs()),
         ],
         **kwargs,
     )
@@ -840,9 +861,9 @@ def test_solver_stage_leaves_other_groups_and_their_transform_states_untouched()
         _toy_logdensity,
         init,
         stages=[
-            FitStage(10, ("a",)),
-            FitStage(8, ("b",), solver=optax.lbfgs()),
-            FitStage(5, ("a",)),
+            MAPStage(10, ("a",)),
+            MAPStage(8, ("b",), solver=optax.lbfgs()),
+            MAPStage(5, ("a",)),
         ],
         **kwargs,
     )
@@ -852,16 +873,14 @@ def test_solver_stage_leaves_other_groups_and_their_transform_states_untouched()
 
 def test_solver_stage_rejects_a_closed_form_transforms_or_an_unknown_group():
     """Fails if incompatible stage options or unknown groups are silently accepted."""
-    with pytest.raises(ValueError, match="either prepare or logdensity"):
-        FitStage(
-            1, ("a",), logdensity=_toy_logdensity, prepare=lambda p: _toy_logdensity
-        )
+    with pytest.raises(ValueError, match="either prepare or fit"):
+        MAPStage(1, ("a",), fit=_toy_logdensity, prepare=lambda p: _toy_logdensity)
     with pytest.raises(ValueError, match="no closed_form"):
-        FitStage(1, ("a",), closed_form=lambda p, aux: p, solver=optax.lbfgs())
+        MAPStage(1, ("a",), closed_form=lambda p, aux: p, solver=optax.lbfgs())
     with pytest.raises(ValueError, match="no closed_form"):
-        FitStage(1, ("a",), transforms=_toy_transforms(), solver=optax.lbfgs())
+        MAPStage(1, ("a",), transforms=_toy_transforms(), solver=optax.lbfgs())
     with pytest.raises(ValueError, match="at least one group"):
-        FitStage(1, (), solver=optax.lbfgs())
+        MAPStage(1, (), solver=optax.lbfgs())
     init = _toy_init()
     with pytest.raises(ValueError, match="unknown"):
         map_fit(
@@ -869,7 +888,7 @@ def test_solver_stage_rejects_a_closed_form_transforms_or_an_unknown_group():
             init,
             group_labels(init, _TOY_GROUPS),
             _toy_transforms(),
-            [FitStage(1, ("z",), solver=optax.lbfgs())],
+            [MAPStage(1, ("z",), solver=optax.lbfgs())],
         )
 
 

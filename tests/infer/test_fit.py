@@ -622,7 +622,7 @@ def test_orbit_fit_recovers_the_truth_on_a_scene():
         ra_err=jnp.full(4, 1e-4),
         dec_err=jnp.full(4, 1e-4),
         corr=jnp.zeros(4),
-        planet_id=jnp.zeros(4, dtype=int),
+        planet=jnp.zeros(4, dtype=int),
         max_n=4,
     )
     block = _block()

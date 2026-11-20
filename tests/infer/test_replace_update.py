@@ -24,7 +24,7 @@ from photomancy.infer import (
     run,
     update,
 )
-from photomancy.infer.backends.grid import midpoint
+from photomancy.infer.backends.grid import midpoint_rule
 
 jax.config.update("jax_enable_x64", True)
 
@@ -253,14 +253,14 @@ def test_update_on_a_quadrature_posterior_reads_the_real_refusal():
     """
     grid = run(
         Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_Gauss(jnp.asarray(1.5)),)),
-        Grid({KEY: midpoint(0.0, HIGH, 200)}),
+        Grid({KEY: midpoint_rule(0.0, HIGH, 200)}),
         jax.random.key(0),
     )
     for term, expected in ((_Gauss(jnp.asarray(1.6)), False), (_NanAbove(1.5), True)):
         out = update(
             grid,
             term,
-            Grid({KEY: midpoint(0.0, HIGH, 200)}),
+            Grid({KEY: midpoint_rule(0.0, HIGH, 200)}),
             jax.random.key(1),
             min_n_eff=None,
             max_khat=None,

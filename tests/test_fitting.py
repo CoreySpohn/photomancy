@@ -448,7 +448,7 @@ class TestLoglikeAstrom:
             ra_err=jnp.array([0.01]),
             dec_err=jnp.array([0.01]),
             corr=jnp.array([0.0]),
-            planet_id=jnp.array([0]),
+            planet=jnp.array([0]),
             is_valid=jnp.ones(1, dtype=bool),
         )
         ll = loglike_relative_astrom(jnp.array([0.1]), jnp.array([0.2]), data)
@@ -463,7 +463,7 @@ class TestLoglikeAstrom:
             ra_err=jnp.array([0.01]),
             dec_err=jnp.array([0.01]),
             corr=jnp.array([0.0]),
-            planet_id=jnp.array([0]),
+            planet=jnp.array([0]),
             is_valid=jnp.ones(1, dtype=bool),
         )
         ll_good = loglike_relative_astrom(jnp.array([0.1]), jnp.array([0.2]), data)
@@ -479,7 +479,7 @@ class TestLoglikeAstrom:
             ra_err=jnp.array([0.5]),
             dec_err=jnp.array([0.5]),
             corr=jnp.array([0.0]),
-            planet_id=jnp.array([0]),
+            planet=jnp.array([0]),
             is_valid=jnp.ones(1, dtype=bool),
         )
         ra_pred = jnp.array([1.1])
@@ -502,7 +502,7 @@ class TestLoglikeAstrom:
             ra_err=jnp.array([0.01]),
             dec_err=jnp.array([0.01]),
             corr=jnp.array([0.0]),
-            planet_id=jnp.array([0]),
+            planet=jnp.array([0]),
             is_valid=jnp.ones(1, dtype=bool),
         )
 

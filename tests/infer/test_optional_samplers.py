@@ -35,7 +35,7 @@ key = jax.random.key(0)
 calls = {
     "blackjax": [
         lambda: run(fit, NUTS(n_warmup=2, n_draws=2), key),
-        lambda: run(fit, MCLMC(n_tune=2, n_draws=2), key),
+        lambda: run(fit, MCLMC(n_warmup=2, n_draws=2), key),
         lambda: run(fit, Pathfinder(), key),
     ],
     "jaxns": [lambda: run(fit, NestedSampling(), key)],
