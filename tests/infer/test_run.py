@@ -33,6 +33,7 @@ from photomancy.infer import (
     AbstractTerm,
     AdaptiveImportance,
     Fit,
+    ForwardTerm,
     Grid,
     Importance,
     Laplace,
@@ -45,8 +46,10 @@ from photomancy.infer import (
 )
 from photomancy.infer.backends._flat import draw_template, start_points
 from photomancy.infer.backends.grid import gauss_legendre, midpoint
+from photomancy.infer.backends.laplace import _merge_modes
 from photomancy.infer.diagnostics import khat_threshold, pareto_khat
 from photomancy.infer.evidence import importance_evidence
+from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.infer.posterior import cluster_to_mixture, ravel_samples
 
 jax.config.update("jax_enable_x64", True)
@@ -178,6 +181,91 @@ def test_cluster_to_mixture_follows_the_modes():
     )
 
 
+def test_cluster_to_mixture_takes_init_centers_and_checks_their_shape():
+    """``init`` fixes the starting centers; a wrong count is refused.
+
+    Fails if: ``init`` is ignored, or a mismatched ``init`` reaches the clustering.
+    """
+    fit = _leaf_fit()
+    post = run(fit, Laplace(n_draws=400), jax.random.key(2))
+    left = jnp.where(jnp.arange(400) % 4 == 0, 0.5, 3.0)
+    split = eqx.tree_at(
+        lambda p: (p.samples, p.log_weights),
+        post,
+        ({KEY: left[:, None]}, jnp.full(400, -math.log(400))),
+    )
+    mixture = cluster_to_mixture(
+        split, 2, None, init={KEY: jnp.array([[0.4], [2.9]])}, iters=3
+    )
+    means = np.sort(np.asarray(mixture.component_distribution.loc).ravel())
+    np.testing.assert_allclose(means, [0.5, 3.0], atol=1e-6)
+    with pytest.raises(ValueError, match="expected k=2"):
+        cluster_to_mixture(split, 2, None, init={KEY: jnp.array([[0.4]])})
+    with pytest.raises(ValueError, match="init needs the entries"):
+        cluster_to_mixture(split, 2, None, init={"other": jnp.zeros((2, 1))})
+
+
+class _Sinusoid(eqx.Module):
+    logP: jax.Array
+    K: jax.Array
+    phi: jax.Array
+
+
+class _SinusoidForward(eqx.Module):
+    t: jax.Array
+
+    def __call__(self, p):
+        return p.K * jnp.sin(2 * jnp.pi * self.t / 10.0**p.logP + p.phi)
+
+
+@pytest.mark.medium(reason="a three-alias Laplace fit, then clustering on four keys")
+def test_cluster_to_mixture_recovers_period_aliases_from_the_laplace_modes():
+    """One component per alias, weighted by the cloud, when seeded with the modes.
+
+    Truth source: the aliases of a 2.7 d signal sampled once a day, ``1 / (1/P + n)``,
+    and the cloud mass within 3 percent of each. Fails if: distances are taken in
+    unscaled coordinates, where the large range of ``K`` splits the main alias and the
+    minor aliases get no component.
+    """
+    period = 2.7
+    alias = np.array([period, 1 / (1 / period + 1), 1 / (1 / period + 2)])
+    truth = _Sinusoid(jnp.log10(period), jnp.array(5.0), jnp.array(0.7))
+    t = jnp.arange(0.0, 8.0)
+    y = _SinusoidForward(t)(truth) + 0.4 * jax.random.normal(jax.random.key(0), (8,))
+    laws = {
+        "logP": Uniform(jnp.log10(0.3), jnp.log10(5.0)),
+        "K": Uniform(0.0, 10.0),
+        "phi": Uniform(-jnp.pi, jnp.pi),
+    }
+    starts = {
+        "logP": jnp.log10(jnp.asarray(alias)),
+        "K": jnp.full(3, 4.0),
+        "phi": jnp.full(3, 0.5),
+    }
+    fit = Fit(
+        _Sinusoid(jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)),
+        laws,
+        (ForwardTerm(_SinusoidForward(t), gaussian_loglike(y, 0.4)),),
+    )
+    post = run(
+        fit,
+        Laplace(n_draws=2000, n_modes=3, n_steps=200, init=starts),
+        jax.random.key(10),
+    )
+    assert int(post.info.n_modes_kept) == 3
+    w = np.asarray(jax.nn.softmax(post.log_weights))
+    p_cloud = 10.0 ** np.asarray(post.samples["logP"])
+    mass = [w[np.abs(p_cloud - a) < 0.03 * a].sum() for a in alias]
+    for seed in range(4):
+        mix = cluster_to_mixture(post, 3, jax.random.key(seed), init=post.info.modes)
+        p_mix = 10.0 ** np.asarray(mix.component_distribution.loc[:, 1])
+        weight = np.asarray(jax.nn.softmax(mix.mixing_logits))
+        for a, m in zip(alias, mass, strict=True):
+            near = np.abs(p_mix - a) < 0.03 * a
+            assert near.sum() == 1
+            assert abs(weight[near][0] - m) < 0.02
+
+
 # ----- backends on the one-leaf fit with a closed-form evidence ------------------
 
 
@@ -212,7 +300,7 @@ def test_laplace_corrects_the_gaussian_with_importance_weights():
     )
     mean, _ = _moments(post)
     assert abs(mean - 1.5) < 0.01
-    assert post.info.means.shape == (1, 1)
+    assert post.info.flat_means.shape == (1, 1)
 
 
 class _TwoBumps(AbstractTerm):
@@ -236,7 +324,7 @@ def _bimodal_fit():
 
 def _mode_radii(fit, post):
     """Radii of the modes of a Laplace or Pathfinder run, in the stored coordinates."""
-    x, _ = fit.from_real({KEY: post.info.means})
+    x, _ = fit.from_real({KEY: post.info.flat_means})
     return np.asarray(x[KEY])[:, 0]
 
 
@@ -254,6 +342,48 @@ def test_explicit_starts_land_on_distinct_modes(backend):
         jax.random.key(0),
     )
     assert np.all(np.abs(_mode_radii(fit, one) - 1.0) < 0.15)
+
+
+def test_laplace_merges_starts_that_reach_the_same_mode():
+    """Three starts on two bumps keep two modes and map the duplicate to its mode.
+
+    Truth source: the two bumps of ``_TwoBumps`` (radii 1 and 3). Fails if: a
+    duplicate start enters the proposal as a second component of its mode, which
+    doubles that mode's weight and biases the evidence.
+    """
+    fit = _bimodal_fit()
+    starts = {KEY: jnp.array([[1.1], [0.9], [2.9]])}
+    backend = Laplace(n_draws=400, n_modes=3, init=starts)
+    post = run(fit, backend, jax.random.key(0))
+    info = post.info
+    assert int(info.n_modes_kept) == 2
+    index = np.asarray(info.mode_index)
+    assert index[2] == 2 and index[0] == index[1] and index[0] in (0, 1)
+    assert np.asarray(info.kept).tolist().count(True) == 2
+    assert not bool(info.kept[index[0] ^ 1]) and bool(info.kept[index[0]])
+    radii = np.asarray(info.modes[KEY])[:, 0]
+    np.testing.assert_allclose(np.sort(radii[[index[0], 2]]), [1.0, 3.0], atol=0.15)
+    again = run(
+        fit, Laplace(n_draws=400, n_modes=3, init=info.modes), jax.random.key(0)
+    )
+    assert np.asarray(again.info.kept).tolist() == np.asarray(info.kept).tolist()
+    np.testing.assert_array_equal(again.info.mode_index, info.mode_index)
+
+
+def test_merge_distance_wraps_on_periodic_coordinates():
+    """Two modes on either side of the period boundary are one mode."""
+    means = jnp.array([[0.02, 0.0], [5.98, 0.0], [3.0, 0.0]])
+    covs = jnp.broadcast_to(jnp.eye(2) * 0.01, (3, 2, 2))
+    args = (means, covs, jnp.array([2.0, 1.0, 0.0]), jnp.ones(3, bool))
+    kept, index = _merge_modes(*args, (6.0, None), 1.0)
+    assert np.asarray(kept).tolist() == [True, False, True]
+    assert np.asarray(index).tolist() == [0, 0, 2]
+    kept, _ = _merge_modes(*args, (None, None), 1.0)
+    assert np.asarray(kept).all()
+    kept, index = _merge_modes(
+        *args[:3], jnp.array([True, False, True]), (6.0, None), 1.0
+    )
+    assert np.asarray(index).tolist() == [0, -1, 2]
 
 
 def test_explicit_starts_refuse_a_wrong_leading_length():

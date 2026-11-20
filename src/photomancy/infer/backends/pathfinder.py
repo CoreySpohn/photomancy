@@ -63,16 +63,16 @@ class PathfinderInfo(eqx.Module):
     Coordinates are the unconstrained flat vector of ``fit.to_real``.
 
     Attributes:
-        means: Variational means ``(K, d)``.
-        covs: Variational covariances ``(K, d, d)``.
+        flat_means: Variational means ``(K, d)``.
+        flat_covs: Variational covariances ``(K, d, d)``.
         elbo: ELBO of each path, which sets its weight in the proposal ``(K,)``.
         kept: Whether each path entered the proposal (a finite ELBO) ``(K,)``.
         n_modes_kept: Number of paths kept; zero means the slice is NaN.
         importance: The :class:`~photomancy.infer.backends.importance.ImportanceInfo`.
     """
 
-    means: jax.Array
-    covs: jax.Array
+    flat_means: jax.Array
+    flat_covs: jax.Array
     elbo: jax.Array
     kept: jax.Array
     n_modes_kept: jax.Array
