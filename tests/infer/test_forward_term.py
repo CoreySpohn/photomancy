@@ -37,7 +37,7 @@ class _Drawable(eqx.Module):
     def __call__(self, predicted):
         return -0.5 * jnp.sum((predicted - self.data) ** 2)
 
-    def sample(self, key, predicted):
+    def draw(self, key, predicted):
         """Return a likelihood holding data drawn around ``predicted``."""
         return _Drawable(predicted + jax.random.normal(key, predicted.shape))
 
@@ -96,9 +96,18 @@ def test_draw_replaces_only_the_data():
 
 
 def test_draw_needs_a_likelihood_that_can_sample():
-    """A likelihood with no sample method cannot define a draw."""
-    with pytest.raises(TypeError, match="sample"):
+    """A likelihood with no draw method cannot define a draw."""
+    with pytest.raises(TypeError, match="draw"):
         _term().draw(jax.random.key(0), _Model(jnp.ones(3)))
+
+
+def test_a_closure_likelihood_is_refused():
+    """A lambda likelihood is a static leaf that recompiles per instance: refuse it.
+
+    Fails if ``ForwardTerm`` accepts a likelihood that is not an ``eqx.Module``.
+    """
+    with pytest.raises(TypeError, match="likelihood is a function"):
+        _term(lambda predicted: -0.5 * jnp.sum(predicted**2))
 
 
 def test_fit_density_adds_the_prior_to_the_term_value():

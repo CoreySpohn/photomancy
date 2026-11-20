@@ -87,8 +87,9 @@ class ReweightInfo(eqx.Module):
     ``Posterior.with_priors``, ``append_term`` and ``replace_term`` return it in
     ``info``, and :func:`~photomancy.infer.update` passes it through whether or not it
     refits. The reading is taken on the combined weights before the gate decides, so a
-    refused slice still says why. A ``quadrature`` posterior has no gate: ``n_eff`` and
-    ``khat`` are NaN and ``refused`` is false.
+    refused slice still says why. A ``quadrature`` posterior has no Monte Carlo gate:
+    ``n_eff`` and ``khat`` are NaN and ``refused`` is true when any weight of the slice
+    is NaN.
 
     Attributes:
         n_eff: Kish effective sample size of the combined weights.
@@ -394,7 +395,7 @@ class Posterior(eqx.Module):
             refused = jnp.any(jnp.isnan(new_lw))
             increment_se = jnp.where(refused, jnp.nan, 0.0)
             nan = jnp.asarray(jnp.nan, jnp.float64)
-            info = ReweightInfo(nan, nan, jnp.asarray(False))
+            info = ReweightInfo(nan, nan, refused)
         target_ratio = log_ratio if log_target_ratio is None else log_target_ratio
         return Posterior(
             samples=self.samples if samples is None else samples,

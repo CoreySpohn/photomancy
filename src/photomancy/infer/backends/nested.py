@@ -33,8 +33,9 @@ class NestedInfo(eqx.Module):
         log_likelihood: Log likelihood of each stored point ``(N,)``.
         ess: jaxns estimate of the Kish effective sample size.
         n_likelihood_evaluations: Total likelihood evaluations.
-        termination_reason: Zero for convergence, else a hard-stop code (for example
-            the sample buffer filled).
+        termination_reason: Zero when jaxns met its own stopping rule, else a
+            hard-stop code (1: the sample buffer filled). A nonzero code makes the
+            evidence NaN.
     """
 
     log_likelihood: jax.Array
@@ -59,8 +60,10 @@ class NestedSampling(AbstractBackend):
     Args:
         n_live: Number of independent root chains (jaxns ``root_allocation_degree``);
             ``None`` uses the jaxns default, ``30 * D``.
-        max_samples: Hard cap on stored samples; jaxns stops early (nonzero
-            ``termination_reason``) if the buffer fills first.
+        max_samples: Hard cap on stored samples. If the buffer fills first, jaxns
+            stops with a nonzero ``termination_reason`` (1 is "reached max samples")
+            before the evidence has converged: the samples and weights are returned
+            as they stand and the evidence and its error are NaN.
     """
 
     n_live: int | None = eqx.field(static=True, default=None)
@@ -114,11 +117,15 @@ class NestedSampling(AbstractBackend):
         )
         results = ns.run(key=key).to_result().trim()
         flat = jnp.asarray(results.X_samples["x"]).reshape(-1, dim)
+        converged = jnp.asarray(results.termination_reason) == 0
+        nan = jnp.asarray(jnp.nan, jnp.float64)
         return BackendDraws(
             samples=jax.vmap(unravel_x)(flat),
             log_weights=jnp.asarray(results.log_dp),
-            log_evidence=jnp.asarray(results.log_Z_mean),
-            log_evidence_se=jnp.asarray(results.log_Z_uncert),
+            log_evidence=jnp.where(converged, jnp.asarray(results.log_Z_mean), nan),
+            log_evidence_se=jnp.where(
+                converged, jnp.asarray(results.log_Z_uncert), nan
+            ),
             info=NestedInfo(
                 log_likelihood=jnp.asarray(results.log_L),
                 ess=jnp.asarray(results.ess),

@@ -95,14 +95,15 @@ def test_mixture_from_a_cloud_is_the_law_of_the_next_leaf():
         def __call__(self, model):
             return model.theta
 
-    def bumps(pred):
-        z = (pred - jnp.array([-3.0, 3.0])) / 0.3
-        return jax.scipy.special.logsumexp(-0.5 * z**2)
+    class _Bumps(eqx.Module):
+        def __call__(self, pred):
+            z = (pred - jnp.array([-3.0, 3.0])) / 0.3
+            return jax.scipy.special.logsumexp(-0.5 * z**2)
 
     fit = Fit(
         _Toy(jnp.zeros(1)),
         {"theta": Uniform(jnp.full((1,), -6.0), jnp.full((1,), 6.0))},
-        (ForwardTerm(_TwoBumps(), bumps),),
+        (ForwardTerm(_TwoBumps(), _Bumps()),),
     )
     cloud = run(fit, Grid({"theta": midpoint(-6.0, 6.0, 1200)}), jax.random.key(0))
     law = cluster_to_mixture(cloud, 2, jax.random.key(1))

@@ -343,6 +343,7 @@ def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):
     swapped = grid.with_priors({KEY: Uniform(1.0, 3.0)}, min_n_eff=None, max_khat=None)
     assert swapped.kind == "quadrature" and np.isnan(swapped.log_evidence_se)
     assert abs(float(swapped.log_evidence) - _log_z_window(1.0, 3.0)) < 1e-4
+    assert not bool(swapped.info.refused)
     _check_target(swapped)
 
     class _Nan(_Gauss):
@@ -351,6 +352,14 @@ def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):
 
     out = cloud.append_term(_Nan(jnp.asarray(0.0)), min_n_eff=0, max_khat=jnp.inf)
     assert np.all(np.isnan(out.log_weights)) and np.isnan(out.log_evidence)
+    assert bool(out.info.refused)
+    for posterior, gate in (
+        (cloud, {"min_n_eff": 0, "max_khat": jnp.inf}),
+        (grid, {"min_n_eff": None, "max_khat": None}),
+    ):
+        moved = posterior.append_term(_Nan(jnp.asarray(0.0)), **gate)
+        assert bool(moved.info.refused) == bool(np.any(np.isnan(moved.log_weights)))
+        assert bool(moved.info.refused)
 
 
 # ----- append --------------------------------------------------------------------

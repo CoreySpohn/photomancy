@@ -43,6 +43,7 @@ from photomancy.infer import (
     PriorProposal,
     run,
 )
+from photomancy.infer.backends._flat import draw_template, start_points
 from photomancy.infer.backends.grid import gauss_legendre, midpoint
 from photomancy.infer.diagnostics import khat_threshold, pareto_khat
 from photomancy.infer.evidence import importance_evidence
@@ -265,6 +266,42 @@ def test_explicit_starts_refuse_a_wrong_leading_length():
         )
 
 
+@pytest.mark.parametrize("with_leaf", [False, True], ids=["block_only", "block_leaf"])
+def test_stacked_starts_pass_through_for_a_block_fit(with_leaf):
+    """Stacked starts of a block fit become ``(n, d)`` flat starts, one per start.
+
+    Fails if: a block entry's rank is compared as a whole, so the starts raise a
+    misleading error (block plus leaf) or are silently broadcast to ``(n, n, d)``.
+    """
+    priors = {"dynamics.orbits": _block()}
+    if with_leaf:
+        priors[KEY] = Uniform(0.0, HIGH)
+    fit = Fit(_scene(), priors, (_relative(),))
+    n = 3
+    starts = fit.sample_prior(jax.random.key(1), (n,))
+    flat = start_points(fit, starts, jax.random.key(0), n)
+    assert flat.shape == (n, ravel_pytree(fit.to_real(draw_template(fit)))[0].shape[0])
+    for i in range(n):
+        one = jax.tree.map(lambda a, i=i: a[i], starts)
+        np.testing.assert_allclose(flat[i], fit.to_flat(one), rtol=1e-12)
+    single = start_points(fit, one, jax.random.key(0), n)
+    assert single.shape == flat.shape
+    np.testing.assert_allclose(single, jnp.broadcast_to(fit.to_flat(one), flat.shape))
+
+
+def test_mixed_rank_starts_name_the_entry():
+    """One entry stacked and another not raises, and the message names an entry."""
+    fit = Fit(
+        _scene(),
+        {"dynamics.orbits": _block(), KEY: Uniform(0.0, HIGH)},
+        (_relative(),),
+    )
+    starts = fit.sample_prior(jax.random.key(1), (3,))
+    bad = {**starts, KEY: starts[KEY][0]}
+    with pytest.raises(ValueError, match="extra leading axis"):
+        start_points(fit, bad, jax.random.key(0), 3)
+
+
 def test_nuts_has_no_evidence_and_the_right_moments():
     """NUTS draws match the known mean; the evidence is NaN; chains are in info."""
     fit = _leaf_fit()
@@ -317,10 +354,20 @@ def test_map_finds_the_mode():
 
 
 def test_nested_sampling_recovers_the_evidence():
-    """Jaxns gives the exact evidence within its standard deviation."""
+    """Jaxns gives the exact evidence within its standard deviation.
+
+    A run cut by ``max_samples`` (jaxns termination reason 1) keeps its samples and
+    weights but has no evidence: fails if a finite value comes back from a run that
+    stopped before convergence.
+    """
     pytest.importorskip("jaxns")
     fit = _leaf_fit()
+    cut = run(fit, NestedSampling(max_samples=120), jax.random.key(0))
+    assert int(cut.info.termination_reason) == 1
+    assert np.isnan(float(cut.log_evidence)) and np.isnan(float(cut.log_evidence_se))
+    assert cut.log_weights.shape == (120,) and np.all(np.isfinite(cut.log_weights))
     post = run(fit, NestedSampling(max_samples=20000), jax.random.key(0))
+    assert int(post.info.termination_reason) == 0
     _check_contract(post, fit)
     se = float(post.log_evidence_se)
     assert abs(float(post.log_evidence) - _exact_log_z()) < 5 * max(se, 0.02)

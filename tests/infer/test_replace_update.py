@@ -13,6 +13,7 @@ from test_run import HIGH, KEY, WIDTH, _Gauss
 from photomancy.infer import (
     AbstractTerm,
     Fit,
+    Grid,
     Laplace,
     ReweightInfo,
     eig_contrastive,
@@ -22,6 +23,7 @@ from photomancy.infer import (
     run,
     update,
 )
+from photomancy.infer.backends.grid import midpoint
 
 jax.config.update("jax_enable_x64", True)
 
@@ -218,6 +220,39 @@ def test_update_appends_without_an_index_and_keeps_a_passing_cloud(cloud):
     assert not bool(ungated.info.refused)
     np.testing.assert_array_equal(refused.info.n_eff, ungated.info.n_eff)
     np.testing.assert_array_equal(refused.info.khat, ungated.info.khat)
+
+
+class _NanAbove(_Gauss):
+    """Gaussian that is NaN for radii above 1.5."""
+
+    def __call__(self, model):
+        return jnp.where(
+            model.planets[0].Rp_Rearth[0] > 1.5, jnp.nan, super().__call__(model)
+        )
+
+
+def test_update_on_a_quadrature_posterior_reads_the_real_refusal():
+    """``info.refused`` is true exactly where a quadrature slice has a NaN weight.
+
+    Fails if: the quadrature branch hardcodes ``refused`` to false, so a refused
+    slice reads as passed although ``update`` refits it.
+    """
+    grid = run(
+        Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_Gauss(jnp.asarray(1.5)),)),
+        Grid({KEY: midpoint(0.0, HIGH, 200)}),
+        jax.random.key(0),
+    )
+    for term, expected in ((_Gauss(jnp.asarray(1.6)), False), (_NanAbove(1.5), True)):
+        out = update(
+            grid,
+            term,
+            Grid({KEY: midpoint(0.0, HIGH, 200)}),
+            jax.random.key(1),
+            min_n_eff=None,
+            max_khat=None,
+        )
+        assert bool(out.info.refused) == expected
+        assert bool(out.info.refused) == bool(np.any(np.isnan(out.log_weights)))
 
 
 def test_update_refuses_a_refit_with_another_layout(cloud):
