@@ -1,88 +1,186 @@
-# Fit a PyTree in stages with a MAP backend
+# Fit a model in stages with the MAP backend
 
 Some fits cannot free every parameter at once. A coronagraph model, for example, is fitted
 by first locating the star, then adjusting the optics, then holding the optics while the
-science exposure is fitted. {class}`~photomancy.infer.backends.staged.MAPBackend` runs that kind
-of fit: a sequence of stages, each of which frees some named groups of parameters, over a
-parameter PyTree that keeps its structure. The result is a point estimate, a
-{class}`~photomancy.infer.legacy_posterior.PointPosterior`, with no covariance and no evidence.
+science exposure is fitted. {class}`~photomancy.infer.backends.staged.MAP` runs that kind
+of fit on a `Fit`: a sequence of stages, each of which frees some named groups of the free
+entries. The result is a {class}`~photomancy.infer.Posterior` with one draw, the optimum, at
+weight one. It has no evidence, so `log_evidence` is NaN, and its `info` is a
+{class}`~photomancy.infer.MAPInfo` that holds the trace of every stage.
 
-## Name the groups
+## Build the fit
 
-A group is a selector that picks leaves out of the parameter PyTree, in the form
-`equinox.tree_at` takes. Nothing is a group by default, so a floating-point array that
-should stay fixed is never fitted by accident.
+The fit below has a model with two leaves, `shape` (two numbers) and `offset` (one number),
+and three measurements. The first two measurements see `shape + offset`, and the third
+sees `offset` alone. Each group of measurements is one term, so a stage can score one term
+without the other. Every free entry gets a wide Normal prior, which the last section
+explains.
 
 ```python
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import optax
+from priorities import Normal
 
-from photomancy.infer.backends.staged import FitStage, MAPBackend, group_labels
+from photomancy.infer import MAP, Fit, ForwardTerm, run
+from photomancy.infer.backends.staged import FitStage, group_labels
+from photomancy.infer.likelihoods import gaussian_loglike
+
+jax.config.update("jax_enable_x64", True)
 
 
 class Model(eqx.Module):
-    shape: jnp.ndarray
-    offset: jnp.ndarray
-    fixed: jnp.ndarray
+    shape: jax.Array
+    offset: jax.Array
 
 
-init = Model(
-    shape=jnp.array([0.0, 0.0]), offset=jnp.array(5.0), fixed=jnp.array([1.0, 2.0])
-)
-labels = group_labels(
-    init,
-    {"shape": lambda m: m.shape, "offset": lambda m: m.offset},
-)
+class Render(eqx.Module):
+    rows: jax.Array
+
+    def __call__(self, m):
+        everything = jnp.concatenate([m.shape, jnp.zeros(1)]) + m.offset
+        return everything[self.rows]
+
+
+truth = Model(shape=jnp.array([4.0, 6.0]), offset=jnp.asarray(2.0))
+data = Render(jnp.array([0, 1, 2]))(truth)
+first = ForwardTerm(Render(jnp.array([0, 1])), gaussian_loglike(data[:2], 0.1))
+second = ForwardTerm(Render(jnp.array([2])), gaussian_loglike(data[2:], 0.1))
+
+init = Model(shape=jnp.zeros(2), offset=jnp.asarray(0.0))
+free = {
+    "shape": Normal(jnp.zeros(2), 1e8 * jnp.ones(2)),
+    "offset": Normal(jnp.asarray(0.0), jnp.asarray(1e8)),
+}
+fit = Fit(init, free, (first, second))
 ```
 
-## Write the log-density and the stages
+A `ForwardTerm` pairs a forward model, here `Render`, with a normalized log likelihood of the
+data. The forward model is an Equinox module so that any array it holds stays a leaf of
+the term.
 
-The log-density is any callable from the PyTree to a scalar. A stage names the groups it
-frees, and every group has an `optax` transform. A group that a stage does not free keeps
-its values and its optimizer state exactly (`freeze="hold"`).
+## Name the groups
+
+A stage frees groups, so the first job is to say which free entries belong to which group.
+The optimizer works on the free entries in unconstrained coordinates, which is the dict
+`fit.to_real` returns for one draw: one key per free entry, holding that entry's array. For
+a Normal prior the unconstrained value equals the stored value. A group is a selector that
+picks leaves out of that dict, in the form `equinox.tree_at` takes. Nothing is a group by
+default, so an entry that should stay fixed is never fitted by accident.
 
 ```python continuation
-def logdensity(m):
-    return (
-        -0.5 * jnp.sum((m.shape + m.offset * m.fixed - jnp.array([4.0, 6.0])) ** 2)
-        - 0.5 * (m.offset - 2.0) ** 2
-    )
-
-
-backend = MAPBackend(
-    labels=labels,
-    transforms={"shape": optax.adam(0.1), "offset": optax.adam(0.05)},
-    stages=(
-        FitStage(n_steps=300, free=("shape",), name="shape first"),
-        FitStage(n_steps=300, free=("offset", "shape"), name="together"),
-    ),
+start = {"shape": init.shape, "offset": init.offset}
+labels = group_labels(
+    start,
+    {"shape": lambda u: u["shape"], "offset": lambda u: u["offset"]},
 )
-posterior = backend.run(logdensity, init)
-assert abs(float(posterior.params.offset) - 2.0) < 0.05
 ```
 
-`run` returns the fitted PyTree in `posterior.params`. To read the loss of each stage, call
-`backend.fit(logdensity, init)`, which returns the same parameters with one trace per stage.
+## Write the stages
+
+A stage names the groups it frees, and every group has an `optax` transform. A group that a
+stage does not free keeps its values and its optimizer state exactly (`freeze="hold"`).
+
+The first stage below frees `shape` alone and scores only the first term. Its `logdensity`
+is a second `Fit` over a subset of the terms, a view of the exposure. The view must have the
+same free entries as the run's fit, and a different set raises a `ValueError`. The second
+stage frees both groups and scores every term, the density of the run.
+
+```python continuation
+backend = MAP(
+    labels=labels,
+    transforms={"shape": optax.adam(0.2), "offset": optax.adam(0.2)},
+    stages=(
+        FitStage(
+            n_steps=400,
+            free=("shape",),
+            logdensity=Fit(init, free, (first,)),
+            name="first exposure",
+        ),
+        FitStage(n_steps=600, free=("offset", "shape"), name="together"),
+    ),
+    init=start,
+)
+posterior = run(fit, backend, jax.random.key(0))
+assert abs(float(posterior.samples["offset"][0]) - 2.0) < 1e-3
+assert jnp.allclose(posterior.samples["shape"][0], jnp.array([4.0, 6.0]), atol=1e-3)
+```
+
+`run` returns the optimum as the single draw of `posterior.samples`, under the keys of the
+free entries. The loss of each stage is in `posterior.info.stages`, one trace per stage.
+Without `init`, the fit starts from a draw of the prior, and `init` may also be one
+constrained draw or an earlier `Posterior`, whose highest-density draw is used. With no
+`stages`, the backend runs one stage of `n_steps` L-BFGS iterations over every free entry.
 
 ## Choices a stage can make
 
 - `objective_scale` multiplies the objective the stage minimizes, so a stage can be
   down-weighted without changing its learning rates.
-- `closed_form` is a function `(params, aux) -> params` applied after each optimizer update,
-  for a parameter that is set by a formula rather than by a gradient (a flux set by a ratio
-  of windows, for example). It sees the `aux` of the evaluation that produced the update,
-  that is, the prediction made before the step.
-- `logdensity` replaces the run's log-density for the stage, for instance a view over one
-  exposure of an {class}`~photomancy.exposure.ExposureLogDensity`.
+- `closed_form` sets a parameter by a formula rather than by a gradient. It is described
+  in the next section.
+- `logdensity` replaces the run's density for the stage with a `Fit` over a subset of the
+  terms, as above. `prepare` is the same replacement made late: a function from the current
+  parameters to the `Fit`, called once on the host when the stage starts.
 - `transforms` replaces the table of optimizers and starts them fresh at the current values.
   Without it the stage continues the optimizer states and their schedule clocks.
 - `early_stopping` ends the stage once the objective stops improving.
+- `solver` swaps the per-group optimizers for one `optax` line-search solver, such as
+  `optax.lbfgs()`, that optimizes all the freed groups together.
 
-A log-density that also returns auxiliary output derives from
-{class}`~photomancy.infer.model.AbstractLogDensity` and overrides `value_and_aux`.
-{func}`~photomancy.infer.backends.staged.rescaled_transform` runs a transform on `params / scale`
-so that a leaf kept in nanometers takes the steps of a fit in meters.
+{func}`~photomancy.infer.backends.staged.rescaled_transform` runs a transform on
+`params / scale` so that a leaf kept in nanometers takes the steps of a fit in meters.
+
+## Set a parameter by a formula
+
+Some parameters have a closed-form value once the rest are known, such as a flux set by the
+ratio of the data to the prediction. A stage's `closed_form` is a function
+`(u, aux) -> u` applied after each optimizer update. Its first argument `u` is the dict of
+free entries after the update. Its second argument `aux` is the tuple of predictions made
+before the update: one entry per term, each the `predict` output of that term at the
+parameters the gradient was taken at, or `None` for a term that has no prediction. The
+metrics and the callback of the backend receive the same `aux`.
+
+The order matters. The prediction describes the parameters before the step, while `u` holds
+the parameters after it, so a formula that corrects a parameter from the residual lags the
+optimizer by one step. It still has the right fixed point, which is what the example
+needs. The stage below frees `shape` only and gives `offset` the empty label, so no
+gradient moves it. After each step, `closed_form` shifts `offset` by the mean residual
+between the data and the pre-step predictions of both terms.
+
+```python continuation
+def closed_form(u, aux):
+    prediction = jnp.concatenate([aux[0], aux[1]])
+    return {**u, "offset": u["offset"] + jnp.mean(data - prediction)}
+
+
+formula = MAP(
+    labels={"shape": "shape", "offset": ""},
+    transforms={"shape": optax.adam(0.2)},
+    stages=(FitStage(n_steps=800, free=("shape",), closed_form=closed_form),),
+    init=start,
+)
+posterior = run(fit, formula, jax.random.key(0))
+assert abs(float(posterior.samples["offset"][0]) - 2.0) < 1e-3
+```
+
+A fit with a closed form renders each term twice per step, once for the gradient and once
+for the prediction, so it compiles a larger program than a fit without one.
+
+## Give the solved coefficients a wide prior
+
+A MAP fit returns the point where the whole objective, the prior included, is largest.
+The coefficients that a stage solves for, by
+gradient or by `closed_form`, should therefore carry a prior wide enough to be negligible
+next to the data, a Normal of width `1e8` rather than a few units.
+
+The reason is the optimizer. The gradient of a Normal prior with mean `m` and width `w` is
+`(x - m) / w**2`. Adam divides each step by a running estimate of the gradient size, so
+near the optimum, where the data gradient has shrunk, a small prior gradient is a large
+share of what Adam normalizes and it moves the answer. With a Normal of width `1e3`, Adam
+amplifies the prior gradient to about `1e-2` relative in the solved coefficients, while a
+width of `1e8` agrees with the closed-form answer to `1e-13`. A wide prior does not change what the data say, because the prior is flat across
+the range the data allow. The fits on this page use `1e8` for that reason.
 
 ## Freezing policies
 
