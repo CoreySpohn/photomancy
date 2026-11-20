@@ -3,7 +3,8 @@
 A proposal gives properly weighted draws ``z`` in the flat real vector of
 ``fit.to_real`` (the ``ravel_pytree`` of one draw: sorted entry keys, sorted coordinate
 names inside a block; ``fit.from_flat`` reads it). ``weigh`` returns the draws, their
-log weights, whose mean estimates the evidence, and the fit's log density at them. A
+log weights, whose mean estimates the evidence, the fit's log density at them, and
+``valid``, the proposal's own verdict on whether those weights carry an evidence. A
 density proposal draws ``z`` with its own log density ``log_q`` and weighs a draw by
 ``fit.log_density + volume - log_q``, the target density in the flat vector over the
 proposal's.
@@ -107,7 +108,7 @@ class AbstractProposal(eqx.Module):
     @abstractmethod
     def weigh(
         self, key, fit, n: int, *, batch_size: int | None = None
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         """Draw ``n`` properly weighted points of ``fit``.
 
         A dead draw has log weight ``-inf`` and its coordinates are not read; this is
@@ -121,9 +122,15 @@ class AbstractProposal(eqx.Module):
             batch_size: Draws per batch of the fit's density, where it is evaluated.
 
         Returns:
-            ``(z, log_weights, log_target)``: the draws in the flat vector, ``(n, d)``;
-            their log weights, ``(n,)``; and ``fit.log_density`` at the draws, ``(n,)``
-            (``-inf`` at a dead draw).
+            ``(z, log_weights, log_target, valid)``: the draws in the flat vector,
+            ``(n, d)``; their log weights, ``(n,)``; ``fit.log_density`` at the draws,
+            ``(n,)`` (``-inf`` at a dead draw); and ``valid``, a boolean scalar.
+            ``valid`` is the proposal's own condition for the weights to carry an
+            evidence, beyond what the backend reads from the weights (the Pareto
+            k-hat). A proposal that has no such condition returns true. When it is false
+            the backend returns the draws and weights and a NaN evidence and standard
+            error; the weights of the slice stay finite, so the draws remain usable for
+            forecasts.
         """
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
@@ -173,12 +180,13 @@ class AbstractDensityProposal(AbstractProposal):
     def weigh(self, key, fit, n, *, batch_size=None):
         """Draw ``n`` points; weigh each by ``fit.log_density + volume - log_q``.
 
-        A draw in a zero-density region of the fit has weight zero.
+        A draw in a zero-density region of the fit has weight zero. A density proposal
+        has no condition of its own, so ``valid`` is true.
         """
         z, log_q = self.sample(key, fit, n)
         x, volume = fit.from_flat(z)
         log_target = fit.log_density(x, batch_size=batch_size)
-        return z, log_target + volume - log_q, log_target
+        return z, log_target + volume - log_q, log_target, jnp.asarray(True)
 
 
 class PriorProposal(AbstractDensityProposal):

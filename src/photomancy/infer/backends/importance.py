@@ -7,9 +7,12 @@ wrapped density). The evidence is
 the importance mean (:func:`photomancy.infer.evidence.importance_evidence`) and is
 consistent whenever the proposal has positive density wherever the target does and the
 weights have a finite mean. Its standard error needs a finite variance of the weights,
-which the Pareto k-hat of the weights tests: the evidence and its error are NaN unless
-``khat <= khat_threshold(n_draws)`` (a NaN k-hat refuses). The draws and their weights
-are returned either way. ``AdaptiveImportance`` is population Monte Carlo: it
+which the Pareto k-hat of the weights tests. The evidence and its error are NaN unless
+``khat <= khat_threshold(n_draws)`` (a NaN k-hat refuses) and the proposal reports its
+weights valid (``info.proposal_valid``; the fourth value of ``weigh``, true for a
+density proposal and, for a completed orbit proposal, at least half the pool
+effective). The draws and their weights are returned either way.
+``AdaptiveImportance`` is population Monte Carlo: it
 tempers the target, refits a Gaussian mixture on each round's weighted cloud and
 draws the returned cloud from the last proposal.
 
@@ -62,6 +65,10 @@ class ImportanceInfo(eqx.Module):
         khat: Pareto k-hat of the returned weights, the value judged against
             ``khat_threshold(n_draws)``. Above it, or NaN, the evidence and its
             standard error are NaN.
+        proposal_valid: The ``valid`` value of the last round's ``weigh``: the
+            proposal's own condition for its weights to carry an evidence. False makes
+            the evidence and its standard error NaN, with the draws and weights
+            returned. Earlier rounds of ``AdaptiveImportance`` are not read.
     """
 
     n_rounds: int = eqx.field(static=True)
@@ -69,6 +76,7 @@ class ImportanceInfo(eqx.Module):
     n_eff_per_round: jax.Array
     reached_target: jax.Array
     khat: jax.Array
+    proposal_valid: jax.Array
 
 
 class Importance(AbstractBackend):
@@ -78,7 +86,9 @@ class Importance(AbstractBackend):
     importance mean, so it is consistent for any proposal that covers the target. The
     evidence and its standard error are NaN when the Pareto k-hat of the weights is
     not at or below ``khat_threshold(n_draws)`` (``info.khat``): above it the variance
-    of the weights is not finite and the standard error is not an error bar. The
+    of the weights is not finite and the standard error is not an error bar. They are
+    also NaN when the proposal reports its weights invalid (``info.proposal_valid``,
+    the pool condition of a completed orbit proposal). The
     draws and weights are not gated; a caller's thresholds on them (``min_n_eff``,
     ``max_khat``) stay on the operations of the ``Posterior``. ``PriorProposal`` gives
     the prior-sampling estimate, whose weights are the likelihood.
@@ -96,16 +106,21 @@ class Importance(AbstractBackend):
     @eqx.filter_jit
     def _run(self, fit, key, *, batch_size=None):
         """Draw from the proposal and weight the draws to the fit."""
-        z, log_w, log_target = self.proposal.weigh(
+        z, log_w, log_target, proposal_valid = self.proposal.weigh(
             key, fit, self.n_draws, batch_size=batch_size
         )
         x, _ = fit.from_flat(z)
         log_z, se = importance_evidence(log_w)
         khat = pareto_khat(log_w)
-        valid = khat <= khat_threshold(self.n_draws)
+        valid = (khat <= khat_threshold(self.n_draws)) & proposal_valid
         nan = jnp.asarray(jnp.nan)
         info = ImportanceInfo(
-            1, jnp.ones(1), kish_ess(log_w)[None], jnp.asarray(True), khat
+            1,
+            jnp.ones(1),
+            kish_ess(log_w)[None],
+            jnp.asarray(True),
+            khat,
+            proposal_valid,
         )
         return BackendDraws(
             samples=x,
@@ -230,7 +245,7 @@ class AdaptiveImportance(AbstractBackend):
                     log_base + _temper(log_like, beta),
                 )
             else:
-                z, log_w, _ = proposal.weigh(
+                z, log_w, _, _ = proposal.weigh(
                     k_draw, fit, self.n_adapt_draws, batch_size=batch_size
                 )
             temperatures.append(beta)
@@ -254,6 +269,7 @@ class AdaptiveImportance(AbstractBackend):
             jnp.stack(kish),
             reached,
             last.info.khat,
+            last.info.proposal_valid,
         )
         return BackendDraws(
             samples=last.samples,

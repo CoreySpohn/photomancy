@@ -271,12 +271,16 @@ class ScaleRotateProposal(AbstractDensityProposal):
         return z, jnp.where(inside, log_q, -jnp.inf)
 
     def weigh(self, key, fit, n, *, batch_size=None):
-        """Draw and weigh ``n`` orbits; a draw outside the period bounds is dead."""
+        """Draw and weigh ``n`` orbits; a draw outside the period bounds is dead.
+
+        The proposal has a density, so ``valid`` (the fourth value) is true.
+        """
         z, log_q, inside = self._draw(key, fit, n)
         x, volume = fit.from_flat(z)
         log_target = fit.log_density(x, batch_size=batch_size)
         log_target = jnp.where(inside, log_target, -jnp.inf)
-        return z, jnp.where(inside, log_target + volume - log_q, -jnp.inf), log_target
+        log_w = jnp.where(inside, log_target + volume - log_q, -jnp.inf)
+        return z, log_w, log_target, jnp.asarray(True)
 
     def log_prob(self, z, fit):
         """Log density of flat vectors ``z (n, d)`` (zero outside the period bounds)."""

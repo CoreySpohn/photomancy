@@ -320,7 +320,11 @@ class Completion(eqx.Module):
         return c, z, log_s, log_z, mean, chol, volume
 
     def _one(self, shape, key, n_pool, n_scored):
-        """Weight and kept draw of one ``shape``: ``(z_kept, lw, log_target_kept)``.
+        """Weight and kept draw of one ``shape``.
+
+        Returns ``(z_kept, lw, log_target_kept, pool_kish)``. ``pool_kish`` is the Kish
+        size of the screen over the pool, ``(sum_j s_j)**2 / sum_j s_j**2``, and zero
+        when no pool member is inside the prior.
 
         The pool of ``n_pool`` constants is screened by the prior; ``n_scored`` of
         them, resampled systematically by the screen, get their leaves drawn and the
@@ -331,11 +335,16 @@ class Completion(eqx.Module):
         c, z, log_s, log_z, mean, chol, volume = self._constants(shape, k_draw, n_pool)
         total = logsumexp(log_s)
         lw = log_z + total - jnp.log(n_pool)
+        alive = jnp.isfinite(total)
+        pool_kish = jnp.where(
+            alive,
+            jnp.exp(2.0 * jnp.where(alive, total, 0.0) - logsumexp(2.0 * log_s)),
+            0.0,
+        )
         if not self.fit_rest.terms:
             keep = jnp.argmax(log_s + jax.random.gumbel(k_keep, (n_pool,)))
             log_form = log_z + _log_conditional(c[keep], mean, chol)
-            return z[keep], lw, log_form + log_s[keep] - volume[keep]
-        alive = jnp.isfinite(total)
+            return z[keep], lw, log_form + log_s[keep] - volume[keep], pool_kish
         normalized = jnp.where(alive, log_s - total, -jnp.log(n_pool))
         idx = systematic_indices(jax.random.fold_in(key, 2), normalized, n_scored)
         c, z = c[idx], z[idx]
@@ -352,14 +361,16 @@ class Completion(eqx.Module):
         lw = jnp.where(alive, lw + logsumexp(r) - jnp.log(n_scored), -jnp.inf)
         log_form = log_z + _log_conditional(c[keep], mean, chol)
         log_target = jnp.where(alive, log_form + target[keep] - volume[keep], -jnp.inf)
-        return z[keep], lw, log_target
+        return z[keep], lw, log_target, pool_kish
 
     def complete(self, key, shapes, n_pool, n_scored):
-        """Complete ``shapes (n, dt)``: return ``(z (n, d), lw (n,), log_target (n,))``.
+        """Complete ``shapes (n, dt)``.
 
-        ``lw`` is the log marginal weight of each shape; ``log_target`` is
-        ``fit.log_density`` at the kept draw, from the form, and ``-inf`` where ``lw``
-        is. ``n_scored`` is not read when the fit has no term left to score.
+        Returns ``(z (n, d), lw (n,), log_target (n,), pool_kish (n,))``. ``lw`` is the
+        log marginal weight of each shape; ``log_target`` is ``fit.log_density`` at the
+        kept draw, from the form, and ``-inf`` where ``lw`` is; ``pool_kish`` is the
+        Kish size of the screen over the pool of each shape (see :meth:`_one`).
+        ``n_scored`` is not read when the fit has no term left to score.
         """
         keys = jax.random.split(key, shapes.shape[0])
         return jax.lax.map(
@@ -435,10 +446,26 @@ class CompletedProposal(AbstractProposal):
     ``r_k = 1``: ``W = Z * S / M`` and the kept draw is picked on ``s``.
 
     ``weigh`` returns the flat vector of the kept draw, the log weight
-    ``log W - log q(shape)`` and the fit's density at the kept draw from the form. No
-    density exists at ``z`` (it is not an ``AbstractDensityProposal``):
+    ``log W - log q(shape)``, the fit's density at the kept draw from the form, and
+    ``valid``. No density exists at ``z`` (it is not an ``AbstractDensityProposal``):
     ``AdaptiveImportance`` refits on the weights of the fit's own density and the refit
     is over ``shape`` only.
+
+    Pool condition. The screen resamples the pool, so the estimate is an average over
+    the pool only while the screen is spread over it. The pool fraction of a draw is
+    the Kish size of its screen, ``(sum_j s_j)**2 / sum_j s_j**2``, over ``n_pool``;
+    the reading of the cloud is the plain mean of that fraction over the draws with a
+    finite weight. Below one half the screen is a lottery over a few live members, the
+    weights of the shapes that carry the posterior are dominated by it, and the
+    importance evidence can read low with a standard error that does not show it.
+    ``valid`` is true when the reading is at least ``min_pool_fraction``; the backend
+    then publishes an evidence, and otherwise returns the draws and weights with a NaN
+    evidence. The reading does not use the weights: a weighted mean leans on the draws
+    whose own screen is luckiest, which are the ones that read the evidence worst. The
+    condition is conservative, and a starved pool can still give a calibrated
+    evidence that it refuses. The cause is a pool drawn at the reference scale that
+    does not know a tight constraint on the orbit size (a mass law over a few epochs);
+    a larger pool does not remove it.
 
     Attributes:
         base: Proposal over ``shape`` (it is given the :class:`Completion`, which
@@ -454,6 +481,8 @@ class CompletedProposal(AbstractProposal):
         leaf_widen: Factor on the standard deviation of the leaf proposal components
             (see the module docstring); only used when a term proposes a free leaf.
         leaf_uniform: Share of the leaf's support drawn uniformly.
+        min_pool_fraction: Smallest mean pool fraction over the live draws (see the
+            pool condition above) for which ``weigh`` reports its weights valid.
     """
 
     base: AbstractDensityProposal
@@ -466,6 +495,7 @@ class CompletedProposal(AbstractProposal):
     )
     leaf_widen: float = eqx.field(static=True, default=1.5, kw_only=True)
     leaf_uniform: float = eqx.field(static=True, default=0.1, kw_only=True)
+    min_pool_fraction: float = eqx.field(static=True, default=0.5, kw_only=True)
 
     def _completion(self, fit):
         return Completion.from_fit(
@@ -476,9 +506,11 @@ class CompletedProposal(AbstractProposal):
         )
 
     def weigh(self, key, fit, n, *, batch_size=None):
-        """Draw ``n`` completed points; return ``(z, log_weights, log_target)``.
+        """Draw ``n`` completed points; return ``(z, log_weights, log_target, valid)``.
 
         The completion evaluates in its own batches, so ``batch_size`` is not read.
+        ``valid`` is the pool condition of the class docstring; a cloud with no live
+        draw has nothing to read and is valid (its evidence is ``-inf``).
         """
         completion = self._completion(fit)
         n_pool = self.n_pool
@@ -486,10 +518,19 @@ class CompletedProposal(AbstractProposal):
             n_pool = 32 if completion.fit_rest.terms else 8
         k_base, k_c = jax.random.split(key)
         shapes, log_q = self.base.sample(k_base, completion, n)
-        z, lw, log_target = completion.complete(k_c, shapes, n_pool, self.n_scored)
+        z, lw, log_target, pool_kish = completion.complete(
+            k_c, shapes, n_pool, self.n_scored
+        )
         # a world with no valid astrometric row has no scale: refuse its slice
         lw = jnp.where(jnp.isnan(completion.scale_AU), jnp.nan, lw)
-        return z, lw - log_q, log_target
+        log_w = lw - log_q
+        live = jnp.isfinite(log_w)
+        n_live = jnp.sum(live)
+        reading = (
+            jnp.sum(jnp.where(live, pool_kish, 0.0)) / jnp.maximum(n_live, 1) / n_pool
+        )
+        valid = jnp.where(n_live > 0, reading >= self.min_pool_fraction, True)
+        return z, log_w, log_target, valid
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
         """Refit the base over the orbit shapes of the weighted cloud."""

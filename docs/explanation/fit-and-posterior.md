@@ -143,6 +143,11 @@ weights (Vehtari et al. 2024): a k-hat above `khat_threshold(n_draws)` means a f
 carry almost all of the weight and the stated error is not an error bar. In that case the
 backend returns NaN for the evidence and its error.
 
+A proposal can add a condition of its own through `info.proposal_valid`. The completed
+orbit proposal of `any_epoch` reports its weights valid only when at least half of its
+pool of constants is effective for the draws that carry the weight; otherwise the
+evidence and its error are NaN and the draws are still returned.
+
 Making the data a hundred times more precise shows the refusal. Prior draws then almost
 never land where the likelihood is, and a handful of draws take all the weight.
 

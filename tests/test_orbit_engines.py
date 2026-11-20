@@ -18,7 +18,7 @@ from orbix.system.core import Body, SkyFrame
 from priorities import LogUniform, Uniform
 from skyscapes.population import kipping_eccentricity
 
-from photomancy.infer import AbstractTerm, Fit, Importance, run
+from photomancy.infer import AbstractTerm, AdaptiveImportance, Fit, Importance, run
 from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
 from photomancy.orbit.backends import any_epoch, few_epoch
 from photomancy.orbit.completion import (
@@ -136,12 +136,12 @@ def test_completed_weight_is_the_generic_weight(fit):
     """
     comp = Completion.from_fit(fit)
     proposal = CompletedProposal(ShapePriorProposal())
-    z, log_w, log_target = eqx.filter_jit(proposal.weigh)(jax.random.key(0), fit, 32)
+    z, log_w, log_target, _ = eqx.filter_jit(proposal.weigh)(jax.random.key(0), fit, 32)
     x, _ = fit.from_flat(z)
     np.testing.assert_allclose(log_target, fit.log_density(x), rtol=1e-9)
     k_base, k_c = jax.random.split(jax.random.key(0))
     shape, log_q_shape = ShapePriorProposal().sample(k_base, comp, 32)
-    z_c, lw, _ = comp.complete(k_c, shape, 8, 4)
+    z_c, lw, _, _ = comp.complete(k_c, shape, 8, 4)
     np.testing.assert_allclose(log_w, lw - log_q_shape, rtol=1e-9)
     keys = jax.random.split(k_c, 32)
     z_ref, lw_ref = jax.vmap(lambda t, k: _unscreened(comp, t, k, 8))(shape, keys)
@@ -296,15 +296,25 @@ def test_any_epoch_and_few_epoch_agree_and_vmap_equals_the_loop():
     rtol 1e-9 (shared key). The third world has no valid row, so no data scale: its
     slice is refused (NaN weights) in both, and the other two keep live weights.
     ``any_epoch(n_draws)`` sizes the returned cloud only: the adaptation rounds keep
-    their own size, so the two can be passed together.
+    their own size, so the two can be passed together. The pool of one anchor row is
+    starved (under half effective), so the default ``any_epoch`` publishes no evidence
+    there; the agreement is read with the pool condition switched off.
     """
     sizes = any_epoch(n_draws=4000, n_adapt_draws=2**16)
     assert (sizes.n_draws, sizes.n_adapt_draws) == (4000, 2**16)
     assert any_epoch().n_draws == any_epoch().n_adapt_draws == 2**16
     fit = _fit(_term(n_rows=1))
     exact = few_epoch(n_draws=2**12)._run(fit, jax.random.key(0))
-    adaptive = any_epoch(
-        n_draws=2**12, n_adapt_draws=2**12, n_rounds=2, n_centers=64
+    settings = {"n_draws": 2**12, "n_adapt_draws": 2**12, "n_rounds": 2}
+    gated = any_epoch(**settings, n_centers=64)._run(fit, jax.random.key(0))
+    assert not bool(gated.info.proposal_valid)
+    assert np.isnan(float(gated.log_evidence))
+    assert not np.any(np.isnan(gated.log_weights))
+    assert np.any(np.isfinite(gated.log_weights))
+    adaptive = AdaptiveImportance(
+        CompletedProposal(ShapePriorProposal(), min_pool_fraction=0.0),
+        **settings,
+        n_centers=64,
     )._run(fit, jax.random.key(0))
     gap = abs(float(exact.log_evidence) - float(adaptive.log_evidence))
     assert gap < 4 * float(adaptive.log_evidence_se) + 1e-6
@@ -351,3 +361,44 @@ def test_any_epoch_refits_with_over_dispersed_kernels_in_every_round():
     narrow, wide = covariances(1.0), covariances(2.0)
     for n, w in zip(narrow, wide, strict=True):
         np.testing.assert_allclose(w @ w.mT, 4.0 * (n @ n.mT), rtol=1e-6)
+
+
+@pytest.mark.medium(reason="one completed sample on two thresholds, 15 s cold")
+def test_the_pool_reading_gates_the_evidence_and_matches_a_direct_one(fit):
+    """Fails if the pool fraction is not the Kish size of the screen over the pool.
+
+    The direct reading takes ``(sum s)**2 / sum s**2`` from the screen of each shape
+    (``Completion._constants`` at the draw key of ``complete``) and averages it over
+    the draws with a finite weight, unweighted; ``CompletedProposal.weigh`` must agree
+    on the verdict at a threshold just below and just above that reading. When the
+    verdict is false the ``Importance`` backend returns finite weights and a NaN
+    evidence.
+    """
+    comp = Completion.from_fit(fit)
+    n = 256
+    k_base, k_c = jax.random.split(jax.random.key(3))
+    shape, log_q = ShapePriorProposal().sample(k_base, comp, n)
+    _, lw, _, kish = comp.complete(k_c, shape, 8, 4)
+    keys = jax.random.split(k_c, n)
+    screens = jax.vmap(lambda t, k: comp._constants(t, jax.random.split(k)[0], 8)[2])(
+        shape, keys
+    )
+    direct = np.exp(
+        2 * jax.scipy.special.logsumexp(screens, -1)
+        - jax.scipy.special.logsumexp(2 * screens, -1)
+    )
+    np.testing.assert_allclose(
+        np.where(np.isfinite(lw), kish, 0.0),
+        np.where(np.isfinite(lw), direct, 0.0),
+        rtol=1e-9,
+    )
+    live = np.isfinite(np.asarray(lw - log_q))
+    reading = float(np.mean(np.asarray(kish)[live]) / 8)
+    for threshold, expected in ((reading * 0.99, True), (reading * 1.01, False)):
+        proposal = CompletedProposal(ShapePriorProposal(), min_pool_fraction=threshold)
+        *_, valid = eqx.filter_jit(proposal.weigh)(jax.random.key(3), fit, n)
+        assert bool(valid) == expected
+    draws = Importance(proposal, n)._run(fit, jax.random.key(3))
+    assert not bool(draws.info.proposal_valid)
+    assert np.isnan(float(draws.log_evidence))
+    assert np.all(np.isfinite(draws.log_weights) | np.isneginf(draws.log_weights))

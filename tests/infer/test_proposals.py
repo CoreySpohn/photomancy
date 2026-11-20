@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -366,3 +367,34 @@ def test_pathfinder_keeps_its_paths_and_refuses_the_evidence_above_the_khat_limi
     differs from the importance mean.
     """
     _modes_and_evidence("pathfinder", Pathfinder(n_draws=2000, n_modes=4))
+
+
+class _Reporting(PriorProposal):
+    """A prior proposal that reports its weights valid or invalid as told."""
+
+    reports: bool = eqx.field(static=True, default=True)
+
+    def weigh(self, key, fit, n, *, batch_size=None):
+        z, log_w, log_target, _ = super().weigh(key, fit, n, batch_size=batch_size)
+        return z, log_w, log_target, jnp.asarray(self.reports)
+
+
+@pytest.mark.parametrize("reports", [True, False])
+def test_the_evidence_needs_the_proposal_to_report_its_weights_valid(reports):
+    """Fails if ``valid`` from ``weigh`` does not gate the importance evidence.
+
+    A scene whose likelihood is mild enough that the k-hat passes: with ``valid`` true
+    the evidence is the importance mean of the weights; with it false the evidence and
+    its error are NaN while the weights are the same finite values, and
+    ``info.proposal_valid`` carries the proposal's verdict.
+    """
+    fit = _orbit_fit()
+    draws = Importance(_Reporting(reports=reports), 512)._run(fit, jax.random.key(0))
+    assert bool(draws.info.proposal_valid) == reports
+    assert np.all(np.isfinite(draws.log_weights))
+    if reports:
+        assert float(draws.info.khat) <= khat_threshold(512)
+        assert np.isfinite(float(draws.log_evidence))
+    else:
+        assert np.isnan(float(draws.log_evidence))
+        assert np.isnan(float(draws.log_evidence_se))

@@ -216,8 +216,9 @@ def test_a_pool_with_no_live_constant_weighs_zero_without_nan(fit):
 
     At a 4,900 d period the constants that fit the two rows imply a star mass far
     below the law's window, so no pool member is live: the weight is ``-inf`` and the
-    kept draw and its density are free of NaN. A ``shape`` at the true period beside it
-    keeps a finite weight, so the guard cannot pass by killing everything.
+    kept draw, its density and its pool Kish size (zero) are free of NaN. A ``shape``
+    at the true period beside it keeps a finite weight, so the guard cannot pass by
+    killing everything.
     """
     comp = Completion.from_fit(fit)
     block, model = comp.block, comp.model
@@ -228,8 +229,12 @@ def test_a_pool_with_no_live_constant_weighs_zero_without_nan(fit):
         ]
     )
     shape = block.chart.unconstrain(x, block.chart_support(model))[:, :3]
-    z, lw, log_density = eqx.filter_jit(comp.complete)(jax.random.key(0), shape, 32, 4)
+    z, lw, log_density, kish = eqx.filter_jit(comp.complete)(
+        jax.random.key(0), shape, 32, 4
+    )
     assert float(lw[0]) == -np.inf
+    assert float(kish[0]) == 0.0
+    assert 1.0 <= float(kish[1]) <= 32.0
     assert np.isfinite(float(lw[1]))
     assert not np.any(np.isnan(np.asarray(z)))
     assert not np.any(np.isnan(np.asarray(log_density)))

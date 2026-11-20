@@ -51,7 +51,10 @@ def update(
     both have one structure). The refit must return the cloud's own layout: the
     same draw count, sample shapes and dtypes and the same ``kind``; a backend that
     does not raises ``ValueError`` on the host when traced. Its draw count is the
-    backend's, so build it with the posterior's size.
+    backend's, so build it with the posterior's size. The refit's evidence follows the
+    contract of :func:`~photomancy.infer.run.run`: NaN unless the Pareto k-hat is at or
+    below ``khat_threshold(n_draws)`` and the proposal reports its weights valid
+    (``info.proposal_valid``; for ``any_epoch``, at least half the pool effective).
 
     The choice is one ``jax.lax.cond``. For one slice it is lazy: the backend runs
     only on a refusal. Under ``eqx.filter_vmap`` over worlds the predicate is batched
