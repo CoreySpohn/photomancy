@@ -51,7 +51,7 @@ class SyntheticCoronagraph(AbstractTableCoronagraph):
         """Detect use of a radial sky response to prepare a point-source stamp."""
         raise AssertionError("template generation must use the source product")
 
-    def _native_stellar_map(self, stellar_diam_lod):
+    def _native_stellar_map(self, stellar_diameter_lod):
         raise AssertionError("template geometry must not require a stellar image")
 
     def curves(self, *args, **kwargs):
