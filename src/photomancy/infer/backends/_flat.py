@@ -65,14 +65,31 @@ def start_points(fit, init, key, n):
 
 
 def _repeat_or_stack(fit, init, n):
-    """Repeat one entry dict ``n`` times, or pass ``n`` stacked starts through."""
+    """Repeat one entry dict ``n`` times, or pass ``n`` stacked starts through.
+
+    The rank of every leaf is compared with the matching leaf of one draw, entry by
+    entry, so a block entry (a pytree of arrays) counts leaf by leaf.
+    """
     template = draw_template(fit)
-    extra = {
-        np.ndim(init[key]) - np.ndim(template[key]) for key in template if key in init
-    }
-    if extra == {0}:
+    extra = {}
+    for key in template:
+        if key not in init:
+            continue
+        got, want = jax.tree.leaves(init[key]), jax.tree.leaves(template[key])
+        if len(got) != len(want):
+            raise ValueError(
+                f"init entry {key!r} does not have the structure of a draw"
+            )
+        ranks = {np.ndim(g) - np.ndim(w) for g, w in zip(got, want, strict=True)}
+        if len(ranks) != 1 or ranks - {0, 1}:
+            raise ValueError(
+                f"init entry {key!r} must have the leaf shape (one start, repeated) "
+                "or one extra leading axis (one start each)"
+            )
+        extra[key] = ranks.pop()
+    if set(extra.values()) == {0}:
         return jax.tree.map(lambda a: jnp.broadcast_to(a, (n, *a.shape)), init)
-    if extra == {1}:
+    if set(extra.values()) == {1}:
         sizes = {np.shape(a)[0] for a in jax.tree.leaves(init)}
         if sizes != {n}:
             raise ValueError(
@@ -82,7 +99,7 @@ def _repeat_or_stack(fit, init, n):
         return init
     raise ValueError(
         "init entries must all have the leaf shape (one start, repeated) or all one "
-        "extra leading axis (one start each)"
+        f"extra leading axis (one start each); got {extra}"
     )
 
 
