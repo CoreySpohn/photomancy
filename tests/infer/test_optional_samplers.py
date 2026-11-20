@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 from priorities import Uniform
+from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.infer import MCLMC, NUTS, Fit, NestedSampling, Pathfinder, run
 from photomancy.infer.terms import ForwardTerm
 
@@ -28,7 +29,7 @@ class Forward(eqx.Module):
 fit = Fit(
     Model(jnp.zeros(2)),
     {"x": Uniform(-1.0, 1.0)},
-    (ForwardTerm(Forward(), lambda predicted: -0.5 * jnp.sum(predicted**2)),),
+    (ForwardTerm(Forward(), gaussian_loglike(jnp.zeros(2), 1.0)),),
 )
 key = jax.random.key(0)
 calls = {
