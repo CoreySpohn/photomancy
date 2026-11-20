@@ -50,9 +50,11 @@ class Grid(AbstractBackend):
     :func:`midpoint_rule` and :func:`gauss_legendre_rule`) with every weight positive.
     The result has ``prod(len(nodes))`` draws in C order of the sorted axis names,
     weights ``quadrature weight * density`` and ``kind = "quadrature"``. The evidence is
-    the sum of the weights; its standard error is NaN. Coordinates are those of
-    ``fit.sample_prior`` (a block's own, unconstrained, coordinates), so choose the
-    nodes in them and cover the posterior mass.
+    the sum of the weights; its standard error is NaN. The contract on
+    :attr:`~photomancy.infer.posterior.Posterior.log_evidence` applies without its
+    tail condition, and the error of the sum is judged by refining the grid. Coordinates
+    are those of ``fit.sample_prior`` (a block's own, unconstrained, coordinates), so
+    choose the nodes in them and cover the posterior mass.
 
     Args:
         axes: ``{name: (nodes, weights)}``, one entry per scalar degree of freedom.

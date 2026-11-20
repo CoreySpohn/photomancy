@@ -62,7 +62,8 @@ def update(
     ``run(new_fit, backend, key).info`` where the refit ran. Elsewhere it has the same
     structure, filled (floats NaN, integers zero, booleans false), so both
     ``jax.lax.cond`` branches agree. Read ``info.refit.proposal_valid`` and the
-    backend's k-hat there. The refit must return the cloud's own layout: the
+    backend's k-hat there (``info.refit.importance.khat`` for ``Laplace`` and
+    ``Pathfinder``). The refit must return the cloud's own layout: the
     same draw count, sample shapes and dtypes and the same ``kind``; a backend that
     does not raises ``ValueError`` on the host when traced. Its draw count is the
     backend's, so build it with the posterior's size. The evidence of a refit follows
@@ -84,11 +85,10 @@ def update(
         min_n_eff: As in :meth:`Posterior.with_priors`: an absolute Kish count that
             the caller states, not a fraction of the draw count. The refit is not
             gated, so read ``kish_ess(new.log_weights)`` on the result, and size the
-            backend so that its cloud clears the same number. For
-            :func:`~photomancy.orbit.any_epoch` that is about 100 draws per unit of
-            ``min_n_eff`` (``n_draws=2**16`` suits ``min_n_eff`` near 650). The
-            expected Kish size of a refit is not known before it runs, so ``update``
-            keeps one criterion and no retry.
+            backend so that its cloud clears the same number (the orbit backends state
+            the draw count that suits them, see :mod:`photomancy.orbit`). The expected
+            Kish size of a refit is not known before it runs, so ``update`` keeps one
+            criterion and no retry.
         max_khat: As in :meth:`Posterior.with_priors`.
         index: Position of the term to replace in ``posterior.fit.terms``, or
             ``None`` to append.

@@ -52,11 +52,12 @@ def any_epoch(n_draws=2**16, n_rounds=3, **adaptive):
     see :meth:`~photomancy.infer.Posterior.with_priors`), size ``n_draws`` at about
     100 draws per unit of ``min_n_eff``.
 
-    The evidence has a third condition, read from the pool of constants that each shape
-    draws (:class:`CompletedProposal`): it is NaN unless at least half of that pool is
-    effective, on average over the live draws (``info.proposal_valid``). A fit that
-    one or two epochs leave with a tight constraint on the orbit size, which the pool
-    does not know, fails it; the draws and weights are still returned.
+    The proposal's validity condition in the contract on
+    :attr:`~photomancy.infer.Posterior.log_evidence` is read from the pool of constants
+    that each shape draws (:class:`CompletedProposal`): the plain mean over the live
+    draws of the pool's Kish fraction must be at least 0.5 (``info.proposal_valid``).
+    A fit that one or two epochs leave with a tight constraint on the orbit size, which
+    the pool does not know, fails it; the draws and weights are still returned.
 
     Args:
         n_draws: Draws of the last round, the returned cloud.

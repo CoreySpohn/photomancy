@@ -5,14 +5,10 @@ quasi-Newton inverse-Hessian estimate along that trajectory, keeping the point o
 path with the best evidence lower bound. It is a more robust alternative to the
 single-Hessian Laplace fit (it uses the whole trajectory rather than one Hessian at the
 mode) and is purpose-built as a fast initializer for the sampling backends. The dense
-covariance is reconstructed from the compact L-BFGS factors, and ``evidence`` carries
-the Pathfinder ELBO, a lower bound on the log marginal likelihood, not the Laplace
-``log Z``. The multi-start variant weights its modes by their ELBO and feeds the
-analytic EIG layer the same way ``Laplace`` does.
-
-``pathfinder_fit`` is ``filter_jit``-compiled, so when ``logdensity`` is a
-``SceneLogDensity`` Module its forward's array leaves thread as traced inputs rather
-than baking into the compiled kernel as constants.
+covariance is reconstructed from the compact L-BFGS factors. The ELBO of each path, a
+lower bound on the log marginal likelihood, sets the path's weight in the proposal; the
+reported evidence is the importance mean of the draws weighted to the fit, not the ELBO.
+The multi-start variant mixes its paths by their ELBO, as ``Laplace`` mixes its modes.
 """
 
 import equinox as eqx
@@ -87,9 +83,9 @@ class Pathfinder(AbstractBackend):
     Hessian when a mode is poorly conditioned) and weighted by its ELBO. The proposal
     is the mixture of the paths, wrapped on every periodic coordinate; the draws are
     weighted to the fit with the wrapped density, so the evidence is the importance mean
-    and the proposal quality shows in the weights. The evidence and its standard error
-    are NaN when the Pareto k-hat of the weights is above ``khat_threshold(n_draws)``
-    (``info.importance.khat``); the draws and weights are not gated. A path whose ELBO
+    and the proposal quality shows in the weights. The evidence follows the contract on
+    :attr:`~photomancy.infer.posterior.Posterior.log_evidence` (the k-hat is
+    ``info.importance.khat``); the draws and weights are not gated. A path whose ELBO
     is not finite leaves the mixture; with none left the slice is NaN. The cases where
     a Gaussian is a poor proposal, and the seed for ``AdaptiveImportance``, are those
     of ``Laplace``.

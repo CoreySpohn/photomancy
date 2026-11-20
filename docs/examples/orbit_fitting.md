@@ -197,10 +197,10 @@ for i, t in enumerate([250.0, 450.0, 700.0]):
     print(f"{t:5.0f} d: log evidence {float(posterior.log_evidence):.3f}")
 ```
 
-The evidence of each step is finite here. When an estimate fails its own validity check
-(a k-hat of the importance weights above the limit for the draw count), the evidence and
-its error come back NaN while the draws are still returned. A NaN is a refusal, never a
-number to compare.
+The evidence of each step is finite here. When an estimate fails a condition of the
+evidence contract (see [Fits and posteriors](../explanation/fit-and-posterior)), the
+evidence and its error come back NaN while the draws are still returned. A NaN is a
+refusal, never a number to compare.
 
 The 90 percent interval of the period narrows as the epochs arrive, from thousands of
 days with two epochs to tens of days with five, and the median settles on the true

@@ -137,16 +137,30 @@ Markov chain sampler, returns NaN in both rather than an invented number.
 
 ## A NaN evidence is a refusal
 
-The importance estimate of the evidence is trustworthy only when the weights have a
-finite variance. The library tests this from the run itself with the Pareto k-hat of the
-weights (Vehtari et al. 2024): a k-hat above `khat_threshold(n_draws)` means a few draws
-carry almost all of the weight and the stated error is not an error bar. In that case the
-backend returns NaN for the evidence and its error.
+A finite `log_evidence` means that three things held. The same statement is on
+`Posterior.log_evidence`, and the rest of the documentation refers here.
 
-A proposal can add a condition of its own through `info.proposal_valid`. The completed
-orbit proposal of `any_epoch` reports its weights valid only when at least half of its
-pool of constants is effective for the draws that carry the weight; otherwise the
-evidence and its error are NaN and the draws are still returned.
+1. **Tail.** The importance estimate of the evidence is trustworthy only when the
+   weights have a finite variance. The library tests this from the run itself with the
+   Pareto k-hat of the weights (Vehtari et al. 2024): a k-hat above
+   `khat_threshold(n_draws)` means a few draws carry almost all of the weight and the
+   stated error is not an error bar.
+2. **Proposal validity.** The proposal reports its weights valid, `info.proposal_valid`.
+   A proposal that has no condition of its own always reports valid. The completed orbit
+   proposal of `any_epoch` has one. It draws a pool of constants for every orbit shape,
+   and the pool fraction of a draw is the Kish size of its pool divided by the pool
+   size. The proposal reports valid only when the plain mean of that fraction over the
+   live draws is at least 0.5 (`min_pool_fraction`).
+3. **No refusal.** The run reached its target (a tempering ladder that arrived at
+   temperature one, a mode kept, a nested-sampling run that converged rather than being
+   cut by its sample cap, no NaN weight) and every later gate passed.
+
+When any of the three fails, the backend returns NaN for the evidence and its error and
+still returns the draws and their weights.
+
+The contract has one limit that no check can see. A fit that misses a mode entirely,
+because no start or proposal ever visited it, gives a finite evidence that is wrong. The
+tail test cannot flag it, because the weights of the visited mode look healthy.
 
 Making the data a hundred times more precise shows the refusal. Prior draws then almost
 never land where the likelihood is, and a handful of draws take all the weight.
@@ -164,9 +178,7 @@ assert np.all(np.isfinite(refused.log_weights))
 ```
 
 The draws and their weights are still returned, because a caller may want them as the
-seed of a better run. Only the number that would have been wrong is withheld. A finite
-`log_evidence` therefore means that every validity condition the backend can check from
-its own run has held.
+seed of a better run. Only the number that would have been wrong is withheld.
 
 ## New data reweight the cloud
 
@@ -250,12 +262,12 @@ how the draws are made and in whether an evidence comes with them.
 
 | Backend | How it draws | Evidence |
 |---|---|---|
-| `Importance(proposal)` | independent draws from one proposal, weighted to the fit | importance mean, NaN above the k-hat limit |
-| `AdaptiveImportance(proposal)` | rounds of Gaussian mixtures refitted to the weighted cloud, tempered when the proposal is the prior | importance mean of the last round, NaN above the k-hat limit |
-| `Laplace()` | a Gaussian at each mode, weighted to the fit | importance mean, NaN above the k-hat limit |
-| `Pathfinder()` | Pathfinder Gaussians along the optimizer path, weighted to the fit | importance mean, NaN above the k-hat limit |
+| `Importance(proposal)` | independent draws from one proposal, weighted to the fit | importance mean, refused under the contract above |
+| `AdaptiveImportance(proposal)` | rounds of Gaussian mixtures refitted to the weighted cloud, tempered when the proposal is the prior | importance mean of the last round, refused under the contract above |  XXhat limit |
+| `Laplace()` | a Gaussian at each mode, weighted to the fit | importance mean, refused under the contract above |
+| `Pathfinder()` | Pathfinder Gaussians along the optimizer path, weighted to the fit | importance mean, refused under the contract above |
 | `NUTS()`, `MCLMC()` | Markov chains with equal weights | none (NaN) |
-| `NestedSampling()` | jaxns nested sampling of the unit cube | nested-sampling estimate |
+| `NestedSampling()` | jaxns nested sampling of the unit cube | nested-sampling estimate, NaN when cut by the sample cap |
 | `MAP()` | a staged optimization, one draw at the optimum | none (NaN) |
 | `Grid(axes)` | a quadrature rule on a product grid | the quadrature sum, with no standard error |
 

@@ -167,12 +167,12 @@ class Laplace(AbstractBackend):
     2. The draws are weighted ``density / proposal`` with the wrapped proposal density.
        The weights correct the Gaussian to the posterior; the evidence is the importance
        mean and is consistent whenever the weights have a finite mean.
-    3. The evidence and its standard error are NaN when the Pareto k-hat of the
-       weights is above ``khat_threshold(n_draws)`` (``info.importance.khat``), as for
-       :class:`~photomancy.infer.backends.importance.Importance`: a Gaussian that
-       misses the tail of the posterior gives weights of infinite variance and an
-       optimistic error. The draws and weights are still returned and are not gated;
-       the operations of a ``Posterior`` gate them.
+    3. The evidence follows the contract on
+       :attr:`~photomancy.infer.posterior.Posterior.log_evidence` (the k-hat is
+       ``info.importance.khat``): a Gaussian that misses the tail of the posterior
+       gives weights of infinite variance and an optimistic error. The draws and
+       weights are still returned and are not gated; the operations of a ``Posterior``
+       gate them.
     4. Expected to be poor: a posterior that is flat or nearly flat in an angle (a
        Gaussian cannot match a flat density on a circle), a posterior with more than one
        mode, and a mode near a zero-density region of a block.
