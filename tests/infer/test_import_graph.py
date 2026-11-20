@@ -217,6 +217,34 @@ DELETED = (
     "posterior_physical",
     "n_round",
     "kish_per_round",
+    "TermLogDensity",
+    "LegacyBackend",
+    "laplace_fit",
+    "laplace_covariance",
+    "LaplaceBackend",
+    "LaplaceMixtureBackend",
+    "PathfinderBackend",
+    "PathfinderMixtureBackend",
+    "NUTSBackend",
+    "MCLMCBackend",
+    "JaxnsBackend",
+    "jaxns_prior",
+    "build_scene_nested_model",
+    "AbstractLogDensity",
+    "AbstractPosterior",
+    "GaussianPosterior",
+    "MixturePosterior",
+    "PointPosterior",
+    "SamplePosterior",
+    "IndependentPrior",
+    "build_gaussian_fit",
+    "build_scene_logdensity",
+    "project_samples",
+    "sample_capped",
+    "photomancy.infer.legacy_posterior",
+    "photomancy.infer.model",
+    "photomancy.infer.priors",
+    "photomancy.infer.posterior_utils",
     # The time field of the measurement data classes is ``time_d``. The old field
     # names are ordinary prose words, so they are guarded as an attribute read and as
     # a keyword.
@@ -246,14 +274,13 @@ def test_no_deleted_name_is_left_in_the_package():
 
 
 def _private_reaches(path):
-    """Imports of ``path`` that are legacy or private to another subpackage."""
+    """Imports of ``path`` that are private to another subpackage."""
     found = set()
     for name in _imported_modules(path):
         parts = name.split(".")
         if parts[0] != "photomancy" or len(parts) < 2 or parts[1] == "orbit":
             continue
-        legacy = name.startswith("photomancy.infer.legacy_posterior")
-        if legacy or any(part.startswith("_") for part in parts[1:]):
+        if any(part.startswith("_") for part in parts[1:]):
             found.add(name)
     return found
 
@@ -261,8 +288,7 @@ def _private_reaches(path):
 def test_orbit_reaches_no_private_or_legacy_name_of_another_subpackage():
     """Fails if ``photomancy.orbit`` imports a private module or name of a sibling.
 
-    A leading underscore anywhere in the imported path, or the legacy posterior
-    module, counts.
+    A leading underscore anywhere in the imported path counts.
     """
     orbit = ROOT.parent / "orbit"
     found = {

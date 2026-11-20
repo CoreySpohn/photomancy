@@ -1,12 +1,11 @@
-"""Laplace backend: MAP + Hessian -> GaussianPosterior.
+"""Laplace backend: MAP + Hessian -> Gaussian mixture Posterior.
 
 The MAP is found with ``optax.lbfgs`` (a quasi-Newton line search that
 converges to high precision). The covariance is the inverse of the
 negative-log-density Hessian at the MAP, computed by Hessian-vector products
 (forward-over-reverse AD) and regularized by flooring its eigenvalues at
 ``min_eigenvalue`` -- so a direction the data barely constrains gets a bounded
-variance instead of inverting to an enormous one. The single-mode fit lives in
-``laplace_fit`` so the multi-start mixture backend can ``vmap`` it.
+variance instead of inverting to an enormous one.
 """
 
 import equinox as eqx
@@ -15,9 +14,8 @@ import jax.numpy as jnp
 import optax
 
 from photomancy.infer.backends._flat import flat_density, start_points
-from photomancy.infer.backends.base import AbstractBackend, LegacyBackend
+from photomancy.infer.backends.base import AbstractBackend
 from photomancy.infer.backends.importance import ImportanceInfo, modes_importance
-from photomancy.infer.legacy_posterior import GaussianPosterior, MixturePosterior
 from photomancy.infer.posterior import Posterior
 
 
@@ -49,99 +47,6 @@ def _hessian(neg_logdensity, z_map):
     d = z_map.shape[0]
     hess = jax.vmap(hvp)(jnp.eye(d, dtype=z_map.dtype))
     return 0.5 * (hess + hess.T)
-
-
-def laplace_covariance(neg_logdensity, z_map, min_eigenvalue):
-    """Eigenvalue-clamped inverse Hessian of ``neg_logdensity`` at ``z_map``."""
-    eigvals, eigvecs = jnp.linalg.eigh(_hessian(neg_logdensity, z_map))
-    eigvals = jnp.maximum(eigvals, min_eigenvalue)
-    precision = (eigvecs * eigvals) @ eigvecs.T
-    return jnp.linalg.inv(precision)
-
-
-@eqx.filter_jit
-def laplace_fit(logdensity, init, n_steps, min_eigenvalue):
-    """Single-mode Laplace fit: MAP, covariance, and Laplace log-evidence.
-
-    ``filter_jit``-compiled: when ``logdensity`` is a ``SceneLogDensity`` Module its
-    array leaves (e.g. a forward's PSF datacube) are traced inputs, not baked-in
-    constants. ``n_steps`` / ``min_eigenvalue`` are Python scalars and stay static.
-
-    Args:
-        logdensity: ``z -> scalar`` log-density over the flat parameter position.
-        init: Initial flat position. Shape ``(d,)``.
-        n_steps: Number of L-BFGS iterations.
-        min_eigenvalue: Floor on the precision (negative-Hessian) eigenvalues.
-
-    Returns:
-        A tuple ``(z_map, cov, log_evidence)``: the MAP point ``(d,)``, the
-        regularized covariance ``(d, d)``, and the scalar Laplace ``log Z``.
-    """
-
-    def neg(z):
-        return -logdensity(z)
-
-    z_map = _map_optimize(neg, init, n_steps)
-    cov = laplace_covariance(neg, z_map, min_eigenvalue)
-    d = z_map.shape[0]
-    _, logdet_cov = jnp.linalg.slogdet(cov)
-    log_z = logdensity(z_map) + 0.5 * d * jnp.log(2.0 * jnp.pi) + 0.5 * logdet_cov
-    return z_map, cov, log_z
-
-
-class LaplaceBackend(LegacyBackend):
-    """MAP + Laplace approximation: a Gaussian posterior around the mode.
-
-    Optimizes the logdensity to its MAP with L-BFGS, takes the eigenvalue-clamped
-    inverse Hessian there as the covariance, and returns a ``GaussianPosterior``
-    carrying the Laplace log-evidence. Exact for Gaussian targets.
-
-    Args:
-        n_steps: Number of L-BFGS iterations for the MAP search.
-        min_eigenvalue: Floor on the precision eigenvalues. The default is a tiny
-            positive-definiteness safeguard; pass a larger value (the orbit
-            unconstrained space uses ``1.0``) to bound the variance of directions
-            the data barely constrains.
-    """
-
-    n_steps: int = 100
-    min_eigenvalue: float = 1e-10
-
-    def run(self, logdensity, init, key=None):
-        """Fit the Laplace approximation and return a GaussianPosterior."""
-        z_map, cov, log_z = laplace_fit(
-            logdensity, init, self.n_steps, self.min_eigenvalue
-        )
-        return GaussianPosterior(mean=z_map, cov=cov, evidence=log_z)
-
-
-class LaplaceMixtureBackend(LegacyBackend):
-    """Multi-start MAP + Laplace: an evidence-weighted mixture of Gaussians.
-
-    Runs the single-mode Laplace fit from each of ``K`` starts (``init`` has shape
-    ``(K, d)``, one row per start), then assembles a ``MixturePosterior`` whose
-    modes are weighted by their per-mode Laplace log-evidence. This is the EIG /
-    value-of-information substrate: it carries the per-mode Gaussians and
-    approximates the total ``log Z`` by ``logsumexp`` over the modes. Pass the
-    starts from a blind initializer (the orbix Thiele-Innes grid maxima) to cover
-    the period aliases.
-
-    Args:
-        n_steps: L-BFGS iterations per start.
-        min_eigenvalue: Floor on each mode's precision eigenvalues.
-    """
-
-    n_steps: int = 100
-    min_eigenvalue: float = 1e-10
-
-    def run(self, logdensity, init, key=None):
-        """Fit one Laplace mode per start in ``init`` (shape ``(K, d)``)."""
-
-        def fit_one(z0):
-            return laplace_fit(logdensity, z0, self.n_steps, self.min_eigenvalue)
-
-        means, covs, log_evidences = jax.vmap(fit_one)(init)
-        return MixturePosterior(means=means, covs=covs, log_evidences=log_evidences)
 
 
 @eqx.filter_jit

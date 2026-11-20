@@ -11,25 +11,33 @@ sys.modules["jaxctx"] = None
 
 import jax
 import jax.numpy as jnp
-from photomancy.infer.backends import (
-    JaxnsBackend,
-    MCLMCBackend,
-    NUTSBackend,
-    PathfinderBackend,
+import equinox as eqx
+from priorities import Uniform
+from photomancy.infer import MCLMC, NUTS, Fit, NestedSampling, Pathfinder, run
+from photomancy.infer.terms import ForwardTerm
+
+jax.config.update("jax_enable_x64", True)
+
+class Model(eqx.Module):
+    x: jax.Array
+
+class Forward(eqx.Module):
+    def __call__(self, model):
+        return model.x
+
+fit = Fit(
+    Model(jnp.zeros(2)),
+    {"x": Uniform(-1.0, 1.0)},
+    (ForwardTerm(Forward(), lambda predicted: -0.5 * jnp.sum(predicted**2)),),
 )
-
-def density(z):
-    return -0.5 * jnp.sum(z**2)
-
 key = jax.random.key(0)
-z = jnp.zeros(2)
 calls = {
     "blackjax": [
-        lambda: NUTSBackend(n_warmup=2, n_samples=2).run(density, z, key),
-        lambda: MCLMCBackend(n_tune=2, n_samples=2).run(density, z, key),
-        lambda: PathfinderBackend().run(density, z, key),
+        lambda: run(fit, NUTS(n_warmup=2, n_draws=2), key),
+        lambda: run(fit, MCLMC(n_tune=2, n_draws=2), key),
+        lambda: run(fit, Pathfinder(), key),
     ],
-    "jaxns": [lambda: JaxnsBackend().run(None, key=key)],
+    "jaxns": [lambda: run(fit, NestedSampling(), key)],
 }
 for extra, backends in calls.items():
     for call in backends:

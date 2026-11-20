@@ -3,7 +3,7 @@
 Each builder takes the observed ``data``, a per-element ``sigma`` and an optional
 boolean ``mask`` (True means the element is used) and returns a callable
 ``predicted -> scalar log-likelihood``. That callable is the ``likelihood`` plug-in
-of :func:`photomancy.infer.model.build_scene_logdensity`.
+of :class:`photomancy.infer.terms.ForwardTerm`.
 
 In every builder ``sigma`` is the *scale parameter* of the density of the
 standardized residual ``z = (predicted - data) / sigma`` (the same convention as
