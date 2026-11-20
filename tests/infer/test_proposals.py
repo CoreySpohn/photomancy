@@ -345,10 +345,11 @@ def test_laplace_keeps_its_modes_and_refuses_the_evidence_above_the_khat_limit()
     """``Laplace`` on the frame-chart orbit keeps its stored modes, and F2 holds.
 
     Truth source: the stored modes of ``Laplace`` on the golden scene with a
-    ``FrameChart`` block, which has no angle coordinate. The kept modes, sorted by
-    evidence, match the stored ones: score within 0.01, means within 1e-3, variances
-    within 1 percent (floor 1e-8, the stored rounding); they do not read the draws, so
-    a small ``n_draws`` keeps the test cheap. The published evidence and its error are
+    ``FrameChart`` block, which has no angle coordinate. The kept modes (coincident
+    starts merged), sorted by evidence, match the stored ones: score within 0.01,
+    means within 1e-3, variances within 1 percent (floor 1e-8, the stored rounding);
+    they do not read the draws, so a small
+    ``n_draws`` keeps the test cheap. The published evidence and its error are
     NaN where ``info.importance.khat`` is above ``khat_threshold(n_draws)`` and equal
     ``importance_evidence`` of the returned weights (rtol 1e-12) where it is not.
     Fails if: a mode moves, a mode is kept or dropped differently, or an evidence is
