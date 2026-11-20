@@ -20,12 +20,16 @@ import jax.numpy as jnp
 from hwoutils.model_paths import resolve
 from orbix.system import System, sky_design
 
-from photomancy.infer.fit import AbstractLinearTerm, AbstractTerm, LinearForm
+from photomancy.infer.fit import (
+    AbstractLinearGaussianTerm,
+    AbstractTerm,
+    LinearGaussian,
+)
 from photomancy.measurements._observables import (
     _relative_positions,
     _stellar_reflex,
 )
-from photomancy.measurements._padding import MAX_REL_ASTROM, _pad_1d, _valid_mask
+from photomancy.measurements._padding import _pad_1d, _valid_mask
 
 __all__ = [
     "AstrometryData",
@@ -39,9 +43,9 @@ __all__ = [
 class AstrometryData(eqx.Module):
     """East/north astrometry in arcsec: a planet relative to its star, or the star.
 
-    The relative term reads each row as the offset of planet ``planet_id`` from the
+    The relative term reads each row as the offset of planet ``planet`` from the
     host star; the stellar term reads each row as the reflex offset of the star about
-    the system barycenter (one body, so ``planet_id`` is not read).
+    the system barycenter (one body, so ``planet`` is not read).
 
     Args:
         time_d: Observation epochs (days). Shape ``(N,)``.
@@ -51,7 +55,7 @@ class AstrometryData(eqx.Module):
         ra_err: RA uncertainty (arcsec). Shape ``(N,)``.
         dec_err: DEC uncertainty (arcsec). Shape ``(N,)``.
         corr: RA/DEC correlation coefficient. Shape ``(N,)``.
-        planet_id: Planet index per observation (for multi-planet systems).
+        planet: Planet index per observation (for multi-planet systems).
             Shape ``(N,)``.
         is_valid: Boolean validity mask. Shape ``(N,)``.
     """
@@ -62,19 +66,19 @@ class AstrometryData(eqx.Module):
     ra_err: jnp.ndarray
     dec_err: jnp.ndarray
     corr: jnp.ndarray
-    planet_id: jnp.ndarray
+    planet: jnp.ndarray
     is_valid: jnp.ndarray
 
     @classmethod
     def from_sep_pa(
-        cls, *, time_d, sep, sep_err, pa_deg, pa_err_deg, planet_id=None, max_n=None
+        cls, *, time_d, sep, sep_err, pa_deg, pa_err_deg, planet=None, max_n=None
     ):
         """Convert separation and position angle to east/north astrometry.
 
         Separation and its error are in arcsec. Position angle and its error
         are in degrees, east of north. Independent separation and angle errors
         are propagated to a first-order Cartesian covariance. Inputs have one
-        entry per epoch; ``planet_id`` defaults to zero for every row.
+        entry per epoch; ``planet`` defaults to zero for every row.
         ``max_n=None`` keeps all rows valid; otherwise pad to ``max_n``.
         """
         time_d = jnp.asarray(time_d)
@@ -86,8 +90,8 @@ class AstrometryData(eqx.Module):
         ra_err = jnp.sqrt(sin_pa**2 * sep_var + cos_pa**2 * tangential_var)
         dec_err = jnp.sqrt(cos_pa**2 * sep_var + sin_pa**2 * tangential_var)
         cov = sin_pa * cos_pa * (sep_var - tangential_var)
-        if planet_id is None:
-            planet_id = jnp.zeros(time_d.shape, dtype=int)
+        if planet is None:
+            planet = jnp.zeros(time_d.shape, dtype=int)
         values = dict(
             time_d=time_d,
             ra=sep * sin_pa,
@@ -95,7 +99,7 @@ class AstrometryData(eqx.Module):
             ra_err=ra_err,
             dec_err=dec_err,
             corr=cov / (ra_err * dec_err),
-            planet_id=jnp.asarray(planet_id, dtype=int),
+            planet=jnp.asarray(planet, dtype=int),
         )
         if max_n is not None:
             return cls.pad(**values, max_n=max_n)
@@ -111,13 +115,13 @@ class AstrometryData(eqx.Module):
         ra_err,
         dec_err,
         corr,
-        planet_id=None,
-        max_n=MAX_REL_ASTROM,
+        planet=None,
+        max_n,
     ):
-        """Pad to ``max_n`` with an ``is_valid`` mask; ``planet_id`` defaults to 0."""
+        """Pad to ``max_n`` with an ``is_valid`` mask; ``planet`` defaults to 0."""
         n = jnp.asarray(time_d).shape[0]
-        if planet_id is None:
-            planet_id = jnp.zeros(n, dtype=int)
+        if planet is None:
+            planet = jnp.zeros(n, dtype=int)
         return cls(
             time_d=_pad_1d(time_d, max_n),
             ra=_pad_1d(ra, max_n),
@@ -125,12 +129,12 @@ class AstrometryData(eqx.Module):
             ra_err=_pad_1d(ra_err, max_n, fill=1.0),
             dec_err=_pad_1d(dec_err, max_n, fill=1.0),
             corr=_pad_1d(corr, max_n),
-            planet_id=_pad_1d(planet_id, max_n).astype(int),
+            planet=_pad_1d(planet, max_n).astype(int),
             is_valid=_valid_mask(n, max_n),
         )
 
     @classmethod
-    def zeros(cls, max_n=MAX_REL_ASTROM):
+    def zeros(cls, max_n):
         """Create an all-invalid placeholder (for model tracing)."""
         return cls(
             time_d=jnp.zeros(max_n),
@@ -139,7 +143,7 @@ class AstrometryData(eqx.Module):
             ra_err=jnp.ones(max_n),
             dec_err=jnp.ones(max_n),
             corr=jnp.zeros(max_n),
-            planet_id=jnp.zeros(max_n, dtype=int),
+            planet=jnp.zeros(max_n, dtype=int),
             is_valid=jnp.zeros(max_n, dtype=bool),
         )
 
@@ -230,7 +234,7 @@ def _dynamics(system):
 
 
 def _record_form(design, data):
-    """Assemble a :class:`LinearForm` from an arcsec-per-AU design and the records."""
+    """Assemble a :class:`LinearGaussian` from an arcsec-per-AU design and records."""
     valid = data.is_valid
     target = jnp.where(valid[:, None], jnp.stack([data.ra, data.dec], -1), 0.0)
     sx = jnp.where(valid, data.ra_err, 1.0)
@@ -241,14 +245,14 @@ def _record_form(design, data):
     precision = jnp.stack(
         [jnp.stack([scale / sx**2, off], -1), jnp.stack([off, scale / sy**2], -1)], -2
     )
-    return LinearForm(
+    return LinearGaussian(
         design=jnp.where(valid[:, None, None], design, 0.0),
         target=target,
         precision=jnp.where(valid[:, None, None], precision, 0.0),
     )
 
 
-class RelativeAstrometryTerm(AbstractLinearTerm):
+class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
     """Score relative east/north offsets from a system's sky positions.
 
     Attributes:
@@ -278,11 +282,11 @@ class RelativeAstrometryTerm(AbstractLinearTerm):
             ra_err=jnp.where(valid, self.data.ra_err, 1.0),
             dec_err=jnp.where(valid, self.data.dec_err, 1.0),
             corr=jnp.where(valid, self.data.corr, 0.0),
-            planet_id=jnp.where(valid, self.data.planet_id, 0),
+            planet=jnp.where(valid, self.data.planet, 0),
             is_valid=valid,
         )
         system = resolve(model, self.system_path)
-        prediction = _relative_positions(system, data.time_d, data.planet_id)
+        prediction = _relative_positions(system, data.time_d, data.planet)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
         east, north = prediction
         return loglike_relative_astrom(east, north, data), prediction
@@ -299,37 +303,37 @@ class RelativeAstrometryTerm(AbstractLinearTerm):
         """Copy with correlated Gaussian positions at the same epochs."""
         return _sample_radec(key, self, self.predict(model))
 
-    def linear_form(self, model, row=0) -> LinearForm:
-        """The term as a Gaussian in the sky constants of orbit ``row``.
+    def linear_gaussian(self, model, planet=0) -> LinearGaussian:
+        """The term as a Gaussian in the sky constants of orbit of ``planet``.
 
-        Only ``n``, ``ex``, ``ey`` and the epoch of the row's orbit in ``model`` enter
-        the design, so the form is exact for every value of the four constants at that
-        shape, provided the records depend on the constants only through that orbit.
-        That holds for a system with a single planet row, and the form refuses a system
-        with more: the other rows' offsets, masses and mean motions move with the
+        Only ``n``, ``ex``, ``ey`` and the epoch of the planet's orbit in ``model``
+        enter the design, so the form is exact for every value of the four constants at
+        that shape, provided the records depend on the constants only through that
+        orbit. That holds for a system with a single planet row, and the form refuses a
+        system with more: the other rows' offsets, masses and mean motions move with the
         constants under a block that writes the star mass (``ThieleInnesBlock``). It
-        also refuses a record of another planet, which one form cannot carry. The
-        design is in arcsec per AU, the target and precision in the units of the data.
+        also refuses a record of another planet, which one form cannot carry. The design
+        is in arcsec per AU, the target and precision in the units of the data.
 
         Args:
             model: The model holding the system at ``system_path``.
-            row: Zero-based Jacobi chain index of the planet.
+            planet: Zero-based Jacobi chain index of the planet.
         """
         dynamics = _dynamics(resolve(model, self.system_path))
-        shape = jax.tree.map(lambda a: a[row], dynamics.orbits)
+        shape = jax.tree.map(lambda a: a[planet], dynamics.orbits)
         valid = self.data.is_valid
         time_d = jnp.where(valid, self.data.time_d, shape.epoch_d)
         design = sky_design(shape, time_d) / dynamics.frame.dist_pc
         design = eqx.error_if(
             design,
             jnp.asarray(dynamics.orbits.a_AU.shape[-1] > 1),
-            "linear_form: the system has more than one planet row, so the other rows "
-            "move with the constants",
+            "linear_gaussian: the system has more than one planet row, so the other "
+            "rows move with the constants",
         )
         design = eqx.error_if(
             design,
-            jnp.any(valid & (self.data.planet_id != row)),
-            "linear_form: a valid record belongs to another planet",
+            jnp.any(valid & (self.data.planet != planet)),
+            "linear_gaussian: a valid record belongs to another planet",
         )
         return _record_form(design, self.data)
 
@@ -356,7 +360,7 @@ class StellarAstrometryTerm(AbstractTerm):
             ra_err=jnp.where(valid, self.data.ra_err, 1.0),
             dec_err=jnp.where(valid, self.data.dec_err, 1.0),
             corr=jnp.where(valid, self.data.corr, 0.0),
-            planet_id=self.data.planet_id,
+            planet=self.data.planet,
             is_valid=valid,
         )
         system = resolve(model, self.system_path)

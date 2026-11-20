@@ -4,16 +4,17 @@ The posterior's draws are clustered into Gaussian modes over the flat vector of 
 entries (:func:`~photomancy.infer.cluster_to_mixture`); each mode builds the model
 through the posterior's ``Fit`` and is linearized about its mean. Candidate scoring
 applies an optional contrast curve and delegates the analytic EIG to
-:func:`photomancy.infer.eig.evaluate_candidates`.
+:func:`photomancy.infer.eig.eig_linearized`.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.model_paths import resolve
 from orbix.system import System
 
 from photomancy.infer import cluster_to_mixture, ravel_samples
-from photomancy.infer.eig import evaluate_candidates
+from photomancy.infer.eig import LinearizedEIG, eig_linearized
 from photomancy.measurements import (
     AstrometryData,
     RelativeAstrometryTerm,
@@ -21,7 +22,23 @@ from photomancy.measurements import (
     system_separation_dmag,
 )
 
-__all__ = ["evaluate_orbit_candidates"]
+__all__ = ["AstrometryEIG", "eig_astrometry"]
+
+
+class AstrometryEIG(eqx.Module):
+    """The linearized EIG of candidate epochs and the sky geometry behind it.
+
+    Attributes:
+        eig: The :class:`~photomancy.infer.eig.LinearizedEIG` of the candidates.
+        separation_arcsec: Projected separation at each mode mean, ``(N, n_modes)``
+            (zero without a contrast curve).
+        dmag: Planet-star magnitude difference at each mode mean, ``(N, n_modes)``
+            (zero without a contrast curve).
+    """
+
+    eig: LinearizedEIG
+    separation_arcsec: jax.Array
+    dmag: jax.Array
 
 
 def _astrometry(system, t, planet):
@@ -37,16 +54,16 @@ def _astrometry(system, t, planet):
         ra_err=one,
         dec_err=one,
         corr=0.0 * one,
-        planet_id=jnp.array([planet]),
+        planet=jnp.array([planet]),
         is_valid=jnp.ones(1, dtype=bool),
     )
     return RelativeAstrometryTerm(row).predict(system)[:, 0]
 
 
-def evaluate_orbit_candidates(
+def eig_astrometry(
     posterior,
     time_d,
-    obs_variance,
+    obs_variance_arcsec2,
     *,
     key,
     n_modes=4,
@@ -65,7 +82,7 @@ def evaluate_orbit_candidates(
     index follows scene order for a scene and Jacobi chain order for a bare orbix
     system.
 
-    Each reported measurement has variance ``obs_variance`` in arcsec squared. An
+    Each reported measurement has variance ``obs_variance_arcsec2``. An
     optional ``(sep_arcsec, dMag_limit)`` curve makes a mode report only when its
     planet is above the inner working angle and brighter than the curve (one-planet
     systems). The Lambertian scale is the scene's albedo times squared radius; a bare
@@ -74,7 +91,7 @@ def evaluate_orbit_candidates(
     Args:
         posterior: An unbatched :class:`~photomancy.infer.Posterior`.
         time_d: Candidate epochs, days from the system's epoch, shape ``(N,)``.
-        obs_variance: Measurement variance (arcsec squared).
+        obs_variance_arcsec2: Measurement variance (arcsec squared).
         key: PRNG key of the clustering.
         n_modes: Number of Gaussian modes.
         system_path: Model path of the scored system; the empty path is the model.
@@ -85,10 +102,8 @@ def evaluate_orbit_candidates(
         iwa_arcsec: Inner working angle (arcsec) of the detection model.
 
     Returns:
-        The dict of :func:`~photomancy.infer.eig.evaluate_candidates` (``total_eig``,
-        ``geometric_eig``, ``alias_eig``, ``predictions``, ``detectability``) plus
-        ``separation`` and ``dMag``, shape ``(N, n_modes)``, at each mode mean (zero
-        without a contrast curve).
+        An :class:`AstrometryEIG`: the :class:`~photomancy.infer.eig.LinearizedEIG` of
+        the candidates, and the separation and dMag at each mode mean.
     """
     mixture = cluster_to_mixture(posterior, n_modes, key)
     means = mixture.component_distribution.loc
@@ -120,21 +135,18 @@ def evaluate_orbit_candidates(
             return ((sep > iwa_arcsec) & (dmag < dmag_limit)).astype(sep.dtype)
 
     epochs = jnp.asarray(time_d)
-    res = evaluate_candidates(
+    eig = eig_linearized(
         mixture,
         epochs,
         forward,
-        obs_variance,
+        obs_variance_arcsec2,
         detectable=detectable,
         detectable_args=detectable_args,
     )
-    if contrast_curve is not None:
-        sep_dmag = jax.vmap(
-            lambda t: jax.vmap(photometry, in_axes=(0, None))(means, t)
-        )(epochs)
-        res["separation"] = sep_dmag[..., 0]
-        res["dMag"] = sep_dmag[..., 1]
-    else:
-        res["separation"] = jnp.zeros_like(res["detectability"])
-        res["dMag"] = jnp.zeros_like(res["detectability"])
-    return res
+    if contrast_curve is None:
+        zeros = jnp.zeros_like(eig.detectability)
+        return AstrometryEIG(eig, zeros, zeros)
+    sep_dmag = jax.vmap(lambda t: jax.vmap(photometry, in_axes=(0, None))(means, t))(
+        epochs
+    )
+    return AstrometryEIG(eig, sep_dmag[..., 0], sep_dmag[..., 1])

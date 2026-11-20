@@ -123,7 +123,7 @@ def test_sep_pa_covariance(max_n):
         sep_err=[sep_err],
         pa_deg=[np.rad2deg(pa)],
         pa_err_deg=[np.rad2deg(pa_err)],
-        planet_id=[2],
+        planet=[2],
         max_n=max_n,
     )
     draws = np.random.default_rng(427).normal(
@@ -140,7 +140,7 @@ def test_sep_pa_covariance(max_n):
         np.corrcoef(east, north)[0, 1], abs=0.014
     )
     np.testing.assert_array_equal(data.is_valid, [True] + [False] * ((max_n or 1) - 1))
-    assert int(data.planet_id[0]) == 2
+    assert int(data.planet[0]) == 2
 
 
 @vv.case("scene-fits", "code-verification", basis="equivalence")
@@ -195,7 +195,7 @@ def test_element_gradients_and_padding(padding):
     if padding:
         # Invalid payloads must be sanitized before propagation and division.
         data = eqx.tree_at(
-            lambda d: (d.time_d, d.ra, d.dec, d.ra_err, d.dec_err, d.corr, d.planet_id),
+            lambda d: (d.time_d, d.ra, d.dec, d.ra_err, d.dec_err, d.corr, d.planet),
             data,
             tuple(
                 jnp.where(data.is_valid, x, fill)
@@ -207,7 +207,7 @@ def test_element_gradients_and_padding(padding):
                         data.ra_err,
                         data.dec_err,
                         data.corr,
-                        data.planet_id,
+                        data.planet,
                     ),
                     (jnp.nan, jnp.nan, jnp.nan, 0.0, 0.0, jnp.nan, -999),
                     strict=True,
@@ -258,7 +258,7 @@ def test_planet_and_epoch_routing():
             east = jnp.array([10.0, 30.0])[:, None] + time_d
             return jnp.stack((east, -2 * east))
 
-    data = eqx.tree_at(lambda d: d.planet_id, _data(), jnp.array([1, 0, 1, 0]))
+    data = eqx.tree_at(lambda d: d.planet, _data(), jnp.array([1, 0, 1, 0]))
     prediction = RelativeAstrometryTerm(data).predict(LinearSystem())
     east = _TIMES + np.array([30.0, 10.0, 30.0, 10.0])
     np.testing.assert_array_equal(prediction, [east, -2 * east])
@@ -575,7 +575,7 @@ def test_photometry_band_planet_epoch_routing():
         dmag=[25.0] * 4,
         dmag_err=[0.2] * 4,
         band_id=band_ids,
-        planet_id=planet_ids,
+        planet=planet_ids,
     )
     prediction = PhotometryTerm(data, rule, bands, system_path="system").predict(
         _Holder(system)
@@ -603,7 +603,7 @@ def test_dmag_contrast_error_propagation():
     np.testing.assert_allclose(data.contrast[0], 1e-6, rtol=1e-14)
     np.testing.assert_allclose(data.contrast_err[0], draws.std(ddof=1), rtol=0.01)
     np.testing.assert_array_equal(data.is_valid, [True, False, False])
-    np.testing.assert_array_equal(data.planet_id, [0, 0, 0])
+    np.testing.assert_array_equal(data.planet, [0, 0, 0])
     np.testing.assert_array_equal(data.is_upper_limit, [False, False, False])
 
 
@@ -640,6 +640,7 @@ def test_rv_marginal_integrates_to_one_over_the_contrast():
     per instrument (``sqrt(3 / 2)``).
     """
     data = RadialVelocityData.pad(
+        max_n=8,
         time_d=[0.0, 1.0, 2.0],
         rv=[0.0, 0.0, 0.0],
         rv_err=[1.5, 2.5, 1.0],

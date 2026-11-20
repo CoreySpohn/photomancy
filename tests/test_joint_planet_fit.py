@@ -19,7 +19,7 @@ from photomancy.exposure import ExposureModel, ExposureTerm
 from photomancy.infer import Fit, run
 from photomancy.infer.backends.staged import (
     MAP,
-    FitStage,
+    MAPStage,
     group_labels,
     rescaled_transform,
 )
@@ -152,35 +152,35 @@ def _joint_fit(peak_fraction):
     }
     scale = 1.0 / n_used
     h0_stages = [
-        FitStage(
+        MAPStage(
             _N_TILT,
             ("tilt",),
-            logdensity=ref,
+            fit=ref,
             objective_scale=scale,
             closed_form=_window_flux(ref_data, window),
             name="reference star",
         ),
-        FitStage(
+        MAPStage(
             _N_LONG,
             ("ote", "si", "tilt"),
-            logdensity=ref,
+            fit=ref,
             objective_scale=scale,
             closed_form=_window_flux(ref_data, window),
             name="reference seams",
         ),
-        FitStage(
+        MAPStage(
             _N_TILT,
             ("tilt",),
-            logdensity=sci,
+            fit=sci,
             objective_scale=scale,
             closed_form=_window_flux(sci_data, window),
             transforms=second,
             name="science star",
         ),
-        FitStage(
+        MAPStage(
             _N_LONG,
             ("si",),
-            logdensity=sci,
+            fit=sci,
             objective_scale=0.5 * scale,
             name="science exit seam",
         ),
@@ -229,18 +229,18 @@ def _joint_fit(peak_fraction):
         ),
     }
     h1_stages = [
-        FitStage(
+        MAPStage(
             _N_PLANET,
             ("offset", "flux"),
-            logdensity=sci,
+            fit=sci,
             objective_scale=scale,
             transforms=planet_lr,
             name="planet",
         ),
-        FitStage(
+        MAPStage(
             _N_FINAL,
             ("si", "tilt", "star_flux", "offset", "flux"),
-            logdensity=sci,
+            fit=sci,
             objective_scale=scale,
             name="planet and exit seam",
         ),

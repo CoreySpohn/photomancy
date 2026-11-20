@@ -8,7 +8,7 @@ dimensions from the search.
 
 ``Completion`` splits the flat vector three ways: ``shape``, the constants, and the
 conditional leaves (a free leaf that a term proposes, an
-:class:`~photomancy.infer.AbstractConditionalTerm` such as the report term's planet
+:class:`~photomancy.infer.AbstractProposingTerm` such as the report term's planet
 radius). It holds the fit without the linear terms and the reference scale, and answers
 :meth:`Completion.conditional`. ``CompletedProposal`` turns a proposal over ``shape``
 into a properly weighted proposal over the whole vector (it has no density; the class
@@ -43,12 +43,12 @@ from orbix.system import System, ThieleInnesBlock, linear_gaussian_conditional
 from priorities import from_real, to_real
 
 from photomancy.infer import (
-    AbstractConditionalTerm,
     AbstractDensityProposal,
-    AbstractLinearTerm,
+    AbstractLinearGaussianTerm,
     AbstractProposal,
+    AbstractProposingTerm,
     Fit,
-    LinearForm,
+    LinearGaussian,
 )
 from photomancy.infer.particles import systematic_indices
 
@@ -59,24 +59,6 @@ CONSTANTS = ("A_AU", "B_AU", "F_AU", "G_AU")
 _PLACEHOLDER = (0.7, 0.3, -0.3, 0.7)
 _FIELDS = ("design", "target", "precision")
 _BATCH = 2**14
-
-
-def _flat_layout(fit):
-    """Names and sizes of the flat vector of ``fit``, ``(key, name or None)`` per leaf.
-
-    The order is that of ``ravel_pytree`` over ``fit.to_real`` (sorted keys, sorted
-    coordinate names inside a block), taken from the leaf shapes on the host.
-    """
-    shapes = eqx.filter_eval_shape(
-        lambda k: fit.to_real(fit.sample_prior(k)), jax.random.key(0)
-    )
-    leaves = jax.tree_util.tree_flatten_with_path(shapes)[0]
-    names, sizes = [], []
-    for path, leaf in leaves:
-        keys = tuple(p.key for p in path)
-        names.append((keys[0], keys[1] if len(keys) > 1 else None))
-        sizes.append(int(np.prod(leaf.shape, dtype=int)))
-    return names, sizes
 
 
 def _block_of(fit):
@@ -102,7 +84,8 @@ class Completion(eqx.Module):
 
     Attributes:
         fit_rest: The fit without its linear terms.
-        terms: The linear terms (``AbstractLinearTerm``) whose forms are concatenated.
+        terms: The linear terms (``AbstractLinearGaussianTerm``) whose forms are
+            concatenated.
         scale_AU: Standard deviation of the reference Gaussian on the constants.
         block_key: Key of the block in ``fit.free``.
         shape_idx: Flat indices of ``shape``.
@@ -110,7 +93,7 @@ class Completion(eqx.Module):
         shape_periods: Period of each ``shape`` entry (``None`` if none).
         dim: Length of the flat vector.
         leaf_terms: Indices in ``fit_rest.terms`` of the terms that propose a free
-            leaf (an :class:`AbstractConditionalTerm` whose ``leaf_path`` is free).
+            leaf (an :class:`AbstractProposingTerm` whose ``leaf_path`` is free).
         leaf_paths: The leaf each of those terms proposes.
         leaf_idx: Flat index of each of those leaves (a leaf holds one value).
         leaf_widen: Factor on the standard deviation of the proposal components.
@@ -118,7 +101,7 @@ class Completion(eqx.Module):
     """
 
     fit_rest: Fit
-    terms: tuple[AbstractLinearTerm, ...]
+    terms: tuple[AbstractLinearGaussianTerm, ...]
     scale_AU: jax.Array
     block_key: str = eqx.field(static=True)
     shape_idx: tuple = eqx.field(static=True)
@@ -152,9 +135,13 @@ class Completion(eqx.Module):
                 conditional for, or a second block), named in the message.
         """
         key, block = _block_of(fit)
-        linear = tuple(t for t in fit.terms if isinstance(t, AbstractLinearTerm))
+        linear = tuple(
+            t for t in fit.terms if isinstance(t, AbstractLinearGaussianTerm)
+        )
         if not linear:
-            raise ValueError("a completion needs a linear term (AbstractLinearTerm)")
+            raise ValueError(
+                "a completion needs a linear term (AbstractLinearGaussianTerm)"
+            )
         target = resolve(fit.model, block.system)
         for term in linear:
             system = resolve(fit.model, term.system_path)
@@ -164,9 +151,11 @@ class Completion(eqx.Module):
                     f"term system_path {term.system_path!r} does not resolve to the "
                     f"system {block.system!r} of the orbit block {key!r}"
                 )
-        rest = tuple(t for t in fit.terms if not isinstance(t, AbstractLinearTerm))
+        rest = tuple(
+            t for t in fit.terms if not isinstance(t, AbstractLinearGaussianTerm)
+        )
         rest = Fit(fit.model, fit.free, rest)
-        names, sizes = _flat_layout(fit)
+        names, sizes = fit.flat_layout()
         edges = np.concatenate([[0], np.cumsum(sizes)])
         missing = [c for c in CONSTANTS if (key, c) not in names]
         if missing:
@@ -174,7 +163,7 @@ class Completion(eqx.Module):
         constants_idx = tuple(int(edges[names.index((key, c))]) for c in CONSTANTS)
         leaf_terms, leaf_paths, leaf_idx = [], [], []
         for i, term in enumerate(rest.terms):
-            path = term.leaf_path if isinstance(term, AbstractConditionalTerm) else None
+            path = term.leaf_path if isinstance(term, AbstractProposingTerm) else None
             if path is None or path not in fit.leaf_laws:
                 continue
             if path in leaf_paths:
@@ -195,7 +184,7 @@ class Completion(eqx.Module):
             raise ValueError(
                 f"free entries {sorted(set(orphans))} are neither orbit coordinates "
                 f"of the block {key!r} nor leaves a term proposes "
-                "(AbstractConditionalTerm.leaf_path); a completion cannot draw them"
+                "(AbstractProposingTerm.leaf_path); a completion cannot draw them"
             )
         shape_idx, periods = tuple(shape_idx), fit.periods()
         scale = _data_scale_AU(linear, target) if scale_AU is None else scale_AU
@@ -261,7 +250,7 @@ class Completion(eqx.Module):
             zip(self.leaf_paths, self.leaf_idx, self.leaf_terms, strict=True)
         ):
             dist = self.fit_rest.free[path]
-            record = jax.vmap(self.fit_rest.terms[term_index].leaf_conditional)(models)
+            record = jax.vmap(self.fit_rest.terms[term_index].leaf_proposal)(models)
             low, high = (jnp.log(jnp.maximum(b, 1e-300)) for b in dist.support())
             keys = jax.random.split(jax.random.fold_in(key, i), z.shape[0])
             ln_leaf, log_q_ln = jax.vmap(
@@ -283,8 +272,8 @@ class Completion(eqx.Module):
         x, _ = self.fit_rest.from_flat(z0[None])
         model = self.fit_rest.model_at(jax.tree.map(lambda a: a[0], x))
         row = self.block.rows[0]
-        forms = [t.linear_form(model, row) for t in self.terms]
-        return LinearForm(
+        forms = [t.linear_gaussian(model, row) for t in self.terms]
+        return LinearGaussian(
             *(jnp.concatenate([getattr(f, n) for f in forms]) for n in _FIELDS)
         )
 

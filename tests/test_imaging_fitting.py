@@ -19,7 +19,6 @@ from photomancy.measurements import (  # noqa: E402
     DMagData,
     loglike_dmag,
 )
-from photomancy.measurements._padding import MAX_IMG  # noqa: E402
 
 MSUN_KG = 1.989e30
 
@@ -43,7 +42,7 @@ def _predict(data, cos_i):
 
 def test_loglike_dmag_gradient_finite_on_placeholder():
     """The masked-placeholder gradient of the dMag likelihood is finite."""
-    img0 = DMagData.zeros()
+    img0 = DMagData.zeros(64)
     grad = jax.grad(lambda ci: loglike_dmag(*_predict(img0, ci), img0))(0.5)
     assert jnp.isfinite(grad)
 
@@ -58,7 +57,7 @@ def test_contrast_curve_nulls_convert_and_keep_a_finite_gradient():
     seps = jnp.broadcast_to(jnp.linspace(0.05, 0.5, 40), (3, 40))
     contrast = jnp.full((3, 40), 1e-9).at[1].set(1e-10)
     data = DMagData.from_contrast_curves(
-        jnp.array([100.0, 500.0, 900.0]), seps, contrast
+        jnp.array([100.0, 500.0, 900.0]), seps, contrast, max_n=64
     )
     assert jnp.allclose(data.dmag0_grid[:3, :40], -2.5 * jnp.log10(contrast))
     assert bool(data.is_valid[:3].all()) and not bool(data.is_valid[3:].any())
@@ -100,7 +99,8 @@ def test_null_epochs_penalize_only_a_planet_bright_enough_to_see():
 
 
 def test_dmag_data_pad_produces_max_sized_valid_container():
-    """DMagData.pad pads all per-epoch fields to MAX with a validity mask."""
+    """DMagData.pad pads all per-epoch fields to ``max_n`` with a validity mask."""
+    max_n = 64
     padded = DMagData.pad(
         time_d=jnp.array([200.0, 800.0]),
         sep_grid=jnp.broadcast_to(jnp.linspace(0.05, 0.5, 40), (2, 40)),
@@ -108,8 +108,9 @@ def test_dmag_data_pad_produces_max_sized_valid_container():
         is_detected=jnp.array([True, False]),
         dmag_obs=jnp.array([22.0, 0.0]),
         dmag_err=jnp.array([0.1, 1.0]),
+        max_n=max_n,
     )
-    assert padded.time_d.shape == (MAX_IMG,)
-    assert padded.dmag_obs.shape == (MAX_IMG,)
+    assert padded.time_d.shape == (max_n,)
+    assert padded.dmag_obs.shape == (max_n,)
     assert int(padded.is_valid.sum()) == 2
     assert bool(padded.is_detected[0]) and not bool(padded.is_detected[1])

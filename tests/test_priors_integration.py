@@ -24,7 +24,7 @@ from photomancy.infer import (  # noqa: E402
     weighted_cov,
     weighted_mean,
 )
-from photomancy.infer.backends.grid import midpoint  # noqa: E402
+from photomancy.infer.backends.grid import midpoint_rule  # noqa: E402
 from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
 
 SIGMA = 0.4
@@ -105,7 +105,7 @@ def test_mixture_from_a_cloud_is_the_law_of_the_next_leaf():
         {"theta": Uniform(jnp.full((1,), -6.0), jnp.full((1,), 6.0))},
         (ForwardTerm(_TwoBumps(), _Bumps()),),
     )
-    cloud = run(fit, Grid({"theta": midpoint(-6.0, 6.0, 1200)}), jax.random.key(0))
+    cloud = run(fit, Grid({"theta": midpoint_rule(-6.0, 6.0, 1200)}), jax.random.key(0))
     law = cluster_to_mixture(cloud, 2, jax.random.key(1))
     assert isinstance(law, Mixture)
     np.testing.assert_allclose(

@@ -29,15 +29,15 @@ from photomancy.infer.posterior import Posterior
 
 
 @eqx.filter_jit
-def pathfinder_fit(logdensity, init, key, maxiter, maxcor):
+def pathfinder_fit(logdensity, init, key, n_steps, history_size):
     """Single-path Pathfinder fit: mean, dense covariance, and the ELBO.
 
     Args:
         logdensity: ``z -> scalar`` log-density over the flat parameter position.
         init: Initial flat position. Shape ``(d,)``.
         key: PRNG key (Pathfinder draws Monte Carlo samples for the ELBO).
-        maxiter: Maximum L-BFGS iterations along the optimization path.
-        maxcor: L-BFGS history size (number of correction pairs).
+        n_steps: Maximum L-BFGS iterations along the optimization path.
+        history_size: L-BFGS history size (number of correction pairs).
 
     Returns:
         A tuple ``(mean, cov, elbo)``: the variational mean ``(d,)``, the dense
@@ -50,8 +50,8 @@ def pathfinder_fit(logdensity, init, key, maxiter, maxcor):
         rng_key=key,
         logdensity_fn=logdensity,
         initial_position=init,
-        maxiter=maxiter,
-        maxcor=maxcor,
+        maxiter=n_steps,
+        maxcor=history_size,
     )
     cov = lbfgs.lbfgs_inverse_hessian_formula_1(state.alpha, state.beta, state.gamma)
     return state.position, cov, state.elbo
@@ -97,8 +97,8 @@ class Pathfinder(AbstractBackend):
     Args:
         n_draws: Importance draws.
         n_modes: Number of starts and proposal components.
-        maxiter: Maximum L-BFGS iterations along the path.
-        maxcor: L-BFGS history size.
+        n_steps: Maximum L-BFGS iterations along the path.
+        history_size: L-BFGS history size.
         init: ``None`` for prior draws as starts, one constrained draw (repeated for
             every start), an entry dict whose every leaf has a leading axis of length
             ``n_modes`` (one explicit start each, so each alias keeps its own mode),
@@ -108,8 +108,8 @@ class Pathfinder(AbstractBackend):
 
     n_draws: int = eqx.field(static=True, default=2000)
     n_modes: int = eqx.field(static=True, default=1)
-    maxiter: int = eqx.field(static=True, default=50)
-    maxcor: int = eqx.field(static=True, default=10)
+    n_steps: int = eqx.field(static=True, default=50)
+    history_size: int = eqx.field(static=True, default=10)
     init: Posterior | dict | None = None
 
     @eqx.filter_jit
@@ -120,7 +120,9 @@ class Pathfinder(AbstractBackend):
         starts = start_points(fit, self.init, k_start, self.n_modes)
         keys = jax.random.split(k_fit, self.n_modes)
         means, covs, elbo = jax.vmap(
-            lambda z0, k: pathfinder_fit(density, z0, k, self.maxiter, self.maxcor)
+            lambda z0, k: pathfinder_fit(
+                density, z0, k, self.n_steps, self.history_size
+            )
         )(starts, keys)
         kept = jnp.isfinite(elbo) & jnp.all(jnp.isfinite(means), axis=-1)
         draws = modes_importance(

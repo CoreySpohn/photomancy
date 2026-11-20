@@ -1,9 +1,14 @@
 """Contract tests for photomancy.viz.plot_eig."""
 
+from types import SimpleNamespace
+
+import jax.numpy as jnp
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+
+from photomancy.infer.eig import LinearizedEIG
 
 matplotlib.use("Agg")
 
@@ -16,15 +21,18 @@ def _close_figures():
 
 
 def _result(n=40):
-    """A synthetic evaluate_candidates-shaped result with a known argmax."""
+    """A synthetic eig_linearized-shaped result with a known argmax."""
     t = np.linspace(0.0, 400.0, n)
     geometric = 0.2 + 0.1 * np.sin(t / 60.0)
     alias = np.exp(-0.5 * ((t - 250.0) / 40.0) ** 2)
-    return t, {
-        "total_eig": geometric + alias,
-        "alias_eig": alias,
-        "geometric_eig": geometric,
-    }
+    zeros = jnp.zeros((n, 1))
+    return t, LinearizedEIG(
+        total=geometric + alias,
+        geometric=geometric,
+        alias=alias,
+        predictions=zeros[..., None],
+        detectability=zeros,
+    )
 
 
 def test_plot_eig_draws_components_and_marks_best():
@@ -40,7 +48,7 @@ def test_plot_eig_draws_components_and_marks_best():
     assert len(result.artists["line"]) == 2
 
     best_line = result.artists["lines"][-1]
-    expected = t[int(np.argmax(result_dict["total_eig"]))]
+    expected = t[int(np.argmax(result_dict.total))]
     assert best_line.get_xdata()[0] == pytest.approx(expected)
     assert result.ax.get_ylabel() == "expected information gain [nats]"
 
@@ -50,19 +58,19 @@ def test_plot_eig_best_marker_skips_unscored_candidates():
     from photomancy.viz import plot_eig
 
     t, result_dict = _result()
-    total = np.array(result_dict["total_eig"])
+    total = np.array(result_dict.total)
     total[3] = np.nan
-    result = plot_eig(t, {"total_eig": total})
+    result = plot_eig(t, SimpleNamespace(total=total))
     best_line = result.artists["lines"][-1]
     assert best_line.get_xdata()[0] == pytest.approx(t[int(np.nanargmax(total))])
 
 
 def test_plot_eig_tolerates_missing_components():
-    """A result with only total_eig still draws."""
+    """A result with only a total still draws."""
     from photomancy.viz import plot_eig
 
     t, result_dict = _result()
-    result = plot_eig(t, {"total_eig": result_dict["total_eig"]}, mark_best=False)
+    result = plot_eig(t, SimpleNamespace(total=result_dict.total), mark_best=False)
     assert len(result.artists["lines"]) == 1
 
 
@@ -114,8 +122,6 @@ def test_plot_eig_draws_total_as_an_envelope_under_its_components():
 def test_plot_eig_total_really_is_the_sum_of_the_parts():
     """The encoding claims additivity; check the library actually delivers it."""
     _, result_dict = _result()
-    total = np.asarray(result_dict["total_eig"])
-    parts = np.asarray(result_dict["alias_eig"]) + np.asarray(
-        result_dict["geometric_eig"]
-    )
+    total = np.asarray(result_dict.total)
+    parts = np.asarray(result_dict.alias) + np.asarray(result_dict.geometric)
     np.testing.assert_allclose(total, parts, rtol=1e-12)

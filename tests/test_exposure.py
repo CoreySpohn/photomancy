@@ -18,7 +18,7 @@ from photomancy.exposure import ExposureModel, ExposureTerm
 from photomancy.infer import Fit, run
 from photomancy.infer.backends.staged import (
     MAP,
-    FitStage,
+    MAPStage,
     group_labels,
     rescaled_transform,
 )
@@ -206,35 +206,35 @@ def _self_fit(companion_peak):
     }
     ref, sci = Fit(init, free, terms[:1]), Fit(init, free, terms[1:])
     stages = [
-        FitStage(
+        MAPStage(
             _TILT_STEPS,
             ("tilt",),
-            logdensity=ref,
+            fit=ref,
             closed_form=_window_flux(0, ref_data, window),
             objective_scale=1.0 / n_used,
             name="reference star",
         ),
-        FitStage(
+        MAPStage(
             n_long,
             ("ote", "si", "tilt"),
-            logdensity=ref,
+            fit=ref,
             closed_form=_window_flux(0, ref_data, window),
             objective_scale=1.0 / n_used,
             name="reference seams",
         ),
-        FitStage(
+        MAPStage(
             _TILT_STEPS,
             ("tilt",),
-            logdensity=sci,
+            fit=sci,
             closed_form=_window_flux(0, sci_data, window),
             transforms=second,
             objective_scale=1.0 / n_used,
             name="science star",
         ),
-        FitStage(
+        MAPStage(
             n_long,
             ("si",),
-            logdensity=sci,
+            fit=sci,
             objective_scale=0.5 / n_used,
             name="science exit seam",
         ),

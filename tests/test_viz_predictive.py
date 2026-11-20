@@ -30,6 +30,7 @@ def test_plot_rv_converts_au_per_day_to_m_per_s():
     t = np.linspace(0.0, 300.0, 50)
     rv = 1.0e-6 * np.sin(2.0 * np.pi * t / 150.0)
     data = RadialVelocityData.pad(
+        max_n=8,
         time_d=jnp.array([10.0, 90.0, 200.0]),
         rv=jnp.array([1.0e-6, -0.5e-6, 0.2e-6]) * (AU2m / d2s),
         rv_err=jnp.array([1.0e-7, 1.0e-7, 1.0e-7]) * (AU2m / d2s),
@@ -63,6 +64,7 @@ def _imaging_data():
     grid = jnp.linspace(0.05, 0.4, 8)
     limit = jnp.full(8, 24.0)
     return DMagData.from_detections_and_nulls(
+        max_n=8,
         det_time_d=jnp.array([20.0, 150.0]),
         det_dmag_obs=jnp.array([22.5, 23.1]),
         det_dmag_err=jnp.array([0.1, 0.15]),
@@ -150,6 +152,7 @@ def test_plot_rv_preserves_observed_m_per_s():
     from photomancy.viz import plot_rv
 
     data = RadialVelocityData.pad(
+        max_n=8,
         time_d=jnp.array([10.0, 20.0]),
         rv=jnp.array([8.0, -3.0]),
         rv_err=jnp.array([0.5, 0.7]),

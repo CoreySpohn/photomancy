@@ -87,7 +87,7 @@ def fit():
 
 
 @pytest.mark.medium(reason="one conditional and one fit density per draw, 12 s cold")
-def test_completion_identity_pins_the_linear_form(fit):
+def test_completion_identity_pins_the_linear_gaussian(fit):
     """Fails if the form or the conditional disagrees with the fit's own density.
 
     The fit density at random prior draws equals the density without the term minus the

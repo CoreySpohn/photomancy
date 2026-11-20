@@ -1,4 +1,4 @@
-"""``linear_form`` of relative astrometry: a Gaussian in the sky constants."""
+"""``linear_gaussian`` of relative astrometry: a Gaussian in the sky constants."""
 
 import dataclasses
 
@@ -19,7 +19,12 @@ from orbix.system import (
 )
 from orbix.system.core import Body, SkyFrame
 
-from photomancy.infer import AbstractLinearTerm, AbstractTerm, Fit, LinearForm
+from photomancy.infer import (
+    AbstractLinearGaussianTerm,
+    AbstractTerm,
+    Fit,
+    LinearGaussian,
+)
 from photomancy.measurements import (
     AstrometryData,
     RelativeAstrometryTerm,
@@ -47,7 +52,7 @@ def _system(k=1):
     )
 
 
-def _relative_data(planet_id):
+def _relative_data(planet):
     return AstrometryData.pad(
         time_d=TIMES,
         ra=[0.10, -0.05, 0.12, 0.2, -0.1],
@@ -55,7 +60,7 @@ def _relative_data(planet_id):
         ra_err=[0.004, 0.005, 0.003, 0.006, 0.004],
         dec_err=[0.005, 0.004, 0.004, 0.003, 0.006],
         corr=[0.2, -0.3, 0.0, 0.5, -0.1],
-        planet_id=planet_id,
+        planet=planet,
         max_n=7,
     )
 
@@ -95,7 +100,7 @@ def _assert_pinned(term, model, system, scale_AU):
     which also rewrites the star mass and the mean motion, as a fit does. The form is
     built once at the base model.
     """
-    form = term.linear_form(model, row=0)
+    form = term.linear_gaussian(model, planet=0)
     for key in jax.random.split(jax.random.key(0), 3):
         c = scale_AU * jax.random.normal(key, (4,))
         actual = float(term(_through_the_block(model, system, c)))
@@ -121,7 +126,7 @@ def test_relative_form_on_a_bare_system_with_records_of_its_row():
     _assert_pinned(term, system, "", 1.0)
     mixed = RelativeAstrometryTerm(_relative_data([0, 1, 0, 0, 0]))
     with pytest.raises(Exception, match="another planet"):
-        mixed.linear_form(system, row=0)
+        mixed.linear_gaussian(system, planet=0)
 
 
 def test_a_fit_on_a_bare_system_joins_the_block_path():
@@ -147,7 +152,7 @@ def test_relative_form_refuses_a_system_with_more_than_one_planet_row():
     """
     term = RelativeAstrometryTerm(_relative_data([1] * 5))
     with pytest.raises(Exception, match="more than one planet row"):
-        term.linear_form(_system(k=2), row=1)
+        term.linear_gaussian(_system(k=2), planet=1)
 
 
 def test_the_linear_capability_is_a_type_and_the_stellar_term_does_not_have_it():
@@ -168,12 +173,12 @@ def test_the_linear_capability_is_a_type_and_the_stellar_term_does_not_have_it()
             max_n=7,
         )
     )
-    assert isinstance(relative, AbstractLinearTerm)
+    assert isinstance(relative, AbstractLinearGaussianTerm)
     assert isinstance(stellar, AbstractTerm)
-    assert not isinstance(stellar, AbstractLinearTerm)
-    assert not hasattr(stellar, "linear_form")
-    form = relative.linear_form(_system(), row=0)
-    assert isinstance(form, LinearForm)
+    assert not isinstance(stellar, AbstractLinearGaussianTerm)
+    assert not hasattr(stellar, "linear_gaussian")
+    form = relative.linear_gaussian(_system(), planet=0)
+    assert isinstance(form, LinearGaussian)
     assert {f.name for f in dataclasses.fields(form)} == {
         "design",
         "target",
@@ -189,7 +194,7 @@ def test_conditional_marginal_is_the_density_of_the_data_in_arcsec():
     minus half log det of the posterior information.
     """
     _, scene, entry, terms = next(s for s in systems() if s[0] == "g1")
-    form = terms[0].linear_form(model_at(scene, entry(0)))
+    form = terms[0].linear_gaussian(model_at(scene, entry(0)))
     prior = 1e-12
     mean, chol, log_z = linear_gaussian_conditional(
         form.design, form.target, form.precision, prior

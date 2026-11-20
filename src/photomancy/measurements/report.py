@@ -22,7 +22,7 @@ from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Transmission
 
-from photomancy.infer.fit import AbstractConditionalTerm, LeafConditional
+from photomancy.infer.fit import AbstractProposingTerm, LeafProposal
 from photomancy.measurements._observables import (
     _band_contrasts,
     _relative_positions,
@@ -166,7 +166,7 @@ class ReportData(eqx.Module):
             ra_err=self.ra_err,
             dec_err=self.dec_err,
             corr=self.corr,
-            planet_id=jnp.full(self.time_d.shape, planet, int),
+            planet=jnp.full(self.time_d.shape, planet, int),
             is_valid=self.is_valid & self.is_detected,
         )
 
@@ -253,15 +253,15 @@ class PrecomputedReportPredictor(AbstractReportPredictor):
                 f"model epoch {model.epoch}"
             )
         clean = _prediction_rows(rows)
-        planet_id = jnp.full(clean.time_d.shape, self.planet, jnp.int32)
-        ra, dec = _relative_positions(model, clean.time_d, planet_id)
+        planet = jnp.full(clean.time_d.shape, self.planet, jnp.int32)
+        ra, dec = _relative_positions(model, clean.time_d, planet)
         contrast = _band_contrasts(
             model,
             self.table.quadrature,
             self.table.bandpasses,
             clean.time_d,
             clean.mode,
-            planet_id,
+            planet,
         )
         radius2 = ra**2 + dec**2
         sep = jnp.sqrt(jnp.where(radius2 > 0, radius2, 1.0))
@@ -326,7 +326,7 @@ def _scale_fit(counts, limit, rows, rule):
     return has, t_hat, sd, chi2, log_norm, on_region
 
 
-class ReportTerm(AbstractConditionalTerm):
+class ReportTerm(AbstractProposingTerm):
     """The counts likelihood of a report, from an exact or a precomputed predictor.
 
     The term scores the counts of every valid row: a null is the probability of counts
@@ -345,8 +345,8 @@ class ReportTerm(AbstractConditionalTerm):
     so on a Thiele-Innes block, whose model holds the orbit on one line-of-sight sheet,
     the term belongs inside a :class:`~photomancy.orbit.SheetSum` of that orbit row.
 
-    ``leaf_conditional`` offers a proposal density for the photometric leaf from the
-    detections (see :class:`~photomancy.infer.LeafConditional`); it never enters the
+    ``leaf_proposal`` offers a proposal density for the photometric leaf from the
+    detections (see :class:`~photomancy.infer.LeafProposal`); it never enters the
     likelihood.
 
     Attributes:
@@ -411,7 +411,7 @@ class ReportTerm(AbstractConditionalTerm):
         """Sum valid null log probabilities and detection counts log densities."""
         return jnp.sum(self._row_density(model, self.data)[0])
 
-    def leaf_conditional(self, model) -> LeafConditional:
+    def leaf_proposal(self, model) -> LeafProposal:
         """A Gaussian proposal for the photometric leaf, as a one-component mixture.
 
         The detections are Gaussian in the log of the counts scale
@@ -437,7 +437,7 @@ class ReportTerm(AbstractConditionalTerm):
             log_norm - 0.5 * chi2 + 0.5 * jnp.log(2.0 * jnp.pi) + jnp.log(sd),
             -jnp.inf,
         )
-        return LeafConditional(
+        return LeafProposal(
             self.leaf_path,
             (jnp.log(jnp.reshape(leaf, ())) + t_hat / self.leaf_exponent)[None],
             (sd / self.leaf_exponent)[None],

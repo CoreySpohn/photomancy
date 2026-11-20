@@ -14,9 +14,9 @@ def _sky_positions(system, time_d):
     return system.positions(time_d=time_d)
 
 
-def _relative_positions(system, time_d, planet_id):
+def _relative_positions(system, time_d, planet):
     """Read east/north offsets (2, T) for each row's planet and epoch."""
-    return _sky_positions(system, time_d)[:, planet_id, jnp.arange(time_d.size)]
+    return _sky_positions(system, time_d)[:, planet, jnp.arange(time_d.size)]
 
 
 def _stellar_reflex(system, time_d):
@@ -26,7 +26,7 @@ def _stellar_reflex(system, time_d):
     return system.star_reflex(time_d=time_d)
 
 
-def _band_contrasts(system, quadrature, bandpasses, time_d, band_id, planet_id):
+def _band_contrasts(system, quadrature, bandpasses, time_d, band_id, planet):
     """Select each row's filter, planet and epoch from a single scene evaluation."""
 
     def response(nodes_nm):
@@ -35,4 +35,4 @@ def _band_contrasts(system, quadrature, bandpasses, time_d, band_id, planet_id):
         )
 
     bands = system.band_contrasts(quadrature, time_d, bandpass=response)
-    return bands[band_id, planet_id, jnp.arange(time_d.size)]
+    return bands[band_id, planet, jnp.arange(time_d.size)]

@@ -105,7 +105,7 @@ def class_mi_mc(key, weights, class_probs, means, variances, n_samples=20000):
     Samples (k, c, y) from the joint p(k) p(c | k) p(y | k) and averages
     log p(y | c) - log pbar(y), with p(y | c) = sum_k w_k P(c|k) p(y|k) / P(c).
     This is a different decomposition than the entropy-difference estimator in
-    ``photomancy.infer.eig.class_eig``, so agreement is a real cross-check.
+    ``photomancy.infer.eig.eig_class``, so agreement is a real cross-check.
 
     Args:
         key: PRNG key.

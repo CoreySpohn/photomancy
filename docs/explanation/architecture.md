@@ -68,7 +68,7 @@ flowchart TB
 The engine layer is the {py:mod}`photomancy.infer` subpackage and knows no astrophysics.
 {py:class}`~photomancy.infer.Fit` and the abstract term types define the density,
 {py:mod}`~photomancy.infer.likelihoods` builds normalized likelihoods for gridded data,
-{py:mod}`~photomancy.infer.backends` run inference, {py:class}`~photomancy.infer.Posterior`
+{py:func}`~photomancy.infer.run` with a backend runs inference, {py:class}`~photomancy.infer.Posterior`
 carries the result behind one type, and {py:mod}`~photomancy.infer.eig` scores candidate
 observations as expected information gain. The domain layer supplies the physics-specific
 pieces, such as the data terms of `photomancy.measurements` and the orbit blocks, and

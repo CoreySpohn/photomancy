@@ -86,7 +86,7 @@ def test_stellar_and_relative_likelihoods_share_form():
         ra_err=jnp.full(n, 2e-3),
         dec_err=jnp.full(n, 2e-3),
         corr=jnp.zeros(n),
-        planet_id=jnp.zeros(n, dtype=int),
+        planet=jnp.zeros(n, dtype=int),
         is_valid=jnp.ones(n, dtype=bool),
     )
 

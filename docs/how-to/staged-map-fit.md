@@ -2,7 +2,7 @@
 
 Some fits cannot free every parameter at once. A coronagraph model, for example, is fitted
 by first locating the star, then adjusting the optics, then holding the optics while the
-science exposure is fitted. {class}`~photomancy.infer.backends.staged.MAP` runs that kind
+science exposure is fitted. {class}`~photomancy.infer.MAP` runs that kind
 of fit on a `Fit`: a sequence of stages, each of which frees some named groups of the free
 entries. The result is a {class}`~photomancy.infer.Posterior` with one draw, the optimum, at
 weight one. It has no evidence, so `log_evidence` is NaN, and its `info` is a
@@ -23,8 +23,14 @@ import jax.numpy as jnp
 import optax
 from priorities import Normal
 
-from photomancy.infer import MAP, Fit, ForwardTerm, run
-from photomancy.infer.backends.staged import FitStage, group_labels
+from photomancy.infer import (
+    MAP,
+    Fit,
+    ForwardTerm,
+    MAPStage,
+    group_labels,
+    run,
+)
 from photomancy.infer.likelihoods import gaussian_loglike
 
 jax.config.update("jax_enable_x64", True)
@@ -82,9 +88,9 @@ labels = group_labels(
 A stage names the groups it frees, and every group has an `optax` transform. A group that a
 stage does not free keeps its values and its optimizer state exactly (`freeze="hold"`).
 
-The first stage below frees `shape` alone and scores only the first term. Its `logdensity`
+The first stage below frees `shape` alone and scores only the first term. Its `fit`
 is a second `Fit` over a subset of the terms, a view of the exposure. The view must have the
-same free entries as the run's fit, and a different set raises a `ValueError`. The second
+same free entries as the run's fit, and a different set raises a `ValueError`; anything but a `Fit` raises a `TypeError`. The second
 stage frees both groups and scores every term, the density of the run.
 
 ```python continuation
@@ -92,13 +98,13 @@ backend = MAP(
     labels=labels,
     transforms={"shape": optax.adam(0.2), "offset": optax.adam(0.2)},
     stages=(
-        FitStage(
+        MAPStage(
             n_steps=400,
-            free=("shape",),
-            logdensity=Fit(init, free, (first,)),
+            groups=("shape",),
+            fit=Fit(init, free, (first,)),
             name="first exposure",
         ),
-        FitStage(n_steps=600, free=("offset", "shape"), name="together"),
+        MAPStage(n_steps=600, groups=("offset", "shape"), name="together"),
     ),
     init=start,
 )
@@ -119,7 +125,7 @@ constrained draw or an earlier `Posterior`, whose highest-density draw is used. 
   down-weighted without changing its learning rates.
 - `closed_form` sets a parameter by a formula rather than by a gradient. It is described
   in the next section.
-- `logdensity` replaces the run's density for the stage with a `Fit` over a subset of the
+- `fit` replaces the run's density for the stage with a `Fit` over a subset of the
   terms, as above. `prepare` is the same replacement made late: a function from the current
   parameters to the `Fit`, called once on the host when the stage starts.
 - `transforms` replaces the table of optimizers and starts them fresh at the current values.
@@ -128,7 +134,7 @@ constrained draw or an earlier `Posterior`, whose highest-density draw is used. 
 - `solver` swaps the per-group optimizers for one `optax` line-search solver, such as
   `optax.lbfgs()`, that optimizes all the freed groups together.
 
-{func}`~photomancy.infer.backends.staged.rescaled_transform` runs a transform on
+{func}`~photomancy.infer.rescaled_transform` runs a transform on
 `params / scale` so that a leaf kept in nanometers takes the steps of a fit in meters.
 
 ## Set a parameter by a formula
@@ -157,7 +163,7 @@ def closed_form(u, aux):
 formula = MAP(
     labels={"shape": "shape", "offset": ""},
     transforms={"shape": optax.adam(0.2)},
-    stages=(FitStage(n_steps=800, free=("shape",), closed_form=closed_form),),
+    stages=(MAPStage(n_steps=800, groups=("shape",), closed_form=closed_form),),
     init=start,
 )
 posterior = run(fit, formula, jax.random.key(0))

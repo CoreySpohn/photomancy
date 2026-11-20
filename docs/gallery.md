@@ -234,6 +234,7 @@ rv_data = RadialVelocityData.pad(
     rv_err=jnp.full(t_obs.size, rv_err_m_s),
     inst_ids=jnp.zeros(t_obs.size, dtype=int),
     n_inst=1,
+    max_n=256,
 )
 
 result = viz.plot_rv(np.asarray(t_d), np.asarray(rv_fan), data=rv_data)
@@ -278,6 +279,7 @@ imaging = DMagData.from_detections_and_nulls(
     null_time_d=np.array([500.0]),
     null_sep_grid=np.tile(cc_sep, (1, 1)),
     null_dmag0_grid=np.tile(cc_dmag, (1, 1)),
+    max_n=64,
 )
 
 result = viz.plot_dmag(
@@ -308,29 +310,27 @@ result = viz.plot_detectability(
 
 ## plot_eig
 
-The expected-information-gain decision panel: whichever of `total_eig`,
-`alias_eig`, and `geometric_eig` a candidate evaluation returned, drawn against
+The expected-information-gain decision panel: whichever of `total`,
+`alias`, and `geometric` a candidate evaluation returned, drawn against
 candidate epoch. The total is the sum of the other two rather than a third peer
 measurement, so it is drawn as a thick envelope underneath them instead of a
 third equal line. Existing epochs enter as faint reference lines, and the best
 candidate is marked in the total's color.
 
 The values below are synthesized to make the two regimes legible in one figure.
-{doc}`examples/eig_scheduling` runs the real `evaluate_candidates` and puts the
+{doc}`examples/eig_scheduling` runs the real `eig_linearized` and puts the
 result in a closed loop.
 
 ```{code-cell} ipython3
+from types import SimpleNamespace
+
 candidates_d = np.linspace(0.0, 900.0, 400)
 geometric = 0.35 + 0.12 * np.sin(2.0 * np.pi * candidates_d / TRUTH["period_d"])
 alias = 1.1 * np.exp(-0.5 * ((candidates_d - 300.0) / 70.0) ** 2)
 
 result = viz.plot_eig(
     candidates_d,
-    {
-        "total_eig": geometric + alias,
-        "geometric_eig": geometric,
-        "alias_eig": alias,
-    },
+    SimpleNamespace(total=geometric + alias, geometric=geometric, alias=alias),
     epochs_d=[0.0, 60.0, 130.0],
 )
 ```

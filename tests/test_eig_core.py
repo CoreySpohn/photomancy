@@ -21,17 +21,18 @@ from nmc_reference import (  # noqa: E402
 from priorities import Mixture, MultivariateNormal  # noqa: E402
 
 from photomancy.infer.eig import (  # noqa: E402
-    alias_breaking_eig,
-    alias_breaking_eig_from_covariances,
-    class_eig,
-    detectability_eig,
-    detection_channel_eig,
-    detection_class_eig,
-    ep_probit_update,
-    evaluate_candidates,
-    geometric_eig,
-    null_update,
-    probit_gaussian_mass,
+    LinearizedEIG,
+    _ep_probit_update,
+    _null_update,
+    _probit_gaussian_mass,
+    eig_alias_breaking,
+    eig_alias_breaking_from_covariances,
+    eig_class,
+    eig_detectability,
+    eig_detection_channel,
+    eig_detection_class,
+    eig_geometric,
+    eig_linearized,
 )
 
 
@@ -55,7 +56,7 @@ def _two_mode_posterior():
 
 def test_geometric_eig_matches_analytic_gaussian_update():
     """The log-det shrinkage equals the 1-D conjugate-Gaussian information gain."""
-    eig, cov_new = geometric_eig(jnp.array([[4.0]]), jnp.array([[1.0]]), 1.0)
+    eig, cov_new = eig_geometric(jnp.array([[4.0]]), jnp.array([[1.0]]), 1.0)
     assert jnp.allclose(eig, 0.5 * jnp.log(5.0))
     assert float(cov_new[0, 0]) < 4.0
 
@@ -64,34 +65,34 @@ def test_alias_breaking_eig_zero_when_modes_agree():
     """Zero when modes predict the same observable; positive when they differ."""
     weights = jnp.array([0.5, 0.5])
     assert jnp.allclose(
-        alias_breaking_eig(weights, jnp.array([[1.0], [1.0]]), 1.0), 0.0
+        eig_alias_breaking(weights, jnp.array([[1.0], [1.0]]), 1.0), 0.0
     )
-    assert alias_breaking_eig(weights, jnp.array([[1.0], [5.0]]), 1.0) > 0.0
+    assert eig_alias_breaking(weights, jnp.array([[1.0], [5.0]]), 1.0) > 0.0
 
 
 def test_detectability_eig_zero_when_modes_agree():
     """Zero when all modes agree on detectability; positive when split."""
     weights = jnp.array([0.5, 0.5])
-    assert jnp.allclose(detectability_eig(weights, jnp.array([1.0, 1.0])), 0.0)
-    assert detectability_eig(weights, jnp.array([1.0, 0.0])) > 0.0
+    assert jnp.allclose(eig_detectability(weights, jnp.array([1.0, 1.0])), 0.0)
+    assert eig_detectability(weights, jnp.array([1.0, 0.0])) > 0.0
 
 
-def test_evaluate_candidates_linear_forward_more_informative_scores_higher():
+def test_eig_linearized_linear_forward_more_informative_scores_higher():
     """A larger Jacobian and wider mode disagreement give more information."""
     posterior = _two_mode_posterior()
 
     def forward(z, c):
         return jnp.array([c * z[0]])
 
-    res = evaluate_candidates(posterior, jnp.array([0.5, 2.0]), forward, 1.0)
-    assert res["total_eig"].shape == (2,)
-    assert jnp.all(jnp.isfinite(res["total_eig"]))
-    assert jnp.all(res["total_eig"] >= -1e-6)
-    assert res["total_eig"][1] > res["total_eig"][0]
-    assert res["predictions"].shape == (2, 2, 1)
+    res = eig_linearized(posterior, jnp.array([0.5, 2.0]), forward, 1.0)
+    assert res.total.shape == (2,)
+    assert jnp.all(jnp.isfinite(res.total))
+    assert jnp.all(res.total >= -1e-6)
+    assert res.total[1] > res.total[0]
+    assert res.predictions.shape == (2, 2, 1)
 
 
-def test_evaluate_candidates_detectable_splits_modes():
+def test_eig_linearized_detectable_splits_modes():
     """A detectable callback that splits the modes drives the detectability output."""
     posterior = _two_mode_posterior()
 
@@ -101,12 +102,12 @@ def test_evaluate_candidates_detectable_splits_modes():
     def detectable(z, c):
         return jnp.where(z[0] < 1.5, 1.0, 0.0)  # mode 0 detectable, mode 1 not
 
-    res = evaluate_candidates(
+    res = eig_linearized(
         posterior, jnp.array([1.0]), forward, 1.0, detectable=detectable
     )
-    assert res["detectability"].shape == (1, 2)
-    assert jnp.allclose(res["detectability"][0], jnp.array([1.0, 0.0]))
-    assert jnp.isfinite(res["total_eig"][0])
+    assert res.detectability.shape == (1, 2)
+    assert jnp.allclose(res.detectability[0], jnp.array([1.0, 0.0]))
+    assert jnp.isfinite(res.total[0])
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +125,7 @@ def test_detectability_eig_exact_at_deterministic_split():
     """
     weights = jnp.array([0.5, 0.5])
     det = jnp.array([0.0, 1.0])
-    assert jnp.allclose(detectability_eig(weights, det), LN2)
+    assert jnp.allclose(eig_detectability(weights, det), LN2)
 
 
 def test_detectability_eig_bounded_by_mode_entropy():
@@ -132,7 +133,7 @@ def test_detectability_eig_bounded_by_mode_entropy():
     weights = jnp.array([0.9, 0.1])
     h_w = -jnp.sum(weights * jnp.log(weights))
     det = jnp.array([0.0, 1.0])
-    val = detectability_eig(weights, det)
+    val = eig_detectability(weights, det)
     assert val <= h_w + 1e-12
     assert val > 0.0
 
@@ -149,7 +150,7 @@ def test_detectability_eig_soft_probabilities_match_direct_sum():
             direct += jnp.where(
                 p_out > 0, weights[k] * p_out * jnp.log(p_out / p_marg), 0.0
             )
-    assert jnp.allclose(detectability_eig(weights, det), direct, rtol=1e-10)
+    assert jnp.allclose(eig_detectability(weights, det), direct, rtol=1e-10)
 
 
 def test_alias_breaking_eig_capped_at_mode_entropy():
@@ -160,11 +161,11 @@ def test_alias_breaking_eig_capped_at_mode_entropy():
     """
     weights = jnp.array([0.5, 0.5])
     y_preds = jnp.array([[0.0], [100.0]])
-    assert jnp.allclose(alias_breaking_eig(weights, y_preds, 1.0), LN2)
+    assert jnp.allclose(eig_alias_breaking(weights, y_preds, 1.0), LN2)
 
     # Far below full separation the bound itself (not the cap) is active.
     y_close = jnp.array([[0.0], [0.5]])
-    val = alias_breaking_eig(weights, y_close, 1.0)
+    val = eig_alias_breaking(weights, y_close, 1.0)
     assert val < LN2
     assert jnp.allclose(val, 0.5 * jnp.log1p(0.0625), rtol=1e-10)
 
@@ -177,9 +178,9 @@ def test_alias_breaking_eig_uses_per_mode_predictive_widths():
     """
     weights = jnp.array([0.5, 0.5])
     y_preds = jnp.array([[0.0], [1.0]])
-    narrow = alias_breaking_eig(weights, y_preds, 0.01)
+    narrow = eig_alias_breaking(weights, y_preds, 0.01)
     pred_var = jnp.array([[1.01], [1.01]])  # J Sigma J^T = 1.0 on top of R = 0.01
-    wide = alias_breaking_eig(weights, y_preds, pred_var)
+    wide = eig_alias_breaking(weights, y_preds, pred_var)
     assert wide < narrow
     expected = 0.5 * (jnp.log(0.25 + 1.01) - jnp.log(1.01))
     assert jnp.allclose(wide, expected, rtol=1e-10)
@@ -190,7 +191,7 @@ def test_alias_breaking_eig_distinguishes_unequal_widths():
     weights = jnp.array([0.5, 0.5])
     y_preds = jnp.array([[0.0], [0.0]])
     pred_var = jnp.array([[0.01], [4.0]])
-    assert alias_breaking_eig(weights, y_preds, pred_var) > 0.1
+    assert eig_alias_breaking(weights, y_preds, pred_var) > 0.1
 
 
 def test_geometric_eig_qoi_projection_ignores_nuisance_gain():
@@ -203,10 +204,10 @@ def test_geometric_eig_qoi_projection_ignores_nuisance_gain():
     jac_nuisance = jnp.array([[0.0, 1.0]])  # measures only parameter 1
     phi_qoi = jnp.array([[1.0, 0.0]])  # QoI is parameter 0
 
-    eig_full, _ = geometric_eig(cov, jac_nuisance, 0.01)
+    eig_full, _ = eig_geometric(cov, jac_nuisance, 0.01)
     assert eig_full > 1.0  # full-theta logdet books the nuisance shrinkage
 
-    eig_marg, cov_new = geometric_eig(cov, jac_nuisance, 0.01, qoi_projection=phi_qoi)
+    eig_marg, cov_new = eig_geometric(cov, jac_nuisance, 0.01, qoi_projection=phi_qoi)
     assert jnp.allclose(eig_marg, 0.0, atol=1e-10)
     assert cov_new.shape == (2, 2)  # update itself stays full-space
 
@@ -215,8 +216,8 @@ def test_geometric_eig_identity_projection_matches_full():
     """Phi = I reproduces the unprojected gain."""
     cov = jnp.array([[2.0, 0.3], [0.3, 1.0]])
     jac = jnp.array([[1.0, 0.5], [0.2, 2.0]])
-    eig_full, _ = geometric_eig(cov, jac, 0.5)
-    eig_proj, _ = geometric_eig(cov, jac, 0.5, qoi_projection=jnp.eye(2))
+    eig_full, _ = eig_geometric(cov, jac, 0.5)
+    eig_proj, _ = eig_geometric(cov, jac, 0.5, qoi_projection=jnp.eye(2))
     assert jnp.allclose(eig_full, eig_proj, rtol=1e-10)
 
 
@@ -225,7 +226,7 @@ def test_geometric_eig_correlated_qoi_marginal_gain_positive():
     cov = jnp.array([[1.0, 0.8], [0.8, 1.0]])
     jac = jnp.array([[0.0, 1.0]])
     phi = jnp.array([[1.0, 0.0]])
-    eig_marg, _ = geometric_eig(cov, jac, 0.01, qoi_projection=phi)
+    eig_marg, _ = eig_geometric(cov, jac, 0.01, qoi_projection=phi)
     # Sigma'_00 = 1 - 0.8^2 * (1 / (1 + 0.01)) -> gain ~ 0.5 log(1/0.366)
     assert eig_marg > 0.4
 
@@ -245,7 +246,7 @@ def test_alias_bound_upper_bounds_true_mixture_mi():
     variances = jnp.ones((2, 1))
     for i, sep in enumerate([0.5, 1.0, 2.0, 4.0, 20.0]):
         y_preds = jnp.array([[0.0], [sep]])
-        bound = alias_breaking_eig(weights, y_preds, variances)
+        bound = eig_alias_breaking(weights, y_preds, variances)
         mc, se = mixture_mode_mi_mc(jax.random.PRNGKey(i), weights, y_preds, variances)
         # 1e-12 covers the ulp-equality case where both saturate at exactly H(w).
         assert bound >= mc - 4.0 * se - 1e-12, f"bound violated at sep={sep}"
@@ -256,7 +257,7 @@ def test_alias_cap_tight_in_resolved_limit():
     weights = jnp.array([0.5, 0.5])
     y_preds = jnp.array([[0.0], [50.0]])
     variances = jnp.ones((2, 1))
-    bound = alias_breaking_eig(weights, y_preds, variances)
+    bound = eig_alias_breaking(weights, y_preds, variances)
     mc, se = mixture_mode_mi_mc(jax.random.PRNGKey(0), weights, y_preds, variances)
     assert jnp.allclose(bound, LN2)
     assert jnp.abs(mc - LN2) < 4.0 * se + 1e-3
@@ -268,12 +269,12 @@ def test_detectability_eig_matches_binary_channel_limits():
     # Deterministic split: ln 2. Noisy but symmetric d = {0.2, 0.8}:
     # I = H_b(0.5) - H_b(0.2) (binary symmetric channel with crossover 0.2).
     hb = lambda p: -p * jnp.log(p) - (1 - p) * jnp.log(1 - p)  # noqa: E731
-    val = detectability_eig(weights, jnp.array([0.2, 0.8]))
+    val = eig_detectability(weights, jnp.array([0.2, 0.8]))
     assert jnp.allclose(val, LN2 - hb(0.2), rtol=1e-10)
 
 
 # ---------------------------------------------------------------------------
-# class_eig: classification gain I(C; Y) over caller-supplied P(c | k)
+# eig_class: classification gain I(C; Y) over caller-supplied P(c | k)
 # ---------------------------------------------------------------------------
 
 
@@ -281,8 +282,8 @@ def test_detection_class_eig_identity_classes_equals_detectability():
     """With C = M (identity class map) the closed form reduces to I(D; M)."""
     weights = jnp.array([0.3, 0.7])
     det = jnp.array([0.1, 0.9])
-    val = detection_class_eig(weights, det, jnp.eye(2))
-    assert jnp.allclose(val, detectability_eig(weights, det), rtol=1e-10)
+    val = eig_detection_class(weights, det, jnp.eye(2))
+    assert jnp.allclose(val, eig_detectability(weights, det), rtol=1e-10)
 
 
 def test_detection_class_eig_merged_classes_lose_information():
@@ -290,15 +291,15 @@ def test_detection_class_eig_merged_classes_lose_information():
     weights = jnp.array([0.5, 0.5])
     det = jnp.array([0.0, 1.0])
     one_class = jnp.array([[1.0], [1.0]])
-    assert jnp.allclose(detection_class_eig(weights, det, one_class), 0.0, atol=1e-12)
+    assert jnp.allclose(eig_detection_class(weights, det, one_class), 0.0, atol=1e-12)
 
     # Three modes, two classes: I(C; D) <= I(M; D).
     weights3 = jnp.array([0.3, 0.4, 0.3])
     det3 = jnp.array([0.05, 0.6, 0.95])
     classes3 = jnp.array([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
     assert (
-        detection_class_eig(weights3, det3, classes3)
-        <= detectability_eig(weights3, det3) + 1e-12
+        eig_detection_class(weights3, det3, classes3)
+        <= eig_detectability(weights3, det3) + 1e-12
     )
 
 
@@ -306,7 +307,7 @@ def test_detection_class_eig_certain_detection_is_uninformative():
     """All modes surely detected -> the detection bit carries nothing."""
     weights = jnp.array([0.5, 0.5])
     det = jnp.ones(2)
-    assert jnp.allclose(detection_class_eig(weights, det, jnp.eye(2)), 0.0, atol=1e-12)
+    assert jnp.allclose(eig_detection_class(weights, det, jnp.eye(2)), 0.0, atol=1e-12)
 
 
 def test_class_eig_saturates_at_class_prior_entropy():
@@ -314,7 +315,7 @@ def test_class_eig_saturates_at_class_prior_entropy():
     weights = jnp.array([0.5, 0.5])
     class_probs = jnp.eye(2)
     y_preds = jnp.array([[0.0], [200.0]])
-    val = class_eig(
+    val = eig_class(
         weights, class_probs, y_preds, 1.0, key=jax.random.PRNGKey(0), n_samples=256
     )
     h_class = -jnp.sum(0.5 * jnp.log(0.5) * jnp.ones(2))
@@ -325,7 +326,7 @@ def test_class_eig_saturates_at_class_prior_entropy():
 def test_class_eig_identical_predictions_zero():
     """Modes that predict identically cannot classify: I(C; Y) ~ 0."""
     weights = jnp.array([0.5, 0.5])
-    val = class_eig(
+    val = eig_class(
         weights,
         jnp.eye(2),
         jnp.array([[1.0], [1.0]]),
@@ -342,7 +343,7 @@ def test_class_eig_matches_nmc_reference_mid_separation():
     class_probs = jnp.array([[1.0, 0.0], [0.8, 0.2], [0.0, 1.0]])
     y_preds = jnp.array([[0.0, 0.5], [1.5, -0.5], [3.0, 1.0]])
     variances = jnp.array([[1.0, 2.0], [1.5, 1.0], [1.0, 1.0]])
-    val = class_eig(
+    val = eig_class(
         weights,
         class_probs,
         y_preds,
@@ -361,7 +362,7 @@ def test_class_eig_dpi_under_capped_alias():
     weights = jnp.array([0.5, 0.5])
     y_preds = jnp.array([[0.0], [2.0]])
     variances = jnp.ones((2, 1))
-    val = class_eig(
+    val = eig_class(
         weights,
         jnp.eye(2),
         y_preds,
@@ -369,7 +370,7 @@ def test_class_eig_dpi_under_capped_alias():
         key=jax.random.PRNGKey(0),
         n_samples=4096,
     )
-    bound = alias_breaking_eig(weights, y_preds, variances)
+    bound = eig_alias_breaking(weights, y_preds, variances)
     assert val <= bound + 5e-3
 
 
@@ -377,7 +378,7 @@ def test_class_eig_wider_separation_more_informative():
     """Monotone in mode separation for class-pure modes."""
     weights = jnp.array([0.5, 0.5])
     vals = [
-        class_eig(
+        eig_class(
             weights,
             jnp.eye(2),
             jnp.array([[0.0], [sep]]),
@@ -400,7 +401,7 @@ def test_probit_gaussian_mass_matches_mc():
     mean = jnp.array([0.4, -0.2])
     cov = jnp.array([[0.8, 0.3], [0.3, 0.6]])
     a, b = 0.3, jnp.array([1.2, -0.7])
-    mass = probit_gaussian_mass(mean, cov, a, b)
+    mass = _probit_gaussian_mass(mean, cov, a, b)
     mc_mass, _, _ = probit_site_moments_mc(jax.random.PRNGKey(0), mean, cov, a, b)
     assert jnp.abs(mass - mc_mass) < 5.0e-3
 
@@ -410,7 +411,7 @@ def test_ep_probit_update_matches_mc_tilted_moments():
     mean = jnp.array([0.4, -0.2])
     cov = jnp.array([[0.8, 0.3], [0.3, 0.6]])
     a, b = -0.5, jnp.array([1.5, 0.4])
-    log_mass, mean_new, cov_new = ep_probit_update(mean, cov, a, b)
+    log_mass, mean_new, cov_new = _ep_probit_update(mean, cov, a, b)
     mc_mass, mc_mean, mc_cov = probit_site_moments_mc(
         jax.random.PRNGKey(0), mean, cov, a, b, n_samples=400000
     )
@@ -428,7 +429,7 @@ def test_ep_probit_update_hard_truncation_limit():
     """
     mu, sigma, c = 1.0, 0.7, 1.3
     steep = 400.0  # site Phi(steep * (c - x)) -> indicator{x <= c}
-    log_mass, mean_new, cov_new = ep_probit_update(
+    log_mass, mean_new, cov_new = _ep_probit_update(
         jnp.array([mu]), jnp.array([[sigma**2]]), steep * c, jnp.array([-steep])
     )
     alpha = (c - mu) / sigma
@@ -444,7 +445,7 @@ def test_ep_probit_update_flat_site_is_identity():
     """A site that is ~1 over the bulk leaves mass and moments unchanged."""
     mean = jnp.array([0.0])
     cov = jnp.array([[1.0]])
-    log_mass, mean_new, cov_new = ep_probit_update(mean, cov, 30.0, jnp.array([0.1]))
+    log_mass, mean_new, cov_new = _ep_probit_update(mean, cov, 30.0, jnp.array([0.1]))
     assert jnp.exp(log_mass) > 0.999
     assert jnp.allclose(mean_new, mean, atol=1.0e-4)
     assert jnp.allclose(cov_new, cov, rtol=1.0e-3)
@@ -460,7 +461,7 @@ def test_null_update_kills_the_detectable_mode():
     means = jnp.array([[3.0], [-3.0]])
     covs = jnp.array([[[0.2]], [[0.2]]])
     a, b = 0.0, jnp.array([3.0])
-    w_new, m_new, _c_new = null_update(weights, means, covs, a, b)
+    w_new, m_new, _c_new = _null_update(weights, means, covs, a, b)
     assert w_new[1] > 0.999
     assert jnp.allclose(jnp.sum(w_new), 1.0, rtol=1.0e-9)
     # The surviving mode was never near the boundary: moments unchanged.
@@ -473,7 +474,7 @@ def test_null_update_shaves_a_mode_cut_by_the_limit():
     means = jnp.array([[0.0]])
     covs = jnp.array([[[1.0]]])
     a, b = 0.0, jnp.array([2.0])  # boundary right through the mode
-    _w_new, m_new, c_new = null_update(weights, means, covs, a, b)
+    _w_new, m_new, c_new = _null_update(weights, means, covs, a, b)
     assert m_new[0, 0] < -0.3  # pushed toward the undetectable side
     assert c_new[0, 0, 0] < 1.0  # tail shaved
 
@@ -484,9 +485,9 @@ def test_detection_channel_eig_reduces_to_detectability_eig_at_zero_width():
     means = jnp.array([[1.0], [-1.5]])
     covs = jnp.array([[[1.0e-8]], [[1.0e-8]]])
     a, b = 0.2, jnp.array([1.3])
-    val = detection_channel_eig(weights, means, covs, a, b)
+    val = eig_detection_channel(weights, means, covs, a, b)
     d_k = norm.cdf(a + means @ b)
-    assert jnp.allclose(val, detectability_eig(weights, d_k), atol=1.0e-6)
+    assert jnp.allclose(val, eig_detectability(weights, d_k), atol=1.0e-6)
 
 
 def test_detection_channel_eig_adds_within_mode_information():
@@ -495,9 +496,9 @@ def test_detection_channel_eig_adds_within_mode_information():
     means = jnp.array([[0.5], [-0.5]])
     covs = jnp.array([[[1.5]], [[1.5]]])
     a, b = 0.0, jnp.array([2.0])
-    val = detection_channel_eig(weights, means, covs, a, b)
-    d_smeared = jax.vmap(lambda m, c: probit_gaussian_mass(m, c, a, b))(means, covs)
-    discrete_only = detectability_eig(weights, d_smeared)
+    val = eig_detection_channel(weights, means, covs, a, b)
+    d_smeared = jax.vmap(lambda m, c: _probit_gaussian_mass(m, c, a, b))(means, covs)
+    discrete_only = eig_detectability(weights, d_smeared)
     assert val >= discrete_only - 1.0e-12
     assert val > discrete_only + 1.0e-3  # boundary cuts both modes: strictly more
 
@@ -509,7 +510,7 @@ def test_detection_channel_eig_matches_nmc():
     covs = jnp.array([[[0.7, 0.2], [0.2, 0.5]], [[1.1, -0.3], [-0.3, 0.9]]])
     a_arr = jnp.array([0.3, -0.2])
     b_arr = jnp.array([[1.4, -0.5], [0.9, 1.1]])
-    val = detection_channel_eig(weights, means, covs, a_arr, b_arr)
+    val = eig_detection_channel(weights, means, covs, a_arr, b_arr)
     mc, se = detection_channel_mi_mc(
         jax.random.PRNGKey(0), weights, means, covs, a_arr, b_arr
     )
@@ -528,7 +529,7 @@ def test_fisher_is_blind_to_the_null_but_the_channel_mi_is_not():
     covs = jnp.array([[[0.3]], [[0.3]]])
     a, b = 0.0, jnp.array([2.0])
 
-    val = detection_channel_eig(weights, means, covs, a, b)
+    val = eig_detection_channel(weights, means, covs, a, b)
     assert jnp.abs(val - LN2) < 1.0e-3
 
     def bernoulli_fim(theta):
@@ -570,21 +571,23 @@ def test_mode_information_invariant_under_observable_rotation():
     200000 draws, seed 0) for the bound.
     """
     posterior = _opposite_correlation_posterior()
-    original = evaluate_candidates(
+    original = eig_linearized(
         posterior, jnp.array([0.0]), lambda z, c: z, OPPOSITE_NOISE
     )
-    rotated = evaluate_candidates(
+    rotated = eig_linearized(
         posterior, jnp.array([0.0]), lambda z, c: ROTATION_45 @ z, OPPOSITE_NOISE
     )
-    for name in ("total_eig", "geometric_eig", "alias_eig"):
-        assert jnp.allclose(original[name], rotated[name], rtol=0.0, atol=1e-12), name
+    for name in ("total", "geometric", "alias"):
+        assert jnp.allclose(
+            getattr(original, name), getattr(rotated, name), rtol=0.0, atol=1e-12
+        ), name
 
     predictive = OPPOSITE_COVS + OPPOSITE_NOISE * jnp.eye(2)
     mc, se = reported_mixture_mode_mi_mc(
         jax.random.PRNGKey(0), jnp.array([0.5, 0.5]), jnp.zeros((2, 2)), predictive
     )
     assert mc > 0.2
-    assert original["alias_eig"][0] >= mc - 4.0 * se
+    assert original.alias[0] >= mc - 4.0 * se
 
 
 def test_covariance_bound_closed_form_for_opposite_correlations():
@@ -595,7 +598,7 @@ def test_covariance_bound_closed_form_for_opposite_correlations():
     per-observable (diagonal) form reports zero here. Tolerance: exact-algebra.
     """
     predictive = OPPOSITE_COVS + OPPOSITE_NOISE * jnp.eye(2)
-    val = alias_breaking_eig_from_covariances(
+    val = eig_alias_breaking_from_covariances(
         jnp.array([0.5, 0.5]), jnp.zeros((2, 2)), predictive
     )
     assert jnp.allclose(val, 0.5 * jnp.log(1.21 / 0.4), rtol=1e-12)
@@ -613,8 +616,8 @@ def test_covariance_bound_rotation_invariant_with_offset_means():
         ]
     )
     rot = jnp.array([[jnp.cos(0.7), -jnp.sin(0.7)], [jnp.sin(0.7), jnp.cos(0.7)]])
-    base = alias_breaking_eig_from_covariances(weights, means, covs)
-    turned = alias_breaking_eig_from_covariances(
+    base = eig_alias_breaking_from_covariances(weights, means, covs)
+    turned = eig_alias_breaking_from_covariances(
         weights, means @ rot.T, jnp.einsum("ij,kjl,ml->kim", rot, covs, rot)
     )
     assert base > 0.0
@@ -629,7 +632,7 @@ def test_covariance_bound_upper_bounds_full_covariance_mc():
     """
     weights = jnp.array([0.5, 0.5])
     predictive = OPPOSITE_COVS + OPPOSITE_NOISE * jnp.eye(2)
-    bound = alias_breaking_eig_from_covariances(weights, jnp.zeros((2, 2)), predictive)
+    bound = eig_alias_breaking_from_covariances(weights, jnp.zeros((2, 2)), predictive)
     mc, se = reported_mixture_mode_mi_mc(
         jax.random.PRNGKey(0), weights, jnp.zeros((2, 2)), predictive
     )
@@ -643,7 +646,7 @@ def test_covariance_bound_upper_bounds_full_covariance_mc():
 def test_covariance_bound_zero_for_identical_distributions():
     """Identical means and full covariances carry no mode information."""
     cov = jnp.array([[1.0, 0.7], [0.7, 2.0]])
-    val = alias_breaking_eig_from_covariances(
+    val = eig_alias_breaking_from_covariances(
         jnp.array([0.2, 0.3, 0.5]),
         jnp.tile(jnp.array([[0.4, -1.0]]), (3, 1)),
         jnp.tile(cov[None], (3, 1, 1)),
@@ -656,10 +659,10 @@ def test_covariance_bound_matches_variance_interface_in_one_dimension():
     weights = jnp.array([0.5, 0.5])
     y_preds = jnp.array([[0.0], [0.5]])
     variances = jnp.array([[1.0], [1.3]])
-    from_cov = alias_breaking_eig_from_covariances(
+    from_cov = eig_alias_breaking_from_covariances(
         weights, y_preds, variances[:, :, None]
     )
-    from_var = alias_breaking_eig(weights, y_preds, variances)
+    from_var = eig_alias_breaking(weights, y_preds, variances)
     expected = 0.5 * (jnp.log(0.0625 + 1.15) - 0.5 * jnp.log(1.3))
     assert jnp.allclose(from_cov, from_var, rtol=1e-12)
     assert jnp.allclose(from_cov, expected, rtol=1e-12)
@@ -676,14 +679,14 @@ def test_variance_interface_is_the_diagonal_covariance_case():
     variances = jnp.array([[1.0, 2.0], [0.5, 1.5]])
     diag_covs = jax.vmap(jnp.diag)(variances)
     assert jnp.allclose(
-        alias_breaking_eig(weights, y_preds, variances),
-        alias_breaking_eig_from_covariances(weights, y_preds, diag_covs),
+        eig_alias_breaking(weights, y_preds, variances),
+        eig_alias_breaking_from_covariances(weights, y_preds, diag_covs),
         rtol=1e-12,
     )
     # Scalar and (n_obs,) measurement variances broadcast to every mode.
     assert jnp.allclose(
-        alias_breaking_eig(weights, y_preds, jnp.array([0.5, 2.0])),
-        alias_breaking_eig_from_covariances(
+        eig_alias_breaking(weights, y_preds, jnp.array([0.5, 2.0])),
+        eig_alias_breaking_from_covariances(
             weights, y_preds, jnp.tile(jnp.diag(jnp.array([0.5, 2.0]))[None], (2, 1, 1))
         ),
         rtol=1e-12,
@@ -695,7 +698,7 @@ def test_covariance_bound_capped_at_mode_entropy():
     weights = jnp.array([0.2, 0.3, 0.5])
     means = jnp.array([[0.0, 0.0], [80.0, 0.0], [0.0, 80.0]])
     covs = jnp.tile(OPPOSITE_COVS[:1] + OPPOSITE_NOISE * jnp.eye(2), (3, 1, 1))
-    val = alias_breaking_eig_from_covariances(weights, means, covs)
+    val = eig_alias_breaking_from_covariances(weights, means, covs)
     h_w = -jnp.sum(weights * jnp.log(weights))
     assert jnp.allclose(val, h_w, rtol=1e-12)
 
@@ -705,8 +708,8 @@ def test_covariance_bound_ignores_zero_mass_components():
     weights = jnp.array([0.4, 0.6])
     means = jnp.array([[0.0, 0.0], [0.8, -0.3]])
     covs = OPPOSITE_COVS + OPPOSITE_NOISE * jnp.eye(2)
-    base = alias_breaking_eig_from_covariances(weights, means, covs)
-    padded = alias_breaking_eig_from_covariances(
+    base = eig_alias_breaking_from_covariances(weights, means, covs)
+    padded = eig_alias_breaking_from_covariances(
         jnp.array([0.4, 0.0, 0.6]),
         jnp.array([[0.0, 0.0], [1.0e6, -1.0e6], [0.8, -0.3]]),
         jnp.stack([covs[0], 1.0e-6 * jnp.eye(2), covs[1]]),
@@ -724,7 +727,7 @@ def test_covariance_bound_rejects_non_positive_definite_input():
         jnp.array([[1.0, 1.0], [1.0, 1.0]]),  # singular
         jnp.array([[jnp.nan, 0.0], [0.0, 1.0]]),
     ):
-        val = alias_breaking_eig_from_covariances(
+        val = eig_alias_breaking_from_covariances(
             weights, means, jnp.stack([good, bad])
         )
         assert jnp.isnan(val)
@@ -735,9 +738,9 @@ def test_covariance_bound_rejects_mismatched_shapes():
     weights = jnp.array([0.5, 0.5])
     means = jnp.zeros((2, 2))
     with pytest.raises(ValueError, match="predictive_covariances"):
-        alias_breaking_eig_from_covariances(weights, means, jnp.ones((2, 2)))
+        eig_alias_breaking_from_covariances(weights, means, jnp.ones((2, 2)))
     with pytest.raises(ValueError, match="predictive_covariances"):
-        alias_breaking_eig_from_covariances(weights, means, jnp.ones((2, 3, 3)))
+        eig_alias_breaking_from_covariances(weights, means, jnp.ones((2, 3, 3)))
 
 
 def _float64_covariance_bound(weights, means, covs):
@@ -776,7 +779,7 @@ def test_covariance_bound_never_returns_a_wrong_finite_value_in_float32():
         covs = scale**2 * np.einsum("ki,kj->kij", v, v) + np.eye(2)
         means = rng.normal(size=(2, 2)) * (trial % 3 > 0)
         val = float(
-            alias_breaking_eig_from_covariances(
+            eig_alias_breaking_from_covariances(
                 jnp.asarray(weights, jnp.float32),
                 jnp.asarray(means, jnp.float32),
                 jnp.asarray(covs, jnp.float32),
@@ -804,7 +807,7 @@ def test_covariance_bound_is_exact_for_mixed_units_in_float32():
     covs = base * np.outer(scales, scales)
     means = np.zeros((2, 2))
     weights = np.array([0.5, 0.5])
-    val = alias_breaking_eig_from_covariances(
+    val = eig_alias_breaking_from_covariances(
         jnp.asarray(weights, jnp.float32),
         jnp.asarray(means, jnp.float32),
         jnp.asarray(covs, jnp.float32),
@@ -839,32 +842,32 @@ def test_always_null_record_carries_no_information():
     probability of zero for both means the only possible record is the same
     null. Tolerance: floating-point.
     """
-    res = evaluate_candidates(
+    res = eig_linearized(
         _separated_null_posterior(),
         jnp.array([0.0]),
         lambda z, c: z,
         1.0,
         detectable=lambda z, c: jnp.array(0.0),
     )
-    for name in ("total_eig", "geometric_eig", "alias_eig"):
-        assert jnp.allclose(res[name], 0.0, rtol=0.0, atol=1e-12), name
+    for name in ("total", "geometric", "alias"):
+        assert jnp.allclose(getattr(res, name), 0.0, rtol=0.0, atol=1e-12), name
 
 
 def test_always_reported_record_recovers_the_continuous_score():
     """Detection probability one everywhere reproduces the score without reporting."""
     posterior = _opposite_correlation_posterior()
-    plain = evaluate_candidates(
-        posterior, jnp.array([0.0]), lambda z, c: z, OPPOSITE_NOISE
-    )
-    reported = evaluate_candidates(
+    plain = eig_linearized(posterior, jnp.array([0.0]), lambda z, c: z, OPPOSITE_NOISE)
+    reported = eig_linearized(
         posterior,
         jnp.array([0.0]),
         lambda z, c: z,
         OPPOSITE_NOISE,
         detectable=lambda z, c: jnp.array(1.0),
     )
-    for name in ("total_eig", "geometric_eig", "alias_eig"):
-        assert jnp.allclose(plain[name], reported[name], rtol=1e-12, atol=1e-14), name
+    for name in ("total", "geometric", "alias"):
+        assert jnp.allclose(
+            getattr(plain, name), getattr(reported, name), rtol=1e-12, atol=1e-14
+        ), name
 
 
 def test_deterministic_binary_split_is_worth_ln2_of_mode_information():
@@ -877,17 +880,15 @@ def test_deterministic_binary_split_is_worth_ln2_of_mode_information():
     """
     posterior = _two_mode_posterior()  # modes at 1 and 2, unit variance
     c = 1.5
-    res = evaluate_candidates(
+    res = eig_linearized(
         posterior,
         jnp.array([c]),
         lambda z, cand: jnp.array([cand * z[0]]),
         1.0,
         detectable=lambda z, cand: jnp.where(z[0] < 1.5, 1.0, 0.0),
     )
-    assert jnp.allclose(res["alias_eig"][0], LN2, rtol=1e-12)
-    assert jnp.allclose(
-        res["geometric_eig"][0], 0.5 * 0.5 * jnp.log1p(c**2), rtol=1e-12
-    )
+    assert jnp.allclose(res.alias[0], LN2, rtol=1e-12)
+    assert jnp.allclose(res.geometric[0], 0.5 * 0.5 * jnp.log1p(c**2), rtol=1e-12)
 
 
 def _reporting_posterior(x_means, x_vars, det_probs, weights):
@@ -904,7 +905,7 @@ def _reporting_posterior(x_means, x_vars, det_probs, weights):
 
 
 def _score_reporting(posterior, obs_var):
-    return evaluate_candidates(
+    return eig_linearized(
         posterior,
         jnp.array([0.0]),
         lambda z, c: z[:1],
@@ -933,7 +934,7 @@ def test_informative_nondetection_matches_direct_enumeration():
         for p_given_k, p_marginal in ((det[k], p_bar), (1.0 - det[k], 1.0 - p_bar)):
             enumerated += weights[k] * p_given_k * jnp.log(p_given_k / p_marginal)
     assert enumerated > 0.05
-    assert jnp.allclose(res["alias_eig"][0], enumerated, rtol=1e-10)
+    assert jnp.allclose(res.alias[0], enumerated, rtol=1e-10)
 
     mc, se = reported_mixture_mode_mi_mc(
         jax.random.PRNGKey(0),
@@ -942,7 +943,7 @@ def test_informative_nondetection_matches_direct_enumeration():
         jnp.full((3, 1, 1), 1.5),
         det_probs=det,
     )
-    assert jnp.abs(res["alias_eig"][0] - mc) < 4.0 * se
+    assert jnp.abs(res.alias[0] - mc) < 4.0 * se
 
 
 def test_resolved_reports_match_direct_enumeration():
@@ -962,8 +963,8 @@ def test_resolved_reports_match_direct_enumeration():
     p_bar = jnp.sum(weights * det)
     w_null = weights * (1.0 - det) / (1.0 - p_bar)
     enumerated = _entropy(weights) - (1.0 - p_bar) * _entropy(w_null)
-    assert jnp.allclose(res["alias_eig"][0], enumerated, rtol=1e-10)
-    assert res["alias_eig"][0] < _entropy(weights)
+    assert jnp.allclose(res.alias[0], enumerated, rtol=1e-10)
+    assert res.alias[0] < _entropy(weights)
 
     mc, se = reported_mixture_mode_mi_mc(
         jax.random.PRNGKey(0),
@@ -972,7 +973,7 @@ def test_resolved_reports_match_direct_enumeration():
         jnp.full((3, 1, 1), 1.5),
         det_probs=det,
     )
-    assert jnp.abs(res["alias_eig"][0] - mc) < 4.0 * se
+    assert jnp.abs(res.alias[0] - mc) < 4.0 * se
 
 
 def test_mixed_reporting_bounds_the_monte_carlo_mode_information():
@@ -998,10 +999,10 @@ def test_mixed_reporting_bounds_the_monte_carlo_mode_information():
         (x_vars + obs_var)[:, None, None],
         det_probs=det,
     )
-    assert res["alias_eig"][0] >= mc - 4.0 * se
-    assert res["alias_eig"][0] <= _entropy(weights) + 1e-12
+    assert res.alias[0] >= mc - 4.0 * se
+    assert res.alias[0] <= _entropy(weights) + 1e-12
     within = jnp.sum(weights * det * 0.5 * jnp.log1p(x_vars / obs_var))
-    assert jnp.allclose(res["geometric_eig"][0], within, rtol=1e-8)
+    assert jnp.allclose(res.geometric[0], within, rtol=1e-8)
 
 
 # ---------------------------------------------------------------------------
@@ -1020,24 +1021,28 @@ def _golden_detectable(z, c):
 
 
 @pytest.mark.parametrize("name", ["two_modes_plain", "three_modes_reporting"])
-def test_evaluate_candidates_matches_golden_of_the_legacy_input(name):
+def test_eig_linearized_matches_golden_of_the_legacy_input(name):
     """The Mixture input reproduces the result captured from the legacy input.
 
     The golden (``scripts/one_stack/capture_eig_mixture_golden.py`` on the base
-    commit) holds the full result dict. Tolerance: rtol 1e-12, since the Cholesky
-    round trip of the covariances changes them by about 1e-16.
+    commit) holds the full result as the fields of ``LinearizedEIG``.
+    Tolerance: rtol 1e-12, since the Cholesky round trip of the covariances
+    changes them by about 1e-16.
     """
     fixture = json.loads(GOLDEN.read_text())[name]
     mixture = _mixture(fixture["means"], fixture["covs"], fixture["log_weights"])
-    res = evaluate_candidates(
+    res = eig_linearized(
         mixture,
         jnp.asarray(fixture["candidates"]),
         _golden_forward,
         0.5,
         detectable=_golden_detectable if fixture["reporting"] else None,
     )
-    assert set(res) == set(fixture["result"])
+    assert set(fixture["result"]) == set(LinearizedEIG.__dataclass_fields__)
     for key, expected in fixture["result"].items():
         np.testing.assert_allclose(
-            np.asarray(res[key]), np.asarray(expected), rtol=1e-12, atol=1e-13
+            np.asarray(getattr(res, key)),
+            np.asarray(expected),
+            rtol=1e-12,
+            atol=1e-13,
         )

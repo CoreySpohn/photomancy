@@ -98,7 +98,7 @@ Before a stage frees a new group, the curvature of the log-density over that gro
 whether the data constrain it.
 {func}`~photomancy.detection.curvature_block` returns the negative Hessian over the
 leaves a selector names, with everything else held fixed. It is the same selector form as
-{func}`~photomancy.infer.backends.staged.group_labels`.
+{func}`~photomancy.infer.group_labels`.
 
 ```python continuation
 from photomancy.detection import curvature_block

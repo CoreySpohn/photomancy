@@ -14,8 +14,8 @@ from skyscapes.population import kipping_eccentricity
 from skyscapes.scene import FlatStar, Planet, Scene
 
 from photomancy.infer import Fit, Posterior
-from photomancy.infer.eig import alias_breaking_eig, detectability_eig, geometric_eig
-from photomancy.orbit import evaluate_orbit_candidates
+from photomancy.infer.eig import eig_alias_breaking, eig_detectability, eig_geometric
+from photomancy.orbit import eig_astrometry
 
 jax.config.update("jax_enable_x64", True)
 
@@ -29,12 +29,12 @@ KEY = jax.random.key(0)
 
 def test_geometric_eig_matches_analytic_gaussian_update():
     """The log-det shrinkage equals the 1-D conjugate-Gaussian information gain."""
-    eig, cov_new = geometric_eig(jnp.array([[4.0]]), jnp.array([[1.0]]), 1.0)
+    eig, cov_new = eig_geometric(jnp.array([[4.0]]), jnp.array([[1.0]]), 1.0)
     # prec_new = 1/4 + 1 -> cov_new = 0.8; eig = 0.5 * log(4 / 0.8) = 0.5 * log 5
     assert jnp.allclose(eig, 0.5 * jnp.log(5.0))
     assert float(cov_new[0, 0]) < 4.0
 
-    eig_precise, _ = geometric_eig(jnp.array([[4.0]]), jnp.array([[1.0]]), 0.1)
+    eig_precise, _ = eig_geometric(jnp.array([[4.0]]), jnp.array([[1.0]]), 0.1)
     assert eig_precise > eig  # a more precise measurement is more informative
 
 
@@ -42,16 +42,16 @@ def test_alias_breaking_eig_zero_when_modes_agree():
     """Zero when modes predict the same observable; positive when they differ."""
     weights = jnp.array([0.5, 0.5])
     assert jnp.allclose(
-        alias_breaking_eig(weights, jnp.array([[1.0], [1.0]]), 1.0), 0.0
+        eig_alias_breaking(weights, jnp.array([[1.0], [1.0]]), 1.0), 0.0
     )
-    assert alias_breaking_eig(weights, jnp.array([[1.0], [5.0]]), 1.0) > 0.0
+    assert eig_alias_breaking(weights, jnp.array([[1.0], [5.0]]), 1.0) > 0.0
 
 
 def test_detectability_eig_zero_when_modes_agree():
     """No information when all modes agree on detectability; positive when split."""
     weights = jnp.array([0.5, 0.5])
-    assert jnp.allclose(detectability_eig(weights, jnp.array([1.0, 1.0])), 0.0)
-    assert detectability_eig(weights, jnp.array([1.0, 0.0])) > 0.0
+    assert jnp.allclose(eig_detectability(weights, jnp.array([1.0, 1.0])), 0.0)
+    assert eig_detectability(weights, jnp.array([1.0, 0.0])) > 0.0
 
 
 def _one_mode_posterior():
@@ -123,7 +123,7 @@ def one_mode():
 
 
 def _score(posterior, epochs, curve):
-    return evaluate_orbit_candidates(
+    return eig_astrometry(
         posterior,
         epochs,
         1e-6,
@@ -149,11 +149,11 @@ def test_predictions_are_the_orbit_at_the_total_mass(one_mode):
     astrometry = predict_relative_astrometry(epochs, *args, Msun2kg, DIST_PC, Mp=mp)
     sep, dmag = predict_photometry(epochs, *args, Msun2kg, LAMBDA, DIST_PC, Mp=mp)
     np.testing.assert_allclose(
-        result["predictions"][:, 0], jnp.stack(astrometry, axis=-1), rtol=1e-12
+        result.eig.predictions[:, 0], jnp.stack(astrometry, axis=-1), rtol=1e-12
     )
-    np.testing.assert_allclose(result["separation"][:, 0], sep, rtol=1e-12)
-    np.testing.assert_allclose(result["dMag"][:, 0], dmag, rtol=1e-12)
-    np.testing.assert_array_equal(result["detectability"], jnp.ones((2, 1)))
+    np.testing.assert_allclose(result.separation_arcsec[:, 0], sep, rtol=1e-12)
+    np.testing.assert_allclose(result.dmag[:, 0], dmag, rtol=1e-12)
+    np.testing.assert_array_equal(result.eig.detectability, jnp.ones((2, 1)))
 
 
 @pytest.mark.medium(reason="three EIG evaluations on the shared posterior")
@@ -169,24 +169,24 @@ def test_the_contrast_curve_decides_each_report(one_mode):
     tp = _truth_elements()[-1]
     epochs = jnp.array([tp, tp + period / 2])
     wide = (jnp.array([0.0, 10.0]), jnp.array([80.0, 80.0]))
-    sep = _score(one_mode, epochs, wide)["separation"][:, 0]
+    sep = _score(one_mode, epochs, wide).separation_arcsec[:, 0]
     assert sep[0] < sep[1]
 
     between = jnp.array([1.05 * sep[0], 0.95 * sep[1]])
     outside = _score(one_mode, epochs, (between, jnp.array([50.0, 50.0])))
-    np.testing.assert_array_equal(outside["detectability"], jnp.zeros((2, 1)))
-    np.testing.assert_array_equal(outside["total_eig"], jnp.zeros(2))
+    np.testing.assert_array_equal(outside.eig.detectability, jnp.zeros((2, 1)))
+    np.testing.assert_array_equal(outside.eig.total, jnp.zeros(2))
 
     covering = jnp.array([0.5 * sep[0], 2.0 * sep[1]])
     deep, shallow = [
         _score(one_mode, epochs, (covering, jnp.full(2, depth)))
         for depth in (50.0, 1.0)
     ]
-    assert jnp.all((1.0 < deep["dMag"]) & (deep["dMag"] < 50.0))
-    np.testing.assert_array_equal(deep["detectability"], jnp.ones((2, 1)))
-    assert jnp.all(deep["total_eig"] > 0.0)
-    np.testing.assert_array_equal(shallow["detectability"], jnp.zeros((2, 1)))
-    np.testing.assert_array_equal(shallow["total_eig"], jnp.zeros(2))
+    assert jnp.all((1.0 < deep.dmag) & (deep.dmag < 50.0))
+    np.testing.assert_array_equal(deep.eig.detectability, jnp.ones((2, 1)))
+    assert jnp.all(deep.eig.total > 0.0)
+    np.testing.assert_array_equal(shallow.eig.detectability, jnp.zeros((2, 1)))
+    np.testing.assert_array_equal(shallow.eig.total, jnp.zeros(2))
 
 
 @pytest.mark.medium(reason="a scale-and-rotate run, the clustering and the EIG forward")
@@ -205,10 +205,10 @@ def test_modes_of_a_run_score_every_candidate():
     posterior = run(_fit(_term(n_rows=1)), few_epoch(n_draws=2**12), KEY)
     assert np.isneginf(np.asarray(posterior.log_weights)).any()
     epochs = jnp.linspace(0.0, 2000.0, 12)
-    result = evaluate_orbit_candidates(
+    result = eig_astrometry(
         posterior, epochs, 0.004**2, key=jax.random.key(1), n_modes=4
     )
-    total = np.asarray(result["total_eig"])
+    total = np.asarray(result.eig.total)
     assert total.shape == (12,)
     assert np.all(np.isfinite(total) & (total >= 0.0)), total
     assert np.ptp(total) > 0.0

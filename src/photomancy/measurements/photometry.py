@@ -22,7 +22,6 @@ from photomancy.infer.fit import AbstractTerm
 from photomancy.measurements._observables import _band_contrasts
 from photomancy.measurements._padding import (
     MAX_CC_PTS,
-    MAX_IMG,
     _pad_1d,
     _pad_2d,
     _valid_mask,
@@ -88,7 +87,8 @@ class DMagData(eqx.Module):
         null_sep_grid,
         null_dmag0_grid,
         snr_thresh=5.0,
-        max_n=MAX_IMG,
+        *,
+        max_n,
         max_pts=MAX_CC_PTS,
     ):
         """Build from separate detection and null arrays with padding.
@@ -156,7 +156,8 @@ class DMagData(eqx.Module):
         sep_grids,
         contrast_grids,
         snr_thresh=5.0,
-        max_n=MAX_IMG,
+        *,
+        max_n,
         max_pts=MAX_CC_PTS,
     ):
         """Null epochs from contrast curves, with every epoch a non-detection.
@@ -198,7 +199,7 @@ class DMagData(eqx.Module):
         dmag_obs,
         dmag_err,
         snr_thresh=5.0,
-        max_n=MAX_IMG,
+        max_n,
         max_pts=MAX_CC_PTS,
     ):
         """Create a padded DMagData with an ``is_valid`` mask."""
@@ -215,7 +216,7 @@ class DMagData(eqx.Module):
         )
 
     @classmethod
-    def zeros(cls, max_n=MAX_IMG, max_pts=MAX_CC_PTS, snr_thresh=5.0):
+    def zeros(cls, max_n, max_pts=MAX_CC_PTS, snr_thresh=5.0):
         """Create an all-invalid placeholder (for model tracing)."""
         return cls(
             time_d=jnp.zeros(max_n),
@@ -234,7 +235,7 @@ class PhotometryData(eqx.Module):
 
     All fields have shape ``(N,)``. ``time_d`` uses the system's day frame;
     ``contrast`` and ``contrast_err`` are dimensionless linear flux ratios.
-    ``band_id`` and ``planet_id`` index the term's bandpasses and system planets.
+    ``band_id`` and ``planet`` index the term's bandpasses and system planets.
     ``is_upper_limit`` selects a Gaussian cumulative probability below the
     reported contrast; ``is_valid`` excludes padded rows.
     """
@@ -243,7 +244,7 @@ class PhotometryData(eqx.Module):
     contrast: jnp.ndarray
     contrast_err: jnp.ndarray
     band_id: jnp.ndarray
-    planet_id: jnp.ndarray
+    planet: jnp.ndarray
     is_upper_limit: jnp.ndarray
     is_valid: jnp.ndarray
 
@@ -255,9 +256,9 @@ class PhotometryData(eqx.Module):
         contrast,
         contrast_err,
         band_id,
-        planet_id,
+        planet,
         is_upper_limit,
-        max_n=MAX_IMG,
+        max_n,
     ):
         """Pad contrast observations, using unit errors on invalid rows."""
         n = jnp.asarray(time_d).shape[0]
@@ -266,7 +267,7 @@ class PhotometryData(eqx.Module):
             contrast=_pad_1d(contrast, max_n),
             contrast_err=_pad_1d(contrast_err, max_n, fill=1.0),
             band_id=_pad_1d(band_id, max_n).astype(int),
-            planet_id=_pad_1d(planet_id, max_n).astype(int),
+            planet=_pad_1d(planet, max_n).astype(int),
             is_upper_limit=_pad_1d(is_upper_limit, max_n).astype(bool),
             is_valid=_valid_mask(n, max_n),
         )
@@ -279,7 +280,7 @@ class PhotometryData(eqx.Module):
         dmag,
         dmag_err,
         band_id,
-        planet_id=None,
+        planet=None,
         is_upper_limit=None,
         max_n=None,
     ):
@@ -292,8 +293,8 @@ class PhotometryData(eqx.Module):
         """
         time_d = jnp.asarray(time_d)
         contrast = delta_mag_to_contrast(jnp.asarray(dmag))
-        if planet_id is None:
-            planet_id = jnp.zeros(time_d.shape, dtype=int)
+        if planet is None:
+            planet = jnp.zeros(time_d.shape, dtype=int)
         if is_upper_limit is None:
             is_upper_limit = jnp.zeros(time_d.shape, dtype=bool)
         values = dict(
@@ -301,7 +302,7 @@ class PhotometryData(eqx.Module):
             contrast=contrast,
             contrast_err=0.4 * jnp.log(10.0) * contrast * jnp.asarray(dmag_err),
             band_id=jnp.asarray(band_id, dtype=int),
-            planet_id=jnp.asarray(planet_id, dtype=int),
+            planet=jnp.asarray(planet, dtype=int),
             is_upper_limit=jnp.asarray(is_upper_limit, dtype=bool),
         )
         if max_n is not None:
@@ -520,7 +521,7 @@ class PhotometryTerm(AbstractTerm):
             contrast=jnp.where(valid, self.data.contrast, 0.0),
             contrast_err=jnp.where(valid, self.data.contrast_err, 1.0),
             band_id=jnp.where(valid, self.data.band_id, 0),
-            planet_id=jnp.where(valid, self.data.planet_id, 0),
+            planet=jnp.where(valid, self.data.planet, 0),
             is_upper_limit=jnp.where(valid, self.data.is_upper_limit, False),
             is_valid=valid,
         )
@@ -531,7 +532,7 @@ class PhotometryTerm(AbstractTerm):
             self.bandpasses,
             data.time_d,
             data.band_id,
-            data.planet_id,
+            data.planet,
         )
         prediction = jnp.where(valid, prediction, 0.0)
         z = (data.contrast - prediction) / data.contrast_err

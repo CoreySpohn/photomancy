@@ -31,7 +31,7 @@ from photomancy.infer import (
     pareto_khat,
     run,
 )
-from photomancy.infer.backends.grid import midpoint
+from photomancy.infer.backends.grid import midpoint_rule
 
 jax.config.update("jax_enable_x64", True)
 
@@ -226,7 +226,9 @@ def test_prior_swap_agrees_with_direct_sampling_and_the_exact_evidence(cloud):
     assert se > float(cloud.log_evidence_se) and se < 0.05
     assert abs(float(swapped.log_evidence) - exact) < 4 * se
     _check_target(swapped)
-    direct = run(swapped.fit, Grid({KEY: midpoint(1.0, 3.0, 2000)}), jax.random.key(0))
+    direct = run(
+        swapped.fit, Grid({KEY: midpoint_rule(1.0, 3.0, 2000)}), jax.random.key(0)
+    )
     assert abs(float(swapped.log_evidence) - float(direct.log_evidence)) < 4 * se
     (m1, s1), (m2, s2) = _moments(swapped), _moments(direct)
     assert abs(m1 - m2) < 1e-2 and abs(s1 - s2) < 1e-2
@@ -337,7 +339,9 @@ def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):
         cloud.with_priors({KEY: Uniform(1.0, 3.0)}, min_n_eff=None, max_khat=None)
     with pytest.raises(ValueError, match="cannot change the free set"):
         cloud.with_priors({"other": Uniform(1.0, 3.0)}, min_n_eff=0, max_khat=1.0)
-    grid = run(_leaf_fit(), Grid({KEY: midpoint(0.0, HIGH, 400)}), jax.random.key(0))
+    grid = run(
+        _leaf_fit(), Grid({KEY: midpoint_rule(0.0, HIGH, 400)}), jax.random.key(0)
+    )
     with pytest.raises(ValueError, match="no Monte Carlo gate"):
         grid.with_priors({KEY: Uniform(1.0, 3.0)}, min_n_eff=10, max_khat=0.7)
     swapped = grid.with_priors({KEY: Uniform(1.0, 3.0)}, min_n_eff=None, max_khat=None)
@@ -380,7 +384,7 @@ def test_append_agrees_with_a_refit_and_the_exact_evidence():
     out = first.append_term(extra, min_n_eff=1000, max_khat=0.7)
     assert len(out.fit.terms) == 2 and len(first.fit.terms) == 1
     _check_target(out)
-    refit = run(out.fit, Grid({KEY: midpoint(0.0, HIGH, 4000)}), jax.random.key(0))
+    refit = run(out.fit, Grid({KEY: midpoint_rule(0.0, HIGH, 4000)}), jax.random.key(0))
     se = float(out.log_evidence_se)
     assert 0.0 < se < 0.05
     assert abs(float(out.log_evidence) - float(refit.log_evidence)) < 4 * se

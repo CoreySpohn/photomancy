@@ -1,6 +1,6 @@
-"""The sum over the two line-of-sight sheets of one orbit row, as a term combinator.
+"""The sum over the two line-of-sight sheets of one planet orbit, as a term combinator.
 
-A Thiele-Innes block holds the orbit of its row on one sheet; the reflection of that
+A Thiele-Innes block holds the orbit of its planet on one sheet; the reflection of that
 orbit through the sky plane has the same sky track and the opposite line-of-sight sign.
 Relative astrometry cannot tell the two apart, but radial velocity and phase-dependent
 photometry can. ``SheetSum`` scores the terms it holds on both sheets and averages the
@@ -15,20 +15,20 @@ import jax.numpy as jnp
 from hwoutils.model_paths import assign, resolve
 from orbix.system import reflect_line_of_sight
 
-from photomancy.infer import AbstractConditionalTerm, AbstractTerm, LeafConditional
+from photomancy.infer import AbstractProposingTerm, AbstractTerm, LeafProposal
 
 __all__ = ["SheetSum"]
 
 
-class SheetSum(AbstractConditionalTerm):
-    """The terms that tell the sheets of one orbit row apart, summed over both sheets.
+class SheetSum(AbstractProposingTerm):
+    """The terms that tell the sheets of one planet apart, summed over both sheets.
 
     The value is ``logaddexp(sum_t t(model), sum_t t(reflected)) - log 2``, with
-    ``reflected`` the model whose orbit row ``row`` at ``orbit_path`` is reflected
+    ``reflected`` the model whose orbit of ``planet`` at ``orbit_path`` is reflected
     through the sky plane (:func:`orbix.system.reflect_line_of_sight`). Every term that
-    tells the sheets of that row apart belongs inside one ``SheetSum``: a product of
+    tells the sheets of that planet apart belongs inside one ``SheetSum``: a product of
     two sheet sums is not the sheet sum of the product. ``marginalizes`` names the
-    sheet, so a ``Fit`` refuses a second ``SheetSum`` over the same row, and a term
+    sheet, so a ``Fit`` refuses a second ``SheetSum`` over the same planet, and a term
     added later enters through ``replace_term`` of the ``SheetSum``. Terms that do not
     see the sheet (relative astrometry) stay outside it. For an orbit law that is
     symmetric under the reflection the sum is exact.
@@ -39,12 +39,12 @@ class SheetSum(AbstractConditionalTerm):
     Attributes:
         terms: The terms summed over the two sheets.
         orbit_path: Model path of the stacked orbits.
-        row: Orbit row whose sheet is summed.
+        planet: Index of the planet whose orbit sheet is summed.
     """
 
     terms: tuple[AbstractTerm, ...]
     orbit_path: str = eqx.field(static=True)
-    row: int = eqx.field(static=True, default=0)
+    planet: int = eqx.field(static=True, default=0)
 
     def __check_init__(self):
         """Refuse an empty sum, a non-term, or two held terms that propose a leaf."""
@@ -62,7 +62,7 @@ class SheetSum(AbstractConditionalTerm):
         return [
             t
             for t in self.terms
-            if isinstance(t, AbstractConditionalTerm) and t.leaf_path is not None
+            if isinstance(t, AbstractProposingTerm) and t.leaf_path is not None
         ]
 
     @property
@@ -72,8 +72,8 @@ class SheetSum(AbstractConditionalTerm):
 
     @property
     def marginalizes(self) -> tuple[str, ...]:
-        """The sheet of the orbit row, and what the held terms marginalize."""
-        own = f"{self.orbit_path}[{self.row}].sheet"
+        """The sheet of the planet orbit, and what the held terms marginalize."""
+        own = f"{self.orbit_path}[{self.planet}].sheet"
         return (own, *(m for t in self.terms for m in t.marginalizes))
 
     @property
@@ -83,9 +83,11 @@ class SheetSum(AbstractConditionalTerm):
         return proposers[0].leaf_path if proposers else None
 
     def reflected(self, model):
-        """``model`` with the orbit row reflected through the sky plane."""
+        """``model`` with the planet orbit reflected through the sky plane."""
         orbits = resolve(model, self.orbit_path)
-        return assign(model, self.orbit_path, reflect_line_of_sight(orbits, self.row))
+        return assign(
+            model, self.orbit_path, reflect_line_of_sight(orbits, self.planet)
+        )
 
     def _total(self, model):
         return sum(t(model) for t in self.terms)
@@ -96,7 +98,7 @@ class SheetSum(AbstractConditionalTerm):
             self._total(model), self._total(self.reflected(model))
         ) - jnp.log(2.0)
 
-    def leaf_conditional(self, model) -> LeafConditional:
+    def leaf_proposal(self, model) -> LeafProposal:
         """The proposing term's record on both sheets, components concatenated.
 
         Raises:
@@ -106,9 +108,9 @@ class SheetSum(AbstractConditionalTerm):
         if not proposers:
             raise ValueError("no term in this SheetSum proposes a leaf")
         term = proposers[0]
-        plus = term.leaf_conditional(model)
-        minus = term.leaf_conditional(self.reflected(model))
-        return LeafConditional(
+        plus = term.leaf_proposal(model)
+        minus = term.leaf_proposal(self.reflected(model))
+        return LeafProposal(
             plus.path,
             jnp.concatenate([plus.mean, minus.mean]),
             jnp.concatenate([plus.sd, minus.sd]),

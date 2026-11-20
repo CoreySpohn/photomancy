@@ -5,11 +5,11 @@ import jax.numpy as jnp
 from hwoutils.model_paths import resolve
 
 
-def classical_elements(posterior, key, n, *, orbit_path, row=0):
+def classical_elements(posterior, key, n, *, orbit_path, planet=0):
     """Draw ``n`` samples of a ``Posterior`` and read one orbit's classical elements.
 
     Each draw builds its model through the posterior's ``Fit``; the orbits at
-    ``orbit_path`` give the row's period, size, shape and orientation. The keys are
+    ``orbit_path`` give the planet's period, size, shape and orientation. The keys are
     those of ``FrameOrbit.to_classical``, with ``cos_i`` in place of ``i_rad``, plus
     ``period_d``.
 
@@ -19,7 +19,7 @@ def classical_elements(posterior, key, n, *, orbit_path, row=0):
         n: Number of samples.
         orbit_path: Model path of the batched orbits, for example
             ``"dynamics.orbits"``.
-        row: Planet row of those orbits.
+        planet: Planet index of those orbits.
 
     Returns:
         Dict ``{name: (n,)}`` with ``period_d``, ``a_AU``, ``e``, ``cos_i``,
@@ -30,7 +30,7 @@ def classical_elements(posterior, key, n, *, orbit_path, row=0):
 
     def one(x):
         orbits = resolve(posterior.fit.model_at(x), orbit_path)
-        orbit = jax.tree.map(lambda leaf: leaf[row], orbits)
+        orbit = jax.tree.map(lambda leaf: leaf[planet], orbits)
         classical = orbit.to_classical()
         return {
             "period_d": orbit.period_d,

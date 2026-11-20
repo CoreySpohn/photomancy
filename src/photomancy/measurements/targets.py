@@ -131,7 +131,7 @@ def load_target(
             sep_err=[_mean_error(r["sep_err_mas"]) / 1000.0 for r in rows],
             pa_deg=[r["pa_deg"] for r in rows],
             pa_err_deg=[_mean_error(r["pa_err_deg"]) for r in rows],
-            planet_id=[r.get("planet", 0) for r in rows],
+            planet=[r.get("planet", 0) for r in rows],
         )
     rows = selected["photometry"]
     band_names = tuple(dict.fromkeys(r["filter"] for r in rows))
@@ -142,7 +142,7 @@ def load_target(
             dmag=[r["dmag"] for r in rows],
             dmag_err=[_mean_error(r["dmag_err"]) for r in rows],
             band_id=[band_names.index(r["filter"]) for r in rows],
-            planet_id=[r.get("planet", 0) for r in rows],
+            planet=[r.get("planet", 0) for r in rows],
             is_upper_limit=[r.get("upper_limit", False) for r in rows],
         )
     return TargetData(

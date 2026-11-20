@@ -45,7 +45,7 @@ from photomancy.infer import (
     run,
 )
 from photomancy.infer.backends._flat import draw_template, start_points
-from photomancy.infer.backends.grid import gauss_legendre, midpoint
+from photomancy.infer.backends.grid import gauss_legendre_rule, midpoint_rule
 from photomancy.infer.backends.laplace import _merge_modes
 from photomancy.infer.diagnostics import khat_threshold, pareto_khat
 from photomancy.infer.evidence import importance_evidence
@@ -195,11 +195,11 @@ def test_cluster_to_mixture_takes_init_centers_and_checks_their_shape():
         ({KEY: left[:, None]}, jnp.full(400, -math.log(400))),
     )
     mixture = cluster_to_mixture(
-        split, 2, None, init={KEY: jnp.array([[0.4], [2.9]])}, iters=3
+        split, 2, None, init={KEY: jnp.array([[0.4], [2.9]])}, n_steps=3
     )
     means = np.sort(np.asarray(mixture.component_distribution.loc).ravel())
     np.testing.assert_allclose(means, [0.5, 3.0], atol=1e-6)
-    with pytest.raises(ValueError, match="expected k=2"):
+    with pytest.raises(ValueError, match="expected n_modes=2"):
         cluster_to_mixture(split, 2, None, init={KEY: jnp.array([[0.4]])})
     with pytest.raises(ValueError, match="init needs the entries"):
         cluster_to_mixture(split, 2, None, init={"other": jnp.zeros((2, 1))})
@@ -274,7 +274,7 @@ def test_grid_is_quadrature_with_the_exact_evidence():
     fit = _leaf_fit()
     errors = []
     for n in (200, 800):
-        post = run(fit, Grid({KEY: midpoint(0.0, HIGH, n)}), jax.random.key(0))
+        post = run(fit, Grid({KEY: midpoint_rule(0.0, HIGH, n)}), jax.random.key(0))
         assert post.kind == "quadrature"
         _check_contract(post, fit, n)
         errors.append(abs(float(post.log_evidence) - _exact_log_z()))
@@ -282,12 +282,12 @@ def test_grid_is_quadrature_with_the_exact_evidence():
     assert errors[1] < errors[0] and errors[1] < 1e-5
     mean, sd = _moments(post)
     assert abs(mean - 1.5) < 1e-6 and abs(sd - WIDTH) < 1e-3
-    gl = run(fit, Grid({KEY: gauss_legendre(0.0, HIGH, 200)}), jax.random.key(0))
+    gl = run(fit, Grid({KEY: gauss_legendre_rule(0.0, HIGH, 200)}), jax.random.key(0))
     assert abs(float(gl.log_evidence) - _exact_log_z()) < 1e-6
     with pytest.raises(ValueError, match="non-positive weight"):
         run(fit, Grid({KEY: (jnp.arange(3.0), jnp.array([1.0, -1.0, 1.0]))}), None)
     with pytest.raises(ValueError, match="exactly the degrees of freedom"):
-        run(fit, Grid({"x": midpoint(0.0, 1.0, 3)}), None)
+        run(fit, Grid({"x": midpoint_rule(0.0, 1.0, 3)}), None)
 
 
 def test_laplace_corrects_the_gaussian_with_importance_weights():
@@ -453,7 +453,7 @@ def test_mclmc_recovers_the_mean():
         {KEY: Uniform(0.0, HIGH), "planets[0].physical_model.Ag": Uniform(0.1, 1.0)},
         (_Gauss(jnp.asarray(1.5)),),
     )
-    post = run(fit, MCLMC(n_tune=500, n_draws=2000, n_chains=2), jax.random.key(0))
+    post = run(fit, MCLMC(n_warmup=500, n_draws=2000, n_chains=2), jax.random.key(0))
     _check_contract(post, fit, 4000)
     assert np.isnan(float(post.log_evidence))
     assert abs(_moments(post)[0] - 1.5) < 0.05
@@ -561,7 +561,7 @@ _WORLD_BACKENDS = {
         n_centers=16,
         target_cess=0.05,
     ),
-    "grid": Grid({KEY: midpoint(0.0, HIGH, 120)}),
+    "grid": Grid({KEY: midpoint_rule(0.0, HIGH, 120)}),
 }
 
 
@@ -614,7 +614,7 @@ def test_a_nan_term_refuses_the_slice_instead_of_zero_weight():
     start = {KEY: jnp.asarray([1.5])}
     laplace = run(fit, Laplace(n_draws=4000, init=start), jax.random.key(0))
     assert np.any(np.isnan(np.asarray(fit.log_density(laplace.samples))))
-    grid = run(fit, Grid({KEY: midpoint(0.0, HIGH, 200)}), jax.random.key(0))
+    grid = run(fit, Grid({KEY: midpoint_rule(0.0, HIGH, 200)}), jax.random.key(0))
     for post in (laplace, grid):
         assert np.all(np.isnan(np.asarray(post.log_weights)))
         assert np.isnan(float(post.log_evidence))
@@ -952,7 +952,7 @@ def test_nuts_and_mclmc_agree_on_the_golden_orbit():
     )
     mclmc = run(
         _golden_fit(),
-        MCLMC(n_tune=1500, n_draws=3000, n_chains=3, init=_golden_start()),
+        MCLMC(n_warmup=1500, n_draws=3000, n_chains=3, init=_golden_start()),
         jax.random.key(5),
     )
     m_n, sd = _chain_features(nuts, 4, 600)

@@ -159,7 +159,7 @@ def build_fit(term=None):
         ra_err=jnp.full(2, 0.0035),
         dec_err=jnp.full(2, 0.0035),
         corr=jnp.zeros(2),
-        planet_id=jnp.zeros(2, int),
+        planet=jnp.zeros(2, int),
         is_valid=jnp.ones(2, bool),
     )
     free = {
@@ -281,7 +281,7 @@ def _scores(fit, both, one, z, astro=None):
     def per(zi):
         x, _ = fit.from_flat(zi)
         model = fit.model_at(x)
-        record = both.leaf_conditional(model)
+        record = both.leaf_proposal(model)
         pair = (model, both.reflected(model))
         sheets = jnp.stack(
             [one(m) + (0.0 if astro is None else astro(m)) for m in pair]
