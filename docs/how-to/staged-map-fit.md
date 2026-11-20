@@ -170,17 +170,18 @@ for the prediction, so it compiles a larger program than a fit without one.
 ## Give the solved coefficients a wide prior
 
 A MAP fit returns the point where the whole objective, the prior included, is largest.
-The coefficients that a stage solves for, by
-gradient or by `closed_form`, should therefore carry a prior wide enough to be negligible
-next to the data, a Normal of width `1e8` rather than a few units.
+The coefficients that a stage solves for, by gradient or by `closed_form`, should
+therefore carry a prior wide enough to be negligible next to the data, a Normal of width
+`1e8` rather than a few units.
 
-The reason is the optimizer. The gradient of a Normal prior with mean `m` and width `w` is
-`(x - m) / w**2`. Adam divides each step by a running estimate of the gradient size, so
-near the optimum, where the data gradient has shrunk, a small prior gradient is a large
-share of what Adam normalizes and it moves the answer. With a Normal of width `1e3`, Adam
-amplifies the prior gradient to about `1e-2` relative in the solved coefficients, while a
-width of `1e8` agrees with the closed-form answer to `1e-13`. A wide prior does not change what the data say, because the prior is flat across
-the range the data allow. The fits on this page use `1e8` for that reason.
+The prior pulls the optimum toward its mean by about its own gradient, `(x - m) / w**2`
+for a Normal with mean `m` and width `w`, divided by how sharply the data constrain that
+coefficient. For a coefficient the data pin down tightly the pull is invisible. For one the
+data constrain only weakly, it is not: in an exposure fit whose detector seam coefficients
+are weakly constrained, a Normal of width `1e3` moved them by about `1e-2` relative, while
+a width of `1e8` matched the closed-form answer to `1e-13`. A wide prior does not change
+what the data say, because it is flat across the range the data allow. The fits on this
+page use `1e8` for that reason.
 
 ## Freezing policies
 
