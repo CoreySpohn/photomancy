@@ -28,6 +28,57 @@
   refit rather than converted. Pass east offsets (Delta RA cos Dec), not
   Delta RA, as `RelativeAstromData.ra`.
 
+## [2.0.0](https://github.com/CoreySpohn/photomancy/compare/v1.0.0...v2.0.0) (2026-11-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* delete the NumPyro orbit model, bridge, forward predictors and legacy routes
+* declare chart and epoch on every chart posterior and check them in EIG, diagnostics and initialization
+* back the fixed-mass and Thiele-Innes targets with the chart density and declare chart and epoch on samples
+* run MAP, Laplace, sampling, SMC and nested backends on the chart density
+* evaluate band contrasts through one multi-band quadrature
+* pass star_planet_distance_AU to skyscapes contrast_cube
+* stamp report tables with their epoch and refuse a mismatched model epoch
+* share one reporting law between refit and report, and move particle weights and resampling into photomancy.particles
+* take projected-orbit scale, gap and mirror completion from orbix
+* fit Thiele-Innes constants with the orbix masked solve, treat separations beyond the contrast curve as undetectable in orbit EIG, and name the atmosphere forward distance dist_AU
+* remove photomancy.fields; use hwoutils random fields, conversions and eyepiece colours
+* Thiele-Innes inversion from orbix, one contrast-curve interpolation, no deprecated eccentricity transform
+* photometry through skyscapes and geometry through orbix, one eccentricity prior and one proper-motion anomaly
+* fit disks through the scene photon radiance on a caller-supplied sky grid
+* **orbit:** orbits_from_samples returns a FrameOrbit and takes the reference day
+
+### Features
+
+* a chart-coordinate system density with an orbit prior against the reference measure ([e787070](https://github.com/CoreySpohn/photomancy/commit/e787070b6c45c849ede02fdb68b63726499cd2ec))
+* add chart routes for Thiele-Innes, few-epoch, projected, grid search, OFTI and initialization ([7bdabdf](https://github.com/CoreySpohn/photomancy/commit/7bdabdf1b94c6a68f1173179f006947bb7dc0f20))
+* back the fixed-mass and Thiele-Innes targets with the chart density and declare chart and epoch on samples ([049808e](https://github.com/CoreySpohn/photomancy/commit/049808edafe0382d6beed4fa1af7065f0c549224))
+* complete physical priors, nuisance coordinates and Frame and Cartesian charts in the chart density ([15a16ef](https://github.com/CoreySpohn/photomancy/commit/15a16ef98c38d9988b40ecafe9500d97146ded99))
+* declare chart and epoch on every chart posterior and check them in EIG, diagnostics and initialization ([be54fbe](https://github.com/CoreySpohn/photomancy/commit/be54fbe76be35cf79ddb7698fb44627051ee74de))
+* delete the NumPyro orbit model, bridge, forward predictors and legacy routes ([815da7d](https://github.com/CoreySpohn/photomancy/commit/815da7d2b41dbbe7426e9b5af5a523cb5736a73c))
+* fit disks through the scene photon radiance on a caller-supplied sky grid ([da4291a](https://github.com/CoreySpohn/photomancy/commit/da4291a83e4ff579929af983fe9b8981169d8f2a))
+* **orbit:** orbits_from_samples returns a FrameOrbit and takes the reference day ([6d2bc9d](https://github.com/CoreySpohn/photomancy/commit/6d2bc9d6f31af23488ded60407ca992f0a0a9b71))
+* run MAP, Laplace, sampling, SMC and nested backends on the chart density ([c969f08](https://github.com/CoreySpohn/photomancy/commit/c969f086afe53fd099410f2531ffa3bbd91fd6d4))
+* score every observable channel as an explicit term of the chart density ([130c291](https://github.com/CoreySpohn/photomancy/commit/130c291b5c27709be31fb90f478a1a9ade597562))
+* stamp report tables with their epoch and refuse a mismatched model epoch ([b06f614](https://github.com/CoreySpohn/photomancy/commit/b06f61494d8dcfee8def0077b2c9e3884ee4a750))
+
+
+### Bug Fixes
+
+* fit Thiele-Innes constants with the orbix masked solve, treat separations beyond the contrast curve as undetectable in orbit EIG, and name the atmosphere forward distance dist_AU ([484ef90](https://github.com/CoreySpohn/photomancy/commit/484ef905deb3da0537ec7de33918fe1e4abd4960))
+
+
+### Code Refactoring
+
+* evaluate band contrasts through one multi-band quadrature ([015ce44](https://github.com/CoreySpohn/photomancy/commit/015ce440d8d38b9c8daf061bf38b6e7e763df8db))
+* pass star_planet_distance_AU to skyscapes contrast_cube ([f85e796](https://github.com/CoreySpohn/photomancy/commit/f85e7967a784f9aa5b0f79618df7aafc50fe0ac5))
+* photometry through skyscapes and geometry through orbix, one eccentricity prior and one proper-motion anomaly ([0fd31f4](https://github.com/CoreySpohn/photomancy/commit/0fd31f4c79778f1aa51875cc74f2d70bcd9fea44))
+* remove photomancy.fields; use hwoutils random fields, conversions and eyepiece colours ([bcc205f](https://github.com/CoreySpohn/photomancy/commit/bcc205f1bc11b9c1523d7072d4d7dc61394a117d))
+* share one reporting law between refit and report, and move particle weights and resampling into photomancy.particles ([15c2556](https://github.com/CoreySpohn/photomancy/commit/15c25564a33271cf36927349c7b6fa90f03839f0))
+* take projected-orbit scale, gap and mirror completion from orbix ([84d12eb](https://github.com/CoreySpohn/photomancy/commit/84d12eb8b247704710e672d1a296c7e1ca339657))
+* Thiele-Innes inversion from orbix, one contrast-curve interpolation, no deprecated eccentricity transform ([efc04aa](https://github.com/CoreySpohn/photomancy/commit/efc04aa308c3c69de29f82f8942d9e8858ed63ab))
+
 ## [1.0.0](https://github.com/CoreySpohn/photomancy/compare/v0.6.0...v1.0.0) (2026-11-16)
 
 
