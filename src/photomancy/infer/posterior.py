@@ -85,11 +85,11 @@ class ReweightInfo(eqx.Module):
     """The gate reading of a reweight, one value per slice.
 
     ``Posterior.with_priors``, ``append_term`` and ``replace_term`` return it in
-    ``info``, and :func:`~photomancy.infer.update` passes it through whether or not it
-    refits. The reading is taken on the combined weights before the gate decides, so a
-    refused slice still says why. A ``quadrature`` posterior has no Monte Carlo gate:
-    ``n_eff`` and ``khat`` are NaN and ``refused`` is true when any weight of the slice
-    is NaN.
+    ``info``; :func:`~photomancy.infer.update` returns it as the ``reweight`` field of
+    :class:`UpdateInfo`. The reading is taken on the combined weights before the gate
+    decides, so a refused slice still says why. A ``quadrature`` posterior has no
+    Monte Carlo gate: ``n_eff`` and ``khat`` are NaN and ``refused`` is true when any
+    weight of the slice is NaN.
 
     Attributes:
         n_eff: Kish effective sample size of the combined weights.
@@ -101,6 +101,22 @@ class ReweightInfo(eqx.Module):
     n_eff: jax.Array
     khat: jax.Array
     refused: jax.Array
+
+
+class UpdateInfo(eqx.Module):
+    """What :func:`~photomancy.infer.update` returns in ``info``, one value per slice.
+
+    Attributes:
+        reweight: The gate's :class:`ReweightInfo`, read before any refit;
+            ``reweight.refused`` true means the refit ran.
+        refit: The refit backend's own info, equal to
+            ``run(new_fit, backend, key).info`` where ``reweight.refused`` is true
+            and filled elsewhere (floats NaN, integers zero, booleans false), with
+            the same structure either way.
+    """
+
+    reweight: ReweightInfo
+    refit: eqx.Module
 
 
 def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):

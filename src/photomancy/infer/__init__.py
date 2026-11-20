@@ -57,6 +57,7 @@ from photomancy.infer.posterior import (
     Forecast,
     Posterior,
     ReweightInfo,
+    UpdateInfo,
     cluster_to_mixture,
     ravel_samples,
 )
@@ -105,6 +106,7 @@ __all__ = [
     "Posterior",
     "PriorProposal",
     "ReweightInfo",
+    "UpdateInfo",
     "cluster_to_mixture",
     "eig_contrastive",
     "eig_nested",

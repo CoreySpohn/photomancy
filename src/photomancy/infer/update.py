@@ -1,9 +1,10 @@
 """``update``: add or replace one term, and refit where the reweighting is refused."""
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from photomancy.infer.posterior import Posterior
+from photomancy.infer.posterior import Posterior, UpdateInfo
 from photomancy.infer.run import run
 
 __all__ = ["update"]
@@ -26,6 +27,14 @@ def _signature(tree):
     ]
 
 
+def _filled(shape):
+    """A placeholder for an info leaf: NaN floats, zero integers, false booleans."""
+    if not isinstance(shape, jax.ShapeDtypeStruct):
+        return shape
+    nan = jnp.issubdtype(shape.dtype, jnp.floating)
+    return jnp.full(shape.shape, jnp.nan if nan else 0, shape.dtype)
+
+
 def update(
     posterior,
     term,
@@ -45,16 +54,19 @@ def update(
     is refitted by ``run(new_fit, backend, key)`` and every other slice keeps the
     reweighted cloud. There is no second criterion.
 
-    The result carries ``info``, the :class:`~photomancy.infer.posterior.ReweightInfo`
-    of the gate, read before any refit: ``refused`` true means the refit ran. Both
-    outcomes return that same reading (the refit's own diagnostics are not kept, so
-    both have one structure). The refit must return the cloud's own layout: the
+    The result carries ``info``, an :class:`~photomancy.infer.posterior.UpdateInfo`.
+    ``info.reweight`` is the :class:`~photomancy.infer.posterior.ReweightInfo` of the
+    gate, read before any refit; ``info.reweight.refused`` is true where the refit ran,
+    which is also how a fresh NaN evidence is told from one inherited from an earlier
+    refusal. ``info.refit`` is the backend's own info, equal to
+    ``run(new_fit, backend, key).info`` where the refit ran. Elsewhere it has the same
+    structure, filled (floats NaN, integers zero, booleans false), so both
+    ``jax.lax.cond`` branches agree. Read ``info.refit.proposal_valid`` and the
+    backend's k-hat there. The refit must return the cloud's own layout: the
     same draw count, sample shapes and dtypes and the same ``kind``; a backend that
     does not raises ``ValueError`` on the host when traced. Its draw count is the
-    backend's, so build it with the posterior's size. The refit's evidence follows the
-    contract of :func:`~photomancy.infer.run.run`: NaN unless the Pareto k-hat is at or
-    below ``khat_threshold(n_draws)`` and the proposal reports its weights valid
-    (``info.proposal_valid``; for ``any_epoch``, at least half the pool effective).
+    backend's, so build it with the posterior's size. The evidence of a refit follows
+    the contract on :attr:`Posterior.log_evidence`.
 
     The choice is one ``jax.lax.cond``. For one slice it is lazy: the backend runs
     only on a refusal. Under ``eqx.filter_vmap`` over worlds the predicate is batched
@@ -85,7 +97,7 @@ def update(
 
     Returns:
         A :class:`~photomancy.infer.posterior.Posterior` over the new fit, whose
-        ``info`` is the gate's :class:`~photomancy.infer.posterior.ReweightInfo`.
+        ``info`` is an :class:`~photomancy.infer.posterior.UpdateInfo`.
 
     Raises:
         ValueError: On the host, as :meth:`Posterior.append_term`, or for a refit whose
@@ -100,7 +112,6 @@ def update(
             index, term, min_n_eff=min_n_eff, max_khat=max_khat, batch_size=batch_size
         )
     refused = jnp.any(jnp.isnan(moved.log_weights))
-    info = moved.info
     kept = _dynamic(moved)
 
     def refit():
@@ -117,10 +128,11 @@ def update(
                 "sample shapes and dtypes); got "
                 f"{_signature(fresh)[1]} against {_signature(kept)[1]}"
             )
-        return fresh
+        return fresh, new.info
 
-    samples, lw, target, evidence, evidence_se = jax.lax.cond(
-        refused, refit, lambda: kept
+    placeholder = jax.tree.map(_filled, eqx.filter_eval_shape(refit)[1])
+    (samples, lw, target, evidence, evidence_se), refit_info = jax.lax.cond(
+        refused, refit, lambda: (kept, placeholder)
     )
     return Posterior(
         samples=samples,
@@ -129,6 +141,6 @@ def update(
         log_evidence=evidence,
         log_evidence_se=evidence_se,
         fit=moved.fit,
-        info=info,
+        info=UpdateInfo(reweight=moved.info, refit=refit_info),
         kind=moved.kind,
     )

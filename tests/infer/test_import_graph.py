@@ -328,3 +328,9 @@ def test_measurement_data_name_their_time_time_d_and_hide_the_padding_sizes():
         "MAX_STELLAR_ASTROM",
     ):
         assert not hasattr(measurements, name), name
+
+
+def test_update_info_is_exported_from_infer():
+    """Fails if ``UpdateInfo`` leaves ``photomancy.infer`` or its ``__all__``."""
+    assert "UpdateInfo" in photomancy.infer.__all__
+    assert photomancy.infer.UpdateInfo.__name__ == "UpdateInfo"

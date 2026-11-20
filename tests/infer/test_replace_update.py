@@ -16,6 +16,7 @@ from photomancy.infer import (
     Grid,
     Laplace,
     ReweightInfo,
+    UpdateInfo,
     eig_contrastive,
     eig_nested,
     kish_ess,
@@ -160,23 +161,34 @@ def test_the_refusal_is_per_slice_and_update_refits_only_where_refused():
     keys = jax.random.split(jax.random.key(5), 2)
     fresh = eqx.filter_vmap(refresh)(stack, keys)
     assert fresh.log_weights.shape == (2, 4000)
+    assert isinstance(fresh.info, UpdateInfo)
     np.testing.assert_array_equal(np.asarray(out.info.refused), [False, True])
     for field in ("n_eff", "khat", "refused"):
         np.testing.assert_array_equal(
-            getattr(fresh.info, field), getattr(out.info, field)
+            getattr(fresh.info.reweight, field), getattr(out.info, field)
         )
     three = jax.tree.map(lambda x, y: jnp.stack([x[0], x[1], y]), stack, a)
     mapped = jax.lax.map(
         lambda pk: refresh(*pk), (three, jax.random.split(jax.random.key(5), 3))
     )
     for field in ("n_eff", "khat", "refused"):
-        leaf = getattr(mapped.info, field)
+        leaf = getattr(mapped.info.reweight, field)
         assert leaf.shape == (3,)
         np.testing.assert_allclose(leaf[:2], getattr(out.info, field), rtol=1e-12)
+    assert all(leaf.shape[0] == 3 for leaf in jax.tree.leaves(mapped.info))
     np.testing.assert_allclose(fresh.log_weights[0], alone.log_weights, rtol=1e-12)
     np.testing.assert_allclose(fresh.log_evidence[0], alone.log_evidence, rtol=1e-12)
     assert np.all(np.isfinite(fresh.log_weights[1]))
     own = refresh(b, keys[1])
+    direct = run(own.fit, backend, keys[1])
+    for got, want in zip(
+        jax.tree.leaves(own.info.refit), jax.tree.leaves(direct.info), strict=True
+    ):
+        np.testing.assert_allclose(got, want, rtol=1e-10, equal_nan=True)
+    for leaf in jax.tree.leaves(alone_info := refresh(a, keys[0]).info.refit):
+        leaf = np.asarray(leaf)
+        assert np.all(np.isnan(leaf) if leaf.dtype.kind == "f" else leaf == 0)
+    assert alone_info.importance.proposal_valid.dtype == bool
     np.testing.assert_allclose(fresh.log_weights[1], own.log_weights, rtol=1e-10)
     np.testing.assert_allclose(fresh.log_evidence[1], own.log_evidence, rtol=1e-10)
     # The refit is the posterior of both narrow terms: N(2.65, WIDTH / sqrt 2).
@@ -205,13 +217,15 @@ def test_update_appends_without_an_index_and_keeps_a_passing_cloud(cloud):
     direct = cloud.append_term(_Gauss(jnp.asarray(1.6)), **GATE)
     np.testing.assert_array_equal(kept.log_weights, direct.log_weights)
     np.testing.assert_array_equal(kept.samples[KEY], cloud.samples[KEY])
-    assert len(kept.fit.terms) == 3 and isinstance(kept.info, ReweightInfo)
-    assert not bool(kept.info.refused)
-    np.testing.assert_array_equal(kept.info.n_eff, direct.info.n_eff)
-    np.testing.assert_array_equal(kept.info.khat, direct.info.khat)
-    np.testing.assert_allclose(kept.info.n_eff, kish_ess(kept.log_weights), rtol=1e-12)
+    assert len(kept.fit.terms) == 3 and isinstance(kept.info.reweight, ReweightInfo)
+    assert not bool(kept.info.reweight.refused)
+    np.testing.assert_array_equal(kept.info.reweight.n_eff, direct.info.n_eff)
+    np.testing.assert_array_equal(kept.info.reweight.khat, direct.info.khat)
     np.testing.assert_allclose(
-        kept.info.khat, pareto_khat(kept.log_weights), rtol=1e-12
+        kept.info.reweight.n_eff, kish_ess(kept.log_weights), rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        kept.info.reweight.khat, pareto_khat(kept.log_weights), rtol=1e-12
     )
     far = _Gauss(jnp.asarray(3.0))
     refused = cloud.append_term(far, **GATE)
@@ -251,8 +265,10 @@ def test_update_on_a_quadrature_posterior_reads_the_real_refusal():
             min_n_eff=None,
             max_khat=None,
         )
-        assert bool(out.info.refused) == expected
-        assert bool(out.info.refused) == bool(np.any(np.isnan(out.log_weights)))
+        assert bool(out.info.reweight.refused) == expected
+        assert bool(out.info.reweight.refused) == bool(
+            np.any(np.isnan(out.log_weights))
+        )
 
 
 def test_update_refuses_a_refit_with_another_layout(cloud):
