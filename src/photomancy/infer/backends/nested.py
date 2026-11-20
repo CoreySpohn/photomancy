@@ -63,7 +63,8 @@ class NestedSampling(AbstractBackend):
         max_samples: Hard cap on stored samples. If the buffer fills first, jaxns
             stops with a nonzero ``termination_reason`` (1 is "reached max samples")
             before the evidence has converged: the samples and weights are returned
-            as they stand and the evidence and its error are NaN.
+            as they stand and the evidence and its error are NaN, a refusal under the
+            contract on :attr:`~photomancy.infer.posterior.Posterior.log_evidence`.
     """
 
     n_live: int | None = eqx.field(static=True, default=None)

@@ -34,13 +34,10 @@ def run(
     The backend returns its native draws and unnormalized log weights; this function
     alone normalizes them, evaluates ``fit.log_density`` at the draws for
     ``log_target``, fixes the float64 fields and attaches the fit. It performs no hidden
-    second pass: a backend with no evidence gives NaN. A finite ``log_evidence`` means
-    every validity condition of its estimator that the backend can compute from its
-    own run has held (for the importance backends, a Pareto k-hat of the weights at or
-    below ``khat_threshold(n_draws)`` and a proposal that reports its weights valid,
-    ``info.proposal_valid``; for ``any_epoch``, at least half the pool effective);
-    otherwise the evidence and its standard error
-    are NaN while the draws and weights are still returned. ``Fit`` already refuses to
+    second pass: a backend with no evidence gives NaN. When the evidence is refused,
+    the draws and weights are still returned; what a finite ``log_evidence`` means is
+    stated once, on :attr:`~photomancy.infer.posterior.Posterior.log_evidence`.
+    ``Fit`` already refuses to
     be built with ``jax_enable_x64`` off, so the float64 fields are guaranteed.
 
     The function is traceable. A stack of worlds is a stacked ``Fit`` mapped with

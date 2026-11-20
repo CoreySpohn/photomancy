@@ -19,7 +19,7 @@ a closed-form update reads the per-term predictions from before the step.
 and a free path names a leaf of that model, so the model must contain every leaf a
 fit frees. The model owns the scene and the instrument (one owner each per fit), and
 :class:`photomancy.image.ImageTerm`, the pixel likelihood over
-``coronagraphoto.expected``, reads them by path. An :class:`ExposureModel` is the legacy
+``coronagraphoto.expected``, reads them by path. An :class:`ExposureModel` is the
 record for the render-function terms: ``instrument``, ``exposures`` (one PyTree of
 per-exposure leaves such as a star position or flux) and ``scene``, so a path is
 ``"instrument.<leaf>"``, ``"exposures[i].<leaf>"`` or ``"scene.<path>"``. A fit of an

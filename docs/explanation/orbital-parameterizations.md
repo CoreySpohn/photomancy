@@ -112,7 +112,7 @@ draws a sky position near one measured epoch, and then solves for the size and t
 that put the orbit through that position. The draws are exact in the prior, so with one
 epoch every weight is equal, and the engine costs about a quarter of `any_epoch`. As more
 epochs arrive the draws spread over orbits that the later epochs rule out, the weights
-concentrate on a few draws, and the evidence is refused under the k-hat rule of
+concentrate on a few draws, and the evidence is refused under the contract of
 [Fits and posteriors](fit-and-posterior). A fit with a free entry other than the orbit
 block is refused by name.
 

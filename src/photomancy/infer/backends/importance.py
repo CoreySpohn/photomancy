@@ -7,11 +7,10 @@ wrapped density). The evidence is
 the importance mean (:func:`photomancy.infer.evidence.importance_evidence`) and is
 consistent whenever the proposal has positive density wherever the target does and the
 weights have a finite mean. Its standard error needs a finite variance of the weights,
-which the Pareto k-hat of the weights tests. The evidence and its error are NaN unless
-``khat <= khat_threshold(n_draws)`` (a NaN k-hat refuses) and the proposal reports its
-weights valid (``info.proposal_valid``; the fourth value of ``weigh``, true for a
-density proposal and, for a completed orbit proposal, at least half the pool
-effective). The draws and their weights are returned either way.
+which the Pareto k-hat of the weights tests. When the evidence is NaN is stated once,
+on :attr:`~photomancy.infer.posterior.Posterior.log_evidence`; the draws and their
+weights are returned either way. The proposal's validity condition is the fourth value
+of ``weigh``.
 ``AdaptiveImportance`` is population Monte Carlo: it
 tempers the target, refits a Gaussian mixture on each round's weighted cloud and
 draws the returned cloud from the last proposal.
@@ -63,12 +62,10 @@ class ImportanceInfo(eqx.Module):
             temperature one (always for ``Importance``). When false, the evidence, its
             standard error and the log weights of the slice are NaN.
         khat: Pareto k-hat of the returned weights, the value judged against
-            ``khat_threshold(n_draws)``. Above it, or NaN, the evidence and its
-            standard error are NaN.
-        proposal_valid: The ``valid`` value of the last round's ``weigh``: the
-            proposal's own condition for its weights to carry an evidence. False makes
-            the evidence and its standard error NaN, with the draws and weights
-            returned. Earlier rounds of ``AdaptiveImportance`` are not read.
+            ``khat_threshold(n_draws)`` (a NaN value refuses).
+        proposal_valid: The ``valid`` value of the last round's ``weigh``, the
+            proposal's own condition for its weights to carry an evidence. Earlier
+            rounds of ``AdaptiveImportance`` are not read.
     """
 
     n_rounds: int = eqx.field(static=True)
@@ -84,11 +81,9 @@ class Importance(AbstractBackend):
 
     The draws and weights are the proposal's (``weigh``) and the evidence is the
     importance mean, so it is consistent for any proposal that covers the target. The
-    evidence and its standard error are NaN when the Pareto k-hat of the weights is
-    not at or below ``khat_threshold(n_draws)`` (``info.khat``): above it the variance
-    of the weights is not finite and the standard error is not an error bar. They are
-    also NaN when the proposal reports its weights invalid (``info.proposal_valid``,
-    the pool condition of a completed orbit proposal). The
+    evidence is refused under the contract on
+    :attr:`~photomancy.infer.posterior.Posterior.log_evidence` (the k-hat is
+    ``info.khat``, the proposal's reading ``info.proposal_valid``). The
     draws and weights are not gated; a caller's thresholds on them (``min_n_eff``,
     ``max_khat``) stay on the operations of the ``Posterior``. ``PriorProposal`` gives
     the prior-sampling estimate, whose weights are the likelihood.
@@ -183,7 +178,7 @@ class AdaptiveImportance(AbstractBackend):
     round draws ``n_draws`` points from the final proposal and weights them to the fit's
     own density, so the returned weights and evidence come from that round alone and are
     importance estimates from independent draws: the last round is an
-    :class:`Importance` run, whose k-hat refusal of the evidence applies. The round
+    :class:`Importance` run, and the same contract applies. The round
     count is fixed and there is no early exit.
 
     The ladder needs one rung per factor of the likelihood that the cloud can absorb,

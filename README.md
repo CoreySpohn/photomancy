@@ -107,8 +107,8 @@ reweighting fails its gate.
   backend produced them: the draws, their normalized weights, the fit's density at each
   draw, and the fit itself, so any quantity of the model can be read at every draw.
 - Bayesian evidence with a standard error for model comparison and detection. A backend
-  that cannot vouch for its estimate (an importance estimate whose Pareto k-hat is above
-  the limit for its draw count, say) returns NaN rather than a wrong number.
+  that cannot vouch for its estimate returns NaN rather than a wrong number; a fit that
+  misses a mode entirely is the one failure it cannot detect.
 - Multimodal posteriors carried as weighted draws, so period aliases and mirror
   ambiguities stay in the cloud rather than being collapsed onto one answer.
 - Sequential updating: `Posterior.append_term` and `Posterior.replace_term` reweight a
@@ -132,6 +132,10 @@ Every backend is passed to `run(fit, backend, key)` and returns a `Posterior`.
 | `NestedSampling` | jaxns nested sampling | yes |
 | `MAP` | staged gradient optimization, one draw at the optimum | no |
 | `Grid` | quadrature on a product grid | yes, without a standard error |
+
+When an evidence is finite and when it is NaN is one contract, stated on
+`Posterior.log_evidence` and explained in the Fits and posteriors page of the
+documentation.
 
 The orbit package adds two configured backends named for the data in hand: `few_epoch()`
 for one or two astrometric epochs, and `any_epoch()` for everything else.

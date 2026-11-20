@@ -228,12 +228,27 @@ class Posterior(eqx.Module):
             normalized prior plus terms against Lebesgue measure on the stored
             coordinates, exactly ``-inf`` off the prior's support. It is never a
             proposal density.
-        log_evidence: Log marginal likelihood ``(*batch,)``, float64, NaN when absent
-            (the MCMC backends have none, and no estimate is invented) or refused by
-            the backend (a validity condition of its estimator failed: the k-hat of
-            importance weights above ``khat_threshold``, or a proposal that reports
-            its weights invalid, ``info.proposal_valid``; for ``any_epoch``, fewer
-            than half the pool effective).
+        log_evidence: Log marginal likelihood ``(*batch,)``, float64. This is the one
+            statement of the evidence contract; every other docstring refers here. The
+            value is NaN when the backend has none (the MCMC backends, ``MAP``: no
+            estimate is invented). A finite value means all three of the following
+            held:
+
+            1. Tail: the Pareto k-hat of the weights is at or below
+               ``khat_threshold(n_draws)``, so their variance is finite (importance
+               backends only).
+            2. Proposal validity: the proposal reports its weights valid,
+               ``info.proposal_valid``. A proposal defines its own condition; one with
+               none always reports valid.
+            3. No refusal: the run reached its target (a tempering ladder that
+               reached temperature one, a mode kept, a nested-sampling run that
+               converged and was not cut by a hard stop, no NaN weight) and every
+               later gate passed (``with_priors``, ``append_term``, ``replace_term``).
+
+            A refused run keeps its draws and weights; only the evidence and its
+            standard error are NaN. The contract has one limit that no check can
+            detect: a fit that misses a mode entirely gives a finite evidence that is
+            wrong. ``log_evidence_se`` follows the same rule.
         log_evidence_se: Standard error of ``log_evidence`` ``(*batch,)``, float64, NaN
             when the backend has none.
         fit: The ``Fit`` whose density the weights target.
