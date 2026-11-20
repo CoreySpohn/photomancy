@@ -45,6 +45,7 @@ from photomancy.infer import (
 )
 from photomancy.infer.backends._flat import draw_template, start_points
 from photomancy.infer.backends.grid import gauss_legendre, midpoint
+from photomancy.infer.backends.laplace import _merge_modes
 from photomancy.infer.diagnostics import khat_threshold, pareto_khat
 from photomancy.infer.evidence import importance_evidence
 from photomancy.infer.posterior import cluster_to_mixture, ravel_samples
@@ -212,7 +213,7 @@ def test_laplace_corrects_the_gaussian_with_importance_weights():
     )
     mean, _ = _moments(post)
     assert abs(mean - 1.5) < 0.01
-    assert post.info.means.shape == (1, 1)
+    assert post.info.flat_means.shape == (1, 1)
 
 
 class _TwoBumps(AbstractTerm):
@@ -236,7 +237,7 @@ def _bimodal_fit():
 
 def _mode_radii(fit, post):
     """Radii of the modes of a Laplace or Pathfinder run, in the stored coordinates."""
-    x, _ = fit.from_real({KEY: post.info.means})
+    x, _ = fit.from_real({KEY: post.info.flat_means})
     return np.asarray(x[KEY])[:, 0]
 
 
@@ -254,6 +255,48 @@ def test_explicit_starts_land_on_distinct_modes(backend):
         jax.random.key(0),
     )
     assert np.all(np.abs(_mode_radii(fit, one) - 1.0) < 0.15)
+
+
+def test_laplace_merges_starts_that_reach_the_same_mode():
+    """Three starts on two bumps keep two modes and map the duplicate to its mode.
+
+    Truth source: the two bumps of ``_TwoBumps`` (radii 1 and 3). Fails if: a
+    duplicate start enters the proposal as a second component of its mode, which
+    doubles that mode's weight and biases the evidence.
+    """
+    fit = _bimodal_fit()
+    starts = {KEY: jnp.array([[1.1], [0.9], [2.9]])}
+    backend = Laplace(n_draws=400, n_modes=3, init=starts)
+    post = run(fit, backend, jax.random.key(0))
+    info = post.info
+    assert int(info.n_modes_kept) == 2
+    index = np.asarray(info.mode_index)
+    assert index[2] == 2 and index[0] == index[1] and index[0] in (0, 1)
+    assert np.asarray(info.kept).tolist().count(True) == 2
+    assert not bool(info.kept[index[0] ^ 1]) and bool(info.kept[index[0]])
+    radii = np.asarray(info.modes[KEY])[:, 0]
+    np.testing.assert_allclose(np.sort(radii[[index[0], 2]]), [1.0, 3.0], atol=0.15)
+    again = run(
+        fit, Laplace(n_draws=400, n_modes=3, init=info.modes), jax.random.key(0)
+    )
+    assert np.asarray(again.info.kept).tolist() == np.asarray(info.kept).tolist()
+    np.testing.assert_array_equal(again.info.mode_index, info.mode_index)
+
+
+def test_merge_distance_wraps_on_periodic_coordinates():
+    """Two modes on either side of the period boundary are one mode."""
+    means = jnp.array([[0.02, 0.0], [5.98, 0.0], [3.0, 0.0]])
+    covs = jnp.broadcast_to(jnp.eye(2) * 0.01, (3, 2, 2))
+    args = (means, covs, jnp.array([2.0, 1.0, 0.0]), jnp.ones(3, bool))
+    kept, index = _merge_modes(*args, (6.0, None), 1.0)
+    assert np.asarray(kept).tolist() == [True, False, True]
+    assert np.asarray(index).tolist() == [0, 0, 2]
+    kept, _ = _merge_modes(*args, (None, None), 1.0)
+    assert np.asarray(kept).all()
+    kept, index = _merge_modes(
+        *args[:3], jnp.array([True, False, True]), (6.0, None), 1.0
+    )
+    assert np.asarray(index).tolist() == [0, -1, 2]
 
 
 def test_explicit_starts_refuse_a_wrong_leading_length():

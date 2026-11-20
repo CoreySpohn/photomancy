@@ -331,9 +331,12 @@ def _modes_and_evidence(label, backend):
         assert len(order) == len(modes), (seed, label)
         for i, mode in zip(order, modes, strict=True):
             np.testing.assert_allclose(score[i], mode["score"], atol=1e-2)
-            np.testing.assert_allclose(info.means[i], mode["mean"], atol=1e-3)
+            np.testing.assert_allclose(info.flat_means[i], mode["mean"], atol=1e-3)
             np.testing.assert_allclose(
-                np.diagonal(np.asarray(info.covs[i])), mode["var"], rtol=1e-2, atol=1e-8
+                np.diagonal(np.asarray(info.flat_covs[i])),
+                mode["var"],
+                rtol=1e-2,
+                atol=1e-8,
             )
 
 
