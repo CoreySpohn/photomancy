@@ -33,6 +33,7 @@ from photomancy.infer import (
     AbstractTerm,
     AdaptiveImportance,
     Fit,
+    ForwardTerm,
     Grid,
     Importance,
     Laplace,
@@ -48,6 +49,7 @@ from photomancy.infer.backends.grid import gauss_legendre, midpoint
 from photomancy.infer.backends.laplace import _merge_modes
 from photomancy.infer.diagnostics import khat_threshold, pareto_khat
 from photomancy.infer.evidence import importance_evidence
+from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.infer.posterior import cluster_to_mixture, ravel_samples
 
 jax.config.update("jax_enable_x64", True)
@@ -177,6 +179,91 @@ def test_cluster_to_mixture_follows_the_modes():
         [0.25, 0.75],
         atol=1e-6,
     )
+
+
+def test_cluster_to_mixture_takes_init_centers_and_checks_their_shape():
+    """``init`` fixes the starting centers; a wrong count is refused.
+
+    Fails if: ``init`` is ignored, or a mismatched ``init`` reaches the clustering.
+    """
+    fit = _leaf_fit()
+    post = run(fit, Laplace(n_draws=400), jax.random.key(2))
+    left = jnp.where(jnp.arange(400) % 4 == 0, 0.5, 3.0)
+    split = eqx.tree_at(
+        lambda p: (p.samples, p.log_weights),
+        post,
+        ({KEY: left[:, None]}, jnp.full(400, -math.log(400))),
+    )
+    mixture = cluster_to_mixture(
+        split, 2, None, init={KEY: jnp.array([[0.4], [2.9]])}, iters=3
+    )
+    means = np.sort(np.asarray(mixture.component_distribution.loc).ravel())
+    np.testing.assert_allclose(means, [0.5, 3.0], atol=1e-6)
+    with pytest.raises(ValueError, match="expected k=2"):
+        cluster_to_mixture(split, 2, None, init={KEY: jnp.array([[0.4]])})
+    with pytest.raises(ValueError, match="init needs the entries"):
+        cluster_to_mixture(split, 2, None, init={"other": jnp.zeros((2, 1))})
+
+
+class _Sinusoid(eqx.Module):
+    logP: jax.Array
+    K: jax.Array
+    phi: jax.Array
+
+
+class _SinusoidForward(eqx.Module):
+    t: jax.Array
+
+    def __call__(self, p):
+        return p.K * jnp.sin(2 * jnp.pi * self.t / 10.0**p.logP + p.phi)
+
+
+@pytest.mark.medium(reason="a three-alias Laplace fit, then clustering on four keys")
+def test_cluster_to_mixture_recovers_period_aliases_from_the_laplace_modes():
+    """One component per alias, weighted by the cloud, when seeded with the modes.
+
+    Truth source: the aliases of a 2.7 d signal sampled once a day, ``1 / (1/P + n)``,
+    and the cloud mass within 3 percent of each. Fails if: distances are taken in
+    unscaled coordinates, where the large range of ``K`` splits the main alias and the
+    minor aliases get no component.
+    """
+    period = 2.7
+    alias = np.array([period, 1 / (1 / period + 1), 1 / (1 / period + 2)])
+    truth = _Sinusoid(jnp.log10(period), jnp.array(5.0), jnp.array(0.7))
+    t = jnp.arange(0.0, 8.0)
+    y = _SinusoidForward(t)(truth) + 0.4 * jax.random.normal(jax.random.key(0), (8,))
+    laws = {
+        "logP": Uniform(jnp.log10(0.3), jnp.log10(5.0)),
+        "K": Uniform(0.0, 10.0),
+        "phi": Uniform(-jnp.pi, jnp.pi),
+    }
+    starts = {
+        "logP": jnp.log10(jnp.asarray(alias)),
+        "K": jnp.full(3, 4.0),
+        "phi": jnp.full(3, 0.5),
+    }
+    fit = Fit(
+        _Sinusoid(jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)),
+        laws,
+        (ForwardTerm(_SinusoidForward(t), gaussian_loglike(y, 0.4)),),
+    )
+    post = run(
+        fit,
+        Laplace(n_draws=2000, n_modes=3, n_steps=200, init=starts),
+        jax.random.key(10),
+    )
+    assert int(post.info.n_modes_kept) == 3
+    w = np.asarray(jax.nn.softmax(post.log_weights))
+    p_cloud = 10.0 ** np.asarray(post.samples["logP"])
+    mass = [w[np.abs(p_cloud - a) < 0.03 * a].sum() for a in alias]
+    for seed in range(4):
+        mix = cluster_to_mixture(post, 3, jax.random.key(seed), init=post.info.modes)
+        p_mix = 10.0 ** np.asarray(mix.component_distribution.loc[:, 1])
+        weight = np.asarray(jax.nn.softmax(mix.mixing_logits))
+        for a, m in zip(alias, mass, strict=True):
+            near = np.abs(p_mix - a) < 0.03 * a
+            assert near.sum() == 1
+            assert abs(weight[near][0] - m) < 0.02
 
 
 # ----- backends on the one-leaf fit with a closed-form evidence ------------------

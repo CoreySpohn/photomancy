@@ -694,23 +694,60 @@ def ravel_samples(posterior, keys=None):
     return flat, unravel
 
 
-def cluster_to_mixture(posterior, k, key, *, keys=None, iters=25, cov_floor=1e-6):
+def _flat_periods(posterior, keys):
+    """Periods of the raveled draw (``None`` for none) for the entries ``keys``."""
+    periods = posterior.fit.periods()
+    names = sorted(posterior.samples)
+    sizes = {
+        name: sum(
+            math.prod(jnp.shape(leaf)[1:])
+            for leaf in jax.tree.leaves(posterior.samples[name])
+        )
+        for name in names
+    }
+    if len(periods) != sum(sizes.values()):
+        return (None,) * sum(sizes[name] for name in (keys or names))
+    out, start = [], 0
+    for name in names:
+        if keys is None or name in keys:
+            out += periods[start : start + sizes[name]]
+        start += sizes[name]
+    return tuple(out)
+
+
+def cluster_to_mixture(
+    posterior, k, key, *, keys=None, init=None, iters=25, cov_floor=1e-6
+):
     """Cluster a posterior into a ``k``-mode Gaussian ``priorities.Mixture``.
 
-    Weighted k-means (fixed iterations) assigns the draws, flattened by
-    :func:`ravel_samples`, to ``k`` clusters. Each mode is the cluster's weighted mean
-    and covariance and its weight is the cluster's mass, so the mixture follows the
-    posterior's modes; draws of zero weight, such as the NaN dead draws of a proposal,
-    take no part. The result is a distribution over the flat vector: use it as the
-    law of one free leaf of shape ``(D,)`` in the next ``Fit``. It has no inverse CDF,
-    so it serves the gradient and sample backends and not nested sampling.
+    The draws, flattened by :func:`ravel_samples`, are assigned to ``k`` clusters by
+    weighted hard-assignment clustering: three rounds of k-means (each draw to the
+    nearest center), then each draw goes to the cluster that maximizes its log mass
+    plus the log density of the cluster's own Gaussian, for ``iters`` rounds in all.
+    Each mode is the cluster's weighted mean and covariance and its weight is the
+    cluster's mass, so the mixture follows the posterior's modes; draws of zero
+    weight, such as the NaN dead draws of a proposal, take no part. The result is a
+    distribution over the flat vector: use it as the law of one free leaf of shape
+    ``(D,)`` in the next ``Fit``. It has no inverse CDF, so it serves the gradient
+    and sample backends and not nested sampling.
+
+    Distances are taken in standardized coordinates (each coordinate divided by the
+    weighted standard deviation of the cloud) and wrapped on the periodic coordinates
+    of ``posterior.fit``, so a coordinate with a large range does not outweigh one
+    that separates the modes. From a random start the clustering can still put two
+    centers on one mode and none on a minor one when the modes are of very unequal
+    mass, so ``init`` is required for separated modes: pass the modes as ``init``
+    (``Laplace``'s ``info.modes``, rows selected by ``info.kept``, is one such set).
 
     Args:
         posterior: An unbatched :class:`Posterior` (one slice; map over worlds).
         k: Number of modes.
-        key: PRNG key for the k-means start (``k`` draws picked by weight).
+        key: PRNG key for the random start (``k`` draws picked by weight); unused
+            when ``init`` is given.
         keys: Entries to cluster, default all.
-        iters: k-means iterations.
+        init: Optional entry dict of the ``k`` starting centers in stored coordinates
+            (every leaf has a leading axis of length ``k``, entries as ``keys``).
+        iters: Clustering iterations.
         cov_floor: Diagonal added to every covariance.
 
     Returns:
@@ -721,32 +758,86 @@ def cluster_to_mixture(posterior, k, key, *, keys=None, iters=25, cov_floor=1e-6
     x, _ = ravel_samples(posterior, keys)
     n, d = x.shape
     w = jax.nn.softmax(posterior.log_weights)
-    # A dead draw (zero weight, possibly NaN) must not reach the weighted sums.
     x = jnp.where(w[:, None] > 0, x, 0.0)
-    centers = x[jax.random.choice(key, n, (k,), p=w)]
-
-    def assign(centers):
-        sq = jnp.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=-1)
-        return jax.nn.one_hot(jnp.argmin(sq, axis=1), k) * w[:, None]
-
-    def step(centers, _):
-        mass_w = assign(centers)
-        mass = jnp.sum(mass_w, axis=0)
-        new = (mass_w.T @ x) / jnp.maximum(mass[:, None], 1e-30)
-        return jnp.where(mass[:, None] > 0, new, centers), None
-
-    centers, _ = jax.lax.scan(step, centers, None, length=iters)
-    mass_w = assign(centers)
-    mass = jnp.sum(mass_w, axis=0)
-    # An empty cluster keeps its center, a live draw, rather than the origin.
-    means = jnp.where(
-        mass[:, None] > 0, (mass_w.T @ x) / jnp.maximum(mass[:, None], 1e-30), centers
+    period = jnp.asarray(
+        [0.0 if p is None else p for p in _flat_periods(posterior, keys)], x.dtype
     )
+    safe = jnp.where(period > 0, period, 1.0)
 
-    def cov(mu, wcol):
-        diff = x - mu
-        return (diff * wcol[:, None]).T @ diff / jnp.maximum(jnp.sum(wcol), 1e-30)
+    def offset(a, b):
+        diff = a - b
+        return jnp.where(period > 0, diff - safe * jnp.round(diff / safe), diff)
 
-    covs = jax.vmap(cov)(means, mass_w.T) + cov_floor * jnp.eye(d)[None]
+    mean = w @ x
+    sd = jnp.sqrt(w @ offset(x, mean) ** 2)
+    scale = jnp.where(sd > 0, sd, 1.0)
+    if init is None:
+        centers = x[jax.random.choice(key, n, (k,), p=w)]
+    else:
+        wanted = sorted(posterior.samples if keys is None else keys)
+        if sorted(init) != wanted:
+            raise ValueError(f"init needs the entries {wanted}, got {sorted(init)}")
+        leaves = jax.tree.leaves({name: init[name] for name in wanted})
+        centers = jnp.concatenate(
+            [jnp.reshape(leaf, (jnp.shape(leaf)[0], -1)) for leaf in leaves], axis=-1
+        )
+        if centers.shape != (k, d):
+            raise ValueError(
+                f"init has {centers.shape[0]} centers of dimension {centers.shape[1]}; "
+                f"expected k={k} of dimension {d}"
+            )
+
+    floor = (1e-2 * scale) ** 2
+
+    def moments(centers, mass_w):
+        mass = jnp.sum(mass_w, axis=0)
+        shift = jnp.einsum(
+            "nk,nkd->kd", mass_w, offset(x[:, None, :], centers[None, :, :])
+        )
+        # An empty cluster keeps its center, a live draw, rather than the origin.
+        means = jnp.where(
+            mass[:, None] > 0,
+            centers + shift / jnp.maximum(mass[:, None], 1e-30),
+            centers,
+        )
+
+        def cov(mu, wcol):
+            diff = offset(x, mu)
+            return (diff * wcol[:, None]).T @ diff / jnp.maximum(jnp.sum(wcol), 1e-30)
+
+        covs = jax.vmap(cov)(means, mass_w.T) + jnp.diag(floor)
+        return means, covs, mass
+
+    def assign(centers, covs, mass):
+        chol = jnp.linalg.cholesky(covs)
+        diff = offset(x[:, None, :], centers[None, :, :])
+        z = jax.vmap(
+            lambda c, v: jax.scipy.linalg.solve_triangular(c, v.T, lower=True),
+            in_axes=(0, 1),
+        )(chol, diff)
+        log_det = 2.0 * jnp.sum(jnp.log(jnp.diagonal(chol, axis1=1, axis2=2)), axis=-1)
+        score = (jnp.log(jnp.maximum(mass, 1e-30)) - 0.5 * log_det)[
+            :, None
+        ] - 0.5 * jnp.sum(z**2, axis=1)
+        return jax.nn.one_hot(jnp.argmax(score, axis=0), k) * w[:, None]
+
+    covs0 = jnp.broadcast_to(jnp.diag(scale**2), (k, d, d))
+    mass0 = jnp.full(k, 1.0 / k)
+
+    def step(carry, i):
+        centers, covs, mass = carry
+        # The first rounds are plain k-means in the standardized coordinates, which
+        # moves a center off a draw that shares its mode with another center; the
+        # Gaussian reassignment after them keeps a cluster from drifting between modes.
+        place = i < 3
+        mass_w = assign(
+            centers, jnp.where(place, covs0, covs), jnp.where(place, mass0, mass)
+        )
+        return moments(centers, mass_w), None
+
+    state = (centers, covs0, mass0)
+    (centers, covs, mass), _ = jax.lax.scan(step, state, jnp.arange(iters))
+    means, covs, mass = moments(centers, assign(centers, covs, mass))
+    covs = covs + cov_floor * jnp.eye(d)[None]
     log_mass = jnp.log(jnp.maximum(mass, 1e-30))
     return Mixture(log_mass, MultivariateNormal(means, jnp.linalg.cholesky(covs)))
