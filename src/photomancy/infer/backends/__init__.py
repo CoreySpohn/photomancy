@@ -11,7 +11,7 @@ install ``photomancy[blackjax]``, ``photomancy[jaxns]`` or ``photomancy[samplers
 """
 
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
-from photomancy.infer.backends.grid import Grid, gauss_legendre, midpoint
+from photomancy.infer.backends.grid import Grid, gauss_legendre_rule, midpoint_rule
 from photomancy.infer.backends.importance import (
     AdaptiveImportance,
     Importance,
@@ -31,7 +31,14 @@ from photomancy.infer.backends.pathfinder import (
     Pathfinder,
     PathfinderInfo,
 )
-from photomancy.infer.backends.staged import MAP, MAPInfo, map_fit
+from photomancy.infer.backends.staged import (
+    MAP,
+    EarlyStopping,
+    MAPInfo,
+    MAPStage,
+    group_labels,
+    rescaled_transform,
+)
 
 __all__ = [
     "MAP",
@@ -40,19 +47,22 @@ __all__ = [
     "AbstractBackend",
     "AdaptiveImportance",
     "BackendDraws",
+    "EarlyStopping",
     "Grid",
     "Importance",
     "ImportanceInfo",
     "Laplace",
     "LaplaceInfo",
     "MAPInfo",
+    "MAPStage",
     "MCLMCInfo",
     "NUTSInfo",
     "NestedInfo",
     "NestedSampling",
     "Pathfinder",
     "PathfinderInfo",
-    "gauss_legendre",
-    "map_fit",
-    "midpoint",
+    "gauss_legendre_rule",
+    "group_labels",
+    "midpoint_rule",
+    "rescaled_transform",
 ]

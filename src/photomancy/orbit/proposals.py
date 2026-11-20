@@ -29,7 +29,7 @@ from photomancy.infer import (
     MixtureProposal,
 )
 from photomancy.measurements import RelativeAstrometryTerm
-from photomancy.orbit.completion import _block_of, _flat_layout
+from photomancy.orbit.completion import _block_of
 
 __all__ = ["ScaleRotateProposal", "ShapePriorProposal"]
 
@@ -188,7 +188,7 @@ class ScaleRotateProposal(AbstractDensityProposal):
             raise ValueError("ScaleRotateProposal needs one RelativeAstrometryTerm")
         data = terms[0].data
         row = jnp.argmax(data.is_valid) if self.anchor is None else self.anchor
-        names, sizes = _flat_layout(fit)
+        names, sizes = fit.flat_layout()
         position = [names.index((key, n)) for n in block.coordinate_names]
         planets = resolve(fit.model, block.reads[0])
         inner = jnp.sum(planets[..., : block.rows[0] + 1], axis=-1)

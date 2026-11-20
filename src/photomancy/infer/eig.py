@@ -11,6 +11,11 @@ information built from full per-mode predictive covariances, and the class infor
 is a caller-supplied ``forward(z, candidate) -> observables`` (differentiable in the
 flat position ``z``); the orbit / disk / imaging layers supply their own. This core
 knows no domain.
+
+One naming pattern: every estimator is ``eig_<method>`` (``eig_geometric``,
+``eig_alias_breaking``, ``eig_detectability``, ``eig_class``, ``eig_linearized``,
+``eig_contrastive``, ``eig_nested``), and every result record is named for its
+estimator (``LinearizedEIG``, ``EIGEstimate``).
 """
 
 import equinox as eqx
@@ -23,6 +28,21 @@ from jax.scipy.stats import norm
 from photomancy.infer.diagnostics import kish_ess
 from photomancy.infer.particles import categorical_indices, take_draws
 
+__all__ = [
+    "EIGEstimate",
+    "LinearizedEIG",
+    "eig_alias_breaking",
+    "eig_alias_breaking_from_covariances",
+    "eig_class",
+    "eig_contrastive",
+    "eig_detectability",
+    "eig_detection_channel",
+    "eig_detection_class",
+    "eig_geometric",
+    "eig_linearized",
+    "eig_nested",
+]
+
 
 def _binary_entropy(p):
     """Entropy of a Bernoulli(p) in nats; exact 0 at p in {0, 1} via xlogy."""
@@ -34,7 +54,7 @@ def _categorical_entropy(p, axis=-1):
     return -jnp.sum(xlogy(p, p), axis=axis)
 
 
-def geometric_eig(cov_old, jacobian, obs_variance, qoi_projection=None):
+def eig_geometric(cov_old, jacobian, obs_variance, qoi_projection=None):
     """Information gain from covariance shrinkage at one mode (nats).
 
     Args:
@@ -84,7 +104,7 @@ def _logdet_positive_definite(cov):
     return 2.0 * jnp.sum(jnp.log(safe)), ok
 
 
-def alias_breaking_eig_from_covariances(weights, y_preds, predictive_covariances):
+def eig_alias_breaking_from_covariances(weights, y_preds, predictive_covariances):
     """Upper bound on the mode information ``I(M; Y)`` of a Gaussian mixture (nats).
 
     Each mode ``k`` predicts the observation as ``N(y_k, S_k)`` with a full
@@ -164,15 +184,15 @@ def alias_breaking_eig_from_covariances(weights, y_preds, predictive_covariances
     return jnp.where(jnp.all(comp_ok) & mix_ok, capped, jnp.nan)
 
 
-def alias_breaking_eig(weights, y_preds, obs_variance):
+def eig_alias_breaking(weights, y_preds, obs_variance):
     """Upper bound on the mode information ``I(M; Y)`` for diagonal predictives (nats).
 
-    The diagonal-covariance case of :func:`alias_breaking_eig_from_covariances`:
+    The diagonal-covariance case of :func:`eig_alias_breaking_from_covariances`:
     each mode's predictive covariance is ``diag(obs_variance)``. The between-mode
     spread of the predictions still enters with its full outer product, so in more
     than one dimension the bound is tighter than a per-observable sum. Components
     whose predictive covariances have off-diagonal terms must use
-    :func:`alias_breaking_eig_from_covariances`; dropping those terms can report zero
+    :func:`eig_alias_breaking_from_covariances`; dropping those terms can report zero
     mode information for modes that the joint observation distinguishes.
 
     Args:
@@ -189,10 +209,10 @@ def alias_breaking_eig(weights, y_preds, obs_variance):
     y_preds = jnp.asarray(y_preds)
     pred_var = jnp.broadcast_to(jnp.asarray(obs_variance), y_preds.shape)
     diag_covs = pred_var[:, :, None] * jnp.eye(y_preds.shape[1], dtype=pred_var.dtype)
-    return alias_breaking_eig_from_covariances(weights, y_preds, diag_covs)
+    return eig_alias_breaking_from_covariances(weights, y_preds, diag_covs)
 
 
-def detectability_eig(weights, det_weights):
+def eig_detectability(weights, det_weights):
     """Exact detection-channel mutual information ``I(D; M)`` (nats).
 
     ``I(D; M) = H_b(sum_k w_k d_k) - sum_k w_k H_b(d_k)`` for the binary detection
@@ -210,12 +230,12 @@ def detectability_eig(weights, det_weights):
     return _binary_entropy(p_det) - jnp.sum(weights * _binary_entropy(det_weights))
 
 
-def detection_class_eig(weights, det_weights, class_probs):
+def eig_detection_class(weights, det_weights, class_probs):
     """Closed-form classification gain ``I(C; D)`` of a detection-only observation.
 
-    The ``Y = D`` special case of :func:`class_eig`, exact:
+    The ``Y = D`` special case of :func:`eig_class`, exact:
     ``P(c | D) propto sum_k w_k d_k^D (1 - d_k)^(1 - D) P(c | k)``. Saturates at the
-    class-prior entropy ``H(C)`` and reduces to :func:`detectability_eig` when the
+    class-prior entropy ``H(C)`` and reduces to :func:`eig_detectability` when the
     class map is the mode identity.
 
     Args:
@@ -239,7 +259,7 @@ def detection_class_eig(weights, det_weights, class_probs):
     return _categorical_entropy(q_prior) - h_cond
 
 
-def class_eig(weights, class_probs, y_preds, obs_variance, *, key, n_samples=64):
+def eig_class(weights, class_probs, y_preds, obs_variance, *, key, n_samples=64):
     """Classification gain ``I(C; Y)`` of a candidate observation (nats).
 
     The mixture-predictive reweighting estimator: the class posterior after seeing
@@ -289,7 +309,7 @@ def class_eig(weights, class_probs, y_preds, obs_variance, *, key, n_samples=64)
     return jnp.maximum(h_prior - expected_h, 0.0)
 
 
-def probit_gaussian_mass(mean, cov, a, b):
+def _probit_gaussian_mass(mean, cov, a, b):
     """Gaussian expectation of a probit site, ``E[Phi(a + b @ theta)]`` (closed form).
 
     The probit-Gaussian integral ``Phi((a + b @ mean) / sqrt(1 + b @ cov @ b))`` --
@@ -310,7 +330,7 @@ def probit_gaussian_mass(mean, cov, a, b):
     return norm.cdf((a + b @ mean) / jnp.sqrt(1.0 + b @ cov @ b))
 
 
-def ep_probit_update(mean, cov, a, b):
+def _ep_probit_update(mean, cov, a, b):
     """Mass and moments of the tilted density ``N(theta; mean, cov) Phi(a + b theta)``.
 
     The expectation-propagation probit-site update in closed form (Mills-ratio
@@ -323,7 +343,7 @@ def ep_probit_update(mean, cov, a, b):
     The mixture stays Gaussian and analytic while carrying the within-mode
     information a soft truncation induces; a steep site recovers the classical
     truncated-Gaussian moments. An observed null is the site with the detection
-    sign flipped (see :func:`null_update`).
+    sign flipped (see :func:`_null_update`).
 
     Args:
         mean: Mode mean. Shape ``(d,)``.
@@ -345,12 +365,12 @@ def ep_probit_update(mean, cov, a, b):
     return log_mass, mean_new, cov_new
 
 
-def null_update(weights, means, covs, a, b):
+def _null_update(weights, means, covs, a, b):
     """Mixture belief update under an observed null (non-detection).
 
     Each mode's detection probability is the linearized probit site
     ``p_det(theta) = Phi(a + b @ theta)``; an observed null multiplies each mode by
-    ``1 - p_det``, the flipped site. Applies :func:`ep_probit_update` per mode and
+    ``1 - p_det``, the flipped site. Applies :func:`_ep_probit_update` per mode and
     renormalizes: the mode reweighting by the null mass plus the within-mode
     tail-shave, the two null effects the Fisher tier cannot represent.
 
@@ -366,7 +386,7 @@ def null_update(weights, means, covs, a, b):
     """
     a_arr = jnp.broadcast_to(jnp.asarray(a), weights.shape)
     b_arr = jnp.broadcast_to(jnp.asarray(b), means.shape)
-    log_mass, means_new, covs_new = jax.vmap(ep_probit_update)(
+    log_mass, means_new, covs_new = jax.vmap(_ep_probit_update)(
         means, covs, -a_arr, -b_arr
     )
     log_w = jnp.where(
@@ -376,7 +396,7 @@ def null_update(weights, means, covs, a, b):
     return weights_new, means_new, covs_new
 
 
-def detection_channel_eig(weights, means, covs, a, b, n_nodes=32):
+def eig_detection_channel(weights, means, covs, a, b, n_nodes=32):
     """Exact detection-channel EIG ``I((M, theta); D)`` for linearized sites (nats).
 
     With per-mode detection probability ``p_det(theta) = Phi(a_k + b_k @ theta)``,
@@ -385,7 +405,7 @@ def detection_channel_eig(weights, means, covs, a, b, n_nodes=32):
 
     ``I = H_b(sum_k w_k d_k) - sum_k w_k E_{u ~ N(m_k, s_k^2)}[H_b(Phi(u))]``,
 
-    with ``d_k`` the smeared per-mode mass (:func:`probit_gaussian_mass`) and the
+    with ``d_k`` the smeared per-mode mass (:func:`_probit_gaussian_mass`) and the
     within-mode expectation evaluated by 1-D Gauss-Hermite quadrature. The chain
     rule splits this into the discrete mode term plus a nonnegative within-mode
     term -- the information a detection boundary crossing the posterior bulk
@@ -426,7 +446,7 @@ def _build_eig_batch_fn(forward, detectable=None):
 
     def _one_candidate(candidate, means, covs, weights, obs_var, detectable_args):
         y_preds, jacobians = jax.vmap(lambda z: _pred_and_jac(z, candidate))(means)
-        geom_eigs = jax.vmap(lambda cov, jac: geometric_eig(cov, jac, obs_var)[0])(
+        geom_eigs = jax.vmap(lambda cov, jac: eig_geometric(cov, jac, obs_var)[0])(
             covs, jacobians
         )
         # Full per-mode predictive covariance S_k = J_k Sigma_k J_k^T + R.
@@ -435,9 +455,9 @@ def _build_eig_batch_fn(forward, detectable=None):
         if detectable is None:
             det_w = jnp.ones(means.shape[0])
             weighted_geom = jnp.sum(weights * geom_eigs)
-            alias_val = alias_breaking_eig_from_covariances(weights, y_preds, pred_cov)
+            alias_val = eig_alias_breaking_from_covariances(weights, y_preds, pred_cov)
         else:
-            # Restricted reporting model (see evaluate_candidates):
+            # Restricted reporting model (see eig_linearized):
             # I(M; D, Y) = I(M; D) + p_det I(M; Y | D=1), with the reported
             # modes weighted by w_k d_k, and the within-mode gain accruing only
             # to reported records.
@@ -450,9 +470,9 @@ def _build_eig_batch_fn(forward, detectable=None):
                 reported, weights * det_w / jnp.where(reported, p_det, 1.0), weights
             )
             weighted_geom = jnp.sum(weights * det_w * geom_eigs)
-            alias_val = detectability_eig(
+            alias_val = eig_detectability(
                 weights, det_w
-            ) + p_det * alias_breaking_eig_from_covariances(
+            ) + p_det * eig_alias_breaking_from_covariances(
                 det_weights, y_preds, pred_cov
             )
         return weighted_geom + alias_val, weighted_geom, alias_val, y_preds, det_w
@@ -466,7 +486,26 @@ def _build_eig_batch_fn(forward, detectable=None):
     return _batch
 
 
-def evaluate_candidates(
+class LinearizedEIG(eqx.Module):
+    """The score of a batch of candidates under the linearized mixture model.
+
+    Attributes:
+        total: Approximate EIG, ``geometric + alias``, shape ``(N,)``, in nats.
+        geometric: Weighted within-mode gain under local linearization, ``(N,)``.
+        alias: Mode-information term, ``(N,)`` (with ``detectable``, the exact
+            reporting term plus ``p_det`` times the bound on the reported mixture).
+        predictions: Each mode's predicted observables, ``(N, K, n_obs)``.
+        detectability: Each mode's reporting probability, ``(N, K)``.
+    """
+
+    total: jax.Array
+    geometric: jax.Array
+    alias: jax.Array
+    predictions: jax.Array
+    detectability: jax.Array
+
+
+def eig_linearized(
     mixture,
     candidates,
     forward,
@@ -482,8 +521,8 @@ def evaluate_candidates(
     ``k`` is linearized about its mean, so given the mode the reported value is
     Gaussian, ``N(y_k, S_k)`` with ``S_k = J_k Sigma_k J_k^T + R``, and the
     within-mode gain is the conjugate Gaussian (Fisher) gain of
-    :func:`geometric_eig`. The mode information uses the upper bound of
-    :func:`alias_breaking_eig_from_covariances`.
+    :func:`eig_geometric`. The mode information uses the upper bound of
+    :func:`eig_alias_breaking_from_covariances`.
 
     Reporting model. Without ``detectable`` every observation is reported. With
     ``detectable``, mode ``k`` produces a report (``D = 1``) with probability
@@ -495,7 +534,7 @@ def evaluate_candidates(
     ``I(M; D, Y) = I(M; D) + p_det * I(M; Y | D = 1)``,
 
     with ``p_det = sum_k w_k d_k``, the exact reporting term ``I(M; D)`` of
-    :func:`detectability_eig`, and ``I(M; Y | D = 1)`` bounded over the reported
+    :func:`eig_detectability`, and ``I(M; Y | D = 1)`` bounded over the reported
     mixture, whose weights are proportional to ``w_k d_k``. The within-mode gain of
     mode ``k`` is weighted by ``w_k d_k``, since only reported records carry it. A
     record that is never reported (``p_det = 0``) therefore scores zero, a record
@@ -522,15 +561,14 @@ def evaluate_candidates(
             across candidates and modes.
 
     Returns:
-        Dict with ``total_eig (N,)``, ``geometric_eig (N,)``, ``alias_eig (N,)``,
-        ``predictions (N, K, n_obs)``, ``detectability (N, K)``. ``geometric_eig`` is
-        the weighted within-mode gain under local linearization, ``alias_eig`` is the
-        mode-information term (with ``detectable``, the exact reporting term plus
-        ``p_det`` times the bound on the reported mixture), and ``total_eig`` is
-        their sum, so it is an approximate score that inherits the bound rather than
-        an exact expected information gain. A candidate whose predictive covariance
-        is not positive definite at the working precision scores NaN (see
-        :func:`alias_breaking_eig_from_covariances`); rank with ``jnp.nanargmax``.
+        A :class:`LinearizedEIG`. ``geometric`` is the weighted within-mode gain under
+        local linearization, ``alias`` is the mode-information term (with
+        ``detectable``, the exact reporting term plus ``p_det`` times the bound on the
+        reported mixture), and ``total`` is their sum, so it is an approximate score
+        that inherits the bound rather than an exact expected information gain. A
+        candidate whose predictive covariance is not positive definite at the working
+        precision scores NaN (see :func:`eig_alias_breaking_from_covariances`); rank
+        with ``jnp.nanargmax``.
     """
     obs_var = jnp.atleast_1d(jnp.asarray(obs_variance))
     batch_fn = _build_eig_batch_fn(forward, detectable)
@@ -548,13 +586,13 @@ def evaluate_candidates(
         obs_var,
         detectable_args,
     )
-    return {
-        "total_eig": total,
-        "geometric_eig": geom,
-        "alias_eig": alias,
-        "predictions": preds,
-        "detectability": det_w,
-    }
+    return LinearizedEIG(
+        total=total,
+        geometric=geom,
+        alias=alias,
+        predictions=preds,
+        detectability=det_w,
+    )
 
 
 class EIGEstimate(eqx.Module):

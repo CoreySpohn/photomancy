@@ -12,7 +12,7 @@ from hwoutils.model_paths import resolve
 from orbix.system import System
 
 from photomancy.infer.fit import AbstractTerm
-from photomancy.measurements._padding import MAX_RV, _pad_1d, _valid_mask
+from photomancy.measurements._padding import _pad_1d, _valid_mask
 
 __all__ = ["RadialVelocityData", "RadialVelocityTerm", "loglike_rv_marginalized"]
 
@@ -38,7 +38,7 @@ class RadialVelocityData(eqx.Module):
     n_inst: int = eqx.field(static=True)
 
     @classmethod
-    def pad(cls, *, time_d, rv, rv_err, inst_ids, n_inst, max_n=MAX_RV):
+    def pad(cls, *, time_d, rv, rv_err, inst_ids, n_inst, max_n):
         """Create a padded RadialVelocityData with ``is_valid`` mask."""
         n = jnp.asarray(time_d).shape[0]
         return cls(
@@ -51,7 +51,7 @@ class RadialVelocityData(eqx.Module):
         )
 
     @classmethod
-    def zeros(cls, max_n=MAX_RV, n_inst=1):
+    def zeros(cls, max_n, n_inst=1):
         """Create an all-invalid placeholder (for model tracing)."""
         return cls(
             time_d=jnp.zeros(max_n),

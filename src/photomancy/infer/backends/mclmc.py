@@ -49,7 +49,7 @@ class MCLMCInfo(eqx.Module):
 
 
 @eqx.filter_jit
-def _mclmc_chains(fit, key, init, n_tune, n_draws, thin):
+def _mclmc_chains(fit, key, init, n_warmup, n_draws, thin):
     """Tune and sample one MCLMC chain per start; return positions and tuned values."""
     blackjax = import_extra("blackjax", "blackjax")
     mclmc = import_extra("blackjax.mcmc.mclmc", "blackjax")
@@ -66,7 +66,7 @@ def _mclmc_chains(fit, key, init, n_tune, n_draws, thin):
         kernel = mclmc.build_kernel(integrator=integrators.isokinetic_mclachlan)
         tuned_state, params, *_ = blackjax.mclmc_find_L_and_step_size(
             mclmc_kernel=kernel,
-            num_steps=n_tune,
+            num_steps=n_warmup,
             state=state,
             rng_key=key_tune,
             logdensity_fn=logdensity,
@@ -97,8 +97,8 @@ class MCLMC(AbstractBackend):
     (``log_evidence`` is NaN).
 
     Args:
-        n_tune: Tuning steps per chain.
-        n_draws: Transitions per chain after tuning.
+        n_warmup: Warmup (tuning) steps per chain.
+        n_draws: Transitions per chain after warmup.
         n_chains: Number of chains, vectorized.
         thin: Keep every ``thin``-th transition; ``MCLMCInfo.thin`` records it.
         init: ``None`` for prior draws, one constrained draw (repeated for every
@@ -108,7 +108,7 @@ class MCLMC(AbstractBackend):
             ``fit.to_flat``.
     """
 
-    n_tune: int = eqx.field(static=True, default=2000)
+    n_warmup: int = eqx.field(static=True, default=2000)
     n_draws: int = eqx.field(static=True, default=1000)
     n_chains: int = eqx.field(static=True, default=4)
     thin: int = eqx.field(static=True, default=1)
@@ -119,7 +119,7 @@ class MCLMC(AbstractBackend):
         key_init, key_run = jax.random.split(key)
         starts = start_points(fit, self.init, key_init, self.n_chains)
         positions, energy, length, step = _mclmc_chains(
-            fit, key_run, starts, self.n_tune, self.n_draws, self.thin
+            fit, key_run, starts, self.n_warmup, self.n_draws, self.thin
         )
         unravel, _, dim = flat_problem(fit)
         n_kept = positions.shape[1]

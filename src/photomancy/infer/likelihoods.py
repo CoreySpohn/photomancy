@@ -42,6 +42,17 @@ import jax.numpy as jnp
 import jax.scipy as jsp
 import numpy as np
 
+__all__ = [
+    "LowRankGaussianLogLikelihood",
+    "MaskedLogLikelihood",
+    "gaussian_loglike",
+    "huber_loglike",
+    "laplace_loglike",
+    "low_rank_gaussian_loglike",
+    "residual_basis",
+    "student_t_loglike",
+]
+
 _LOG_SQRT_2PI = 0.5 * math.log(2.0 * math.pi)
 
 

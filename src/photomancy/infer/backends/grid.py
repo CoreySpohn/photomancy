@@ -16,10 +16,10 @@ import numpy as np
 from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
 
-__all__ = ["Grid", "gauss_legendre", "midpoint"]
+__all__ = ["Grid", "gauss_legendre_rule", "midpoint_rule"]
 
 
-def midpoint(low, high, n):
+def midpoint_rule(low, high, n):
     """Midpoint rule on ``[low, high]``: ``n`` equal cells, nodes at their centers.
 
     Returns:
@@ -30,7 +30,7 @@ def midpoint(low, high, n):
     return nodes, jnp.full(n, width)
 
 
-def gauss_legendre(low, high, n):
+def gauss_legendre_rule(low, high, n):
     """Gauss-Legendre rule on ``[low, high]`` with ``n`` nodes (positive weights).
 
     Returns:
@@ -47,10 +47,10 @@ class Grid(AbstractBackend):
     Each free degree of freedom must be one scalar: a leaf law over a leaf of one
     element is keyed by its free path, a coordinate of a one-row block by
     ``"<key>/<coordinate>"``. ``axes`` maps each such name to ``(nodes, weights)`` (see
-    :func:`midpoint` and :func:`gauss_legendre`) with every weight positive. The result
-    has ``prod(len(nodes))`` draws in C order of the sorted axis names, weights
-    ``quadrature weight * density`` and ``kind = "quadrature"``. The evidence is the
-    sum of the weights; its standard error is NaN. Coordinates are those of
+    :func:`midpoint_rule` and :func:`gauss_legendre_rule`) with every weight positive.
+    The result has ``prod(len(nodes))`` draws in C order of the sorted axis names,
+    weights ``quadrature weight * density`` and ``kind = "quadrature"``. The evidence is
+    the sum of the weights; its standard error is NaN. Coordinates are those of
     ``fit.sample_prior`` (a block's own, unconstrained, coordinates), so choose the
     nodes in them and cover the posterior mass.
 

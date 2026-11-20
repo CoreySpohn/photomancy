@@ -2,21 +2,17 @@
 
 One shape, reimplemented at every scheduling call site: the EIG
 decomposition against candidate epoch, existing epochs as reference
-lines, and the chosen next epoch marked. The input is the result dict
-``evaluate_candidates`` / ``evaluate_orbit_candidates`` returns, so the
-panel keys off the library's own vocabulary (``total_eig``,
-``alias_eig``, ``geometric_eig``) rather than caller-side unpacking.
+lines, and the chosen next epoch marked. The input is the ``LinearizedEIG``
+that ``eig_linearized`` returns, or the ``AstrometryEIG`` of ``eig_astrometry``,
+so the panel keys off the library's own vocabulary (``total``, ``alias``,
+``geometric``) rather than caller-side unpacking.
 """
 
 import numpy as np
 
 from photomancy.viz._require import eyepiece
 
-_COMPONENTS = (
-    ("total_eig", "total"),
-    ("alias_eig", "alias"),
-    ("geometric_eig", "geometric"),
-)
+_COMPONENTS = ("total", "alias", "geometric")
 
 
 def plot_eig(
@@ -33,14 +29,15 @@ def plot_eig(
 
     Args:
         candidates_d: Candidate epochs in days, shape ``(N,)``.
-        result: The dict ``evaluate_candidates`` /
-            ``evaluate_orbit_candidates`` returns; whichever of
-            ``total_eig`` / ``alias_eig`` / ``geometric_eig`` are present
-            are drawn, in one stable color each (the cast is declared per
-            call, so the components keep their colors across figures).
+        result: The ``LinearizedEIG`` of ``eig_linearized`` or the
+            ``AstrometryEIG`` of ``eig_astrometry`` (any object with the
+            attributes); whichever of ``total`` / ``alias`` / ``geometric``
+            are present are drawn, in one stable color each (the cast is
+            declared per call, so the components keep their colors across
+            figures).
         epochs_d: Optional existing observation epochs, drawn as faint
             vertical reference lines.
-        mark_best: Mark ``nanargmax(total_eig)`` with a dashed vertical line
+        mark_best: Mark ``nanargmax(total)`` with a dashed vertical line
             in the total component's color.
         ax: Axes to draw into. None creates a new figure.
         line_kw: Extra kwargs for each component's ``ax.plot``, applied
@@ -55,6 +52,7 @@ def plot_eig(
         epoch reference lines land under ``"line"`` as a list.
     """
     ep = eyepiece()
+    result = getattr(result, "eig", result)
     t = np.asarray(candidates_d, float).reshape(-1)
 
     if ax is None:
@@ -62,21 +60,22 @@ def plot_eig(
 
         _, ax = plt.subplots(layout="constrained")
 
-    styles = ep.style.SourceStyles([name for _, name in _COMPONENTS])
+    styles = ep.style.SourceStyles(list(_COMPONENTS))
     lines = []
     # Total is the SUM of the two components, not a third peer measurement
-    # (evaluate_candidates returns weighted_geom + alias_val, weighted_geom,
-    # alias_val). Drawn as three equal lines it reads as three independent
+    # (eig_linearized returns geometric + alias, geometric,
+    # alias). Drawn as three equal lines it reads as three independent
     # metrics, and once alias goes to zero the total and geometric curves
     # land on each other and overprint into a color belonging to neither.
     # So the total is a wide, pale envelope UNDER its own components: the
     # components stay legible on top, and a component sitting inside the
     # envelope is the additive identity made visible.
-    for key, name in _COMPONENTS:
-        if key not in result:
+    for name in _COMPONENTS:
+        component = getattr(result, name, None)
+        if component is None:
             continue
-        values = np.asarray(result[key], float).reshape(-1)
-        is_total = key == "total_eig"
+        values = np.asarray(component, float).reshape(-1)
+        is_total = name == "total"
         kw = {
             "color": styles[name]["color"],
             "lw": 4.0 if is_total else 1.4,
@@ -98,8 +97,8 @@ def plot_eig(
             for epoch in np.asarray(epochs_d, float).reshape(-1)
         ]
 
-    if mark_best and "total_eig" in result:
-        best = t[int(np.nanargmax(np.asarray(result["total_eig"])))]
+    if mark_best and getattr(result, "total", None) is not None:
+        best = t[int(np.nanargmax(np.asarray(result.total)))]
         lines.append(ax.axvline(best, color=styles["total"]["color"], ls="--", lw=1.2))
 
     ax.set_xlabel("candidate epoch [days]")

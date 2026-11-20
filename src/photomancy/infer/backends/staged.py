@@ -8,7 +8,7 @@ optimizer state. This module holds the pieces a staged fit is described with:
 - :func:`group_labels` names the groups of a parameter PyTree from explicit selectors,
 - :func:`rescaled_transform` runs a transform on ``params / scale`` so a leaf keeps
   its physical units while the steps match a fit in other units,
-- :class:`FitStage` describes one stage and :func:`map_fit` runs the stages (the
+- :class:`MAPStage` describes one stage and :func:`map_fit` runs the stages (the
   engine of :class:`MAP`, which runs a staged fit of a ``Fit`` through ``run``).
 
 Every group has its own optimizer state (the transform applied to that group's
@@ -33,9 +33,9 @@ __all__ = [
     "MAP",
     "UNLABELED",
     "EarlyStopping",
-    "FitStage",
     "MAPInfo",
     "MAPResult",
+    "MAPStage",
     "StageTrace",
     "StepRecord",
     "group_labels",
@@ -177,16 +177,18 @@ class EarlyStopping(eqx.Module):
             raise ValueError("patience and check_every must be at least 1")
 
 
-class FitStage(eqx.Module):
+class MAPStage(eqx.Module):
     """One stage of a staged fit: run ``n_steps`` optimizer steps with some groups free.
 
     Attributes:
         n_steps: Number of optimizer steps in the stage (the most, with early stopping).
-        free: Names of the groups the stage optimizes, a tuple of strings.
-        logdensity: Log-density for this stage, replacing the one given to
-            :func:`map_fit` (for example a view over one exposure). Before the first
-            ``prepare``, this override applies only to this stage. After it, the
-            replacement persists in later stages. ``None`` keeps the current density.
+        groups: Names of the groups the stage optimizes, a tuple of strings.
+        fit: The density for this stage, replacing the one given to :func:`map_fit`
+            (for example a ``Fit`` over one exposure). :class:`MAP` requires a
+            ``Fit`` with the free entries of the run fit; the engine :func:`map_fit`
+            also takes a callable. Before the first ``prepare``, this override applies
+            only to this stage. After it, the replacement persists in later stages.
+            ``None`` keeps the current density.
         objective_scale: The stage minimizes ``-objective_scale * log_density``; the
             loss trace records that scaled objective. It is an array at run time, so
             changing it does not recompile.
@@ -208,16 +210,16 @@ class FitStage(eqx.Module):
             advance. It excludes ``closed_form`` (an update outside the solver would
             invalidate its curvature pairs) and ``transforms``.
         name: Label carried into the trace.
-        prepare: ``params -> logdensity`` called once on the host when the stage
+        prepare: ``params -> density`` called once on the host when the stage
             starts, even with zero steps. It receives independent host copies of
             the current parameters, with the structure of ``init``. The returned
             density is used for this and later stages until another stage supplies
-            ``prepare`` or ``logdensity``. Excludes ``logdensity`` on the same stage.
+            ``prepare`` or ``fit``. Excludes ``fit`` on the same stage.
     """
 
     n_steps: int
-    free: tuple[str, ...]
-    logdensity: Any = None
+    groups: tuple[str, ...]
+    fit: Any = None
     objective_scale: float = 1.0
     closed_form: Callable | None = None
     transforms: dict | None = None
@@ -227,23 +229,25 @@ class FitStage(eqx.Module):
     prepare: Callable | None = None
 
     def __check_init__(self):
-        """Validate the step count and the free-group names."""
+        """Validate the step count and the group names."""
         if not isinstance(self.n_steps, int) or self.n_steps < 0:
             raise ValueError(
                 f"n_steps must be a non-negative int, got {self.n_steps!r}"
             )
-        if not isinstance(self.free, tuple) or not all(
-            isinstance(g, str) for g in self.free
+        if not isinstance(self.groups, tuple) or not all(
+            isinstance(g, str) for g in self.groups
         ):
-            raise ValueError(f"free must be a tuple of group names, got {self.free!r}")
+            raise ValueError(
+                f"groups must be a tuple of group names, got {self.groups!r}"
+            )
         if self.solver is not None and (
             self.closed_form is not None or self.transforms is not None
         ):
             raise ValueError("a solver stage takes no closed_form and no transforms")
-        if self.solver is not None and not self.free:
+        if self.solver is not None and not self.groups:
             raise ValueError("a solver stage must free at least one group")
-        if self.prepare is not None and self.logdensity is not None:
-            raise ValueError("a stage takes either prepare or logdensity, not both")
+        if self.prepare is not None and self.fit is not None:
+            raise ValueError("a stage takes either prepare or fit, not both")
 
 
 class StageTrace(eqx.Module):
@@ -274,7 +278,7 @@ class StepRecord(eqx.Module):
 
     Attributes:
         step: Global step index across all stages.
-        stage: The :class:`FitStage` being run.
+        stage: The :class:`MAPStage` being run.
         stage_step: Step index within the stage.
         params: The parameter PyTree before the step (NumPy arrays).
         loss: The scaled objective at ``params``.
@@ -283,7 +287,7 @@ class StepRecord(eqx.Module):
     """
 
     step: int
-    stage: FitStage
+    stage: MAPStage
     stage_step: int
     params: Any
     loss: float
@@ -340,7 +344,7 @@ def map_fit(
 ):
     """Run a staged MAP fit of ``logdensity`` over the PyTree ``init``.
 
-    Each stage optimizes the groups it frees (``FitStage.free``) with the group's
+    Each stage optimizes the groups it frees (``MAPStage.groups``) with the group's
     transform for ``n_steps`` steps, minimizing ``-objective_scale * logdensity``.
     The optimizer state of every group persists across stages unless a stage brings
     its own transforms. The parameters are never mutated: ``init`` stays valid and
@@ -349,7 +353,7 @@ def map_fit(
 
     A stage's ``prepare`` hook runs on the host with independent copies of the
     current parameters before any step in that stage. Its returned log density
-    persists until another stage supplies ``prepare`` or ``logdensity``. Before the
+    persists until another stage supplies ``prepare`` or ``fit``. Before the
     first hook, explicit stage densities remain local to their stage, preserving
     fits without hooks. Hooks do not reset optimizer states.
 
@@ -359,7 +363,7 @@ def map_fit(
     should share a program), with the parameters,
     optimizer states and trace buffers donated. Stage length and objective scale are
     runtime values, so stages that repeat a configuration do not recompile. A stage
-    whose ``logdensity`` has a different PyTree structure compiles its own program.
+    whose ``fit`` has a different PyTree structure compiles its own program.
     Densities returned by ``prepare`` reuse the same step when their static values,
     PyTree structure, array shapes and dtypes match; changing array values does not
     recompile.
@@ -375,7 +379,7 @@ def map_fit(
         transforms: ``{group: optax.GradientTransformation}``. A group with no
             transform cannot be freed. The transform of a group sees only that
             group's leaves, as a tuple.
-        stages: Sequence of :class:`FitStage`.
+        stages: Sequence of :class:`MAPStage`.
         freeze: How a group that is not free in a stage is treated.
 
             - ``"hold"``: its leaves and its optimizer state are untouched, bitwise,
@@ -442,7 +446,7 @@ def map_fit(
         if stage.transforms is not None:
             check_table(stage.transforms, f"stage {stage.name!r}")
             table = stage.transforms
-        for name in stage.free:
+        for name in stage.groups:
             if stage.solver is not None:
                 if name not in members:
                     raise ValueError(f"stage {stage.name!r} frees unknown {name!r}")
@@ -596,8 +600,8 @@ def map_fit(
         if stage.prepare is not None:
             density = stage.prepare(_host_copy(rebuild(dyn)))
             prepared = True
-        elif stage.logdensity is not None:
-            density = stage.logdensity
+        elif stage.fit is not None:
+            density = stage.fit
         elif not prepared:
             density = logdensity
         if stage.transforms is not None:
@@ -605,7 +609,7 @@ def map_fit(
             states = init_states(table, dyn)
         solver_state = None
         if stage.solver is not None:
-            free = tuple(stage.free)
+            free = tuple(stage.groups)
             step = get_solver_step(stage.solver, free)
             # fresh buffers: a solver state may hold one array in two places, and
             # the step donates its inputs
@@ -614,7 +618,7 @@ def map_fit(
                 stage.solver.init(group_slices(dyn, free)),
             )
         else:
-            step = get_step(table, tuple(stage.free), stage.closed_form)
+            step = get_step(table, tuple(stage.groups), stage.closed_form)
         static_args = (
             density,
             jnp.asarray(stage.objective_scale, dtype),
@@ -707,11 +711,12 @@ class _RealLogProb(eqx.Module):
 def _real_view(view, fit):
     """Wrap a stage ``Fit`` for the optimizer; refuse a different free set.
 
-    Anything that is not a ``Fit`` (a plain callable, a ``value_and_aux`` object) is
-    returned unchanged.
+    Raises:
+        TypeError: If ``view`` is not a ``Fit``.
+        ValueError: If its free entries differ from those of ``fit``.
     """
     if not isinstance(view, Fit):
-        return view
+        raise TypeError(f"a MAP stage density must be a Fit, got {type(view).__name__}")
     if set(view.free) != set(fit.free):
         raise ValueError(
             "a stage Fit must have the free entries of the run fit; "
@@ -721,11 +726,9 @@ def _real_view(view, fit):
 
 
 def _real_stage(stage, fit):
-    """Copy of ``stage`` whose ``logdensity`` or ``prepare`` result may be a ``Fit``."""
-    if isinstance(stage.logdensity, Fit):
-        stage = eqx.tree_at(
-            lambda s: s.logdensity, stage, _real_view(stage.logdensity, fit)
-        )
+    """Copy of ``stage`` whose ``fit`` and ``prepare`` result are real-coordinate."""
+    if stage.fit is not None:
+        stage = eqx.tree_at(lambda s: s.fit, stage, _real_view(stage.fit, fit))
     if stage.prepare is not None:
         prepare = stage.prepare
 
@@ -768,17 +771,18 @@ class MAP(AbstractBackend):
     the ``metrics`` and the ``callback`` receive that tuple as ``aux``. ``closed_form``
     and the metrics see the unconstrained entry dict ``u`` (identity under a ``Normal``
     law); the prediction is a second call of the term on the same model, so a render is
-    traced twice per stage configuration. A stage's ``logdensity``, or what its
-    ``prepare`` returns, may be a ``Fit`` over a subset of the terms (a view of one
-    exposure, say); it must have the same free entries as the run fit, and a different
-    set raises ``ValueError`` on the host.
+    traced twice per stage configuration. A stage's ``fit``, or what its
+    ``prepare`` returns, is a ``Fit`` over a subset of the terms (a view of one
+    exposure, say); it must have the same free entries as the run fit, a different
+    set raises ``ValueError`` on the host, and anything but a ``Fit`` raises
+    ``TypeError``.
 
     Args:
         n_steps: L-BFGS iterations of the default stage.
         labels: Group label PyTree from :func:`group_labels`, or ``None`` for one
             group ``"all"`` over every leaf.
         transforms: ``{group: optax.GradientTransformation}``, or ``None``.
-        stages: Tuple of :class:`FitStage`, or ``None`` for the default stage.
+        stages: Tuple of :class:`MAPStage`, or ``None`` for the default stage.
         freeze: ``"hold"``, ``"zero_gradient"`` or ``"drop_update"``; see
             :func:`map_fit`.
         metrics: ``{name: fn(params, aux) -> scalar}`` recorded every step.
@@ -791,7 +795,7 @@ class MAP(AbstractBackend):
     n_steps: int = eqx.field(static=True, default=200)
     labels: Any = None
     transforms: dict | None = None
-    stages: tuple[FitStage, ...] | None = None
+    stages: tuple[MAPStage, ...] | None = None
     freeze: str = eqx.field(static=True, default="hold")
     metrics: dict | None = None
     callback: Callable | None = None
@@ -818,7 +822,7 @@ class MAP(AbstractBackend):
         transforms = self.transforms
         if stages is None:
             stages = (
-                FitStage(self.n_steps, ("all",), solver=optax.lbfgs(), name="lbfgs"),
+                MAPStage(self.n_steps, ("all",), solver=optax.lbfgs(), name="lbfgs"),
             )
         stages = tuple(_real_stage(stage, fit) for stage in stages)
         result = map_fit(

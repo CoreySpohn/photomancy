@@ -2,11 +2,7 @@
 
 import jax.numpy as jnp
 
-MAX_REL_ASTROM = 64
-MAX_STELLAR_ASTROM = 64
-MAX_IMG = 64
 MAX_CC_PTS = 200
-MAX_RV = 256
 
 
 def _pad_1d(arr, max_len, fill=0.0):

@@ -5,8 +5,8 @@ caller holds: ``few_epoch`` weights scale-and-rotate draws (one or two astrometr
 epochs, the orbit block the only free entry) and ``any_epoch`` is the general engine,
 adaptive importance on a proposal that completes the four sky constants of the orbit
 from the linear astrometry terms. ``SheetSum`` sums terms that tell the two
-line-of-sight sheets of an orbit row apart. ``classical_elements`` reads the orbit of a
-``Posterior`` in classical elements and ``evaluate_orbit_candidates`` scores the next
+line-of-sight sheets of a planet orbit apart. ``classical_elements`` reads the orbit of
+a ``Posterior`` in classical elements and ``eig_astrometry`` scores the next
 astrometric epoch. Data and terms live in ``photomancy.measurements``; the geometry is
 orbix (``orbix.system``).
 """
@@ -14,11 +14,12 @@ orbix (``orbix.system``).
 from photomancy.orbit.backends import any_epoch, few_epoch
 from photomancy.orbit.completion import CompletedProposal, Completion
 from photomancy.orbit.diagnostics import classical_elements
-from photomancy.orbit.eig import evaluate_orbit_candidates
+from photomancy.orbit.eig import AstrometryEIG, eig_astrometry
 from photomancy.orbit.proposals import ScaleRotateProposal, ShapePriorProposal
 from photomancy.orbit.sheets import SheetSum
 
 __all__ = [
+    "AstrometryEIG",
     "CompletedProposal",
     "Completion",
     "ScaleRotateProposal",
@@ -26,6 +27,6 @@ __all__ = [
     "SheetSum",
     "any_epoch",
     "classical_elements",
-    "evaluate_orbit_candidates",
+    "eig_astrometry",
     "few_epoch",
 ]

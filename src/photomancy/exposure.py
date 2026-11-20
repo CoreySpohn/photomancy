@@ -12,7 +12,7 @@ so no optics library is imported here.
 ``ExposureModel`` is the parameter PyTree and ``ExposureTerm`` one exposure's render and
 likelihood. The fit is ``run(Fit(ExposureModel(...), free, terms), MAP(...))``; a stage
 that scores one exposure at a time (the reference star, then the science target)
-gives ``FitStage`` a ``Fit`` over a subset of the terms with the same free entries, and
+gives ``MAPStage`` a ``Fit`` over a subset of the terms with the same free entries, and
 a closed-form update reads the per-term predictions from before the step.
 
 **The model of an image fit.** A term reads the model it is given and nothing else,

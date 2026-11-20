@@ -43,12 +43,12 @@ from jax.scipy.special import log_ndtr, logsumexp
 from priorities import AbstractDistribution, from_real, to_real
 
 __all__ = [
-    "AbstractConditionalTerm",
-    "AbstractLinearTerm",
+    "AbstractLinearGaussianTerm",
+    "AbstractProposingTerm",
     "AbstractTerm",
     "Fit",
-    "LeafConditional",
-    "LinearForm",
+    "LeafProposal",
+    "LinearGaussian",
 ]
 
 
@@ -90,7 +90,7 @@ class AbstractTerm(eqx.Module):
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
 
 
-class LinearForm(eqx.Module):
+class LinearGaussian(eqx.Module):
     """A measurement as a Gaussian in the four sky constants of one orbit row.
 
     At fixed nonlinear orbit shape the predicted offset of a record is linear in the
@@ -111,21 +111,21 @@ class LinearForm(eqx.Module):
     precision: jax.Array
 
 
-class AbstractLinearTerm(AbstractTerm):
-    """A term whose likelihood is exactly Gaussian in the sky constants of one row.
+class AbstractLinearGaussianTerm(AbstractTerm):
+    """A term whose likelihood is exactly Gaussian in the sky constants of one planet.
 
     The capability is the type: a consumer that completes or marginalizes the constants
-    selects terms with ``isinstance``. ``linear_form`` is exact only where the term's
-    records depend on the constants through the row's own orbit; a term refuses the
-    models for which that fails.
+    selects terms with ``isinstance``. ``linear_gaussian`` is exact only where the
+    term's records depend on the constants through the planet's own orbit; a term
+    refuses the models for which that fails.
     """
 
     @abstractmethod
-    def linear_form(self, model, row: int = 0) -> LinearForm:
-        """The term as a Gaussian in the sky constants of orbit ``row`` of ``model``."""
+    def linear_gaussian(self, model, planet: int = 0) -> LinearGaussian:
+        """The term as a Gaussian in the sky constants of ``planet`` of ``model``."""
 
 
-class LeafConditional(eqx.Module):
+class LeafProposal(eqx.Module):
     """A proposal density for one free model leaf, as a mixture of Gaussians in its log.
 
     A record of what a term can say about a leaf given the rest of the model: component
@@ -231,12 +231,12 @@ def _log_normal_mass(a, b):
     return log_hi + jnp.log1p(-jnp.exp(log_ndtr(lo) - log_hi))
 
 
-class AbstractConditionalTerm(AbstractTerm):
+class AbstractProposingTerm(AbstractTerm):
     """A term that can propose one of the leaves it reads from its own data.
 
     The capability is the type: a proposal that completes leaves selects terms with
-    ``isinstance``. ``leaf_conditional`` is approximate by contract; see
-    :class:`LeafConditional`. It never enters a target.
+    ``isinstance``. ``leaf_proposal`` is approximate by contract; see
+    :class:`LeafProposal`. It never enters a target.
 
     Attributes:
         leaf_path: Path of the positive model leaf the term offers a conditional for,
@@ -246,7 +246,7 @@ class AbstractConditionalTerm(AbstractTerm):
     leaf_path: eqx.AbstractVar[str | None]
 
     @abstractmethod
-    def leaf_conditional(self, model) -> LeafConditional:
+    def leaf_proposal(self, model) -> LeafProposal:
         """The proposal record of ``leaf_path`` given everything else in ``model``.
 
         The value of the leaf in ``model`` is read only to scale the prediction; the
@@ -519,27 +519,47 @@ class Fit(eqx.Module):
                 x[key] = _to_cell(entry, u[key])
         return x, jnp.broadcast_to(volume, self._batch_shape(u))
 
-    def periods(self) -> tuple[float | None, ...]:
-        """Period of every entry of the flat unconstrained vector, ``None`` if none.
+    def flat_layout(self) -> tuple[tuple[tuple[str, str | None], ...], tuple[int, ...]]:
+        """Names and sizes of the segments of the flat unconstrained vector, in order.
 
         The flat vector is the ``ravel_pytree`` of one draw of :meth:`to_real` (sorted
-        entry keys; inside a block, sorted coordinate names), so the tuple is assembled
-        per block through its ``coordinate_names`` and never by position. A leaf-law
-        entry is never periodic. The tuple is static (host values) and has the length of
-        the flat vector.
+        entry keys; inside a block, sorted coordinate names). Segment ``i`` is the
+        entry ``names[i] = (key, coordinate name)`` (the name is ``None`` for a leaf-law
+        entry) and has ``sizes[i]`` elements. Both tuples are static (host values).
+
+        Returns:
+            ``(names, sizes)``.
         """
         shapes = eqx.filter_eval_shape(
             lambda k: self.to_real(self.sample_prior(k)), jax.random.key(0)
         )
-        out: list[float | None] = []
+        names, sizes = [], []
         for key in sorted(self.free):
-            entry = self.free[key]
-            if isinstance(entry, AbstractDistribution):
-                out += [None] * int(np.prod(shapes[key].shape, dtype=int))
+            if isinstance(self.free[key], AbstractDistribution):
+                names.append((key, None))
+                sizes.append(int(np.prod(shapes[key].shape, dtype=int)))
                 continue
-            period = dict(zip(entry.coordinate_names, entry.periods, strict=True))
             for name in sorted(shapes[key]):
-                size = int(np.prod(shapes[key][name].shape, dtype=int))
+                names.append((key, name))
+                sizes.append(int(np.prod(shapes[key][name].shape, dtype=int)))
+        return tuple(names), tuple(sizes)
+
+    def periods(self) -> tuple[float | None, ...]:
+        """Period of every entry of the flat unconstrained vector, ``None`` if none.
+
+        The order is that of :meth:`flat_layout`, so the tuple is assembled per block
+        through its ``coordinate_names`` and never by position. A leaf-law entry is
+        never periodic. The tuple is static (host values) and has the length of the
+        flat vector.
+        """
+        names, sizes = self.flat_layout()
+        out: list[float | None] = []
+        for (key, name), size in zip(names, sizes, strict=True):
+            if name is None:
+                out += [None] * size
+            else:
+                entry = self.free[key]
+                period = dict(zip(entry.coordinate_names, entry.periods, strict=True))
                 out += [period[name]] * size
         return tuple(out)
 
@@ -547,8 +567,8 @@ class Fit(eqx.Module):
         """Unconstrained entries of flat vectors ``z (..., d)``.
 
         The flat vector is the ``ravel_pytree`` of one draw of :meth:`to_real` (see
-        :meth:`periods`); the result is an argument of :meth:`from_real` with the batch
-        shape of ``z``.
+        :meth:`flat_layout`); the result is an argument of :meth:`from_real` with the
+        batch shape of ``z``.
         """
         shapes = eqx.filter_eval_shape(
             lambda k: self.to_real(self.sample_prior(k)), jax.random.key(0)
@@ -564,7 +584,7 @@ class Fit(eqx.Module):
 
         The inverse of :meth:`from_flat`: :meth:`to_real` of every draw, with each
         periodic block coordinate reduced to its cell ``[0, period)``, raveled in the
-        order :meth:`unravel` reads (see :meth:`periods`). ``x`` may carry leading
+        order :meth:`unravel` reads (see :meth:`flat_layout`). ``x`` may carry leading
         batch axes, which come before the flat axis of the result. It places a cloud
         (``posterior.samples``) in the coordinates of a proposal's ``adapt`` or of
         ``MixtureProposal.from_cloud``.

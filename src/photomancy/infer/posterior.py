@@ -732,20 +732,20 @@ def _flat_periods(posterior, keys):
 
 
 def cluster_to_mixture(
-    posterior, k, key, *, keys=None, init=None, iters=25, cov_floor=1e-6
+    posterior, n_modes, key, *, keys=None, init=None, n_steps=25, cov_floor=1e-6
 ):
-    """Cluster a posterior into a ``k``-mode Gaussian ``priorities.Mixture``.
+    """Cluster a posterior into an ``n_modes``-mode Gaussian ``priorities.Mixture``.
 
-    The draws, flattened by :func:`ravel_samples`, are assigned to ``k`` clusters by
-    weighted hard-assignment clustering: three rounds of k-means (each draw to the
-    nearest center), then each draw goes to the cluster that maximizes its log mass
-    plus the log density of the cluster's own Gaussian, for ``iters`` rounds in all.
-    Each mode is the cluster's weighted mean and covariance and its weight is the
-    cluster's mass, so the mixture follows the posterior's modes; draws of zero
-    weight, such as the NaN dead draws of a proposal, take no part. The result is a
-    distribution over the flat vector: use it as the law of one free leaf of shape
-    ``(D,)`` in the next ``Fit``. It has no inverse CDF, so it serves the gradient
-    and sample backends and not nested sampling.
+    The draws, flattened by :func:`ravel_samples`, are assigned to ``n_modes`` clusters
+    by weighted hard-assignment clustering: three rounds of k-means (each draw to the
+    nearest center), then each draw goes to the cluster that maximizes its log mass plus
+    the log density of the cluster's own Gaussian, for ``n_steps`` rounds in all. Each
+    mode is the cluster's weighted mean and covariance and its weight is the cluster's
+    mass, so the mixture follows the posterior's modes; draws of zero weight, such as
+    the NaN dead draws of a proposal, take no part. The result is a distribution over
+    the flat vector: use it as the law of one free leaf of shape ``(D,)`` in the next
+    ``Fit``. It has no inverse CDF, so it serves the gradient and sample backends and
+    not nested sampling.
 
     Distances are taken in standardized coordinates (each coordinate divided by the
     weighted standard deviation of the cloud) and wrapped on the periodic coordinates
@@ -757,13 +757,14 @@ def cluster_to_mixture(
 
     Args:
         posterior: An unbatched :class:`Posterior` (one slice; map over worlds).
-        k: Number of modes.
-        key: PRNG key for the random start (``k`` draws picked by weight); unused
+        n_modes: Number of modes.
+        key: PRNG key for the random start (``n_modes`` draws picked by weight); unused
             when ``init`` is given.
         keys: Entries to cluster, default all.
-        init: Optional entry dict of the ``k`` starting centers in stored coordinates
-            (every leaf has a leading axis of length ``k``, entries as ``keys``).
-        iters: Clustering iterations.
+        init: Optional entry dict of the ``n_modes`` starting centers in stored
+            coordinates (every leaf has a leading axis of length ``n_modes``, entries
+            as ``keys``).
+        n_steps: Clustering iterations.
         cov_floor: Diagonal added to every covariance.
 
     Returns:
@@ -788,7 +789,7 @@ def cluster_to_mixture(
     sd = jnp.sqrt(w @ offset(x, mean) ** 2)
     scale = jnp.where(sd > 0, sd, 1.0)
     if init is None:
-        centers = x[jax.random.choice(key, n, (k,), p=w)]
+        centers = x[jax.random.choice(key, n, (n_modes,), p=w)]
     else:
         wanted = sorted(posterior.samples if keys is None else keys)
         if sorted(init) != wanted:
@@ -797,10 +798,10 @@ def cluster_to_mixture(
         centers = jnp.concatenate(
             [jnp.reshape(leaf, (jnp.shape(leaf)[0], -1)) for leaf in leaves], axis=-1
         )
-        if centers.shape != (k, d):
+        if centers.shape != (n_modes, d):
             raise ValueError(
                 f"init has {centers.shape[0]} centers of dimension {centers.shape[1]}; "
-                f"expected k={k} of dimension {d}"
+                f"expected n_modes={n_modes} of dimension {d}"
             )
 
     floor = (1e-2 * scale) ** 2
@@ -835,10 +836,10 @@ def cluster_to_mixture(
         score = (jnp.log(jnp.maximum(mass, 1e-30)) - 0.5 * log_det)[
             :, None
         ] - 0.5 * jnp.sum(z**2, axis=1)
-        return jax.nn.one_hot(jnp.argmax(score, axis=0), k) * w[:, None]
+        return jax.nn.one_hot(jnp.argmax(score, axis=0), n_modes) * w[:, None]
 
-    covs0 = jnp.broadcast_to(jnp.diag(scale**2), (k, d, d))
-    mass0 = jnp.full(k, 1.0 / k)
+    covs0 = jnp.broadcast_to(jnp.diag(scale**2), (n_modes, d, d))
+    mass0 = jnp.full(n_modes, 1.0 / n_modes)
 
     def step(carry, i):
         centers, covs, mass = carry
@@ -852,7 +853,7 @@ def cluster_to_mixture(
         return moments(centers, mass_w), None
 
     state = (centers, covs0, mass0)
-    (centers, covs, mass), _ = jax.lax.scan(step, state, jnp.arange(iters))
+    (centers, covs, mass), _ = jax.lax.scan(step, state, jnp.arange(n_steps))
     means, covs, mass = moments(centers, assign(centers, covs, mass))
     covs = covs + cov_floor * jnp.eye(d)[None]
     log_mass = jnp.log(jnp.maximum(mass, 1e-30))

@@ -31,7 +31,7 @@ class NestedInfo(eqx.Module):
 
     Attributes:
         log_likelihood: Log likelihood of each stored point ``(N,)``.
-        ess: jaxns estimate of the Kish effective sample size.
+        n_eff: jaxns estimate of the Kish effective sample size.
         n_likelihood_evaluations: Total likelihood evaluations.
         termination_reason: Zero when jaxns met its own stopping rule, else a
             hard-stop code (1: the sample buffer filled). A nonzero code makes the
@@ -39,7 +39,7 @@ class NestedInfo(eqx.Module):
     """
 
     log_likelihood: jax.Array
-    ess: jax.Array
+    n_eff: jax.Array
     n_likelihood_evaluations: jax.Array
     termination_reason: jax.Array
 
@@ -128,7 +128,7 @@ class NestedSampling(AbstractBackend):
             ),
             info=NestedInfo(
                 log_likelihood=jnp.asarray(results.log_L),
-                ess=jnp.asarray(results.ess),
+                n_eff=jnp.asarray(results.ess),
                 n_likelihood_evaluations=jnp.asarray(
                     results.total_num_likelihood_evaluations
                 ),
