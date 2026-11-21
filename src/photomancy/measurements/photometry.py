@@ -235,7 +235,7 @@ class PhotometryData(eqx.Module):
 
     All fields have shape ``(N,)``. ``time_d`` uses the system's day frame;
     ``contrast`` and ``contrast_err`` are dimensionless linear flux ratios.
-    ``band_id`` and ``planet`` index the term's bandpasses and system planets.
+    ``band_id`` and ``planet`` index the term's transmissions and system planets.
     ``is_upper_limit`` selects a Gaussian cumulative probability below the
     reported contrast; ``valid`` excludes padded rows.
     """
@@ -496,7 +496,7 @@ class PhotometryTerm(AbstractTerm):
     """Score linear contrasts using Gaussian detections or Gaussian upper limits.
 
     Build ``quadrature`` on the host with the system and filter curves. Its
-    bands and ``bandpasses`` follow ``data.band_id`` order. The system at
+    bands and ``transmissions`` follow ``data.band_id`` order. The system at
     ``system_path`` (the empty path is the model itself) returns ``(W, K, T)`` band
     contrasts. Each row selects its own band, planet and epoch. An upper limit
     contributes ``log Phi((limit - prediction) / contrast_err)``. Invalid rows return
@@ -505,14 +505,16 @@ class PhotometryTerm(AbstractTerm):
 
     data: PhotometryData
     quadrature: Quadrature
-    bandpasses: tuple[Transmission, ...]
+    transmissions: tuple[Transmission, ...]
     system_path: str = eqx.field(static=True, default="")
     reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
-        """Require a bandpass for contrast prediction."""
-        if len(self.bandpasses) != len(self.quadrature.bands):
-            raise ValueError("PhotometryTerm needs one bandpass per quadrature band")
+        """Require a transmission for contrast prediction."""
+        if len(self.transmissions) != len(self.quadrature.bands):
+            raise ValueError(
+                "PhotometryTerm needs one transmission per quadrature band"
+            )
 
     def _score(self, model):
         valid = self.data.valid
@@ -529,7 +531,7 @@ class PhotometryTerm(AbstractTerm):
         prediction = _band_contrasts(
             system,
             self.quadrature,
-            self.bandpasses,
+            self.transmissions,
             data.time_d,
             data.band_id,
             data.planet,

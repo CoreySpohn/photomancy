@@ -32,7 +32,7 @@ class _Scene(eqx.Module):
     def ephemeris(self, time_d):
         return time_d
 
-    def band_contrasts(self, quadrature, time_d, *, bandpass=None):
+    def band_contrasts(self, quadrature, time_d, *, transmission=None):
         # Mode, planet and time dependence makes all three row indices observable.
         scale = (
             jnp.asarray([b.center_nm for b in quadrature.bands])[:, None, None] / 600.0
@@ -221,7 +221,7 @@ def test_surrogate_and_routing(report_case):
         table.counts_per_contrast_s,
         table.lod_arcsec,
         table.quadrature,
-        table.bandpasses,
+        table.transmissions,
         system.epoch,
     )
     actual = PrecomputedReportPredictor(sys_table, 0)(system, term.data)
@@ -230,9 +230,9 @@ def test_surrogate_and_routing(report_case):
     contrasts = jnp.stack(
         [
             system.band_contrasts(
-                table.quadrature.band(i), term.data.time_d, bandpass=b
+                table.quadrature.band(i), term.data.time_d, transmission=b
             )[0]
-            for i, b in enumerate(table.bandpasses)
+            for i, b in enumerate(table.transmissions)
         ]
     )
     pos = np.asarray(system.positions(term.data.time_d))[:, 0]

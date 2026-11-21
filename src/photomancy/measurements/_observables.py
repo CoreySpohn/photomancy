@@ -26,13 +26,13 @@ def _stellar_reflex(system, time_d):
     return system.star_reflex(time_d=time_d)
 
 
-def _band_contrasts(system, quadrature, bandpasses, time_d, band_id, planet):
+def _band_contrasts(system, quadrature, transmissions, time_d, band_id, planet):
     """Select each row's filter, planet and epoch from a single scene evaluation."""
 
     def response(nodes_nm):
         return jnp.stack(
-            [curve(row) for curve, row in zip(bandpasses, nodes_nm, strict=True)]
+            [curve(row) for curve, row in zip(transmissions, nodes_nm, strict=True)]
         )
 
-    bands = system.band_contrasts(quadrature, time_d, bandpass=response)
+    bands = system.band_contrasts(quadrature, time_d, transmission=response)
     return bands[band_id, planet, jnp.arange(time_d.size)]

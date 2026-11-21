@@ -202,11 +202,11 @@ class AbstractReportPredictor(eqx.Module):
 
 
 class CountRateTable(eqx.Module):
-    """A mode bank of count rates, diffraction scales and bandpasses.
+    """A mode bank of count rates, diffraction scales and transmissions.
 
     Separations have shape (n_modes, P). Finite knots increase strictly;
     padding is a trailing +inf separation with zero rate. Rates are expected
-    planet counts per unit linear contrast per second. ``bandpasses`` contains
+    planet counts per unit linear contrast per second. ``transmissions`` contains
     one response per mode. Build the matching quadrature on the host, with
     the system and these responses, as for PhotometryTerm.
     Diffraction scales have shape (n_modes,). ``epoch`` is the static origin of
@@ -217,7 +217,7 @@ class CountRateTable(eqx.Module):
     counts_per_contrast_s: jax.Array = eqx.field(converter=_float64)
     lod_arcsec: jax.Array = eqx.field(converter=_float64)
     quadrature: Quadrature
-    bandpasses: tuple[Transmission, ...]
+    transmissions: tuple[Transmission, ...]
     epoch: Epoch = eqx.field(static=True)
 
     def __check_init__(self):
@@ -227,12 +227,12 @@ class CountRateTable(eqx.Module):
             or self.counts_per_contrast_s.shape != self.separation_arcsec.shape
             or self.lod_arcsec.shape != (self.separation_arcsec.shape[0],)
             or len(self.quadrature.bands) != self.separation_arcsec.shape[0]
-            or len(self.bandpasses) != self.separation_arcsec.shape[0]
+            or len(self.transmissions) != self.separation_arcsec.shape[0]
             or self.separation_arcsec.shape[1] < 1
         ):
             raise ValueError(
                 "table needs matching (n_modes, P) grids, P >= 1, "
-                "and one diffraction scale and bandpass per mode"
+                "and one diffraction scale and transmission per mode"
             )
 
 
@@ -260,7 +260,7 @@ class PrecomputedReportPredictor(AbstractReportPredictor):
         contrast = _band_contrasts(
             model,
             self.table.quadrature,
-            self.table.bandpasses,
+            self.table.transmissions,
             clean.time_d,
             clean.mode,
             planet,

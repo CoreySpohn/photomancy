@@ -107,12 +107,12 @@ def test_target_routing_and_composition(tmp_path):
     with pytest.raises(ValueError, match="L'"):
         loaded.terms()
     with pytest.raises(ValueError, match="L'"):
-        loaded.terms(bandpasses={"H": bands["H"]})
+        loaded.terms(transmissions={"H": bands["H"]})
     model = _Model(_system())
-    terms = loaded.terms(system=model.system, system_path="system", bandpasses=bands)
+    terms = loaded.terms(system=model.system, system_path="system", transmissions=bands)
     assert len(terms) == 2
     assert all(np.isfinite(term(model)) for term in terms)
-    pending = load_target(path, epoch=_EPOCH, include_pending=True, bandpasses=bands)
+    pending = load_target(path, epoch=_EPOCH, include_pending=True, transmissions=bands)
     assert pending.band_names == ("L'", "H")
     assert pending.relative_astrometry.time_d.size == 2
     np.testing.assert_array_equal(pending.photometry.is_upper_limit, [False, True])
@@ -169,7 +169,7 @@ def test_target_epoch_invariance(tmp_path, include_pending):
     }
     epochs = (Epoch(2460000.0, 0.125), Epoch(2460100.0, 0.375))
     loaded = [
-        load_target(path, epoch=e, include_pending=include_pending, bandpasses=bands)
+        load_target(path, epoch=e, include_pending=include_pending, transmissions=bands)
         for e in epochs
     ]
     for name in ("relative_astrometry", "photometry"):

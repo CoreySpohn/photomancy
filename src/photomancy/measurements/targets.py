@@ -24,7 +24,7 @@ class TargetData:
 
     ``band_names`` lists filters in first-used order. ``comparisons`` maps
     table names to raw rows: comparison rows, skipped pending rows, and pixels.
-    A bandpass mapping supplied at load time is the default for ``terms``.
+    A transmission mapping supplied at load time is the default for ``terms``.
     Observation containers retain ``time_d``, in days from ``epoch``, the same
     origin required by the system used to evaluate their terms.
     """
@@ -35,10 +35,10 @@ class TargetData:
     band_names: tuple[str, ...]
     comparisons: dict
     epoch: Epoch
-    _bandpasses: Mapping | None = field(default=None, repr=False, compare=False)
+    _transmissions: Mapping | None = field(default=None, repr=False, compare=False)
 
-    def terms(self, system_path="", bandpasses=None, *, system=None):
-        """Build terms for present data, using filter-name to bandpass mappings.
+    def terms(self, system_path="", transmissions=None, *, system=None):
+        """Build terms for present data, using filter-name to transmission mappings.
 
         ``system_path`` is the model path of the system the terms read; the empty
         default is the model itself.
@@ -51,7 +51,7 @@ class TargetData:
         if self.relative_astrometry is not None:
             result.append(RelativeAstrometryTerm(self.relative_astrometry, system_path))
         if self.photometry is not None:
-            mapping = self._bandpasses if bandpasses is None else bandpasses
+            mapping = self._transmissions if transmissions is None else transmissions
             missing = [
                 name
                 for name in self.band_names
@@ -59,7 +59,7 @@ class TargetData:
             ]
             if missing:
                 raise ValueError(
-                    f"Missing bandpasses for filters: {', '.join(missing)}"
+                    f"Missing transmissions for filters: {', '.join(missing)}"
                 )
             if system is None:
                 raise ValueError(
@@ -82,7 +82,7 @@ def _mean_error(value):
 
 
 def load_target(
-    path, *, epoch: Epoch, pixel_data_ids=(), include_pending=False, bandpasses=None
+    path, *, epoch: Epoch, pixel_data_ids=(), include_pending=False, transmissions=None
 ):
     """Read target metadata and astrometry/photometry rows from a TOML file.
 
@@ -97,7 +97,7 @@ def load_target(
 
     A term row sharing a ``data_id`` with ``pixel_data_ids`` raises ``ValueError``
     to prevent counting the same measurement twice. Pending rows become term
-    rows when requested; any unknown ``use`` value raises. ``bandpasses`` may
+    rows when requested; any unknown ``use`` value raises. ``transmissions`` may
     supply the default filter mapping for the returned object's ``terms`` method.
     """
     with Path(path).open("rb") as stream:
@@ -154,5 +154,5 @@ def load_target(
         band_names,
         comparisons,
         epoch,
-        bandpasses,
+        transmissions,
     )
