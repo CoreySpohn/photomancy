@@ -20,21 +20,33 @@ from photomancy.infer.posterior import Posterior
 
 
 def _map_optimize(neg_logdensity, init, n_steps):
-    """Minimize ``neg_logdensity`` from ``init`` with ``optax.lbfgs``."""
+    """Minimize ``neg_logdensity`` from ``init`` with ``optax.lbfgs``.
+
+    Returns the iterate with the lowest value. The scan runs all ``n_steps``, and
+    once the gradient has reached round-off the quasi-Newton update is built from
+    curvature pairs that are themselves round-off, so a step can leave the minimum
+    by many orders of magnitude (seen with jax 0.12.1: an exactly converged fit
+    stepped to 1e10 at iteration 27 of 100). A diverging step costs the run
+    nothing only if it is not the one returned.
+    """
     opt = optax.lbfgs()
     value_and_grad = optax.value_and_grad_from_state(neg_logdensity)
 
     def step(carry, _):
-        z, state = carry
+        z, state, best_z, best_value = carry
         value, grad = value_and_grad(z, state=state)
+        better = value < best_value
+        best_z = jnp.where(better, z, best_z)
+        best_value = jnp.where(better, value, best_value)
         updates, state = opt.update(
             grad, state, z, value=value, grad=grad, value_fn=neg_logdensity
         )
         z = optax.apply_updates(z, updates)
-        return (z, state), None
+        return (z, state, best_z, best_value), None
 
-    (z_map, _), _ = jax.lax.scan(step, (init, opt.init(init)), None, length=n_steps)
-    return z_map
+    start = (init, opt.init(init), init, jnp.asarray(jnp.inf, init.dtype))
+    (z, _, best_z, best_value), _ = jax.lax.scan(step, start, None, length=n_steps)
+    return jnp.where(neg_logdensity(z) < best_value, z, best_z)
 
 
 def _hessian(neg_logdensity, z_map):
