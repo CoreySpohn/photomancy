@@ -245,7 +245,9 @@ import optixstuff as ox
 from optixstuff import frames_for_time
 
 post_processing = ox.PostProcessing(
-    speckle_residual_fraction=0.1, exozodi_residual_fraction=0.1
+    speckle_residual_fraction=0.1,
+    exozodi_residual_fraction=0.1,
+    background_variance_factor=2.0,  # differential imaging
 )
 needed = ox.exposure_time(
     rates, detector, target_snr, frame_time_s=100.0, post_processing=post_processing
