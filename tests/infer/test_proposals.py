@@ -303,6 +303,8 @@ def test_the_unit_cube_of_a_block_has_the_block_unit_size():
     assert bool(jnp.isfinite(fit.log_density(stored)))
 
 
+_STALLED_NATS = 100.0
+
 MODES = json.loads(
     (
         Path(__file__).parent.parent / "data" / "laplace_pathfinder_modes.json"
@@ -327,11 +329,27 @@ def _modes_and_evidence(label, backend):
             assert np.isnan(float(draws.log_evidence_se)), (seed, label, khat)
         score = np.asarray(info.mode_log_evidence if label == "laplace" else info.elbo)
         kept = np.asarray(info.kept)
+        if label == "laplace":
+            # A start that stalls against a wall (gradient norm 3 to 200 after 100
+            # steps) sits about 1285 nats below the converged modes, so it carries no
+            # proposal weight. Whether it is kept depends on its Hessian eigenvalue
+            # against the indefiniteness threshold, which round-off decides (jax
+            # 0.12.1 drops one that jax 0.12.0.1 keeps): only the converged modes
+            # are matched, and the stalled ones must stay negligible.
+            best = max(m["score"] for m in modes)
+            modes = [m for m in modes if m["score"] > best - _STALLED_NATS]
+            kept = kept & (score > score[kept].max() - _STALLED_NATS)
         order = [i for i in np.argsort(-score) if kept[i]]
         assert len(order) == len(modes), (seed, label)
-        for i, mode in zip(order, modes, strict=True):
+        means = np.asarray(info.flat_means)
+        for mode in modes:
+            # Aliases of one orbit tie in score to round-off, so the score order does
+            # not fix which alias is listed first; each stored mode takes the nearest
+            # remaining kept one by location.
+            i = min(order, key=lambda j: np.max(np.abs(means[j] - mode["mean"])))
+            order.remove(i)
             np.testing.assert_allclose(score[i], mode["score"], atol=1e-2)
-            np.testing.assert_allclose(info.flat_means[i], mode["mean"], atol=1e-3)
+            np.testing.assert_allclose(means[i], mode["mean"], atol=1e-3)
             np.testing.assert_allclose(
                 np.diagonal(np.asarray(info.flat_covs[i])),
                 mode["var"],
@@ -348,7 +366,15 @@ def test_laplace_keeps_its_modes_and_refuses_the_evidence_above_the_khat_limit()
     ``FrameChart`` block, which has no angle coordinate. The kept modes (coincident
     starts merged), sorted by evidence, match the stored ones: score within 0.01,
     means within 1e-3, variances within 1 percent (floor 1e-8, the stored rounding);
-    they do not read the draws, so a small
+    modes are matched to the stored ones by location, because aliases of one orbit tie
+    in score to round-off, and only the converged modes (within 100 nats of the best
+    of the run) are compared. The stored runs also hold starts that stalled against a
+    wall, 1285 nats below the converged modes with gradient norms of 3 to 200; whether
+    one is kept rests on a Hessian eigenvalue against ``-min_eigenvalue``, and under
+    jax 0.12.1 one of them (eigenvalue -1.78 against -0.58 under 0.12.0.1) is dropped.
+    Their weight in the proposal is exp(-1285), so their keeping is not a contract.
+    The converged modes move by 8e-6 in variance and 5e-7 in mean across the two jax
+    versions. They do not read the draws, so a small
     ``n_draws`` keeps the test cheap. The published evidence and its error are
     NaN where ``info.importance.khat`` is above ``khat_threshold(n_draws)`` and equal
     ``importance_evidence`` of the returned weights (rtol 1e-12) where it is not.
