@@ -16,14 +16,14 @@ self-version constraint on shallow VCS checkouts.
 | Dependency | Declared floor | Resolved version | Groups |
 | --- | --- | --- | --- |
 | blackjax | >=1.6 | 1.6 | blackjax, samplers, docs, test |
-| coronagraphoto | >=4.2.0 | not run at the floor | runtime |
+| coronagraphoto | >=7.0.0 | not run at the floor (unreleased; sibling pin) | runtime |
 | equinox | >=0.13.2 | 0.13.2 | runtime |
 | eyepiece | >=0.1.0 | 0.16.1.dev25+gc7a4bea5a | docs, test, viz |
 | hatch-fancy-pypi-readme | >=24.1.0 | 24.1.0 | build |
 | hatch-vcs | >=0.4.0 | 0.4.0 | build |
 | hatchling | >=1.26.3 | 1.26.3 | build |
 | hwostyle | >=1.7.0 | 1.7.1.dev6+g8f7acbaea | docs |
-| hwoutils | >=1.10.0 | 1.10.1.dev16+g683aa5221 | runtime |
+| hwoutils | >=3.0.0 | not run at the floor (unreleased; sibling pin) | runtime |
 | hypothesis | >=6.79.1 | 6.79.1 | test |
 | ineedvalidation | >=1.0.0 | not run at the floor | test |
 | ipython | >=8.18 | 8.18.0 | docs |
@@ -36,7 +36,8 @@ self-version constraint on shallow VCS checkouts.
 | myst-nb | >=1.1 | 1.1.0 | docs |
 | numpy | >=2.1.2 | 2.1.2 | runtime |
 | optax | >=0.2.4 | 0.2.4 | runtime |
-| orbix | >=3.0.0 | 2.0.1.dev17+g2f9f366a6 | runtime |
+| optixstuff | >=7.0.0 | not run at the floor (unreleased; sibling pin) | runtime |
+| orbix | >=6.0.0 | not run at the floor (unreleased; sibling pin) | runtime |
 | packaging | >=24.2 | 24.2 | test |
 | pre-commit | >=3.6 | 3.6.0 | dev |
 | priorities | none | not run at the floor | runtime |
@@ -47,13 +48,19 @@ self-version constraint on shallow VCS checkouts.
 | pytest-timeout | >=1.3.1 | 1.3.1 | test |
 | pytest-xdist | >=2.5 | 2.5.0 | test |
 | scipy | >=1.13 | 1.13.0 | test |
-| skyscapes | >=2.1.0 | 2.0.1.dev44+g5280469c2 | runtime |
+| skyscapes | >=6.0.0 | not run at the floor (unreleased; sibling pin) | runtime |
 | sphinx | >=7.3.7 | 7.3.7 | docs |
 | sphinx-autoapi | >=3.0 | 3.0.0 | docs |
 | sphinx-book-theme | >=1.1.3 | 1.1.3 | docs |
 | sphinx_autodoc_typehints | >=2.0 | 2.0.0 | docs |
 | sphinxcontrib-mermaid | >=0.9.2 | 0.9.2 | docs |
 | tfp-nightly | >=0.26.0.dev20260621 | 0.26.0.dev20260621 | test |
+| yippy | >=4.0.0 | not run at the floor (unreleased; sibling pin) | docs, test |
+
+The sibling floors for coronagraphoto, hwoutils, optixstuff, orbix, skyscapes and yippy name the
+next releases of those libraries; until they are on PyPI the lowest-direct job installs the
+branches listed in `.github/sibling-pins.txt` in their place. Delete a pin once its release is
+published.
 
 NumPy, Matplotlib, and the markdown pytest plugin floors
 match the versions selected by the complete lowest-direct resolution.

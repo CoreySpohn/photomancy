@@ -16,9 +16,10 @@ PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 # First release of each sibling that uses the (east, north, away) sky chart.
 SKY_FLOORS = {
-    "orbix": Version("4.1.0"),  # 4.1.0: the system dynamics API
-    "skyscapes": Version("4.0.0"),  # 4.0.0: times are days from the scene epoch
-    "coronagraphoto": Version("4.2.0"),
+    # Next releases (not yet on PyPI; see .github/sibling-pins.txt).
+    "orbix": Version("6.0.0"),  # sky design and Thiele-Innes block APIs
+    "skyscapes": Version("6.0.0"),  # scene sky frame and local-zodi models
+    "coronagraphoto": Version("7.0.0"),  # renders on optixstuff 7 types
 }
 
 

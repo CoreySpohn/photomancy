@@ -18,9 +18,9 @@ classifiers = [
 ]
 dependencies = [
     # The pixel likelihood renders expected electrons with coronagraphoto.expected.
-    "coronagraphoto>=4.2.0",
+    "coronagraphoto>=7.0.0",  # unreleased: next release, see .github/sibling-pins.txt
     "equinox>=0.13.2",
-    "hwoutils[jax]>=1.15.0",
+    "hwoutils[jax]>=3.0.0",  # unreleased: next release
     "jax>=0.8.1",
     "jaxlib>=0.8.1",
     "numpy>=2.1.2",
@@ -28,13 +28,14 @@ dependencies = [
     # >=0.2.5: the L-BFGS state keeps one dtype under x64, which blackjax's
     # pathfinder needs (0.2.4 fails with "cond branches must have equal output types").
     "optax>=0.2.5",
-    "optixstuff>=5.0.0",
+    "optixstuff>=7.0.0",  # unreleased: next release
     # >=3.0.0: raw positions and velocities use (east, north, away).
-    "orbix>=4.1.0",
+    # >=6.0.0: the sky-design, line-of-sight and Thiele-Innes block APIs (unreleased: next release).
+    "orbix>=6.0.0",
     "priorities",
     # >=2.1.0: scene states and the disk chart use the same (east, north) sky
     # chart as orbix 3, so an older skyscapes must not install beside photomancy.
-    "skyscapes>=4.0.0",
+    "skyscapes>=6.0.0",  # unreleased: next release
 ]
 
 [project.optional-dependencies]
@@ -53,7 +54,7 @@ docs = [
     "matplotlib>=3.11",
     "eyepiece>=0.1.0",
     # The post-processing example builds a template provider from a yippy coronagraph.
-    "yippy>=2.0",
+    "yippy>=4.0.0",
     # The example notebooks run the sampler backends.
     "blackjax>=1.6",
     "jaxctx>=1.2.0",
@@ -81,7 +82,7 @@ test = [
     "jaxctx>=1.2.0",
     "jaxns>=3.0.0",
     # The post-processing tests build a template provider from a yippy coronagraph.
-    "yippy>=2.0",
+    "yippy>=4.0.0",
 ]
 # Sampler backends. The Laplace and staged MAP backends need neither.
 # >=1.6: the MCLMC tuner requires logdensity_fn from 1.6 on, and 1.5 does
