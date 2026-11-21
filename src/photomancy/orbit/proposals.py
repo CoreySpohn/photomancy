@@ -17,11 +17,10 @@ fit's own density.
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.constants import two_pi
+from hwoutils.constants import GM_SUN_AU3_PER_D2, two_pi
 from hwoutils.model_paths import resolve
 from orbix.system import ClassicalChart
 from orbix.system.charts import disk_to_plane
-from orbix.system.core import GM_SUN_AU3_PER_D2
 
 from photomancy.infer import (
     AbstractDensityProposal,

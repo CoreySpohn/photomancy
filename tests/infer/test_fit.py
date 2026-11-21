@@ -14,11 +14,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.constants import Mearth2kg, Msun2kg, Rearth2AU
+from hwoutils.constants import GM_SUN_AU3_PER_D2, Mearth2kg, Msun2kg, Rearth2AU
 from hwoutils.model_paths import resolve
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
-from orbix.system.core import GM_SUN_AU3_PER_D2
 from priorities import LogUniform, Normal, TruncatedDistribution, Uniform
 from priorities.testing import check_distribution
 from skyscapes.physical_model import LambertianPhysicalModel
