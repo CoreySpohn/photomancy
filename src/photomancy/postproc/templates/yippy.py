@@ -48,10 +48,10 @@ class YippyTemplateProvider(AbstractTemplateProvider):
         order selects nearest (0), linear (1), or cubic (3) stamp extraction.
         The source Image declares the reconstruction used for resampling.
         """
-        band = coronagraph.band(wavelength_nm)
-        if not isinstance(band, AbstractImagingCoronagraph):
+        model = coronagraph.coronagraph_at(wavelength_nm)
+        if not isinstance(model, AbstractImagingCoronagraph):
             raise TypeError("PSF templates require an AbstractImagingCoronagraph")
-        source_grid = band.at_wavelength(wavelength_nm).source_grid
+        source_grid = model.at_wavelength(wavelength_nm).source_grid
         if source_grid.unit != "lod":
             raise ValueError("coronagraph grid must be in lod")
         if grid.unit not in ("arcsec", "lod"):
@@ -62,7 +62,7 @@ class YippyTemplateProvider(AbstractTemplateProvider):
             raise ValueError("stamp_size must be positive")
         if order not in (0, 1, 3):
             raise ValueError("order must be 0, 1 or 3")
-        self.coronagraph = band
+        self.coronagraph = model
         self.grid = grid
         self.stamp_size = int(stamp_size)
         self.order = int(order)
