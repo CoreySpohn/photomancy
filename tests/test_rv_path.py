@@ -48,7 +48,7 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
         rv=clean + 17.0,
         rv_err=jnp.full(times.shape, 0.2),
         inst_ids=jnp.zeros(times.shape, dtype=int),
-        is_valid=jnp.ones(times.shape, dtype=bool),
+        valid=jnp.ones(times.shape, dtype=bool),
         n_inst=1,
     )
     term = RadialVelocityTerm(rv, jitters=jnp.array([0.01]))
@@ -255,7 +255,7 @@ def test_rv_term_uses_total_mass():
         rv=velocities * (AU2m / d2s),
         rv_err=jnp.full(4, 0.5),
         inst_ids=jnp.zeros(4, dtype=int),
-        is_valid=jnp.ones(4, dtype=bool),
+        valid=jnp.ones(4, dtype=bool),
         n_inst=1,
     )
     term = RadialVelocityTerm(data, jitters=jnp.array([0.01]))
@@ -268,7 +268,7 @@ def test_rv_term_uses_total_mass():
         data.inst_ids,
         1,
         jnp.array([0.01]),
-        data.is_valid,
+        data.valid,
     )
     assert float(value) == pytest.approx(float(expected), abs=1e-10)
 

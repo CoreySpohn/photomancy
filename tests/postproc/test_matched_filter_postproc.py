@@ -12,7 +12,7 @@ from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
 
 from photomancy.postproc import ApertureSampler, DetectionEstimator, TwoSampleTTest
-from photomancy.postproc.arms import MatchedFilterPostProcessing
+from photomancy.postproc.arms import MatchedFilterArm
 from photomancy.postproc.contracts import DetectionStats, FrameSet
 from photomancy.postproc.core.detection import PSFTemplateFilter
 from photomancy.postproc.templates import ArrayTemplateProvider
@@ -33,7 +33,7 @@ def make_frameset(
     key,
     n_frames: int = 3,
     shape: tuple[int, int] = (64, 64),
-    exposure_time_s: float = 1.0,
+    frame_time_s: float = 1.0,
     noise_variance: jnp.ndarray | None = None,
 ) -> FrameSet:
     """Build a FrameSet of independent seeded white-noise frames.
@@ -42,7 +42,7 @@ def make_frameset(
         key: PRNG key for the frame noise.
         n_frames: Number of frames to generate.
         shape: (ny, nx) frame shape.
-        exposure_time_s: Per-frame exposure time, seconds (uniform).
+        frame_time_s: Per-frame exposure time, seconds (uniform).
         noise_variance: Optional (n_frames, ny, nx) per-pixel variance.
 
     Returns:
@@ -52,7 +52,7 @@ def make_frameset(
     return FrameSet(
         frames=frames,
         time_d=jnp.arange(n_frames, dtype=float),
-        exposure_time_s=jnp.full((n_frames,), exposure_time_s),
+        frame_time_s=jnp.full((n_frames,), frame_time_s),
         telescope_pa_deg=jnp.zeros((n_frames,)),
         fwhm_px=FWHM_PX,
         band=Band(550.0 - 110.0 / 2, 550.0 + 110.0 / 2),
@@ -63,7 +63,7 @@ def make_frameset(
 
 
 def _manual_composition(provider, noise_variance=None) -> DetectionEstimator:
-    """Hand-build the exact composition MatchedFilterPostProcessing.detect wires up."""
+    """Hand-build the exact composition MatchedFilterArm.detect wires up."""
     return DetectionEstimator(
         filter=PSFTemplateFilter(
             provider=provider, order=3, noise_variance=noise_variance
@@ -78,14 +78,14 @@ def test_arm_matches_manual_composition_bitwise():
     fs = make_frameset(jr.PRNGKey(100))
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterPostProcessing(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX)
     result = arm.detect(fs, positions)
 
     manual = _manual_composition(provider)
     expected = manual(
         fs.coadd(),
         positions,
-        fs.validity,
+        fs.valid,
         jnp.array([fs.grid.center_y, fs.grid.center_x]),
     )
 
@@ -100,7 +100,7 @@ def test_statistic_kind_and_result_type():
     fs = make_frameset(jr.PRNGKey(101))
     positions = jnp.array([[32.0, 48.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterPostProcessing(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX)
     result = arm.detect(fs, positions)
     assert isinstance(result, DetectionStats)
     assert result.statistic_kind == "psf_template_t"
@@ -116,7 +116,7 @@ def test_grid_center_consulted():
         replace(fs.grid, center_y=20.0, center_x=40.0),
     )
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterPostProcessing(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX)
     default_center = arm.detect(fs, positions)
     offset_center = arm.detect(fs_off, positions)
     assert not np.array_equal(
@@ -136,12 +136,8 @@ def test_whitening_differs_with_heteroscedastic_variance():
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
 
-    whitened = MatchedFilterPostProcessing(
-        provider=provider, fwhm_px=FWHM_PX, whiten=True
-    )
-    unwhitened = MatchedFilterPostProcessing(
-        provider=provider, fwhm_px=FWHM_PX, whiten=False
-    )
+    whitened = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX, whiten=True)
+    unwhitened = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX, whiten=False)
     with_whitening = whitened.detect(fs, positions)
     without_whitening = unwhitened.detect(fs, positions)
 
@@ -156,7 +152,7 @@ def test_whitening_matches_unwhitened_for_uniform_variance():
     """A spatially uniform noise_variance makes whiten=True match whiten=False.
 
     The arm computes variance = sum(noise_variance, axis=0) /
-    sum(exposure_time_s)**2; a per-pixel-uniform noise_variance stays
+    sum(frame_time_s)**2; a per-pixel-uniform noise_variance stays
     uniform through that propagation (a constant summed over frames,
     divided by a scalar), so the inverse-variance GLS weights are the same
     constant at every pixel. A constant weight factors out of every
@@ -169,12 +165,8 @@ def test_whitening_matches_unwhitened_for_uniform_variance():
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
 
-    whitened = MatchedFilterPostProcessing(
-        provider=provider, fwhm_px=FWHM_PX, whiten=True
-    )
-    unwhitened = MatchedFilterPostProcessing(
-        provider=provider, fwhm_px=FWHM_PX, whiten=False
-    )
+    whitened = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX, whiten=True)
+    unwhitened = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX, whiten=False)
     with_whitening = whitened.detect(fs, positions)
     without_whitening = unwhitened.detect(fs, positions)
 
@@ -199,7 +191,7 @@ def test_detect_is_jit_safe():
     fs = make_frameset(jr.PRNGKey(105))
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterPostProcessing(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX)
 
     direct = arm.detect(fs, positions)
     jitted = eqx.filter_jit(lambda a, f, p: a.detect(f, p))(arm, fs, positions)

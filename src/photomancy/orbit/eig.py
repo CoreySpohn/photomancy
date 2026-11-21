@@ -49,13 +49,13 @@ def _astrometry(system, t, planet):
     one = jnp.ones(1)
     row = AstrometryData(
         time_d=jnp.atleast_1d(t),
-        ra=0.0 * one,
-        dec=0.0 * one,
-        ra_err=one,
-        dec_err=one,
+        east_arcsec=0.0 * one,
+        north_arcsec=0.0 * one,
+        east_err_arcsec=one,
+        north_err_arcsec=one,
         corr=0.0 * one,
         planet=jnp.array([planet]),
-        is_valid=jnp.ones(1, dtype=bool),
+        valid=jnp.ones(1, dtype=bool),
     )
     return RelativeAstrometryTerm(row).predict(system)[:, 0]
 
@@ -83,7 +83,7 @@ def eig_astrometry(
     system.
 
     Each reported measurement has variance ``obs_variance_arcsec2``. An
-    optional ``(sep_arcsec, dMag_limit)`` curve makes a mode report only when its
+    optional ``(separation_arcsec, dMag_limit)`` curve makes a mode report only when its
     planet is above the inner working angle and brighter than the curve (one-planet
     systems). The Lambertian scale is the scene's albedo times squared radius; a bare
     orbix system needs it as a model leaf (AU^2) at ``area_path``.
@@ -96,7 +96,7 @@ def eig_astrometry(
         n_modes: Number of Gaussian modes.
         system_path: Model path of the scored system; the empty path is the model.
         planet: Planet index.
-        contrast_curve: Optional ``(sep_arcsec, dMag_limit)`` arrays.
+        contrast_curve: Optional ``(separation_arcsec, dMag_limit)`` arrays.
         area_path: Model path of the geometric albedo times squared radius (AU^2),
             or None to read the scene's.
         iwa_arcsec: Inner working angle (arcsec) of the detection model.

@@ -26,7 +26,7 @@ class RadialVelocityData(eqx.Module):
         rv_err: RV measurement uncertainties (m/s). Shape ``(N,)``.
         inst_ids: Integer instrument index per observation, ``0..n_inst-1``.
             Shape ``(N,)``.
-        is_valid: Boolean validity mask. Shape ``(N,)``.
+        valid: Boolean validity mask. Shape ``(N,)``.
         n_inst: Number of distinct instruments (static, for ``segment_sum``).
     """
 
@@ -34,19 +34,19 @@ class RadialVelocityData(eqx.Module):
     rv: jnp.ndarray
     rv_err: jnp.ndarray
     inst_ids: jnp.ndarray
-    is_valid: jnp.ndarray
+    valid: jnp.ndarray
     n_inst: int = eqx.field(static=True)
 
     @classmethod
     def pad(cls, *, time_d, rv, rv_err, inst_ids, n_inst, max_n):
-        """Create a padded RadialVelocityData with ``is_valid`` mask."""
+        """Create a padded RadialVelocityData with ``valid`` mask."""
         n = jnp.asarray(time_d).shape[0]
         return cls(
             time_d=_pad_1d(time_d, max_n),
             rv=_pad_1d(rv, max_n),
             rv_err=_pad_1d(rv_err, max_n, fill=1.0),
             inst_ids=_pad_1d(inst_ids, max_n).astype(int),
-            is_valid=_valid_mask(n, max_n),
+            valid=_valid_mask(n, max_n),
             n_inst=n_inst,
         )
 
@@ -58,14 +58,12 @@ class RadialVelocityData(eqx.Module):
             rv=jnp.zeros(max_n),
             rv_err=jnp.ones(max_n),
             inst_ids=jnp.zeros(max_n, dtype=int),
-            is_valid=jnp.zeros(max_n, dtype=bool),
+            valid=jnp.zeros(max_n, dtype=bool),
             n_inst=n_inst,
         )
 
 
-def loglike_rv_marginalized(
-    rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters, is_valid
-):
+def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters, valid):
     """RV log-likelihood with analytically marginalized per-instrument offsets.
 
     Because the instrument design matrix is an indicator matrix, the analytical
@@ -89,13 +87,13 @@ def loglike_rv_marginalized(
             Shape ``(N,)``.
         n_inst: Number of distinct instruments. Integer.
         jitters: Per-instrument jitter terms (m/s). Shape ``(n_inst,)``.
-        is_valid: Boolean validity mask. Shape ``(N,)``.
+        valid: Boolean validity mask. Shape ``(N,)``.
 
     Returns:
         Scalar log-likelihood value.
     """
     # Mask invalid entries -- use jnp.where for gradient safety
-    mask = is_valid  # boolean
+    mask = valid  # boolean
 
     # Total variance: measurement + jitter
     inst_ids = jnp.where(mask, inst_ids, 0)
@@ -161,13 +159,13 @@ class RadialVelocityTerm(AbstractTerm):
         return jitters
 
     def _score(self, model):
-        valid = self.data.is_valid
+        valid = self.data.valid
         data = RadialVelocityData(
             time_d=jnp.where(valid, self.data.time_d, 0.0),
             rv=jnp.where(valid, self.data.rv, 0.0),
             rv_err=jnp.where(valid, self.data.rv_err, 1.0),
             inst_ids=jnp.where(valid, self.data.inst_ids, 0),
-            is_valid=valid,
+            valid=valid,
             n_inst=self.data.n_inst,
         )
         system = resolve(model, self.system_path)
@@ -206,7 +204,7 @@ class RadialVelocityTerm(AbstractTerm):
         in quadrature, as in the score.
         """
         data = self.data
-        valid = data.is_valid
+        valid = data.valid
         ids = jnp.where(valid, data.inst_ids, 0)
         jitter = self._jitters(model)
         sigma = jnp.sqrt(jnp.where(valid, data.rv_err, 1.0) ** 2 + jitter[ids] ** 2)

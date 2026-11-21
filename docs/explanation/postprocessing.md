@@ -53,7 +53,7 @@ Use it when you need to publish a detection significance or compare with communi
 ```
 photomancy/postproc/
 ├── contracts.py   # FrameSet, DetectionStats
-├── arms.py        # AbstractPostProcessing and the Mawet and matched-filter arms
+├── arms.py        # AbstractDetectionArm and the Mawet and matched-filter arms
 ├── core/          # Low-level JAX primitives
 │   ├── geometry.py      # Radial distances, aperture coordinates
 │   ├── photometry.py    # Convolution kernels, flux maps

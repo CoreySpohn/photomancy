@@ -10,7 +10,7 @@ JIT-ready estimators for aperture photometry and Gaussian matched filtering.
 Call an estimator at candidate positions or use its map method for a 2D
 statistic image.
 
-Seam contracts: FrameSet -> AbstractPostProcessing.detect -> DetectionStats.
+Seam contracts: FrameSet -> AbstractDetectionArm.detect -> DetectionStats.
 
 The PSF-template matched filter (PSFTemplateFilter) is exported at the top
 level. YippyTemplateProvider lives in photomancy.postproc.templates.yippy and
@@ -25,9 +25,9 @@ from photomancy.postproc.analysis import (
 
 # Post-processing seam (interface + arms)
 from photomancy.postproc.arms import (
-    AbstractPostProcessing,
-    MatchedFilterPostProcessing,
-    MawetPostProcessing,
+    AbstractDetectionArm,
+    MatchedFilterArm,
+    MawetArm,
 )
 
 # Seam contract types and the post-processing interface
@@ -127,9 +127,9 @@ __all__ = [
     # Seam contracts (post-processing interface)
     "FrameSet",
     "DetectionStats",
-    "AbstractPostProcessing",
-    "MawetPostProcessing",
-    "MatchedFilterPostProcessing",
+    "AbstractDetectionArm",
+    "MawetArm",
+    "MatchedFilterArm",
     "student_t_sf",
     # Template providers (PSF-template matched filtering)
     "AbstractTemplateProvider",

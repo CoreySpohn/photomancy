@@ -96,13 +96,13 @@ class ReportData(eqx.Module):
     science_s: jax.Array = eqx.field(converter=_float64)
     limit_counts: jax.Array = eqx.field(converter=_float64)
     mode: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, jnp.int32))
-    is_valid: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, bool))
+    valid: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, bool))
     is_detected: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, bool))
     counts: jax.Array = eqx.field(converter=_float64)
-    ra: jax.Array = eqx.field(converter=_float64)
-    dec: jax.Array = eqx.field(converter=_float64)
-    ra_err: jax.Array = eqx.field(converter=_float64)
-    dec_err: jax.Array = eqx.field(converter=_float64)
+    east_arcsec: jax.Array = eqx.field(converter=_float64)
+    north_arcsec: jax.Array = eqx.field(converter=_float64)
+    east_err_arcsec: jax.Array = eqx.field(converter=_float64)
+    north_err_arcsec: jax.Array = eqx.field(converter=_float64)
     corr: jax.Array = eqx.field(converter=_float64)
 
     def __check_init__(self):
@@ -143,10 +143,10 @@ class ReportData(eqx.Module):
             jnp.ones(rows.time_d.shape, bool),
             rows.is_detected,
             rows.counts,
-            rows.ra,
-            rows.dec,
-            rows.ra_err,
-            rows.dec_err,
+            rows.east_arcsec,
+            rows.north_arcsec,
+            rows.east_err_arcsec,
+            rows.north_err_arcsec,
             rows.corr,
         )
 
@@ -161,13 +161,13 @@ class ReportData(eqx.Module):
         """
         return AstrometryData(
             time_d=self.time_d,
-            ra=self.ra,
-            dec=self.dec,
-            ra_err=self.ra_err,
-            dec_err=self.dec_err,
+            east_arcsec=self.east_arcsec,
+            north_arcsec=self.north_arcsec,
+            east_err_arcsec=self.east_err_arcsec,
+            north_err_arcsec=self.north_err_arcsec,
             corr=self.corr,
             planet=jnp.full(self.time_d.shape, planet, int),
-            is_valid=self.is_valid & self.is_detected,
+            valid=self.valid & self.is_detected,
         )
 
 
@@ -176,17 +176,19 @@ class ReportPrediction(eqx.Module):
 
     counts: jax.Array = eqx.field(converter=_float64)
     variance: jax.Array = eqx.field(converter=_float64)
-    ra: jax.Array = eqx.field(converter=_float64)
-    dec: jax.Array = eqx.field(converter=_float64)
+    east_arcsec: jax.Array = eqx.field(converter=_float64)
+    north_arcsec: jax.Array = eqx.field(converter=_float64)
 
     @classmethod
-    def from_limit(cls, counts, limit_counts, ra=None, dec=None) -> Self:
+    def from_limit(
+        cls, counts, limit_counts, east_arcsec=None, north_arcsec=None
+    ) -> Self:
         """Combine planet-free variance and shot noise, with optional positions."""
         return cls(
             counts,
             limit_counts**2 + counts,
-            jnp.zeros_like(counts) if ra is None else ra,
-            jnp.zeros_like(counts) if dec is None else dec,
+            jnp.zeros_like(counts) if east_arcsec is None else east_arcsec,
+            jnp.zeros_like(counts) if north_arcsec is None else north_arcsec,
         )
 
 
@@ -211,7 +213,7 @@ class CountRateTable(eqx.Module):
     the report times; a predictor raises if the model's epoch differs.
     """
 
-    sep_arcsec: jax.Array = eqx.field(converter=_float64)
+    separation_arcsec: jax.Array = eqx.field(converter=_float64)
     counts_per_contrast_s: jax.Array = eqx.field(converter=_float64)
     lod_arcsec: jax.Array = eqx.field(converter=_float64)
     quadrature: Quadrature
@@ -221,12 +223,12 @@ class CountRateTable(eqx.Module):
     def __check_init__(self):
         """Require compatible mode-bank dimensions."""
         if (
-            self.sep_arcsec.ndim != 2
-            or self.counts_per_contrast_s.shape != self.sep_arcsec.shape
-            or self.lod_arcsec.shape != (self.sep_arcsec.shape[0],)
-            or len(self.quadrature.bands) != self.sep_arcsec.shape[0]
-            or len(self.bandpasses) != self.sep_arcsec.shape[0]
-            or self.sep_arcsec.shape[1] < 1
+            self.separation_arcsec.ndim != 2
+            or self.counts_per_contrast_s.shape != self.separation_arcsec.shape
+            or self.lod_arcsec.shape != (self.separation_arcsec.shape[0],)
+            or len(self.quadrature.bands) != self.separation_arcsec.shape[0]
+            or len(self.bandpasses) != self.separation_arcsec.shape[0]
+            or self.separation_arcsec.shape[1] < 1
         ):
             raise ValueError(
                 "table needs matching (n_modes, P) grids, P >= 1, "
@@ -266,7 +268,7 @@ class PrecomputedReportPredictor(AbstractReportPredictor):
         radius2 = ra**2 + dec**2
         sep = jnp.sqrt(jnp.where(radius2 > 0, radius2, 1.0))
         sep = jnp.where(radius2 > 0, sep, 0.0)
-        xp = self.table.sep_arcsec[clean.mode]
+        xp = self.table.separation_arcsec[clean.mode]
         fp = self.table.counts_per_contrast_s[clean.mode]
         finite = jnp.isfinite(xp)
         last = jnp.max(jnp.where(finite, xp, -jnp.inf), axis=1)
@@ -287,10 +289,10 @@ def _prediction_rows(rows):
         lambda r: (r.time_d, r.science_s, r.limit_counts, r.mode),
         rows,
         (
-            jnp.where(rows.is_valid, rows.time_d, 0.0),
-            jnp.where(rows.is_valid, rows.science_s, 0.0),
-            jnp.where(rows.is_valid, rows.limit_counts, 1.0),
-            jnp.where(rows.is_valid, rows.mode, 0),
+            jnp.where(rows.valid, rows.time_d, 0.0),
+            jnp.where(rows.valid, rows.science_s, 0.0),
+            jnp.where(rows.valid, rows.limit_counts, 1.0),
+            jnp.where(rows.valid, rows.mode, 0),
         ),
     )
 
@@ -308,7 +310,7 @@ def _scale_fit(counts, limit, rows, rule):
     Returns:
         ``(has, t_hat, sd, chi2, log_norm, on_region)``.
     """
-    det = rows.is_valid & rows.is_detected
+    det = rows.valid & rows.is_detected
     measured = jnp.where(det, rows.counts, 0.0)
     var = limit**2 + measured
     g = jnp.where(det, counts, 0.0)
@@ -383,7 +385,7 @@ class ReportTerm(AbstractProposingTerm):
     def _row_density(self, model, rows):
         clean = _prediction_rows(rows)
         prediction = self.predictor(model, clean)
-        detected = rows.is_valid & rows.is_detected
+        detected = rows.valid & rows.is_detected
         counts = jnp.where(detected, rows.counts, 0.0)
         detection = self.rule.log_counts_density(counts, clean.limit_counts, prediction)
         null = self.rule.log_null_probability(clean.limit_counts, prediction)
@@ -394,10 +396,10 @@ class ReportTerm(AbstractProposingTerm):
                     jnp.isnan(x)
                     for x in (
                         rows.counts,
-                        rows.ra,
-                        rows.dec,
-                        rows.ra_err,
-                        rows.dec_err,
+                        rows.east_arcsec,
+                        rows.north_arcsec,
+                        rows.east_err_arcsec,
+                        rows.north_err_arcsec,
                         rows.corr,
                     )
                 ]
@@ -405,7 +407,7 @@ class ReportTerm(AbstractProposingTerm):
             axis=0,
         )
         value = jnp.where(outcome_nan, jnp.nan, value)
-        return jnp.where(rows.is_valid, value, 0.0), prediction
+        return jnp.where(rows.valid, value, 0.0), prediction
 
     def __call__(self, model) -> jax.Array:
         """Sum valid null log probabilities and detection counts log densities."""
@@ -453,8 +455,8 @@ class ReportTerm(AbstractProposingTerm):
     def draw(self, key, model) -> Self:
         """Draw counts then two position normals per row, preserving padding."""
         rows = self.data
-        valid = rows.is_valid & (rows.science_s > 0) & (rows.limit_counts > 0)
-        clean = _prediction_rows(eqx.tree_at(lambda r: r.is_valid, rows, valid))
+        valid = rows.valid & (rows.science_s > 0) & (rows.limit_counts > 0)
+        clean = _prediction_rows(eqx.tree_at(lambda r: r.valid, rows, valid))
         prediction = self.predictor(model, clean)
         eps = jax.random.normal(key, (rows.time_d.size, 3), dtype=jnp.float64)
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
@@ -471,8 +473,8 @@ class ReportTerm(AbstractProposingTerm):
         )
         sigma = self.rule.kappa * lod_scale / jnp.where(detected, snr, 1.0)
         sigma = jnp.where(detected, sigma, 0.0)
-        ra = prediction.ra + sigma * eps[:, 1]
-        dec = prediction.dec + sigma * (
+        ra = prediction.east_arcsec + sigma * eps[:, 1]
+        dec = prediction.north_arcsec + sigma * (
             self.rule.corr * eps[:, 1] + math.sqrt(1 - self.rule.corr**2) * eps[:, 2]
         )
         finite = (
@@ -490,26 +492,33 @@ class ReportTerm(AbstractProposingTerm):
         )
         # The boolean outcome flag cannot carry NaN; counts carries failed draws.
         values = tuple(
-            jnp.where(rows.is_valid, jnp.where(finite, x, jnp.nan), old)
+            jnp.where(rows.valid, jnp.where(finite, x, jnp.nan), old)
             for x, old in zip(
                 values,
-                (rows.counts, rows.ra, rows.dec, rows.ra_err, rows.dec_err, rows.corr),
+                (
+                    rows.counts,
+                    rows.east_arcsec,
+                    rows.north_arcsec,
+                    rows.east_err_arcsec,
+                    rows.north_err_arcsec,
+                    rows.corr,
+                ),
                 strict=True,
             )
         )
         sampled = eqx.tree_at(
             lambda r: (
-                r.is_valid,
+                r.valid,
                 r.is_detected,
                 r.counts,
-                r.ra,
-                r.dec,
-                r.ra_err,
-                r.dec_err,
+                r.east_arcsec,
+                r.north_arcsec,
+                r.east_err_arcsec,
+                r.north_err_arcsec,
                 r.corr,
             ),
             rows,
-            (valid, jnp.where(rows.is_valid, detected, rows.is_detected), *values),
+            (valid, jnp.where(rows.valid, detected, rows.is_detected), *values),
         )
         return eqx.tree_at(lambda t: t.data, self, sampled)
 

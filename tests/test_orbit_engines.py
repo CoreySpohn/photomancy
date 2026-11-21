@@ -65,10 +65,10 @@ def _block(system=""):
 
 
 def _term(n_rows=4, err=0.004, shift=0.0, system_path=""):
-    data = AstrometryData.from_sep_pa(
+    data = AstrometryData.from_separation_pa(
         time_d=TIMES[:n_rows],
-        sep=np.array([0.13, 0.11, 0.09, 0.15])[:n_rows] + shift,
-        sep_err=[err] * n_rows,
+        separation_arcsec=np.array([0.13, 0.11, 0.09, 0.15])[:n_rows] + shift,
+        separation_err_arcsec=[err] * n_rows,
         pa_deg=[45.0, 120.0, 210.0, 310.0][:n_rows],
         pa_err_deg=[1.0] * n_rows,
         max_n=4,
@@ -327,7 +327,7 @@ def test_any_epoch_and_few_epoch_agree_and_vmap_equals_the_loop():
     assert gap < 4 * float(adaptive.log_evidence_se) + 1e-6
 
     imp = Importance(CompletedProposal(ShapePriorProposal()), 256)
-    empty = eqx.tree_at(lambda t: t.data.is_valid, _term(), jnp.zeros(4, bool))
+    empty = eqx.tree_at(lambda t: t.data.valid, _term(), jnp.zeros(4, bool))
     fits = [_fit(_term(shift=0.0)), _fit(_term(shift=0.01)), _fit(empty)]
     dyn, static = eqx.partition(fits, eqx.is_array)
     stacked = jax.tree.map(lambda *a: jnp.stack(a), *dyn)

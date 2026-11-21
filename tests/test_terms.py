@@ -94,10 +94,14 @@ def test_sign_anchor(pa_deg, axis):
     only the positive sign is asserted on the nonzero axis, independent of scale.
     Fails if: either conversion or system-term prediction flips or swaps axes.
     """
-    data = AstrometryData.from_sep_pa(
-        time_d=[0.0], sep=[0.1], sep_err=[0.001], pa_deg=[pa_deg], pa_err_deg=[0.1]
+    data = AstrometryData.from_separation_pa(
+        time_d=[0.0],
+        separation_arcsec=[0.1],
+        separation_err_arcsec=[0.001],
+        pa_deg=[pa_deg],
+        pa_err_deg=[0.1],
     )
-    observed = np.array([data.ra[0], data.dec[0]])
+    observed = np.array([data.east_arcsec[0], data.north_arcsec[0]])
     system = _system([1.0, 0.2, np.deg2rad(pa_deg), 0.7, 0.0, 0.0, 0.0])
     prediction = RelativeAstrometryTerm(data).predict(system)
     for position in (observed, np.asarray(prediction)[:, 0]):
@@ -117,10 +121,10 @@ def test_sep_pa_covariance(max_n):
     Fails if: propagated errors, covariance sign, angle units or padding differ.
     """
     sep, sep_err, pa, pa_err = 0.4, 0.0004, 0.6, 0.002
-    data = AstrometryData.from_sep_pa(
+    data = AstrometryData.from_separation_pa(
         time_d=[25.0],
-        sep=[sep],
-        sep_err=[sep_err],
+        separation_arcsec=[sep],
+        separation_err_arcsec=[sep_err],
         pa_deg=[np.rad2deg(pa)],
         pa_err_deg=[np.rad2deg(pa_err)],
         planet=[2],
@@ -132,14 +136,14 @@ def test_sep_pa_covariance(max_n):
     east = draws[:, 0] * np.sin(draws[:, 1])
     north = draws[:, 0] * np.cos(draws[:, 1])
     np.testing.assert_allclose(
-        [data.ra_err[0], data.dec_err[0]],
+        [data.east_err_arcsec[0], data.north_err_arcsec[0]],
         [east.std(ddof=1), north.std(ddof=1)],
         rtol=0.01,
     )
     assert float(data.corr[0]) == pytest.approx(
         np.corrcoef(east, north)[0, 1], abs=0.014
     )
-    np.testing.assert_array_equal(data.is_valid, [True] + [False] * ((max_n or 1) - 1))
+    np.testing.assert_array_equal(data.valid, [True] + [False] * ((max_n or 1) - 1))
     assert int(data.planet[0]) == 2
 
 
@@ -195,17 +199,25 @@ def test_element_gradients_and_padding(padding):
     if padding:
         # Invalid payloads must be sanitized before propagation and division.
         data = eqx.tree_at(
-            lambda d: (d.time_d, d.ra, d.dec, d.ra_err, d.dec_err, d.corr, d.planet),
+            lambda d: (
+                d.time_d,
+                d.east_arcsec,
+                d.north_arcsec,
+                d.east_err_arcsec,
+                d.north_err_arcsec,
+                d.corr,
+                d.planet,
+            ),
             data,
             tuple(
-                jnp.where(data.is_valid, x, fill)
+                jnp.where(data.valid, x, fill)
                 for x, fill in zip(
                     (
                         data.time_d,
-                        data.ra,
-                        data.dec,
-                        data.ra_err,
-                        data.dec_err,
+                        data.east_arcsec,
+                        data.north_arcsec,
+                        data.east_err_arcsec,
+                        data.north_err_arcsec,
                         data.corr,
                         data.planet,
                     ),
@@ -235,7 +247,7 @@ def test_element_gradients_and_padding(padding):
         np.testing.assert_allclose(actual, jax.grad(unpadded)(elements), rtol=1e-12)
         np.testing.assert_array_equal(prediction[:, 4:], 0.0)
         empty = RelativeAstrometryTerm(
-            eqx.tree_at(lambda d: d.is_valid, data, jnp.zeros(7, dtype=bool))
+            eqx.tree_at(lambda d: d.valid, data, jnp.zeros(7, dtype=bool))
         )
 
         def empty_score(x):
@@ -331,7 +343,7 @@ def test_reflex_system_element_parity(kind):
             data.inst_ids,
             data.n_inst,
             term.jitters,
-            data.is_valid,
+            data.valid,
         )
         atol = 1e-12
     else:
@@ -453,7 +465,7 @@ def test_new_term_gradients_and_padding(kind):
             if x.dtype == jnp.bool_:
                 return x
             fill = -999 if jnp.issubdtype(x.dtype, jnp.integer) else jnp.nan
-            return jnp.where(data.is_valid, x, fill)
+            return jnp.where(data.valid, x, fill)
 
         return jax.tree.map(field, data)
 
@@ -467,7 +479,7 @@ def test_new_term_gradients_and_padding(kind):
     if kind != "pma":
         np.testing.assert_array_equal(prediction[..., 4:], 0.0)
     empty_data = eqx.tree_at(
-        lambda d: d.is_valid, term.data, jnp.zeros_like(term.data.is_valid)
+        lambda d: d.valid, term.data, jnp.zeros_like(term.data.valid)
     )
     empty = eqx.tree_at(lambda t: t.data, term, poison(empty_data))
     (empty_value, empty_prediction), empty_grad = _new_term_value_grad(
@@ -602,7 +614,7 @@ def test_dmag_contrast_error_propagation():
     draws = 10 ** (-0.4 * np.random.default_rng(0).normal(15.0, 0.002, 200_000))
     np.testing.assert_allclose(data.contrast[0], 1e-6, rtol=1e-14)
     np.testing.assert_allclose(data.contrast_err[0], draws.std(ddof=1), rtol=0.01)
-    np.testing.assert_array_equal(data.is_valid, [True, False, False])
+    np.testing.assert_array_equal(data.valid, [True, False, False])
     np.testing.assert_array_equal(data.planet, [0, 0, 0])
     np.testing.assert_array_equal(data.is_upper_limit, [False, False, False])
 
@@ -648,7 +660,7 @@ def test_rv_marginal_integrates_to_one_over_the_contrast():
         n_inst=2,
     )
     jitters = jnp.array([0.7, 0.3])
-    model = jnp.where(data.is_valid, 3.0, 0.0)
+    model = jnp.where(data.valid, 3.0, 0.0)
 
     @jax.jit
     def likelihood(s):
@@ -657,7 +669,7 @@ def test_rv_marginal_integrates_to_one_over_the_contrast():
         rv = data.rv.at[:2].set(model[:2] + pair).at[2].set(-11.0)
         return jnp.exp(
             loglike_rv_marginalized(
-                rv, model, data.rv_err, data.inst_ids, 2, jitters, data.is_valid
+                rv, model, data.rv_err, data.inst_ids, 2, jitters, data.valid
             )
         )
 
@@ -707,7 +719,7 @@ def test_term_sampling_laws(kind):
         else _new_term(kind, max_n=7)
     )
     if kind != "pma":
-        valid = term.data.is_valid
+        valid = term.data.valid
 
         def poison(x):
             if x.dtype == jnp.bool_:
@@ -733,16 +745,20 @@ def test_term_sampling_laws(kind):
     ):
         np.testing.assert_allclose(a, b, rtol=32 * np.finfo(float).eps, atol=1e-20)
     assert np.isfinite(one(model))
-    np.testing.assert_array_equal(one.data.is_valid, term.data.is_valid)
+    np.testing.assert_array_equal(one.data.valid, term.data.valid)
     for a, b in zip(jax.tree.leaves(one.data), jax.tree.leaves(term.data), strict=True):
         assert a.shape == b.shape
         np.testing.assert_array_equal(
-            np.asarray(a)[~term.data.is_valid], np.asarray(b)[~term.data.is_valid]
+            np.asarray(a)[~term.data.valid], np.asarray(b)[~term.data.valid]
         )
     data = term.data
     if kind in ("relative", "stellar"):
-        east = (draws.data.ra[:, :4] - prediction[0, :4]) / data.ra_err[:4]
-        north = (draws.data.dec[:, :4] - prediction[1, :4]) / data.dec_err[:4]
+        east = (
+            draws.data.east_arcsec[:, :4] - prediction[0, :4]
+        ) / data.east_err_arcsec[:4]
+        north = (
+            draws.data.north_arcsec[:, :4] - prediction[1, :4]
+        ) / data.north_err_arcsec[:4]
         z = jnp.stack(
             (east, (north - data.corr[:4] * east) / jnp.sqrt(1 - data.corr[:4] ** 2)),
             axis=-1,
@@ -758,7 +774,7 @@ def test_term_sampling_laws(kind):
             np.linalg.cholesky(data.pm_anomaly_cov),
             (draws.data.pm_anomaly - prediction).T,
         ).T
-        empty = eqx.tree_at(lambda t: t.data.is_valid, term, jnp.array(False))
+        empty = eqx.tree_at(lambda t: t.data.valid, term, jnp.array(False))
         np.testing.assert_array_equal(
             empty.draw(keys[0], model).data.pm_anomaly, data.pm_anomaly
         )

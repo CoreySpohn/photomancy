@@ -187,7 +187,7 @@ class ScaleRotateProposal(AbstractDensityProposal):
         if len(terms) != 1:
             raise ValueError("ScaleRotateProposal needs one RelativeAstrometryTerm")
         data = terms[0].data
-        row = jnp.argmax(data.is_valid) if self.anchor is None else self.anchor
+        row = jnp.argmax(data.valid) if self.anchor is None else self.anchor
         names, sizes = fit.flat_layout()
         position = [names.index((key, n)) for n in block.coordinate_names]
         planets = resolve(fit.model, block.reads[0])
@@ -198,8 +198,15 @@ class ScaleRotateProposal(AbstractDensityProposal):
 
     def _log_gaussian(self, data, row, east, north):
         """Log density of the anchor row's error kernel at ``(east, north)``."""
-        sx, sy, rho = data.ra_err[row], data.dec_err[row], data.corr[row]
-        dx, dy = (east - data.ra[row]) / sx, (north - data.dec[row]) / sy
+        sx, sy, rho = (
+            data.east_err_arcsec[row],
+            data.north_err_arcsec[row],
+            data.corr[row],
+        )
+        dx, dy = (
+            (east - data.east_arcsec[row]) / sx,
+            (north - data.north_arcsec[row]) / sy,
+        )
         quad = (dx**2 - 2 * rho * dx * dy + dy**2) / (1.0 - rho**2)
         return -0.5 * quad - jnp.log(two_pi * sx * sy * jnp.sqrt(1.0 - rho**2))
 
@@ -232,11 +239,15 @@ class ScaleRotateProposal(AbstractDensityProposal):
         mass = block.star_mass_Msun.sample(k[4], (n,))
         enclosed = mass + inner
         mu = GM_SUN_AU3_PER_D2 * enclosed
-        sx, sy, corr = data.ra_err[row], data.dec_err[row], data.corr[row]
+        sx, sy, corr = (
+            data.east_err_arcsec[row],
+            data.north_err_arcsec[row],
+            data.corr[row],
+        )
         z1 = jax.random.normal(k[5], (n,))
         z2 = jax.random.normal(k[6], (n,))
-        east = data.ra[row] + sx * z1
-        north = data.dec[row] + sy * (
+        east = data.east_arcsec[row] + sx * z1
+        north = data.north_arcsec[row] + sy * (
             corr * z1 + jnp.sqrt(jnp.maximum(1.0 - corr**2, 0.0)) * z2
         )
         t = jnp.stack([east, north], -1)

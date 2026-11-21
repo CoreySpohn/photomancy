@@ -63,7 +63,7 @@ class DMagData(eqx.Module):
             for null epochs (unused). Shape ``(M,)``.
         dmag_err: Measurement uncertainty on dMag at detection epochs.
             Set to 1.0 for null epochs (unused). Shape ``(M,)``.
-        is_valid: Boolean validity mask. Shape ``(M,)``.
+        valid: Boolean validity mask. Shape ``(M,)``.
     """
 
     time_d: jnp.ndarray
@@ -72,7 +72,7 @@ class DMagData(eqx.Module):
     is_detected: jnp.ndarray
     dmag_obs: jnp.ndarray
     dmag_err: jnp.ndarray
-    is_valid: jnp.ndarray
+    valid: jnp.ndarray
     snr_thresh: float = eqx.field(static=True, default=5.0)
 
     @classmethod
@@ -145,7 +145,7 @@ class DMagData(eqx.Module):
             is_detected=_pad_1d(is_detected, max_n).astype(bool),
             dmag_obs=_pad_1d(dmag_obs, max_n),
             dmag_err=_pad_1d(dmag_err, max_n, fill=1.0),
-            is_valid=_valid_mask(n_total, max_n),
+            valid=_valid_mask(n_total, max_n),
             snr_thresh=snr_thresh,
         )
 
@@ -202,7 +202,7 @@ class DMagData(eqx.Module):
         max_n,
         max_pts=MAX_CC_PTS,
     ):
-        """Create a padded DMagData with an ``is_valid`` mask."""
+        """Create a padded DMagData with an ``valid`` mask."""
         n = jnp.asarray(time_d).shape[0]
         return cls(
             time_d=_pad_1d(time_d, max_n),
@@ -211,7 +211,7 @@ class DMagData(eqx.Module):
             is_detected=_pad_1d(is_detected, max_n).astype(bool),
             dmag_obs=_pad_1d(dmag_obs, max_n),
             dmag_err=_pad_1d(dmag_err, max_n, fill=1.0),
-            is_valid=_valid_mask(n, max_n),
+            valid=_valid_mask(n, max_n),
             snr_thresh=snr_thresh,
         )
 
@@ -225,7 +225,7 @@ class DMagData(eqx.Module):
             is_detected=jnp.zeros(max_n, dtype=bool),
             dmag_obs=jnp.zeros(max_n),
             dmag_err=jnp.ones(max_n),
-            is_valid=jnp.zeros(max_n, dtype=bool),
+            valid=jnp.zeros(max_n, dtype=bool),
             snr_thresh=snr_thresh,
         )
 
@@ -237,7 +237,7 @@ class PhotometryData(eqx.Module):
     ``contrast`` and ``contrast_err`` are dimensionless linear flux ratios.
     ``band_id`` and ``planet`` index the term's bandpasses and system planets.
     ``is_upper_limit`` selects a Gaussian cumulative probability below the
-    reported contrast; ``is_valid`` excludes padded rows.
+    reported contrast; ``valid`` excludes padded rows.
     """
 
     time_d: jnp.ndarray
@@ -246,7 +246,7 @@ class PhotometryData(eqx.Module):
     band_id: jnp.ndarray
     planet: jnp.ndarray
     is_upper_limit: jnp.ndarray
-    is_valid: jnp.ndarray
+    valid: jnp.ndarray
 
     @classmethod
     def pad(
@@ -269,7 +269,7 @@ class PhotometryData(eqx.Module):
             band_id=_pad_1d(band_id, max_n).astype(int),
             planet=_pad_1d(planet, max_n).astype(int),
             is_upper_limit=_pad_1d(is_upper_limit, max_n).astype(bool),
-            is_valid=_valid_mask(n, max_n),
+            valid=_valid_mask(n, max_n),
         )
 
     @classmethod
@@ -307,7 +307,7 @@ class PhotometryData(eqx.Module):
         )
         if max_n is not None:
             return cls.pad(**values, max_n=max_n)
-        return cls(**values, is_valid=jnp.ones(time_d.shape, dtype=bool))
+        return cls(**values, valid=jnp.ones(time_d.shape, dtype=bool))
 
 
 # Finite "undetectable" dMag0 sentinel (replaces -inf): the predicted flux ratio
@@ -476,7 +476,7 @@ def loglike_dmag(alpha_pred, dMag_pred, data):
     Returns:
         Scalar log-likelihood value.
     """
-    mask = data.is_valid  # boolean
+    mask = data.valid  # boolean
 
     ll_null = _fixed_noise_null(alpha_pred, dMag_pred, data)
 
@@ -515,7 +515,7 @@ class PhotometryTerm(AbstractTerm):
             raise ValueError("PhotometryTerm needs one bandpass per quadrature band")
 
     def _score(self, model):
-        valid = self.data.is_valid
+        valid = self.data.valid
         data = PhotometryData(
             time_d=jnp.where(valid, self.data.time_d, 0.0),
             contrast=jnp.where(valid, self.data.contrast, 0.0),
@@ -523,7 +523,7 @@ class PhotometryTerm(AbstractTerm):
             band_id=jnp.where(valid, self.data.band_id, 0),
             planet=jnp.where(valid, self.data.planet, 0),
             is_upper_limit=jnp.where(valid, self.data.is_upper_limit, False),
-            is_valid=valid,
+            valid=valid,
         )
         system = resolve(model, self.system_path)
         prediction = _band_contrasts(
@@ -556,7 +556,7 @@ class PhotometryTerm(AbstractTerm):
         Rows already measured as detections remain uncensored Gaussian draws.
         """
         data = self.data
-        valid = data.is_valid
+        valid = data.valid
         sigma = jnp.where(valid, data.contrast_err, 1.0)
         draw = self.predict(model) + sigma * jax.random.normal(
             key, data.contrast.shape, dtype=jnp.float64
@@ -599,7 +599,7 @@ class DMagTerm(AbstractTerm):
     reads: ClassVar[tuple[str, ...]] = ()
 
     def _prediction(self, model):
-        valid = self.data.is_valid
+        valid = self.data.valid
         prediction = system_separation_dmag(
             resolve(model, self.system_path),
             jnp.where(valid, self.data.time_d, 0.0),
@@ -630,11 +630,11 @@ class DMagTerm(AbstractTerm):
         data = self.data
         data = eqx.error_if(
             data,
-            jnp.any(data.is_valid & ~data.is_detected),
+            jnp.any(data.valid & ~data.is_detected),
             "DMagTerm.draw: a null epoch has no dMag to draw; use ReportTerm for the "
             "predictive of a detection outcome",
         )
-        mask = data.is_valid & data.is_detected
+        mask = data.valid & data.is_detected
         sigma = jnp.where(mask, data.dmag_err, 1.0)
         dmag = self.predict(model)[1]
         draw = dmag + sigma * jax.random.normal(key, dmag.shape, dtype=jnp.float64)

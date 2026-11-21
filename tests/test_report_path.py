@@ -116,13 +116,13 @@ def rows(
         science_s=np.ones(n),
         limit_counts=np.full(n, LIMIT_COUNTS),
         mode=np.zeros(n, int),
-        is_valid=np.asarray(valid),
+        valid=np.asarray(valid),
         is_detected=det,
         counts=np.where(det, counts, 0.0),
-        ra=np.where(det, ra, 0.0),
-        dec=np.where(det, dec, 0.0),
-        ra_err=np.where(det, err_ra, 0.0),
-        dec_err=np.where(det, err_dec, 0.0),
+        east_arcsec=np.where(det, ra, 0.0),
+        north_arcsec=np.where(det, dec, 0.0),
+        east_err_arcsec=np.where(det, err_ra, 0.0),
+        north_err_arcsec=np.where(det, err_dec, 0.0),
         corr=np.where(det, corr, 0.0),
     )
 
@@ -154,13 +154,13 @@ def build_fit(term=None):
     block = ThieleInnesBlock(law, LogUniform(0.9, 1.1), rows=(0,), system="dynamics")
     records = AstrometryData(
         time_d=jnp.asarray(REC_TIMES),
-        ra=jnp.asarray(REC_RA),
-        dec=jnp.asarray(REC_DEC),
-        ra_err=jnp.full(2, 0.0035),
-        dec_err=jnp.full(2, 0.0035),
+        east_arcsec=jnp.asarray(REC_RA),
+        north_arcsec=jnp.asarray(REC_DEC),
+        east_err_arcsec=jnp.full(2, 0.0035),
+        north_err_arcsec=jnp.full(2, 0.0035),
         corr=jnp.zeros(2),
         planet=jnp.zeros(2, int),
-        is_valid=jnp.ones(2, bool),
+        valid=jnp.ones(2, bool),
     )
     free = {
         ORBITS: block,

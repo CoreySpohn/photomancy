@@ -84,10 +84,14 @@ def test_target_routing_and_composition(tmp_path):
     assert loaded.target["name"] == "X"
     assert loaded.band_names == ("L'",)
     assert loaded.relative_astrometry.time_d.size == 1
-    np.testing.assert_allclose(loaded.relative_astrometry.ra, [0.3], rtol=1e-14)
-    np.testing.assert_allclose(loaded.relative_astrometry.ra_err, [0.007], rtol=1e-14)
     np.testing.assert_allclose(
-        loaded.relative_astrometry.dec_err, [0.3 * np.deg2rad(1.2)], rtol=1e-14
+        loaded.relative_astrometry.east_arcsec, [0.3], rtol=1e-14
+    )
+    np.testing.assert_allclose(
+        loaded.relative_astrometry.east_err_arcsec, [0.007], rtol=1e-14
+    )
+    np.testing.assert_allclose(
+        loaded.relative_astrometry.north_err_arcsec, [0.3 * np.deg2rad(1.2)], rtol=1e-14
     )
     contrast = 10 ** (-0.4 * 9.9)
     np.testing.assert_allclose(loaded.photometry.contrast, [contrast], rtol=1e-14)

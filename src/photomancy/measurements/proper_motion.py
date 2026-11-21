@@ -32,7 +32,7 @@ class ProperMotionAnomalyData(eqx.Module):
         gaia_window: Gaia mission duration (days) for the proper-motion fit. Scalar.
         pm_anomaly: Observed anomaly ``(pm_ra, pm_dec)`` (arcsec/day). Shape ``(2,)``.
         pm_anomaly_cov: Anomaly covariance (arcsec/day)^2. Shape ``(2, 2)``.
-        is_valid: Boolean validity flag. Scalar.
+        valid: Boolean validity flag. Scalar.
         n_epochs: Epochs sampled per mission window (static). Default 25.
     """
 
@@ -41,7 +41,7 @@ class ProperMotionAnomalyData(eqx.Module):
     gaia_window: jnp.ndarray
     pm_anomaly: jnp.ndarray
     pm_anomaly_cov: jnp.ndarray
-    is_valid: jnp.ndarray
+    valid: jnp.ndarray
     n_epochs: int = eqx.field(static=True, default=25)
 
     @classmethod
@@ -53,7 +53,7 @@ class ProperMotionAnomalyData(eqx.Module):
             gaia_window=jnp.array(1023.0),
             pm_anomaly=jnp.zeros(2),
             pm_anomaly_cov=jnp.eye(2),
-            is_valid=jnp.array(False),
+            valid=jnp.array(False),
             n_epochs=n_epochs,
         )
 
@@ -66,14 +66,14 @@ def loglike_pm_anomaly(anom_pred, data):
         data: A :class:`ProperMotionAnomalyData` instance.
 
     Returns:
-        Scalar log-likelihood (zero when ``data.is_valid`` is False, for the
+        Scalar log-likelihood (zero when ``data.valid`` is False, for the
         placeholder channel during model tracing).
     """
     resid = data.pm_anomaly - anom_pred
     prec = jnp.linalg.inv(data.pm_anomaly_cov)
     _, logdet = jnp.linalg.slogdet(data.pm_anomaly_cov)
     ll = -0.5 * resid @ prec @ resid - 0.5 * logdet - jnp.log(2.0 * jnp.pi)
-    return jnp.where(data.is_valid, ll, 0.0)
+    return jnp.where(data.valid, ll, 0.0)
 
 
 def _path_proper_motion(ts, ra, dec):
@@ -120,14 +120,14 @@ class ProperMotionAnomalyTerm(AbstractTerm):
             raise ValueError("n_epochs must be at least two")
 
     def _score(self, model):
-        valid = self.data.is_valid
+        valid = self.data.valid
         data = ProperMotionAnomalyData(
             t_hip=jnp.where(valid, self.data.t_hip, 0.0),
             t_gaia=jnp.where(valid, self.data.t_gaia, 1.0),
             gaia_window=jnp.where(valid, self.data.gaia_window, 1.0),
             pm_anomaly=jnp.where(valid, self.data.pm_anomaly, 0.0),
             pm_anomaly_cov=jnp.where(valid, self.data.pm_anomaly_cov, jnp.eye(2)),
-            is_valid=valid,
+            valid=valid,
             n_epochs=self.data.n_epochs,
         )
         system = resolve(model, self.system_path)
@@ -154,7 +154,7 @@ class ProperMotionAnomalyTerm(AbstractTerm):
 
     def draw(self, key, model) -> Self:
         """Copy with a full-covariance Gaussian proper-motion anomaly."""
-        valid = self.data.is_valid
+        valid = self.data.valid
         covariance = jnp.where(valid, self.data.pm_anomaly_cov, jnp.eye(2))
         eps = jax.random.normal(key, (2,), dtype=jnp.float64)
         draw = self.predict(model) + jnp.linalg.cholesky(covariance) @ eps

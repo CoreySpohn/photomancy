@@ -13,7 +13,7 @@ from hwoutils.epoch import Epoch
 from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
 
-from photomancy.postproc.arms import AbstractPostProcessing, MawetPostProcessing
+from photomancy.postproc.arms import AbstractDetectionArm, MawetArm
 from photomancy.postproc.contracts import DetectionStats, FrameSet
 from photomancy.postproc.core.detection.estimator import DetectionEstimator
 from photomancy.postproc.core.modeling import inject_planet
@@ -21,13 +21,13 @@ from photomancy.postproc.core.modeling import inject_planet
 FWHM_PX = 4.0
 
 
-def make_frameset(image, n_frames=1, exposure_time_s=1.0):
+def make_frameset(image, n_frames=1, frame_time_s=1.0):
     """Build a single-image FrameSet broadcast to n_frames identical frames."""
     frames = jnp.broadcast_to(image, (n_frames, *image.shape))
     return FrameSet(
         frames=frames,
         time_d=jnp.arange(n_frames, dtype=float),
-        exposure_time_s=jnp.full((n_frames,), exposure_time_s),
+        frame_time_s=jnp.full((n_frames,), frame_time_s),
         telescope_pa_deg=jnp.zeros((n_frames,)),
         fwhm_px=FWHM_PX,
         band=Band(550.0 - 110.0 / 2, 550.0 + 110.0 / 2),
@@ -47,7 +47,7 @@ def gaussian_psf(n=15, sigma=FWHM_PX / 2.355):
 def test_abstract_postprocessing_cannot_instantiate():
     """Test that the abstract base class cannot be instantiated directly."""
     with pytest.raises(TypeError):
-        AbstractPostProcessing()
+        AbstractDetectionArm()
 
 
 def test_mawet_arm_statistic_matches_snr_function():
@@ -56,7 +56,7 @@ def test_mawet_arm_statistic_matches_snr_function():
     image = jr.normal(key, (64, 64))
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     fs = make_frameset(image)
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     stats = arm.detect(fs, positions)
     expected = DetectionEstimator.mawet(FWHM_PX)(image, positions).statistic
     assert isinstance(stats, DetectionStats)
@@ -71,7 +71,7 @@ def test_mawet_arm_bright_planet_has_small_fpf():
     planet_pos = jnp.array([32.0, 50.0])
     image = inject_planet(image, gaussian_psf(n=64), flux=200.0, pos=planet_pos)
     fs = make_frameset(image)
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     stats = arm.detect(fs, planet_pos[None, :])
     assert float(stats.statistic[0]) > 5.0
     assert float(stats.fpf[0]) < 1e-3
@@ -83,7 +83,7 @@ def test_mawet_arm_empty_field_fpf_is_calibrated():
     key = jr.PRNGKey(2)
     image = jr.normal(key, (128, 128))
     fs = make_frameset(image)
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     # 50 random positions in an annulus well inside the field
     pos_key, angle_key = jr.split(jr.PRNGKey(3))
     radii = jr.uniform(pos_key, (50,), minval=15.0, maxval=45.0)
@@ -104,24 +104,24 @@ def test_mawet_arm_nan_statistic_gives_nan_fpf():
     key = jr.PRNGKey(4)
     image = jr.normal(key, (64, 64))
     fs = make_frameset(image)
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     stats = arm.detect(fs, jnp.array([[31.5, 32.5]]))  # r < fwhm -> NaN
     assert bool(jnp.isnan(stats.statistic[0]))
     assert bool(jnp.isnan(stats.fpf[0]))
 
 
 def test_mawet_arm_ignores_references_and_uses_validity():
-    """Test that the Mawet arm ignores references and honors science.validity."""
+    """Test that the Mawet arm ignores references and honors science.valid."""
     key = jr.PRNGKey(5)
     image = jr.normal(key, (64, 64))
     validity = jnp.ones((64, 64)).at[:, :20].set(0.0)
     fs = eqx.tree_at(
-        lambda f: f.validity,
+        lambda f: f.valid,
         make_frameset(image),
         validity,
         is_leaf=lambda x: x is None,
     )
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     positions = jnp.array([[32.0, 48.0]])
     with_refs = arm.detect(fs, positions, references=make_frameset(image))
     without = arm.detect(fs, positions)
@@ -134,8 +134,8 @@ def test_mawet_arm_multiframe_uses_coadd():
     """Test that a multi-frame FrameSet is detected on its exposure-weighted coadd."""
     key = jr.PRNGKey(6)
     image = jr.normal(key, (64, 64)) + 10.0
-    fs = make_frameset(image, n_frames=4, exposure_time_s=25.0)
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    fs = make_frameset(image, n_frames=4, frame_time_s=25.0)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     positions = jnp.array([[32.0, 48.0]])
     stats = arm.detect(fs, positions)
     expected = DetectionEstimator.mawet(FWHM_PX)(fs.coadd(), positions).statistic
@@ -147,7 +147,7 @@ def test_mawet_arm_detect_works_under_jit():
     key = jr.PRNGKey(7)
     image = jr.normal(key, (64, 64))
     fs = make_frameset(image)
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     positions = jnp.array([[32.0, 48.0]])
 
     @jax.jit
@@ -179,14 +179,14 @@ def test_mawet_arm_coadd_uses_content_differing_frames():
     fs = FrameSet(
         frames=frames,
         time_d=jnp.array([0.0, 1.0]),
-        exposure_time_s=exposure,
+        frame_time_s=exposure,
         telescope_pa_deg=jnp.zeros(2),
         fwhm_px=FWHM_PX,
         band=Band(550.0 - 100.0 / 2, 550.0 + 100.0 / 2),
         epoch=Epoch(J2000_JD),
         grid=PixelGrid.regular((n, n), 0.020, "arcsec"),
     )
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     stats = arm.detect(fs, planet_pos[None, :])
     explicit_coadd = jnp.sum(frames, axis=0) / jnp.sum(exposure)
     expected = DetectionEstimator.mawet(FWHM_PX)(
@@ -213,7 +213,7 @@ def test_mawet_arm_grid_center_matches_geometric():
         fs,
         replace(fs.grid, center_x=c, center_y=c),
     )
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     a = arm.detect(fs, positions)
     b = arm.detect(fs_center, positions)
     np.testing.assert_array_equal(np.asarray(a.statistic), np.asarray(b.statistic))
@@ -231,7 +231,7 @@ def test_mawet_arm_consults_off_center():
         fs,
         replace(fs.grid, center_y=20.0, center_x=40.0),
     )
-    arm = MawetPostProcessing(fwhm_px=FWHM_PX)
+    arm = MawetArm(fwhm_px=FWHM_PX)
     a = arm.detect(fs, positions)
     b = arm.detect(fs_off, positions)
     assert not np.array_equal(

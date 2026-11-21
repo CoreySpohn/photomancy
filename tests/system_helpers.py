@@ -111,10 +111,10 @@ _TIMES = np.array([31.0, 120.0, 290.0, 470.0])
 
 def _data(max_n=None):
     """Nonzero residuals and unequal correlated errors exercise every element."""
-    return AstrometryData.from_sep_pa(
+    return AstrometryData.from_separation_pa(
         time_d=_TIMES,
-        sep=[0.13, 0.11, 0.09, 0.15],
-        sep_err=[0.004] * 4,
+        separation_arcsec=[0.13, 0.11, 0.09, 0.15],
+        separation_err_arcsec=[0.004] * 4,
         pa_deg=[45.0, 120.0, 210.0, 310.0],
         pa_err_deg=[1.0] * 4,
         max_n=max_n,
@@ -127,10 +127,10 @@ def _new_term(kind, max_n=4):
         return StellarAstrometryTerm(
             AstrometryData.pad(
                 time_d=_TIMES,
-                ra=[1e-4, -2e-4, 3e-4, 2e-4],
-                dec=[-1e-4, 1e-4, 2e-4, -2e-4],
-                ra_err=[5e-5] * 4,
-                dec_err=[8e-5] * 4,
+                east_arcsec=[1e-4, -2e-4, 3e-4, 2e-4],
+                north_arcsec=[-1e-4, 1e-4, 2e-4, -2e-4],
+                east_err_arcsec=[5e-5] * 4,
+                north_err_arcsec=[8e-5] * 4,
                 corr=[0.2, -0.3, 0.1, 0.0],
                 max_n=max_n,
             )
@@ -155,7 +155,7 @@ def _new_term(kind, max_n=4):
                 gaia_window=jnp.array(1023.0),
                 pm_anomaly=jnp.array([2e-7, -3e-7]),
                 pm_anomaly_cov=jnp.array([[4e-14, 1e-14], [1e-14, 9e-14]]),
-                is_valid=jnp.array(True),
+                valid=jnp.array(True),
             )
         )
     return PhotometryTerm(
@@ -179,6 +179,6 @@ def rv_normalization(data):
     the marginal was a normalized density.
     """
     counts = np.bincount(
-        np.asarray(data.inst_ids)[np.asarray(data.is_valid)], minlength=data.n_inst
+        np.asarray(data.inst_ids)[np.asarray(data.valid)], minlength=data.n_inst
     )
     return 0.5 * float(np.sum(np.log(counts[counts > 0])))

@@ -77,10 +77,10 @@ truth = System.from_classical(
     w_rad=jnp.array([2.0]),
     M0_rad=jnp.array([1.0]),
 )
-layout = AstrometryData.from_sep_pa(
+layout = AstrometryData.from_separation_pa(
     time_d=[0.0, 90.0, 180.0, 270.0],
-    sep=[0.1] * 4,
-    sep_err=[0.004] * 4,
+    separation_arcsec=[0.1] * 4,
+    separation_err_arcsec=[0.004] * 4,
     pa_deg=[0.0] * 4,
     pa_err_deg=[1.0] * 4,
 )

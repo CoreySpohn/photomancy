@@ -125,10 +125,12 @@ def load_target(
     rows = selected["astrometry"]
     astrometry = None
     if rows:
-        astrometry = AstrometryData.from_sep_pa(
+        astrometry = AstrometryData.from_separation_pa(
             time_d=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
-            sep=[r["sep_mas"] / 1000.0 for r in rows],
-            sep_err=[_mean_error(r["sep_err_mas"]) / 1000.0 for r in rows],
+            separation_arcsec=[r["sep_mas"] / 1000.0 for r in rows],
+            separation_err_arcsec=[
+                _mean_error(r["sep_err_mas"]) / 1000.0 for r in rows
+            ],
             pa_deg=[r["pa_deg"] for r in rows],
             pa_err_deg=[_mean_error(r["pa_err_deg"]) for r in rows],
             planet=[r.get("planet", 0) for r in rows],

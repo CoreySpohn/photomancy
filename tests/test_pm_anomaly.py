@@ -85,7 +85,7 @@ def test_pm_anomaly_scales_linearly_with_mass():
 
 
 def test_pm_anomaly_likelihood_masks_invalid():
-    """The placeholder channel (is_valid False) contributes zero log-likelihood."""
+    """The placeholder channel (valid False) contributes zero log-likelihood."""
     placeholder = ProperMotionAnomalyData.zeros()
     ll = loglike_pm_anomaly(jnp.array([1.0, -1.0]), placeholder)
     assert float(ll) == 0.0
@@ -101,7 +101,7 @@ def test_pm_anomaly_likelihood_peaks_at_truth():
         gaia_window=jnp.array(GAIA_WIN),
         pm_anomaly=anom_true,
         pm_anomaly_cov=cov,
-        is_valid=jnp.array(True),
+        valid=jnp.array(True),
     )
     ll_true = loglike_pm_anomaly(anom_true, data)
     ll_off = loglike_pm_anomaly(anom_true + 0.1e-3 / YR, data)

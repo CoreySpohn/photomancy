@@ -158,8 +158,8 @@ def test_seam_contract_names_resolve_at_top_level():
     for name in (
         "FrameSet",
         "DetectionStats",
-        "AbstractPostProcessing",
-        "MawetPostProcessing",
+        "AbstractDetectionArm",
+        "MawetArm",
         "student_t_sf",
     ):
         assert hasattr(postproc, name), name
@@ -201,7 +201,7 @@ def test_template_filter_names_resolve_at_top_level():
         "extract_patch",
         "AbstractTemplateProvider",
         "ArrayTemplateProvider",
-        "MatchedFilterPostProcessing",
+        "MatchedFilterArm",
     ):
         assert hasattr(postproc, name), name
         assert name in postproc.__all__, name

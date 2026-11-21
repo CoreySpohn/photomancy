@@ -264,7 +264,7 @@ def separation_and_dmag(orbit, albedo_area_AU2):
     return separation_arcsec(r, DIST_PC), contrast_to_delta_mag(contrast)
 
 
-sep_arcsec, dmag = jax.vmap(separation_and_dmag)(orbits_of(draws), draws["Lambda"])
+separation_arcsec, dmag = jax.vmap(separation_and_dmag)(orbits_of(draws), draws["Lambda"])
 
 # One instrument contrast curve, reused as the per-epoch limit grid.
 cc_sep = np.linspace(0.045, 0.26, 60)
@@ -300,7 +300,7 @@ conjunctions.
 
 ```{code-cell} ipython3
 result = viz.plot_detectability(
-    np.asarray(sep_arcsec),
+    np.asarray(separation_arcsec),
     np.asarray(dmag),
     contrast_curve=(cc_sep, cc_dmag),
     iwa_arcsec=0.045,

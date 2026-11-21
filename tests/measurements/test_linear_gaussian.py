@@ -55,10 +55,10 @@ def _system(k=1):
 def _relative_data(planet):
     return AstrometryData.pad(
         time_d=TIMES,
-        ra=[0.10, -0.05, 0.12, 0.2, -0.1],
-        dec=[0.02, 0.11, -0.07, 0.15, 0.05],
-        ra_err=[0.004, 0.005, 0.003, 0.006, 0.004],
-        dec_err=[0.005, 0.004, 0.004, 0.003, 0.006],
+        east_arcsec=[0.10, -0.05, 0.12, 0.2, -0.1],
+        north_arcsec=[0.02, 0.11, -0.07, 0.15, 0.05],
+        east_err_arcsec=[0.004, 0.005, 0.003, 0.006, 0.004],
+        north_err_arcsec=[0.005, 0.004, 0.004, 0.003, 0.006],
         corr=[0.2, -0.3, 0.0, 0.5, -0.1],
         planet=planet,
         max_n=7,
@@ -165,10 +165,10 @@ def test_the_linear_capability_is_a_type_and_the_stellar_term_does_not_have_it()
     stellar = StellarAstrometryTerm(
         AstrometryData.pad(
             time_d=TIMES,
-            ra=[1e-4] * 5,
-            dec=[1e-4] * 5,
-            ra_err=[5e-5] * 5,
-            dec_err=[8e-5] * 5,
+            east_arcsec=[1e-4] * 5,
+            north_arcsec=[1e-4] * 5,
+            east_err_arcsec=[5e-5] * 5,
+            north_err_arcsec=[8e-5] * 5,
             corr=[0.0] * 5,
             max_n=7,
         )

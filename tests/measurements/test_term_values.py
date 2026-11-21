@@ -82,6 +82,6 @@ def test_a_dmag_term_with_a_null_epoch_refuses_to_draw():
     for term in (DMagTerm(null), DMagTerm(detections)):
         with pytest.raises(Exception, match="ReportTerm"):
             term.draw(key, model)
-    only = detections.is_detected | ~detections.is_valid
-    kept = eqx.tree_at(lambda d: d.is_valid, detections, detections.is_valid & only)
+    only = detections.is_detected | ~detections.valid
+    kept = eqx.tree_at(lambda d: d.valid, detections, detections.valid & only)
     assert DMagTerm(kept).draw(key, model).data.is_detected.shape == only.shape

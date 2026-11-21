@@ -81,13 +81,13 @@ def test_stellar_and_relative_likelihoods_share_form():
     dec_pred = jnp.linspace(0.05, -0.05, n)
     data = AstrometryData(
         time_d=jnp.arange(n, dtype=float),
-        ra=ra_pred + 1e-3,
-        dec=dec_pred - 1e-3,
-        ra_err=jnp.full(n, 2e-3),
-        dec_err=jnp.full(n, 2e-3),
+        east_arcsec=ra_pred + 1e-3,
+        north_arcsec=dec_pred - 1e-3,
+        east_err_arcsec=jnp.full(n, 2e-3),
+        north_err_arcsec=jnp.full(n, 2e-3),
         corr=jnp.zeros(n),
         planet=jnp.zeros(n, dtype=int),
-        is_valid=jnp.ones(n, dtype=bool),
+        valid=jnp.ones(n, dtype=bool),
     )
 
     ll_stellar = loglike_stellar_astrom(ra_pred, dec_pred, data)

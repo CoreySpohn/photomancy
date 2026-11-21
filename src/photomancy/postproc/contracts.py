@@ -34,7 +34,7 @@ class FrameSet(eqx.Module):
     Attributes:
         frames: (n_frames, ny, nx) detector electrons per frame.
         time_d: (n_frames,) frame start offsets in days from epoch.
-        exposure_time_s: (n_frames,) per-frame exposure times, seconds.
+        frame_time_s: (n_frames,) per-frame exposure times, seconds.
         telescope_pa_deg: (n_frames,) telescope position angle (roll), degrees.
         fwhm_px: Scalar resolution element (lambda/D) in pixels.
         band: Static wavelength interval in nanometers.
@@ -44,14 +44,14 @@ class FrameSet(eqx.Module):
             variance in electrons^2 (e.g. a detector model's variance budget);
             reserved for inverse-variance weighting (first consumer: the
             PSF-template matched filter).
-        validity: Optional (ny, nx) mask (1 = usable pixel, 0 = excluded).
+        valid: Optional (ny, nx) mask (1 = usable pixel, 0 = excluded).
         tau_c_s: Optional speckle decorrelation time, seconds; scalar or
             (ny, nx) map. Reserved for correlated-noise-aware calibration.
     """
 
     frames: jnp.ndarray = eqx.field(converter=_asarray)
     time_d: jnp.ndarray = eqx.field(converter=_asarray)
-    exposure_time_s: jnp.ndarray = eqx.field(converter=_asarray)
+    frame_time_s: jnp.ndarray = eqx.field(converter=_asarray)
     telescope_pa_deg: jnp.ndarray = eqx.field(converter=_asarray)
     fwhm_px: jnp.ndarray = eqx.field(converter=_asarray)
     band: Band = eqx.field(static=True)
@@ -60,7 +60,7 @@ class FrameSet(eqx.Module):
     noise_variance: jnp.ndarray | None = eqx.field(
         default=None, converter=_asarray_or_none
     )
-    validity: jnp.ndarray | None = eqx.field(default=None, converter=_asarray_or_none)
+    valid: jnp.ndarray | None = eqx.field(default=None, converter=_asarray_or_none)
     tau_c_s: jnp.ndarray | None = eqx.field(default=None, converter=_asarray_or_none)
 
     def __check_init__(self):
@@ -74,7 +74,7 @@ class FrameSet(eqx.Module):
                 f"frames must be (n_frames, ny, nx); got shape {self.frames.shape}"
             )
         n_frames, ny, nx = self.frames.shape
-        for name in ("time_d", "exposure_time_s", "telescope_pa_deg"):
+        for name in ("time_d", "frame_time_s", "telescope_pa_deg"):
             value = getattr(self, name)
             if value.shape != (n_frames,):
                 raise ValueError(
@@ -89,9 +89,9 @@ class FrameSet(eqx.Module):
                 "noise_variance must match frames shape "
                 f"({n_frames}, {ny}, {nx}); got {self.noise_variance.shape}"
             )
-        if self.validity is not None and self.validity.shape != (ny, nx):
+        if self.valid is not None and self.valid.shape != (ny, nx):
             raise ValueError(
-                f"validity must have shape ({ny}, {nx}); got {self.validity.shape}"
+                f"valid must have shape ({ny}, {nx}); got {self.valid.shape}"
             )
         if self.grid.shape != (ny, nx):
             raise ValueError("grid.shape must match frames spatial shape")
@@ -99,11 +99,11 @@ class FrameSet(eqx.Module):
     @property
     def rate_frames(self) -> jnp.ndarray:
         """Per-frame count rates, electrons per second, (n_frames, ny, nx)."""
-        return self.frames / self.exposure_time_s[:, None, None]
+        return self.frames / self.frame_time_s[:, None, None]
 
     def coadd(self) -> jnp.ndarray:
         """Exposure-weighted coadd: total electrons / total time, (ny, nx) e-/s."""
-        return jnp.sum(self.frames, axis=0) / jnp.sum(self.exposure_time_s)
+        return jnp.sum(self.frames, axis=0) / jnp.sum(self.frame_time_s)
 
 
 class DetectionStats(eqx.Module):

@@ -4,7 +4,7 @@ These functions own the domain knowledge the hand-rolled versions kept
 fumbling: forward models return AU/day and observations use m/s
 (``plot_rv`` converts the curves); ``dMag`` axes read fainter
 downward (``plot_dmag`` inverts once, idempotently); and the padded data
-containers carry ``is_valid`` prefix masks and ``-inf`` pads that must
+containers carry ``valid`` prefix masks and ``-inf`` pads that must
 never reach a drawn artist.
 """
 
@@ -35,7 +35,7 @@ def _track_color(ep):
 
 def _valid_slice(data):
     """Length of the valid prefix of a padded data container."""
-    return int(np.asarray(data.is_valid).sum())
+    return int(np.asarray(data.valid).sum())
 
 
 def plot_rv(
@@ -146,7 +146,7 @@ def plot_dmag(
         )
 
     if data is not None:
-        valid = np.asarray(data.is_valid)
+        valid = np.asarray(data.valid)
         detected = np.asarray(data.is_detected) & valid
         nulls = ~np.asarray(data.is_detected) & valid
         epochs = np.asarray(data.time_d)
@@ -180,7 +180,7 @@ def plot_dmag(
 
 
 def plot_detectability(
-    sep_arcsec,
+    separation_arcsec,
     dmag,
     *,
     contrast_curve=None,
@@ -191,9 +191,9 @@ def plot_detectability(
     """The separation-dMag plane: predicted points against the limit curve.
 
     Args:
-        sep_arcsec: Separations in arcsec, any shape (flattened).
+        separation_arcsec: Separations in arcsec, any shape (flattened).
         dmag: Delta-magnitudes, same shape.
-        contrast_curve: Optional ``(sep_arcsec, dmag_limit)`` pair of
+        contrast_curve: Optional ``(separation_arcsec, dmag_limit)`` pair of
             arrays, drawn as the detection-limit curve; points fainter than
             the curve (larger dMag) are undetectable, and with the y axis
             inverted those points sit visually below it.
@@ -211,7 +211,7 @@ def plot_detectability(
         drawn.
     """
     ep = eyepiece()
-    sep = np.asarray(sep_arcsec, float).reshape(-1)
+    sep = np.asarray(separation_arcsec, float).reshape(-1)
     dm = np.asarray(dmag, float).reshape(-1)
 
     if ax is None:

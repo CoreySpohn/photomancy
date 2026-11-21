@@ -3,7 +3,7 @@
 A post-processing arm consumes a FrameSet (science frames plus metadata,
 optionally with a reference FrameSet) and produces DetectionStats
 (per-candidate statistic, false positive fraction, and degrees of freedom).
-Downstream mission simulators register arms against AbstractPostProcessing
+Downstream mission simulators register arms against AbstractDetectionArm
 and thread FrameSet/DetectionStats through their pipelines; this module owns
 the vocabulary and must stay import-clean of any downstream package.
 """
@@ -23,7 +23,7 @@ from photomancy.postproc.core.detection import (
 from photomancy.postproc.templates.base import AbstractTemplateProvider
 
 
-class AbstractPostProcessing(eqx.Module):
+class AbstractDetectionArm(eqx.Module):
     """Abstract post-processing arm: FrameSet -> DetectionStats.
 
     Implementations are Equinox modules (PyTrees), constructed per
@@ -53,7 +53,7 @@ class AbstractPostProcessing(eqx.Module):
         """
 
 
-class MawetPostProcessing(AbstractPostProcessing):
+class MawetArm(AbstractDetectionArm):
     """Aperture-photometry detection on the coadded frame (Mawet et al. 2014).
 
     The statistic is the small-sample-corrected two-sample t-statistic of the
@@ -110,7 +110,7 @@ class MawetPostProcessing(AbstractPostProcessing):
         stats = self.estimator(
             image,
             positions_yx,
-            science.validity,
+            science.valid,
             jnp.array([science.grid.center_y, science.grid.center_x]),
         )
         return DetectionStats(
@@ -123,7 +123,7 @@ class MawetPostProcessing(AbstractPostProcessing):
         )
 
 
-class MatchedFilterPostProcessing(AbstractPostProcessing):
+class MatchedFilterArm(AbstractDetectionArm):
     """PSF-template matched-filter detection on the coadded frame.
 
     The statistic is the small-sample-corrected two-sample t-statistic of
@@ -133,7 +133,7 @@ class MatchedFilterPostProcessing(AbstractPostProcessing):
     empirical matched-filter noise normalization of Ruffio et al. 2017).
     When whiten is True and the FrameSet carries noise_variance, the
     template fit is inverse-variance weighted using the coadd-propagated
-    variance sum(noise_variance) / sum(exposure_time_s)**2.
+    variance sum(noise_variance) / sum(frame_time_s)**2.
 
     References are ignored: the noise sample comes from the science image
     itself. FrameSet.grid supplies the reference-aperture center; the
@@ -188,7 +188,7 @@ class MatchedFilterPostProcessing(AbstractPostProcessing):
         image = science.coadd()
         variance = None
         if self.whiten and science.noise_variance is not None:
-            total_time = jnp.sum(science.exposure_time_s)
+            total_time = jnp.sum(science.frame_time_s)
             variance = jnp.sum(science.noise_variance, axis=0) / total_time**2
         composed = DetectionEstimator(
             filter=PSFTemplateFilter(
@@ -204,7 +204,7 @@ class MatchedFilterPostProcessing(AbstractPostProcessing):
         stats = composed(
             image,
             positions_yx,
-            science.validity,
+            science.valid,
             jnp.array([science.grid.center_y, science.grid.center_x]),
         )
         return DetectionStats(

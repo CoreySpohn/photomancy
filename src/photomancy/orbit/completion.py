@@ -397,7 +397,12 @@ def _data_scale_AU(terms, system):
     for term in terms:
         data = term.data
         sep = jnp.maximum(
-            sep, jnp.max(jnp.where(data.is_valid, jnp.hypot(data.ra, data.dec), 0.0))
+            sep,
+            jnp.max(
+                jnp.where(
+                    data.valid, jnp.hypot(data.east_arcsec, data.north_arcsec), 0.0
+                )
+            ),
         )
     # arcsec times parsec is AU
     return jnp.where(sep > 0, sep * system.frame.dist_pc, jnp.nan)

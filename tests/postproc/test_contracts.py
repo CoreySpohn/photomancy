@@ -17,7 +17,7 @@ def make_frameset(n_frames=3, ny=8, nx=8, **overrides):
     kwargs = dict(
         frames=jnp.ones((n_frames, ny, nx)),
         time_d=jnp.arange(n_frames, dtype=float),
-        exposure_time_s=jnp.full((n_frames,), 100.0),
+        frame_time_s=jnp.full((n_frames,), 100.0),
         telescope_pa_deg=jnp.zeros((n_frames,)),
         fwhm_px=3.0,
         band=Band(550.0 - 110.0 / 2, 550.0 + 110.0 / 2),
@@ -33,7 +33,7 @@ def test_frameset_constructs_with_required_fields():
     fs = make_frameset()
     assert fs.frames.shape == (3, 8, 8)
     assert fs.noise_variance is None
-    assert fs.validity is None
+    assert fs.valid is None
     assert (fs.grid.center_y, fs.grid.center_x) == (3.5, 3.5)
     assert fs.tau_c_s is None
 
@@ -79,7 +79,7 @@ def test_frameset_coadd_is_total_electrons_over_total_time():
         nx=4,
         frames=frames,
         time_d=jnp.array([0.0, 1.0]),
-        exposure_time_s=jnp.array([100.0, 300.0]),
+        frame_time_s=jnp.array([100.0, 300.0]),
         telescope_pa_deg=jnp.zeros((2,)),
     )
     coadd = fs.coadd()
@@ -171,7 +171,7 @@ def _frameset_kwargs(n_frames=2, ny=8, nx=8):
     return dict(
         frames=jnp.ones((n_frames, ny, nx)),
         time_d=jnp.arange(n_frames, dtype=float),
-        exposure_time_s=jnp.ones(n_frames),
+        frame_time_s=jnp.ones(n_frames),
         telescope_pa_deg=jnp.zeros(n_frames),
         fwhm_px=4.0,
         band=Band(550.0 - 100.0 / 2, 550.0 + 100.0 / 2),
@@ -184,10 +184,10 @@ class TestOptionalFieldRejection:
     """__check_init__ rejects malformed optional fields (P1 carry-over)."""
 
     def test_bad_validity_shape_rejected(self):
-        """A validity mask not matching (ny, nx) raises ValueError."""
+        """A valid mask not matching (ny, nx) raises ValueError."""
         kwargs = _frameset_kwargs()
-        with pytest.raises(ValueError, match="validity"):
-            FrameSet(validity=jnp.ones((3, 3)), **kwargs)
+        with pytest.raises(ValueError, match="valid"):
+            FrameSet(valid=jnp.ones((3, 3)), **kwargs)
 
     def test_bad_grid_shape_rejected(self):
         """A grid not matching the detector frames raises ValueError."""

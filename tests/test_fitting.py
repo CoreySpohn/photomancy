@@ -160,7 +160,7 @@ class TestDataContainers:
             rv=jnp.array([1.0, 2.0, 3.0]),
             rv_err=jnp.array([0.1, 0.1, 0.1]),
             inst_ids=jnp.array([0, 0, 1]),
-            is_valid=jnp.ones(3, dtype=bool),
+            valid=jnp.ones(3, dtype=bool),
             n_inst=2,
         )
         assert data.time_d.shape == (3,)
@@ -443,13 +443,13 @@ class TestLoglikeAstrom:
         """Zero residuals should give the maximum likelihood."""
         data = AstrometryData(
             time_d=jnp.array([0.0]),
-            ra=jnp.array([0.1]),
-            dec=jnp.array([0.2]),
-            ra_err=jnp.array([0.01]),
-            dec_err=jnp.array([0.01]),
+            east_arcsec=jnp.array([0.1]),
+            north_arcsec=jnp.array([0.2]),
+            east_err_arcsec=jnp.array([0.01]),
+            north_err_arcsec=jnp.array([0.01]),
             corr=jnp.array([0.0]),
             planet=jnp.array([0]),
-            is_valid=jnp.ones(1, dtype=bool),
+            valid=jnp.ones(1, dtype=bool),
         )
         ll = loglike_relative_astrom(jnp.array([0.1]), jnp.array([0.2]), data)
         assert jnp.isfinite(ll)
@@ -458,13 +458,13 @@ class TestLoglikeAstrom:
         """Larger residuals should give lower likelihood."""
         data = AstrometryData(
             time_d=jnp.array([0.0]),
-            ra=jnp.array([0.1]),
-            dec=jnp.array([0.2]),
-            ra_err=jnp.array([0.01]),
-            dec_err=jnp.array([0.01]),
+            east_arcsec=jnp.array([0.1]),
+            north_arcsec=jnp.array([0.2]),
+            east_err_arcsec=jnp.array([0.01]),
+            north_err_arcsec=jnp.array([0.01]),
             corr=jnp.array([0.0]),
             planet=jnp.array([0]),
-            is_valid=jnp.ones(1, dtype=bool),
+            valid=jnp.ones(1, dtype=bool),
         )
         ll_good = loglike_relative_astrom(jnp.array([0.1]), jnp.array([0.2]), data)
         ll_bad = loglike_relative_astrom(jnp.array([0.15]), jnp.array([0.25]), data)
@@ -474,13 +474,13 @@ class TestLoglikeAstrom:
         """With rho=0, should reduce to independent Gaussian in RA and DEC."""
         data = AstrometryData(
             time_d=jnp.array([0.0]),
-            ra=jnp.array([1.0]),
-            dec=jnp.array([2.0]),
-            ra_err=jnp.array([0.5]),
-            dec_err=jnp.array([0.5]),
+            east_arcsec=jnp.array([1.0]),
+            north_arcsec=jnp.array([2.0]),
+            east_err_arcsec=jnp.array([0.5]),
+            north_err_arcsec=jnp.array([0.5]),
             corr=jnp.array([0.0]),
             planet=jnp.array([0]),
-            is_valid=jnp.ones(1, dtype=bool),
+            valid=jnp.ones(1, dtype=bool),
         )
         ra_pred = jnp.array([1.1])
         dec_pred = jnp.array([2.1])
@@ -497,13 +497,13 @@ class TestLoglikeAstrom:
         """Should be differentiable w.r.t. predictions."""
         data = AstrometryData(
             time_d=jnp.array([0.0]),
-            ra=jnp.array([0.1]),
-            dec=jnp.array([0.2]),
-            ra_err=jnp.array([0.01]),
-            dec_err=jnp.array([0.01]),
+            east_arcsec=jnp.array([0.1]),
+            north_arcsec=jnp.array([0.2]),
+            east_err_arcsec=jnp.array([0.01]),
+            north_err_arcsec=jnp.array([0.01]),
             corr=jnp.array([0.0]),
             planet=jnp.array([0]),
-            is_valid=jnp.ones(1, dtype=bool),
+            valid=jnp.ones(1, dtype=bool),
         )
 
         def loss(ra_pred):

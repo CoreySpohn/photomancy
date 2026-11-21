@@ -107,7 +107,7 @@ def data():
     relative = _data(max_n=5)
     # Use a wider astrometric error across the four very different orbits.
     relative = eqx.tree_at(
-        lambda d: (d.ra_err, d.dec_err),
+        lambda d: (d.east_err_arcsec, d.north_err_arcsec),
         relative,
         (jnp.full(5, 0.03), jnp.full(5, 0.04)),
     )
@@ -378,7 +378,7 @@ def test_radiative_padding_and_dark_limit(data):
         np.testing.assert_array_equal(predicted, expected)
         np.testing.assert_array_equal(jnp.stack(predicted)[:, -1], 0.0)
         masked = eqx.tree_at(
-            lambda t: t.data.is_valid, poisoned, jnp.zeros_like(term.data.is_valid)
+            lambda t: t.data.valid, poisoned, jnp.zeros_like(term.data.valid)
         )
         (value, prediction), gradient = evaluate(log_area, masked)
         np.testing.assert_array_equal(jnp.stack(prediction), 0.0)

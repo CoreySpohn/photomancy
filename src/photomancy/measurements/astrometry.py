@@ -49,29 +49,37 @@ class AstrometryData(eqx.Module):
 
     Args:
         time_d: Observation epochs (days). Shape ``(N,)``.
-        ra: East offset Delta alpha* = Delta RA cos Dec (arcsec).
+        east_arcsec: East offset Delta alpha* = Delta RA cos Dec (arcsec).
             Shape ``(N,)``.
-        dec: North offset Delta Dec (arcsec). Shape ``(N,)``.
-        ra_err: RA uncertainty (arcsec). Shape ``(N,)``.
-        dec_err: DEC uncertainty (arcsec). Shape ``(N,)``.
+        north_arcsec: North offset Delta Dec (arcsec). Shape ``(N,)``.
+        east_err_arcsec: RA uncertainty (arcsec). Shape ``(N,)``.
+        north_err_arcsec: DEC uncertainty (arcsec). Shape ``(N,)``.
         corr: RA/DEC correlation coefficient. Shape ``(N,)``.
         planet: Planet index per observation (for multi-planet systems).
             Shape ``(N,)``.
-        is_valid: Boolean validity mask. Shape ``(N,)``.
+        valid: Boolean validity mask. Shape ``(N,)``.
     """
 
     time_d: jnp.ndarray
-    ra: jnp.ndarray
-    dec: jnp.ndarray
-    ra_err: jnp.ndarray
-    dec_err: jnp.ndarray
+    east_arcsec: jnp.ndarray
+    north_arcsec: jnp.ndarray
+    east_err_arcsec: jnp.ndarray
+    north_err_arcsec: jnp.ndarray
     corr: jnp.ndarray
     planet: jnp.ndarray
-    is_valid: jnp.ndarray
+    valid: jnp.ndarray
 
     @classmethod
-    def from_sep_pa(
-        cls, *, time_d, sep, sep_err, pa_deg, pa_err_deg, planet=None, max_n=None
+    def from_separation_pa(
+        cls,
+        *,
+        time_d,
+        separation_arcsec,
+        separation_err_arcsec,
+        pa_deg,
+        pa_err_deg,
+        planet=None,
+        max_n=None,
     ):
         """Convert separation and position angle to east/north astrometry.
 
@@ -82,55 +90,58 @@ class AstrometryData(eqx.Module):
         ``max_n=None`` keeps all rows valid; otherwise pad to ``max_n``.
         """
         time_d = jnp.asarray(time_d)
-        sep, sep_err = jnp.asarray(sep), jnp.asarray(sep_err)
+        sep, sep_err = (
+            jnp.asarray(separation_arcsec),
+            jnp.asarray(separation_err_arcsec),
+        )
         pa = jnp.deg2rad(jnp.asarray(pa_deg))
         pa_err = jnp.deg2rad(jnp.asarray(pa_err_deg))
         sin_pa, cos_pa = jnp.sin(pa), jnp.cos(pa)
         sep_var, tangential_var = sep_err**2, (sep * pa_err) ** 2
-        ra_err = jnp.sqrt(sin_pa**2 * sep_var + cos_pa**2 * tangential_var)
-        dec_err = jnp.sqrt(cos_pa**2 * sep_var + sin_pa**2 * tangential_var)
+        east_err_arcsec = jnp.sqrt(sin_pa**2 * sep_var + cos_pa**2 * tangential_var)
+        north_err_arcsec = jnp.sqrt(cos_pa**2 * sep_var + sin_pa**2 * tangential_var)
         cov = sin_pa * cos_pa * (sep_var - tangential_var)
         if planet is None:
             planet = jnp.zeros(time_d.shape, dtype=int)
         values = dict(
             time_d=time_d,
-            ra=sep * sin_pa,
-            dec=sep * cos_pa,
-            ra_err=ra_err,
-            dec_err=dec_err,
-            corr=cov / (ra_err * dec_err),
+            east_arcsec=sep * sin_pa,
+            north_arcsec=sep * cos_pa,
+            east_err_arcsec=east_err_arcsec,
+            north_err_arcsec=north_err_arcsec,
+            corr=cov / (east_err_arcsec * north_err_arcsec),
             planet=jnp.asarray(planet, dtype=int),
         )
         if max_n is not None:
             return cls.pad(**values, max_n=max_n)
-        return cls(**values, is_valid=jnp.ones(time_d.shape, dtype=bool))
+        return cls(**values, valid=jnp.ones(time_d.shape, dtype=bool))
 
     @classmethod
     def pad(
         cls,
         *,
         time_d,
-        ra,
-        dec,
-        ra_err,
-        dec_err,
+        east_arcsec,
+        north_arcsec,
+        east_err_arcsec,
+        north_err_arcsec,
         corr,
         planet=None,
         max_n,
     ):
-        """Pad to ``max_n`` with an ``is_valid`` mask; ``planet`` defaults to 0."""
+        """Pad to ``max_n`` with an ``valid`` mask; ``planet`` defaults to 0."""
         n = jnp.asarray(time_d).shape[0]
         if planet is None:
             planet = jnp.zeros(n, dtype=int)
         return cls(
             time_d=_pad_1d(time_d, max_n),
-            ra=_pad_1d(ra, max_n),
-            dec=_pad_1d(dec, max_n),
-            ra_err=_pad_1d(ra_err, max_n, fill=1.0),
-            dec_err=_pad_1d(dec_err, max_n, fill=1.0),
+            east_arcsec=_pad_1d(east_arcsec, max_n),
+            north_arcsec=_pad_1d(north_arcsec, max_n),
+            east_err_arcsec=_pad_1d(east_err_arcsec, max_n, fill=1.0),
+            north_err_arcsec=_pad_1d(north_err_arcsec, max_n, fill=1.0),
             corr=_pad_1d(corr, max_n),
             planet=_pad_1d(planet, max_n).astype(int),
-            is_valid=_valid_mask(n, max_n),
+            valid=_valid_mask(n, max_n),
         )
 
     @classmethod
@@ -138,30 +149,30 @@ class AstrometryData(eqx.Module):
         """Create an all-invalid placeholder (for model tracing)."""
         return cls(
             time_d=jnp.zeros(max_n),
-            ra=jnp.zeros(max_n),
-            dec=jnp.zeros(max_n),
-            ra_err=jnp.ones(max_n),
-            dec_err=jnp.ones(max_n),
+            east_arcsec=jnp.zeros(max_n),
+            north_arcsec=jnp.zeros(max_n),
+            east_err_arcsec=jnp.ones(max_n),
+            north_err_arcsec=jnp.ones(max_n),
             corr=jnp.zeros(max_n),
             planet=jnp.zeros(max_n, dtype=int),
-            is_valid=jnp.zeros(max_n, dtype=bool),
+            valid=jnp.zeros(max_n, dtype=bool),
         )
 
 
 def _radec_bivariate_loglike(ra_pred, dec_pred, data):
     """Bivariate-Gaussian (with correlation) log-likelihood over RA/DEC offsets.
 
-    Shared by relative and stellar astrometry: both compare predicted ``(ra, dec)``
-    offsets to measured ones with per-epoch errors ``ra_err``/``dec_err`` and
-    correlation ``corr``, masked by ``is_valid``.
+    Shared by relative and stellar astrometry: both compare the predicted east and
+    north offsets to measured ones with per-epoch errors ``east_err_arcsec`` and
+    ``north_err_arcsec`` and correlation ``corr``, masked by ``valid``.
     """
-    mask = data.is_valid  # boolean
+    mask = data.valid  # boolean
 
-    dx = data.ra - ra_pred
-    dy = data.dec - dec_pred
+    dx = data.east_arcsec - ra_pred
+    dy = data.north_arcsec - dec_pred
     rho = data.corr
-    sx = data.ra_err
-    sy = data.dec_err
+    sx = data.east_err_arcsec
+    sy = data.north_err_arcsec
 
     # Bivariate Gaussian quadratic form
     one_minus_rho2 = jnp.clip(1.0 - rho**2, 1e-30)
@@ -213,17 +224,20 @@ def loglike_stellar_astrom(ra_pred, dec_pred, data):
 def _sample_radec(key, term, prediction):
     """Sample correlated east/north errors without changing padded payloads."""
     data = term.data
-    valid = data.is_valid
+    valid = data.valid
     eps = jax.random.normal(key, (2, data.time_d.size), dtype=jnp.float64)
-    sx = jnp.where(valid, data.ra_err, 1.0)
-    sy = jnp.where(valid, data.dec_err, 1.0)
+    sx = jnp.where(valid, data.east_err_arcsec, 1.0)
+    sy = jnp.where(valid, data.north_err_arcsec, 1.0)
     rho = jnp.where(valid, data.corr, 0.0)
     east = prediction[0] + sx * eps[0]
     north = prediction[1] + sy * (rho * eps[0] + jnp.sqrt(1 - rho**2) * eps[1])
     sampled = eqx.tree_at(
-        lambda d: (d.ra, d.dec),
+        lambda d: (d.east_arcsec, d.north_arcsec),
         data,
-        (jnp.where(valid, east, data.ra), jnp.where(valid, north, data.dec)),
+        (
+            jnp.where(valid, east, data.east_arcsec),
+            jnp.where(valid, north, data.north_arcsec),
+        ),
     )
     return eqx.tree_at(lambda t: t.data, term, sampled)
 
@@ -235,10 +249,12 @@ def _dynamics(system):
 
 def _record_form(design, data):
     """Assemble a :class:`LinearGaussian` from an arcsec-per-AU design and records."""
-    valid = data.is_valid
-    target = jnp.where(valid[:, None], jnp.stack([data.ra, data.dec], -1), 0.0)
-    sx = jnp.where(valid, data.ra_err, 1.0)
-    sy = jnp.where(valid, data.dec_err, 1.0)
+    valid = data.valid
+    target = jnp.where(
+        valid[:, None], jnp.stack([data.east_arcsec, data.north_arcsec], -1), 0.0
+    )
+    sx = jnp.where(valid, data.east_err_arcsec, 1.0)
+    sy = jnp.where(valid, data.north_err_arcsec, 1.0)
     rho = jnp.where(valid, data.corr, 0.0)
     scale = 1.0 / (1.0 - rho**2)
     off = -scale * rho / (sx * sy)
@@ -272,18 +288,18 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
     reads: ClassVar[tuple[str, ...]] = ()
 
     def _score(self, model):
-        valid = self.data.is_valid
+        valid = self.data.valid
         # Sanitize before propagation and division: masking a NaN result alone
         # does not prevent NaN derivatives from flowing through its operands.
         data = AstrometryData(
             time_d=jnp.where(valid, self.data.time_d, 0.0),
-            ra=jnp.where(valid, self.data.ra, 0.0),
-            dec=jnp.where(valid, self.data.dec, 0.0),
-            ra_err=jnp.where(valid, self.data.ra_err, 1.0),
-            dec_err=jnp.where(valid, self.data.dec_err, 1.0),
+            east_arcsec=jnp.where(valid, self.data.east_arcsec, 0.0),
+            north_arcsec=jnp.where(valid, self.data.north_arcsec, 0.0),
+            east_err_arcsec=jnp.where(valid, self.data.east_err_arcsec, 1.0),
+            north_err_arcsec=jnp.where(valid, self.data.north_err_arcsec, 1.0),
             corr=jnp.where(valid, self.data.corr, 0.0),
             planet=jnp.where(valid, self.data.planet, 0),
-            is_valid=valid,
+            valid=valid,
         )
         system = resolve(model, self.system_path)
         prediction = _relative_positions(system, data.time_d, data.planet)
@@ -321,7 +337,7 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
         """
         dynamics = _dynamics(resolve(model, self.system_path))
         shape = jax.tree.map(lambda a: a[planet], dynamics.orbits)
-        valid = self.data.is_valid
+        valid = self.data.valid
         time_d = jnp.where(valid, self.data.time_d, shape.epoch_d)
         design = sky_design(shape, time_d) / dynamics.frame.dist_pc
         design = eqx.error_if(
@@ -352,16 +368,16 @@ class StellarAstrometryTerm(AbstractTerm):
     reads: ClassVar[tuple[str, ...]] = ()
 
     def _score(self, model):
-        valid = self.data.is_valid
+        valid = self.data.valid
         data = AstrometryData(
             time_d=jnp.where(valid, self.data.time_d, 0.0),
-            ra=jnp.where(valid, self.data.ra, 0.0),
-            dec=jnp.where(valid, self.data.dec, 0.0),
-            ra_err=jnp.where(valid, self.data.ra_err, 1.0),
-            dec_err=jnp.where(valid, self.data.dec_err, 1.0),
+            east_arcsec=jnp.where(valid, self.data.east_arcsec, 0.0),
+            north_arcsec=jnp.where(valid, self.data.north_arcsec, 0.0),
+            east_err_arcsec=jnp.where(valid, self.data.east_err_arcsec, 1.0),
+            north_err_arcsec=jnp.where(valid, self.data.north_err_arcsec, 1.0),
             corr=jnp.where(valid, self.data.corr, 0.0),
             planet=self.data.planet,
-            is_valid=valid,
+            valid=valid,
         )
         system = resolve(model, self.system_path)
         prediction = _stellar_reflex(system, data.time_d)

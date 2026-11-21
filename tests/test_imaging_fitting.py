@@ -60,7 +60,7 @@ def test_contrast_curve_nulls_convert_and_keep_a_finite_gradient():
         jnp.array([100.0, 500.0, 900.0]), seps, contrast, max_n=64
     )
     assert jnp.allclose(data.dmag0_grid[:3, :40], -2.5 * jnp.log10(contrast))
-    assert bool(data.is_valid[:3].all()) and not bool(data.is_valid[3:].any())
+    assert bool(data.valid[:3].all()) and not bool(data.valid[3:].any())
     assert not bool(data.is_detected.any())
     grad = jax.grad(lambda ci: loglike_dmag(*_predict(data, ci), data))(0.5)
     assert jnp.isfinite(grad)
@@ -112,5 +112,5 @@ def test_dmag_data_pad_produces_max_sized_valid_container():
     )
     assert padded.time_d.shape == (max_n,)
     assert padded.dmag_obs.shape == (max_n,)
-    assert int(padded.is_valid.sum()) == 2
+    assert int(padded.valid.sum()) == 2
     assert bool(padded.is_detected[0]) and not bool(padded.is_detected[1])

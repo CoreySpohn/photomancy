@@ -139,18 +139,31 @@ def test_sampler_law(report_case):
         / counts
     )
     np.testing.assert_allclose(
-        np.asarray(samples.ra_err[:, 0])[detected], sigma, rtol=16 * np.finfo(float).eps
+        np.asarray(samples.east_err_arcsec[:, 0])[detected],
+        sigma,
+        rtol=16 * np.finfo(float).eps,
     )
-    np.testing.assert_array_equal(samples.ra_err, samples.dec_err)
-    x = (np.asarray(samples.ra[:, 0])[detected] - prediction.ra[0]) / sigma
-    y = (np.asarray(samples.dec[:, 0])[detected] - prediction.dec[0]) / sigma
+    np.testing.assert_array_equal(samples.east_err_arcsec, samples.north_err_arcsec)
+    x = (
+        np.asarray(samples.east_arcsec[:, 0])[detected] - prediction.east_arcsec[0]
+    ) / sigma
+    y = (
+        np.asarray(samples.north_arcsec[:, 0])[detected] - prediction.north_arcsec[0]
+    ) / sigma
     m = len(x)
     assert np.all(np.abs(np.mean([x, y], axis=1)) < 4 / np.sqrt(m))
     assert np.all(np.abs(np.var([x, y], axis=1, ddof=1) - 1) < 4 * np.sqrt(2 / (m - 1)))
     assert abs(float(np.mean(x * y)) - term.rule.corr) < 4 * np.sqrt(
         (1 + term.rule.corr**2) / m
     )
-    for name in ("counts", "ra", "dec", "ra_err", "dec_err", "corr"):
+    for name in (
+        "counts",
+        "east_arcsec",
+        "north_arcsec",
+        "east_err_arcsec",
+        "north_err_arcsec",
+        "corr",
+    ):
         np.testing.assert_array_equal(
             np.asarray(getattr(samples, name))[:, 0][~detected], 0.0
         )
@@ -197,14 +210,14 @@ def test_surrogate_and_routing(report_case):
         contrast * np.asarray(rates) * term.data.science_s,
         rtol=8 * np.finfo(float).eps,
     )
-    np.testing.assert_array_equal(prediction.ra, east)
-    np.testing.assert_array_equal(prediction.dec, -east)
+    np.testing.assert_array_equal(prediction.east_arcsec, east)
+    np.testing.assert_array_equal(prediction.north_arcsec, -east)
     # Pin the actual System seam, rather than relying only on a toy model.
     from test_terms import _system
 
     system = _system()
     sys_table = CountRateTable(
-        table.sep_arcsec,
+        table.separation_arcsec,
         table.counts_per_contrast_s,
         table.lod_arcsec,
         table.quadrature,
@@ -227,7 +240,7 @@ def test_surrogate_and_routing(report_case):
         [
             np.interp(
                 sep,
-                np.asarray(table.sep_arcsec[mode]),
+                np.asarray(table.separation_arcsec[mode]),
                 np.asarray(table.counts_per_contrast_s[mode]),
                 left=0.0,
                 right=0.0,
@@ -238,7 +251,7 @@ def test_surrogate_and_routing(report_case):
     expected = contrasts[term.data.mode, 0, jnp.arange(3)] * rate * term.data.science_s
     np.testing.assert_allclose(actual.counts, expected, rtol=8 * np.finfo(float).eps)
     np.testing.assert_allclose(
-        actual.ra,
+        actual.east_arcsec,
         system.positions(term.data.time_d)[0, 0],
         rtol=8 * np.finfo(float).eps,
     )
@@ -253,13 +266,21 @@ def test_variance_log_ratio(report_case):
     model, term = report_case
     prediction = term.predict(model)
     rows = eqx.tree_at(
-        lambda r: (r.is_detected, r.counts, r.ra, r.dec, r.ra_err, r.dec_err, r.corr),
+        lambda r: (
+            r.is_detected,
+            r.counts,
+            r.east_arcsec,
+            r.north_arcsec,
+            r.east_err_arcsec,
+            r.north_err_arcsec,
+            r.corr,
+        ),
         term.data,
         (
             jnp.ones(3, bool),
             prediction.counts + 1.0,
-            prediction.ra,
-            prediction.dec,
+            prediction.east_arcsec,
+            prediction.north_arcsec,
             jnp.full(3, 0.02),
             jnp.full(3, 0.03),
             jnp.full(3, 0.2),
@@ -315,7 +336,7 @@ def test_masks_and_edges(report_case):
     np.testing.assert_array_equal(outside.predict(model).counts, 0.0)
     assert np.isfinite(outside(model))
     np.testing.assert_array_equal(
-        outside.draw(jax.random.key(0), model).data.is_valid, [True, False, False]
+        outside.draw(jax.random.key(0), model).data.valid, [True, False, False]
     )
     prediction = outside.predict(model)
     # A detection outside the instrument's table can still be a noise false positive.
@@ -325,12 +346,19 @@ def test_masks_and_edges(report_case):
         )[0]
     )
     below = eqx.tree_at(
-        lambda r: (r.is_detected, r.counts, r.ra_err, r.dec_err),
+        lambda r: (r.is_detected, r.counts, r.east_err_arcsec, r.north_err_arcsec),
         term.data,
         (jnp.ones(3, bool), jnp.ones(3), jnp.ones(3), jnp.ones(3)),
     )
     assert jnp.isneginf(eqx.tree_at(lambda t: t.data, term, below)(model))
-    for name in ("counts", "ra", "dec", "ra_err", "dec_err", "corr"):
+    for name in (
+        "counts",
+        "east_arcsec",
+        "north_arcsec",
+        "east_err_arcsec",
+        "north_err_arcsec",
+        "corr",
+    ):
         poisoned = eqx.tree_at(
             lambda r, name=name: getattr(r, name), term.data, jnp.full(3, jnp.nan)
         )
@@ -349,13 +377,20 @@ def test_transformations_and_gradient(report_case):
     model, term = report_case
     prediction = term.predict(model)
     rows = eqx.tree_at(
-        lambda r: (r.is_detected, r.counts, r.ra, r.dec, r.ra_err, r.dec_err),
+        lambda r: (
+            r.is_detected,
+            r.counts,
+            r.east_arcsec,
+            r.north_arcsec,
+            r.east_err_arcsec,
+            r.north_err_arcsec,
+        ),
         term.data,
         (
             jnp.array([True, False, True]),
             prediction.counts + 2.0,
-            prediction.ra + 0.002,
-            prediction.dec - 0.001,
+            prediction.east_arcsec + 0.002,
+            prediction.north_arcsec - 0.001,
             jnp.full(3, 0.02),
             jnp.full(3, 0.03),
         ),

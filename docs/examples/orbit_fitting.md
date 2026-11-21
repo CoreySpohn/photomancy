@@ -77,10 +77,10 @@ and `draw` replaces them.
 def astrometry(times, key):
     """A relative astrometry term with one noisy epoch per time, drawn at the truth."""
     n = len(times)
-    layout = AstrometryData.from_sep_pa(
+    layout = AstrometryData.from_separation_pa(
         time_d=times,
-        sep=[0.1] * n,
-        sep_err=[0.01] * n,
+        separation_arcsec=[0.1] * n,
+        separation_err_arcsec=[0.01] * n,
         pa_deg=[0.0] * n,
         pa_err_deg=[4.0] * n,
     )
@@ -107,7 +107,7 @@ first = astrometry([0.0, 60.0], jax.random.key(0))
 
 fig, ax = sky_axes()
 ax.plot(*track(truth), color="0.6", lw=1, label="true orbit")
-ax.scatter(first.data.ra, first.data.dec, color="crimson", zorder=3, label="epochs")
+ax.scatter(first.data.east_arcsec, first.data.north_arcsec, color="crimson", zorder=3, label="epochs")
 ax.legend()
 plt.show()
 ```
@@ -155,7 +155,7 @@ east, north = draw_tracks(posterior, jax.random.key(2))
 fig, ax = sky_axes()
 ax.plot(np.asarray(east).T, np.asarray(north).T, color="cyan", lw=0.5, alpha=0.35)
 ax.plot(*track(truth), color="0.6", lw=1.5)
-ax.scatter(first.data.ra, first.data.dec, color="crimson", zorder=3)
+ax.scatter(first.data.east_arcsec, first.data.north_arcsec, color="crimson", zorder=3)
 plt.show()
 ```
 
@@ -234,8 +234,8 @@ fig, ax = sky_axes()
 ax.plot(np.asarray(east).T, np.asarray(north).T, color="cyan", lw=0.5, alpha=0.35)
 ax.plot(*track(truth), color="0.6", lw=1.5)
 for data in epochs:
-    valid = np.asarray(data.is_valid)
-    ra, dec = np.asarray(data.ra)[valid], np.asarray(data.dec)[valid]
+    valid = np.asarray(data.valid)
+    ra, dec = np.asarray(data.east_arcsec)[valid], np.asarray(data.north_arcsec)[valid]
     ax.scatter(ra, dec, color="crimson", zorder=3)
 plt.show()
 ```
