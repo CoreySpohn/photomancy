@@ -226,7 +226,7 @@ plane. An oriented native grid requires an oriented science grid.
 its `noise_variance` remains per-pixel variance in electrons squared.
 `PPConfig`, `ppfact`, `ez_ppf`, and `n_rolls` configuration fields are removed.
 Analytic post-processing uses explicit residual fractions in
-`coronagraphoto.ResidualFractions`; photomancy does not depend on coronagraphoto.
+`optixstuff.PostProcessing`; photomancy does not call the calculator.
 
 ---
 
@@ -237,21 +237,22 @@ Analytic post-processing uses explicit residual fractions in
 - `examples/postproc_coronagraphoto_pipeline` – End-to-end example with coronagraphoto
 
 
-Detector count statistics belong to optixstuff; exposure planning belongs to
-coronagraphoto. This example uses aperture photon integrands, image photon
+Detector count statistics, S/N and exposure time belong to optixstuff. This example uses aperture photon integrands, image photon
 integrands, with the wavelength quadrature carried by each rate record.
 
 ```python notest
-import coronagraphoto as cp
+import optixstuff as ox
 from optixstuff import frames_for_time
 
-residuals = cp.ResidualFractions(
+post_processing = ox.PostProcessing(
     speckle_residual_fraction=0.1, exozodi_residual_fraction=0.1
 )
-needed = cp.exposure_time(
-    rates, detector, target_snr, frame_time_s=100.0, residuals=residuals
+needed = ox.exposure_time(
+    rates, detector, target_snr, frame_time_s=100.0, post_processing=post_processing
 )
-value = cp.snr(rates, detector, needed.time_s, frame_time_s=100.0, residuals=residuals)
+value = ox.snr(
+    rates, detector, needed.time_s, frame_time_s=100.0, post_processing=post_processing
+)
 plan = frames_for_time(needed.time_s, 100.0)  # whole frames
 electrons = detector.electrons(rates)
 mean, variance = detector.mean_and_variance(electrons, plan)
