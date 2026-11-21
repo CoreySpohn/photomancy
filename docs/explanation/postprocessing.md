@@ -1,6 +1,6 @@
 # Post-processing
 
-`photomancy.postproc` is the analysis companion to coronagraphoto. It handles post-processing—everything that happens after the photons hit the detector: PSF subtraction, signal extraction, and SNR estimation.
+`photomancy.postproc` is the analysis companion to coronagraphoto. It handles post-processing, which is everything that happens after the photons hit the detector: PSF subtraction, signal extraction, and SNR estimation.
 
 This document covers the conceptual foundation, implementation details, and practical usage.
 
@@ -20,7 +20,7 @@ The likelihood-ratio map in `photomancy.detection` is the model-based counterpar
 it profiles a source amplitude under a fitted likelihood, while this package gives
 the aperture and filter statistics that reporting conventions expect.
 
-This boundary keeps the simulation agnostic to downstream analysis choices, and lets the analysis code run on any image—synthetic or real.
+This boundary keeps the simulation agnostic to downstream analysis choices, and lets the analysis code run on any image, synthetic or real.
 
 ---
 
@@ -84,7 +84,7 @@ This keeps the public API flexible while satisfying JAX's constraints.
 
 ### Batched Extraction
 
-The naive approach—looping over planet candidates—wastes work because the expensive image convolution gets repeated. Instead:
+The naive approach, looping over planet candidates, wastes work because the expensive image convolution gets repeated. Instead:
 
 1. Compute the flux map (convolution with aperture kernel) **once**.
 2. Use `jax.vmap` to extract values at many (y, x) positions in parallel.
@@ -232,9 +232,9 @@ Analytic post-processing uses explicit residual fractions in
 
 ## Further Reading
 
-- `examples/postproc_snr_methods` – SNR calculation demonstration
-- `tests/postproc/test_snr_physics.py` – Physics-based validation tests
-- `examples/postproc_coronagraphoto_pipeline` – End-to-end example with coronagraphoto
+- `examples/postproc_snr_methods` - SNR calculation demonstration
+- `tests/postproc/test_snr_physics.py` - Physics-based validation tests
+- `examples/postproc_coronagraphoto_pipeline` - End-to-end example with coronagraphoto
 
 
 Detector count statistics, S/N and exposure time belong to optixstuff. This example uses aperture photon integrands, image photon

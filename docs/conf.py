@@ -45,6 +45,17 @@ exclude_patterns = [
 
 autoapi_dirs = ["../src"]
 autoapi_ignore = ["**/_version.py"]
+# Document each module where it is defined. Listing a package's re-exports as well
+# would document ``photomancy.infer.run`` and ``photomancy.infer.update`` twice (the
+# functions share the names of their modules) and make a bare record name in a type
+# annotation ambiguous.
+autoapi_options = [
+    "members",
+    "undoc-members",
+    "show-inheritance",
+    "show-module-summary",
+    "special-members",
+]
 autodoc_typehints = "description"
 # AutoAPI already indexes fields; Napoleon renders their descriptions only.
 napoleon_use_ivar = True

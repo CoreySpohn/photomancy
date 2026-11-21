@@ -125,6 +125,7 @@ explanation/glossary
 how-to/staged-map-fit
 how-to/likelihood-ratio-map
 how-to/calibrate-detection
+how-to/detect-with-an-arm
 ```
 
 ```{toctree}
