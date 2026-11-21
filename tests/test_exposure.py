@@ -270,9 +270,16 @@ def test_self_fit_recovers_the_seams_and_leaves_the_companion_out():
     Golden: ``exposure_staged_golden.json`` holds the final parameters of the same fit
     run through the legacy staged path (a density object with per-stage restrictions,
     no prior) before this port. The port agrees to 8e-14 relative at a prior width of
-    1e8 (and to 1e-2 at 1e3, where Adam amplifies the prior gradient); the golden
-    tolerance, rtol 1e-6, leaves room for a platform's round-off along 3000 Adam steps
-    and still fails for a closed form that reads the post-update image.
+    1e8 (and to 1e-2 at 1e3, where Adam amplifies the prior gradient).
+    Golden tolerance basis: 3000 Adam steps amplify round-off, so the fit is
+    reproducible bit for bit on one stack only. A 1e-15 relative change of the seam
+    truth moves the final seam coefficients by 7.5e-4 (``ote``) and 8.3e-3 (``si``)
+    relative, and jax 0.12.1 against 0.12.0.1 moves them by 1.2e-3 and 1.3e-2, so
+    the weakly identified coefficients are not compared. What the data determine
+    moves far less, 9e-7 for the 1e-15 change and 1.4e-6 across the jax versions: the
+    rendered science-star image (relative to its peak), the star position (absolute,
+    pixels) and the star flux (relative). The tolerances are 3 times the larger
+    measurement, 5e-6 for the image and the flux and 6e-6 pixel for the position.
     Fails if: a stage frees the wrong group, donated parameters or optimizer states
     are mixed across a stage boundary, the closed-form flux lags a step, a fresh
     transform table does not restart its clock, the step recompiles (the render is
@@ -301,10 +308,18 @@ def test_self_fit_recovers_the_seams_and_leaves_the_companion_out():
             toy.star_only_image(instrument, star),
         )
         want = golden[repr(peak)]
-        for name, got in (
-            ("ote", instrument.ote),
-            ("si", instrument.si),
-            ("tilt", star.tilt),
-            ("flux", star.flux),
-        ):
-            np.testing.assert_allclose(got, want[name], rtol=1e-6)
+        golden_instrument = eqx.tree_at(
+            lambda i: (i.ote, i.si),
+            instrument,
+            (jnp.asarray(want["ote"]), jnp.asarray(want["si"])),
+        )
+        golden_star = toy.Star(jnp.asarray(want["tilt"]), jnp.asarray(want["flux"]))
+        expected = np.asarray(toy.star_only_image(golden_instrument, golden_star))
+        np.testing.assert_allclose(
+            toy.star_only_image(instrument, star),
+            expected,
+            rtol=0,
+            atol=5e-6 * np.max(np.abs(expected)),
+        )
+        np.testing.assert_allclose(star.tilt, want["tilt"], rtol=0, atol=6e-6)
+        np.testing.assert_allclose(star.flux, want["flux"], rtol=5e-6)

@@ -307,9 +307,14 @@ def test_planet_freed_after_the_map_recovers_flux_and_offset():
     it depends on the platform (8.3e-3 on macOS, 3.3e-2 on the Linux runner).
     Golden: ``exposure_staged_golden.json`` holds the H0 and H1 parameters of the same
     fits through the legacy staged path (no prior) before the port to ``MAP``. H0 and
-    H1 agree to 5e-14 relative on the capture platform; H0 is held to rtol 1e-6, H1 to
-    rtol 1e-2 on the offset and flux because that fit stops before round-off and its
-    optimum moves with the platform (see above).
+    H1 agree to 5e-14 relative on the capture platform; H0's frozen offset and flux
+    are exact and H1 is held to rtol 1e-2 on the offset and flux because that fit
+    stops before round-off and its optimum moves with the platform (see above).
+    The H0 seam coefficients are compared through the point image they render at the
+    origin, not coefficient by coefficient: 3000 Adam steps amplify round-off, so
+    jax 0.12.1 against 0.12.0.1 moves the coefficients by 1.6e-3 (``ote``) and
+    1.1e-2 (``si``) relative, while the point image moves by 1.8e-6 of its peak.
+    The tolerance, 5e-6 of the image peak, is 3 times that.
     Fails if: the map's amplitude or position is not a usable start, a stage that frees
     the planet leaves the star position or flux fixed so the planet cannot explain its
     own light, or the frozen-companion control absorbs the planet.
@@ -331,5 +336,16 @@ def test_planet_freed_after_the_map_recovers_flux_and_offset():
         rtol = 1e-6 if name == "h0" else 1e-2
         np.testing.assert_allclose(model.scene.offset, want["offset"], rtol=rtol)
         np.testing.assert_allclose(model.scene.flux, want["flux"], rtol=rtol, atol=0)
-    np.testing.assert_allclose(h0.instrument.si, golden["h0"]["si"], rtol=1e-6)
-    np.testing.assert_allclose(h0.instrument.ote, golden["h0"]["ote"], rtol=1e-6)
+    golden_h0 = eqx.tree_at(
+        lambda i: (i.ote, i.si),
+        h0.instrument,
+        (jnp.asarray(golden["h0"]["ote"]), jnp.asarray(golden["h0"]["si"])),
+    )
+    origin = jnp.zeros(2)
+    expected = np.asarray(toy.point_image(golden_h0, origin))
+    np.testing.assert_allclose(
+        toy.point_image(h0.instrument, origin),
+        expected,
+        rtol=0,
+        atol=5e-6 * np.max(np.abs(expected)),
+    )
