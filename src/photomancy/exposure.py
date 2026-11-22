@@ -89,6 +89,18 @@ class ExposureTerm(AbstractTerm):
         """Return the scalar log-likelihood of the data at ``model``."""
         return self.likelihood(self.predict(model))
 
+    def fisher_root(self, model):
+        """Return the likelihood's Fisher root of the rendered image.
+
+        Available when the likelihood is a :class:`MaskedLogLikelihood`; an arbitrary
+        callable raises ``NotImplementedError``.
+        """
+        if not hasattr(self.likelihood, "fisher_root"):
+            raise NotImplementedError(
+                f"{type(self.likelihood).__name__} has no closed-form Fisher root"
+            )
+        return self.likelihood.fisher_root(self.predict(model))
+
     def draw(self, key, model) -> Self:
         """Copy with a draw from an injected likelihood supporting ``draw``.
 

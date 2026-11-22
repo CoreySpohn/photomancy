@@ -141,6 +141,22 @@ class ImageTerm(AbstractTerm):
         detector, rates, plan = self._rates(model)
         return detector.mean_and_variance(rates, plan)[0]
 
+    def fisher_root(self, model) -> jax.Array:
+        """Return the detector's Fisher root of the expected rates, flat and masked.
+
+        The detector's own :meth:`optixstuff.AbstractDetector.fisher_root` (``2
+        sqrt(mean)`` for a photon counter, the mean-and-variance stack otherwise) is
+        repeated for every frame of ``observed_e`` and set to zero where ``mask`` is
+        false, so ``J^T J`` of this vector is the expected information of
+        ``__call__``. Masked entries are zeroed in place, not removed: the mask is a
+        traced leaf under ``jit``, and a zero entry adds nothing to ``J^T J``.
+        """
+        detector, rates, plan = self._rates(model)
+        root = detector.fisher_root(rates, plan)
+        parts = root if root.ndim == 4 else root[None]
+        used = jnp.broadcast_to(self.mask, self.observed_e.shape)
+        return jnp.ravel(jnp.where(used[..., None, :, :, :], parts, 0.0))
+
     def draw(self, key, model) -> Self:
         """Copy with frames drawn at ``model``; masked pixels keep their values."""
         detector, rates, plan = self._rates(model)

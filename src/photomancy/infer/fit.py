@@ -37,6 +37,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock, block_order, check_writers
 from hwoutils.constants import two_pi
+from hwoutils.memory import DEFAULT_MAX_BYTES, MemoryLimit, largest_batch
 from hwoutils.model_paths import assign, paths_overlap, resolve
 from jax.flatten_util import ravel_pytree
 from jax.scipy.special import log_ndtr, logsumexp
@@ -49,6 +50,7 @@ __all__ = [
     "Fit",
     "LeafProposal",
     "LinearGaussian",
+    "observed_hessian",
 ]
 
 
@@ -88,6 +90,23 @@ class AbstractTerm(eqx.Module):
     def predict(self, model):
         """Return the prediction of ``model`` for this term's data, where it has one."""
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
+
+    def fisher_root(self, model) -> jax.Array:
+        """Return a flat vector ``r(model)`` whose Jacobian gives the information.
+
+        With ``J = d r / d theta`` for any parameters ``theta`` of the model, ``J^T J``
+        is the expected information (the Fisher matrix) of the term's log likelihood,
+        summed over its independent data. The vector is flat, masked entries
+        contribute zero, and it does not depend on the observed data.
+
+        Optional. The default raises ``NotImplementedError``: a term whose likelihood is
+        an arbitrary callable, one that marginalizes a latent, or a correlated Gaussian
+        has no closed-form root here. The rule is per fit, never per term:
+        :meth:`Fit.information` with ``kind="fisher"`` raises and names the term when
+        any term of the fit lacks a root, because a sum of expected and observed pieces
+        is neither matrix.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no Fisher root")
 
 
 class LinearGaussian(eqx.Module):
@@ -260,6 +279,25 @@ def _sum_leaf(value, leaf_ndim, dist):
     return jnp.sum(value, axis=tuple(range(-n, 0))) if n > 0 else value
 
 
+def _admit_information(n_items, per_item, fixed, batch_size, max_bytes):
+    """Refuse an information matrix whose closed-form estimate exceeds ``max_bytes``."""
+    n_items = max(n_items, 1)
+    try:
+        fits = largest_batch(n_items, per_item, max_bytes, fixed_bytes=fixed)
+    except MemoryLimit as err:
+        raise MemoryLimit(
+            f"{err}. A fit this large needs the product v -> J^T (J v) built with "
+            "jax.linearize and jax.linear_transpose in place of the dense matrix"
+        ) from err
+    batch = n_items if batch_size is None else min(batch_size, n_items)
+    if batch > fits:
+        raise MemoryLimit(
+            f"information with batch_size={batch_size} needs an estimated "
+            f"{fixed + batch * per_item} bytes, above max_bytes={max_bytes}; "
+            f"batch_size={fits} fits (or raise max_bytes, or pass max_bytes=None)"
+        )
+
+
 def _to_cell(block, coordinates):
     """Reduce every periodic coordinate of a block entry to its cell ``[0, period)``."""
     period = dict(zip(block.coordinate_names, block.periods, strict=True))
@@ -267,6 +305,90 @@ def _to_cell(block, coordinates):
         name: value if period[name] is None else jnp.mod(value, period[name])
         for name, value in coordinates.items()
     }
+
+
+def _mapped(fn, items, batch_size):
+    """Map ``fn`` over the leading axis of ``items``.
+
+    ``batch_size=None`` runs every item at once (``jax.vmap``), ``1`` runs them in
+    sequence, and any other size runs that many at a time (``jax.lax.map``).
+    """
+    if batch_size is None:
+        return jax.vmap(fn)(items)
+    if batch_size == 1:
+        return jax.lax.map(fn, items)
+    return jax.lax.map(fn, items, batch_size=batch_size)
+
+
+def observed_hessian(f, x, *, batch_size: int | None = None) -> jax.Array:
+    """Symmetrized Hessian of a scalar ``f`` at the flat vector ``x``.
+
+    Column ``j`` is one Hessian-vector product (forward over reverse) along ``e_j``,
+    so only the tangent columns in flight are held: ``batch_size=1`` runs the columns
+    in sequence and holds one gradient's intermediates (on a CPU a wider batch buys at
+    most 20 to 25 percent and costs memory in proportion), ``None`` runs all at once
+    (what :func:`jax.hessian` does, the fast choice on a GPU with the memory for it).
+
+    Args:
+        f: ``x -> scalar``.
+        x: Point of shape ``(n,)``.
+        batch_size: Columns per batch, or ``None`` for all at once.
+
+    Returns:
+        The ``(n, n)`` matrix ``0.5 (H + H^T)``.
+    """
+    grad_fn = jax.grad(f)
+
+    def column(v):
+        return jax.jvp(grad_fn, (x,), (v,))[1]
+
+    hess = _mapped(column, jnp.eye(x.shape[0], dtype=x.dtype), batch_size)
+    return 0.5 * (hess + hess.T)
+
+
+@eqx.filter_jit
+def _observed_information(fit, x, include_prior, batch_size):
+    flat, unravel = ravel_pytree(x)
+
+    def negative(theta):
+        entries = unravel(theta)
+        total = jnp.asarray(fit.log_likelihood(entries), jnp.float64)
+        if include_prior:
+            total = total + fit.log_prior(entries)
+        return -total
+
+    return observed_hessian(negative, flat, batch_size=batch_size)
+
+
+@eqx.filter_jit
+def _fisher_information(fit, x, include_prior, batch_size, forward, n_root):
+    flat, unravel = ravel_pytree(x)
+
+    def root(theta):
+        return fit._root_vector(unravel(theta))
+
+    if n_root == 0:
+        info = jnp.zeros((flat.size, flat.size), flat.dtype)
+    elif forward:
+        columns = _mapped(
+            lambda v: jax.jvp(root, (flat,), (v,))[1],
+            jnp.eye(flat.size, dtype=flat.dtype),
+            batch_size,
+        )
+        info = columns @ columns.T
+    else:
+        _, pullback = jax.vjp(root, flat)
+        rows = _mapped(
+            lambda c: pullback(c)[0], jnp.eye(n_root, dtype=flat.dtype), batch_size
+        )
+        info = rows.T @ rows
+    if include_prior:
+
+        def negative_prior(theta):
+            return -fit.log_prior(unravel(theta))
+
+        info = info + observed_hessian(negative_prior, flat, batch_size=batch_size)
+    return 0.5 * (info + info.T)
 
 
 class Fit(eqx.Module):
@@ -484,6 +606,124 @@ class Fit(eqx.Module):
         ``batch_size`` is as in :meth:`log_prior`.
         """
         return self._over_batch(self._log_density_one, x, batch_size)
+
+    # ----- curvature -------------------------------------------------------------
+
+    def _root_vector(self, x):
+        """Concatenated float64 Fisher roots of every term at the draw ``x``."""
+        model = self.model_at(x)
+        parts = [
+            jnp.ravel(term.fisher_root(model)).astype(jnp.float64)
+            for term in self.terms
+        ]
+        return jnp.concatenate(parts) if parts else jnp.zeros((0,))
+
+    def _root_length(self):
+        """Length of :meth:`_root_vector`, from shapes only.
+
+        Raises:
+            NotImplementedError: Naming the first term that has no Fisher root.
+        """
+        total = 0
+        for i, term in enumerate(self.terms):
+            try:
+                shape = eqx.filter_eval_shape(term.fisher_root, self.model)
+            except NotImplementedError as err:
+                raise NotImplementedError(
+                    f"terms[{i}] ({type(term).__name__}) has no Fisher root, so "
+                    "kind='fisher' is unavailable for this fit (all terms or none); "
+                    f"use kind='observed'. Reason: {err}"
+                ) from err
+            total += int(np.prod(shape.shape, dtype=int))
+        return total
+
+    def information(
+        self,
+        x: dict,
+        *,
+        kind: str,
+        include_prior: bool = True,
+        batch_size: int | None = None,
+        max_bytes: int | None = DEFAULT_MAX_BYTES,
+    ) -> jax.Array:
+        """Curvature of the negative log density at ``x``, in the stored coordinates.
+
+        The matrix is ``(P, P)`` over the flat vector of ``x`` in the order of
+        :func:`jax.flatten_util.ravel_pytree` (sorted entry keys; each entry row-major),
+        in the coordinates ``x`` is written in (leaf values for a leaf law, chart
+        coordinates for a block), not the unconstrained ``to_real`` ones. Two matrices,
+        each with its own job:
+
+        * ``kind="observed"``: the exact Hessian of the negative log density, built
+          column by column. It is the reported width at a converged maximum, the matrix
+          of the Laplace evidence, and the check that a point is a regular maximum: it
+          is not positive definite away from one, and that is information.
+        * ``kind="fisher"``: ``J^T J`` of the terms' :meth:`AbstractTerm.fisher_root`,
+          the expected curvature of the likelihood at ``x`` (not a function of the
+          data). It is positive semidefinite, so it cannot flag a bad point; use it to
+          scale an optimizer, for a forecast, or for a width before data exist. Every
+          term must have a root, else ``NotImplementedError`` names the first that has
+          none. The Jacobian is built in forward mode when the root is longer than the
+          parameter vector (an image) and in reverse mode when it is shorter (a few
+          astrometric points).
+
+        ``include_prior=True`` adds the Hessian of the negative log prior in the same
+        coordinates. The sum is then not positive semidefinite in general (a chart
+        volume or a logit map has indefinite curvature); pass ``False`` for the
+        likelihood alone.
+
+        Memory. The resident part is estimated in closed form before anything is
+        built: the ``P`` by ``P`` result and, for ``"fisher"``, the tangent matrix
+        (``P`` times the root length times 8 bytes); a batch adds one tangent of the
+        root (or one gradient-sized column of length ``P``) per item. That is a lower
+        bound on the intermediates of the model's own render, which the estimate does
+        not see. A request above ``max_bytes`` raises
+        :class:`hwoutils.memory.MemoryLimit` and names the largest batch that fits. A
+        fit with too many parameters for even one item (tens of thousands of disk
+        pixel fluxes) is refused, and the way forward is the product ``v -> J^T (J v)``
+        built with :func:`jax.linearize` and :func:`jax.linear_transpose`, as
+        ``tiptilt.MatrixFreeEFCController`` does.
+
+        Args:
+            x: One draw of entries (``Fit.log_density`` format, no batch axes).
+            kind: ``"observed"`` or ``"fisher"``.
+            include_prior: Add the Hessian of the negative log prior.
+            batch_size: Columns (or rows, in reverse mode) per batch. ``None`` runs all
+                at once (the fast choice on a GPU), ``1`` one at a time (the choice
+                on a CPU with a large image).
+            max_bytes: Memory limit of the estimate above, or ``None`` for none.
+
+        Returns:
+            The symmetric ``(P, P)`` float64 matrix.
+
+        Raises:
+            RuntimeError: When ``jax_enable_x64`` is off (a float32 curvature is too
+                ill conditioned to invert).
+            ValueError: For an unknown ``kind``.
+            NotImplementedError: For ``kind="fisher"`` when a term has no root.
+            MemoryLimit: When the estimate is above ``max_bytes``.
+        """
+        if kind not in ("observed", "fisher"):
+            raise ValueError(f"kind must be 'observed' or 'fisher', got {kind!r}")
+        if not jax.config.jax_enable_x64:
+            raise RuntimeError("information needs jax_enable_x64 (float64 curvature)")
+        x = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), x)
+        n_param = sum(int(np.size(a)) for a in jax.tree.leaves(x))
+        if kind == "observed":
+            _admit_information(
+                n_param, n_param * 8, 2 * n_param * n_param * 8, batch_size, max_bytes
+            )
+            return _observed_information(self, x, include_prior, batch_size)
+        n_root = self._root_length()
+        forward = n_root > n_param
+        _admit_information(
+            n_param if forward else n_root,
+            (n_root if forward else n_param) * 8,
+            (n_param * n_param + n_param * n_root) * 8,
+            batch_size,
+            max_bytes,
+        )
+        return _fisher_information(self, x, include_prior, batch_size, forward, n_root)
 
     # ----- unconstrained coordinates ---------------------------------------------
 

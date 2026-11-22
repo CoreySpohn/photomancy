@@ -13,10 +13,10 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from photomancy.infer._hessian import dense_hessian
 from photomancy.infer.backends._flat import flat_density, start_points
 from photomancy.infer.backends.base import AbstractBackend
 from photomancy.infer.backends.importance import ImportanceInfo, modes_importance
+from photomancy.infer.fit import observed_hessian
 from photomancy.infer.posterior import Posterior
 
 
@@ -66,7 +66,7 @@ def _laplace_mode(logdensity, init, n_steps, min_eigenvalue):
 
     z_map = _map_optimize(neg, init, n_steps)
     grad = jax.grad(neg)(z_map)
-    eigvals, eigvecs = jnp.linalg.eigh(dense_hessian(neg, z_map))
+    eigvals, eigvecs = jnp.linalg.eigh(observed_hessian(neg, z_map, batch_size=1))
     floored = jnp.maximum(eigvals, min_eigenvalue)
     cov = (eigvecs / floored) @ eigvecs.T
     d = z_map.shape[0]

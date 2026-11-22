@@ -53,6 +53,18 @@ class ForwardTerm(AbstractTerm):
         """Return the scalar log likelihood of the data at ``model``."""
         return self.likelihood(self.forward(model))
 
+    def fisher_root(self, model):
+        """Return the likelihood's Fisher root of the forward model's output.
+
+        Available when the likelihood is a :class:`MaskedLogLikelihood` (the Gaussian
+        and the robust builders); any other likelihood raises ``NotImplementedError``.
+        """
+        if not hasattr(self.likelihood, "fisher_root"):
+            raise NotImplementedError(
+                f"{type(self.likelihood).__name__} has no closed-form Fisher root"
+            )
+        return self.likelihood.fisher_root(self.forward(model))
+
     def draw(self, key, model) -> Self:
         """Copy holding data drawn from the likelihood at ``model``.
 

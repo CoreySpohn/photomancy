@@ -83,6 +83,23 @@ _KERNELS = {
 }
 
 
+def _information_constant(kind, shape_param):
+    """Expected information of a location in units of ``1 / sigma**2``.
+
+    ``E[psi(z)**2]`` of the kernel's score ``psi = d kernel / dz`` under the
+    kernel's own normalized density: 1 for the Gaussian and the Laplace,
+    ``sqrt(2 pi) erf(delta / sqrt(2)) / Z`` for the Huber density (``Z`` its
+    normalization), ``(nu + 1) / (nu + 3)`` for the Student-t.
+    """
+    if kind in ("gaussian", "laplace"):
+        return 1.0
+    if kind == "student_t":
+        return (shape_param + 1.0) / (shape_param + 3.0)
+    delta = shape_param
+    core = math.sqrt(2.0 * math.pi) * math.erf(delta / math.sqrt(2.0))
+    return core / (core + 2.0 * math.exp(-0.5 * delta**2) / delta)
+
+
 class MaskedLogLikelihood(eqx.Module):
     """Normalized log-likelihood of a standardized-residual density over used elements.
 
@@ -114,6 +131,21 @@ class MaskedLogLikelihood(eqx.Module):
         z = jnp.where(self.mask, z, 0.0)
         kernel = _KERNELS[self.kind](z, self.shape_param)
         return self.log_norm - jnp.sum(jnp.where(self.mask, kernel, 0.0))
+
+    def fisher_root(self, predicted):
+        """Return the flat vector whose Jacobian gives the expected information.
+
+        The scale ``sigma`` is fixed, so the information of the prediction is
+        ``c / sigma**2`` per used element, with ``c`` the expected squared score of
+        the kernel under its own density: 1 for the Gaussian and the Laplace
+        density, ``(nu + 1) / (nu + 3)`` for the Student-t, and the Huber constant of
+        the normalization (see ``_information_constant``). The root is
+        ``sqrt(c) * predicted / sigma``, zero at excluded elements, shape
+        ``(data.size,)``.
+        """
+        predicted = jnp.broadcast_to(jnp.asarray(predicted), self.data.shape)
+        scale = math.sqrt(_information_constant(self.kind, self.shape_param))
+        return jnp.ravel(jnp.where(self.mask, scale * predicted / self.sigma, 0.0))
 
 
 class LowRankGaussianLogLikelihood(eqx.Module):
