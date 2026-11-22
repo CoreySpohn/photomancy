@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from photomancy.infer._hessian import dense_hessian
 from photomancy.infer.backends._flat import flat_density, start_points
 from photomancy.infer.backends.base import AbstractBackend
 from photomancy.infer.backends.importance import ImportanceInfo, modes_importance
@@ -49,18 +50,6 @@ def _map_optimize(neg_logdensity, init, n_steps):
     return jnp.where(neg_logdensity(z) < best_value, z, best_z)
 
 
-def _hessian(neg_logdensity, z_map):
-    """Symmetrized Hessian of ``neg_logdensity`` at ``z_map`` (forward over reverse)."""
-    grad_fn = jax.grad(neg_logdensity)
-
-    def hvp(v):
-        return jax.jvp(grad_fn, (z_map,), (v,))[1]
-
-    d = z_map.shape[0]
-    hess = jax.vmap(hvp)(jnp.eye(d, dtype=z_map.dtype))
-    return 0.5 * (hess + hess.T)
-
-
 @eqx.filter_jit
 def _laplace_mode(logdensity, init, n_steps, min_eigenvalue):
     """One mode with the diagnostics that decide whether it is a usable proposal.
@@ -77,7 +66,7 @@ def _laplace_mode(logdensity, init, n_steps, min_eigenvalue):
 
     z_map = _map_optimize(neg, init, n_steps)
     grad = jax.grad(neg)(z_map)
-    eigvals, eigvecs = jnp.linalg.eigh(_hessian(neg, z_map))
+    eigvals, eigvecs = jnp.linalg.eigh(dense_hessian(neg, z_map))
     floored = jnp.maximum(eigvals, min_eigenvalue)
     cov = (eigvecs / floored) @ eigvecs.T
     d = z_map.shape[0]

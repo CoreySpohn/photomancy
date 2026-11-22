@@ -41,6 +41,7 @@ import jax.numpy as jnp
 from hwoutils.model_paths import resolve
 from priorities import AbstractDistribution
 
+from photomancy.infer._hessian import dense_hessian
 from photomancy.infer.fit import Fit
 
 __all__ = [
@@ -322,10 +323,10 @@ def _measure(fit, start, n_newton):
     def loglike(theta):
         return jnp.asarray(fit.log_likelihood(unravel(theta)), jnp.float64)
 
-    grad, hess = jax.grad(loglike), jax.hessian(loglike)
+    grad = jax.grad(loglike)
 
     def step(theta, _):
-        g, h = grad(theta), hess(theta)
+        g, h = grad(theta), dense_hessian(loglike, theta)
         ok = jnp.all(jnp.linalg.eigvalsh(h) < 0.0)
         delta = jnp.linalg.solve(jnp.where(ok, h, -jnp.eye(theta.size)), g)
         return theta - jnp.where(ok, delta, 0.0), None
@@ -391,5 +392,4 @@ def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:
     def negative(vector):
         return -logdensity(eqx.tree_at(where, params, unravel(vector)))
 
-    hessian = jax.hessian(negative)(flat)
-    return 0.5 * (hessian + hessian.T)
+    return dense_hessian(negative, flat)
