@@ -30,6 +30,7 @@ from photomancy.measurements import (
     RadialVelocityTerm,
     RelativeAstrometryTerm,
     StellarAstrometryTerm,
+    system_separation_dmag,
 )
 
 DYNAMICAL = ("rv", "relative_astrom", "stellar_astrom", "pm_anomaly")
@@ -385,3 +386,23 @@ def test_radiative_padding_and_dark_limit(data):
         np.testing.assert_array_equal([value, gradient], 0.0)
         _, dark_dmag = _lit(term.data).predict(_Lit(model, jnp.asarray(0.0)))
         np.testing.assert_allclose(dark_dmag[:-1], 750.0, rtol=0, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "area", [None, 1.0e-8], ids=["scene-reflector", "explicit-area"]
+)
+def test_planet_flux_scale_shifts_predicted_dmag_exactly(area):
+    """Fails if the scene planet's ``flux_scale`` never reaches the dMag prediction.
+
+    A scale of two doubles the contrast, so dMag drops by 2.5 log10(2) at every
+    epoch (rtol 1e-12, float64) and the separation does not move. The scene
+    reflector and an explicit albedo-area product are the two routes.
+    """
+    orbit = jax.tree.map(lambda x: x[0], _orbits(23.0))
+    scene = _scene(orbit, mass_Mearth=23.0, radius_AU=0.00012, albedo=0.32)
+    scaled = eqx.tree_at(lambda sc: sc.planets[0].flux_scale, scene, jnp.asarray([2.0]))
+    times = jnp.array([31.0, 120.0, 290.0, 470.0])
+    sep, dmag = system_separation_dmag(scene, times, albedo_area_AU2=area)
+    sep2, dmag2 = system_separation_dmag(scaled, times, albedo_area_AU2=area)
+    np.testing.assert_array_equal(sep2, sep)
+    np.testing.assert_allclose(dmag2 - dmag, -2.5 * np.log10(2.0), rtol=1e-12)

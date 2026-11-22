@@ -384,11 +384,17 @@ def lambertian_from_area(albedo_area_AU2):
     return LambertianPhysicalModel(Ag=jnp.ones_like(area)), jnp.sqrt(area) / Rearth2AU
 
 
-def lambertian_dmag(phase_rad, distance_AU, model, radius_Rearth):
-    """Convert a Lambertian reflector's contrast to dMag at the orbit-fit floor."""
-    contrast = model.contrast(
-        phase_rad[None, :], distance_AU[None, :], None, radius_Rearth
-    )[0]
+def lambertian_dmag(phase_rad, distance_AU, model, radius_Rearth, flux_scale=1.0):
+    """Convert a Lambertian reflector's contrast to dMag at the orbit-fit floor.
+
+    ``flux_scale`` is the planet's dimensionless factor on its contrast.
+    """
+    contrast = (
+        flux_scale
+        * model.contrast(phase_rad[None, :], distance_AU[None, :], None, radius_Rearth)[
+            0
+        ]
+    )
     return contrast_to_delta_mag(jnp.maximum(contrast, 1e-300))
 
 
@@ -397,7 +403,8 @@ def system_separation_dmag(system, time_d, *, albedo_area_AU2=None):
 
     A scene supplies its Lambertian reflector and radius. An explicit
     geometric-albedo times radius squared (AU^2) supplies the reflector
-    for a bare dynamical system or a known photometric scale.
+    for a bare dynamical system or a known photometric scale. A scene's planet
+    ``flux_scale`` multiplies the contrast in either case.
     """
     bare = isinstance(system, System)
     count = system.orbits.a_AU.size if bare else system.n_planets
@@ -426,14 +433,17 @@ def system_separation_dmag(system, time_d, *, albedo_area_AU2=None):
                 "albedo_area_AU2 must specify one planet's photometric area"
             )
         model, radius_Rearth = lambertian_from_area(jnp.reshape(albedo_area_AU2, (1,)))
+    flux_scale = 1.0
     if not bare:
         radius_Rearth = jnp.where(system.valid, radius_Rearth, 0.0)
+        flux_scale = jnp.reshape(system.planets[0].flux_scale, ())
     ephemeris = system.solve(time_d) if bare else system.ephemeris(time_d)
     return ephemeris.separation_arcsec(1, 0), lambertian_dmag(
         ephemeris.phase_angle_rad(1, 0),
         ephemeris.distance_AU(1, 0),
         model,
         radius_Rearth,
+        flux_scale,
     )
 
 
