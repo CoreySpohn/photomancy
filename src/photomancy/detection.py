@@ -25,8 +25,9 @@ prediction and a template function, an ``eqx.Module``, so the model that produce
   the response come from the fit's terms (a :class:`photomancy.image.ImageTerm` or any
   ``AbstractTerm``) and the coordinates reach the model as ``Fit.model_at`` writes them.
 - :func:`measure` maximizes the fit's likelihood from a start (a detection peak) and
-  returns a :class:`LikelihoodEstimate`: the value as an entry dictionary and the
-  covariance from the curvature block.
+  returns a :class:`LikelihoodEstimate`: the value as an entry dictionary, the
+  covariance from the observed information (``Fit.information(kind="observed")``) and
+  whether that information is positive definite there.
 - :func:`curvature_block` gives the negative Hessian of a log-density over one small
   group of parameters, the check that a group is identifiable before it is freed.
 """
@@ -38,11 +39,11 @@ import equinox as eqx
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
+from hwoutils.memory import DEFAULT_MAX_BYTES
 from hwoutils.model_paths import resolve
 from priorities import AbstractDistribution
 
-from photomancy.infer._hessian import dense_hessian
-from photomancy.infer.fit import Fit
+from photomancy.infer.fit import Fit, observed_hessian
 
 __all__ = [
     "DetectionMap",
@@ -300,68 +301,148 @@ class LikelihoodEstimate(eqx.Module):
         value: The estimate, an entry dictionary keyed by ``fit.free`` (the format of
             the fit's ``x``).
         cov: The formal covariance, the inverse of the observed information
-            (:func:`curvature_block` over every free scalar), shape ``(D, D)`` with
-            rows in the order of :func:`photomancy.infer.posterior.ravel_samples`
-            (the entries' leaves in ``jax.tree.leaves`` order, each row-major). It is
-            a likelihood-only statement and says nothing about the prior.
+            (``Fit.information(kind="observed", include_prior=False)`` at the estimate),
+            shape ``(D, D)`` with rows in the order of
+            :func:`photomancy.infer.posterior.ravel_samples` (the entries' leaves in
+            ``jax.tree.leaves`` order, each row-major). It is a likelihood-only
+            statement and says nothing about the prior. Where ``regular`` is false the
+            diagonal can be negative and the widths in :attr:`sigma` are NaN there: the
+            point is not a maximum and the NaN says so.
+        corr: The correlation matrix ``cov_ij / sqrt(cov_ii cov_jj)``; meaningful where
+            ``regular`` is true.
+        regular: True when the observed information is positive definite, so the
+            estimate is a regular maximum and ``cov`` is a covariance. False at a
+            saddle, on a ridge or off the peak (an undetected source).
+        min_eigenvalue: The smallest eigenvalue of the observed information, in the
+            units of the stored coordinates (negative when ``regular`` is false).
     """
 
     value: dict
     cov: jax.Array
+    corr: jax.Array
+    regular: jax.Array
+    min_eigenvalue: jax.Array
 
     @property
     def sigma(self) -> jax.Array:
-        """Formal standard errors, shape ``(D,)``."""
+        """Formal standard errors, shape ``(D,)``; NaN where ``cov`` is negative."""
         return jnp.sqrt(jnp.diag(self.cov))
 
 
+def _require_float64(flat):
+    if not jax.config.jax_enable_x64 or flat.dtype != jnp.float64:
+        raise RuntimeError(
+            "curvature needs float64 (jax_enable_x64 on and float64 parameters); "
+            "a float32 Hessian is too noisy to invert"
+        )
+
+
+def _correlation_inverse(info):
+    """Invert a symmetric matrix in correlation form and classify it.
+
+    Scaling by the square roots of the absolute diagonal, ``C = D^-1 A D^-1``, takes a
+    matrix whose entries span many orders of magnitude (condition number 4e12 on a
+    full-scene fit) to one near unity (3.7 there); the inverse is
+    ``D^-1 C^-1 D^-1``. A congruence by a positive diagonal keeps the signature, so
+    the sign of the eigenvalues of ``C`` is that of ``A`` without the scale's rounding.
+
+    Returns:
+        ``(cov, corr, regular, min_eigenvalue)``: the inverse, its correlation matrix,
+        whether ``A`` is positive definite, and the smallest eigenvalue of ``A``.
+    """
+    scale = jnp.sqrt(jnp.abs(jnp.diag(info)))
+    scale = jnp.where(scale > 0.0, scale, 1.0)
+    scaled = info / jnp.outer(scale, scale)
+    inverse = jnp.linalg.inv(scaled)
+    cov = inverse / jnp.outer(scale, scale)
+    cov = 0.5 * (cov + cov.T)
+    root = jnp.sqrt(jnp.abs(jnp.diag(inverse)))
+    root = jnp.where(root > 0.0, root, 1.0)
+    corr = inverse / jnp.outer(root, root)
+    regular = jnp.min(jnp.linalg.eigvalsh(scaled)) > 0.0
+    return cov, 0.5 * (corr + corr.T), regular, jnp.min(jnp.linalg.eigvalsh(info))
+
+
 @eqx.filter_jit
-def _measure(fit, start, n_newton):
+def _measure(fit, start, n_newton, batch_size, max_bytes):
     start = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), start)
     flat, unravel = jax.flatten_util.ravel_pytree(start)
+    _require_float64(flat)
 
     def loglike(theta):
         return jnp.asarray(fit.log_likelihood(unravel(theta)), jnp.float64)
 
+    def information(theta):
+        return fit.information(
+            unravel(theta),
+            kind="observed",
+            include_prior=False,
+            batch_size=batch_size,
+            max_bytes=max_bytes,
+        )
+
     grad = jax.grad(loglike)
 
     def step(theta, _):
-        g, h = grad(theta), dense_hessian(loglike, theta)
+        g, h = grad(theta), -information(theta)
         ok = jnp.all(jnp.linalg.eigvalsh(h) < 0.0)
         delta = jnp.linalg.solve(jnp.where(ok, h, -jnp.eye(theta.size)), g)
         return theta - jnp.where(ok, delta, 0.0), None
 
     theta, _ = jax.lax.scan(step, flat, None, length=n_newton)
-    info = curvature_block(loglike, theta, lambda t: t)
-    return unravel(theta), jnp.linalg.inv(info)
+    return (unravel(theta), *_correlation_inverse(information(theta)))
 
 
-def measure(fit: Fit, start: dict, *, n_newton: int = 4) -> LikelihoodEstimate:
+def measure(
+    fit: Fit,
+    start: dict,
+    *,
+    n_newton: int = 4,
+    batch_size: int | None = 1,
+    max_bytes: int | None = DEFAULT_MAX_BYTES,
+) -> LikelihoodEstimate:
     """Maximize a fit's likelihood from ``start`` and take the covariance there.
 
     Newton steps on ``fit.log_likelihood`` over every free scalar jointly, from
     ``start`` (a detection peak from :func:`detect`, say). A step is skipped while the
-    Hessian is not negative definite. The covariance is the inverse of
-    :func:`curvature_block` at the estimate, so it is the formal covariance of the
-    maximum-likelihood estimate and is not a statement about the prior. The estimate is
-    only as good as the start: a start far from any peak can leave the Newton iteration
-    on a saddle.
+    Hessian is not negative definite. The covariance is the inverse of the observed
+    information (:meth:`photomancy.infer.fit.Fit.information` with ``kind="observed"``
+    and ``include_prior=False``) at the estimate, inverted in correlation form, so it
+    is the formal covariance of the maximum-likelihood estimate and is not a statement
+    about the prior. The estimate is only as good as the start: a start far from any
+    peak can leave the Newton iteration on a saddle.
+
+    The result says whether it is a maximum. ``regular`` is false, and the widths of
+    the affected parameters are NaN, where the information is not positive definite: an
+    undetected source (its amplitude is consistent with zero, so its position is not
+    constrained), a saddle, or a point the iteration did not reach the peak from. The
+    Fisher matrix (``kind="fisher"``) cannot make that statement.
+
+    Needs ``jax_enable_x64``.
 
     Args:
         fit: A :class:`~photomancy.infer.fit.Fit`.
         start: Entry dictionary, the format of the fit's ``x`` for one draw, with
             exactly the keys of ``fit.free``.
         n_newton: Newton steps.
+        batch_size: Hessian columns per batch (``None`` for all at once); the default
+            holds one gradient's intermediates.
+        max_bytes: Memory limit of the closed-form estimate, as in ``Fit.information``.
 
     Returns:
         A :class:`LikelihoodEstimate`.
 
     Raises:
         ValueError: If the keys of ``start`` are not the free paths.
+        RuntimeError: If ``jax_enable_x64`` is off.
     """
     _check_entries(start, set(fit.free))
-    value, cov = _measure(fit, start, n_newton)
-    return LikelihoodEstimate(value=value, cov=cov)
+    value, cov, corr, regular, min_eig = _measure(
+        fit, start, n_newton, batch_size, max_bytes
+    )
+    return LikelihoodEstimate(
+        value=value, cov=cov, corr=corr, regular=regular, min_eigenvalue=min_eig
+    )
 
 
 def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:
@@ -373,7 +454,10 @@ def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:
     held at its value in ``params``. The Hessian is taken over the flattened group, in
     the order the leaves are selected, and returned as a dense symmetric matrix.
 
-    The block is the observed information of the group at ``params``. Its eigenvalues
+    The block is the observed information of the group at ``params``, built by the same
+    column-by-column Hessian that :meth:`photomancy.infer.fit.Fit.information` uses for
+    ``kind="observed"`` (this function takes any scalar log-density, not only a fit,
+    and needs float64). Its eigenvalues
     show whether the group is identifiable before it is freed (a near-zero eigenvalue
     is a direction the data do not constrain), and at a maximum of the log-density its
     inverse is the formal covariance of the group.
@@ -392,4 +476,5 @@ def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:
     def negative(vector):
         return -logdensity(eqx.tree_at(where, params, unravel(vector)))
 
-    return dense_hessian(negative, flat)
+    _require_float64(flat)
+    return observed_hessian(negative, flat, batch_size=1)

@@ -128,3 +128,93 @@ The eigenvalues of the block are the information in each direction of the group:
 near zero is a direction the data do not constrain, and at a maximum the inverse of the
 block is the formal covariance of the group (the position error of a source, for
 example).
+
+## Report a width, and say whether the point is a maximum
+
+{func}`~photomancy.detection.measure` maximizes a fit's likelihood from a start and
+reports the formal covariance there. The covariance is the inverse of the observed
+information, `Fit.information(x, kind="observed", include_prior=False)`: the exact
+negative Hessian of the log likelihood, built one column at a time. It is inverted in
+correlation form (scaled by the square roots of its diagonal first): the free
+parameters of an imaging fit span many orders of magnitude (condition number 4e12 on
+a full-scene fit, 3.7 after the scaling), and the scaled matrix decides without
+rounding whether it is positive definite.
+
+The result also says whether the point is a maximum. `regular` is true when the
+information is positive definite, and `min_eigenvalue` is its smallest eigenvalue. Where
+`regular` is false the point is a saddle, a ridge or an undetected source, and the
+widths of the parameters that carry the negative curvature are NaN. That is the correct
+statement: a Gaussian width is not defined there, and a number would hide it.
+
+```python
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
+from priorities import Uniform
+
+from photomancy.detection import measure
+from photomancy.infer import Fit, ForwardTerm
+from photomancy.infer.likelihoods import gaussian_loglike
+
+jax.config.update("jax_enable_x64", True)
+
+
+class Bump(eqx.Module):
+    amplitude: jnp.ndarray
+
+
+class Render(eqx.Module):
+    grid: jnp.ndarray
+
+    def __call__(self, model):
+        return model.amplitude * jnp.exp(-0.5 * (self.grid / 0.2) ** 2)
+
+
+grid = jnp.linspace(-1.0, 1.0, 64)
+data = 0.7 * jnp.exp(-0.5 * (grid / 0.2) ** 2) + 0.05 * jax.random.normal(
+    jax.random.key(0), grid.shape
+)
+term = ForwardTerm(Render(grid), gaussian_loglike(data, 0.05))
+fit = Fit(Bump(jnp.asarray(0.5)), {"amplitude": Uniform(0.0, 5.0)}, (term,))
+
+estimate = measure(fit, {"amplitude": jnp.asarray(0.5)})
+print(
+    float(estimate.value["amplitude"]), float(estimate.sigma[0]), bool(estimate.regular)
+)
+assert bool(estimate.regular)
+```
+
+## Two curvature matrices, behind one call
+
+`Fit.information` returns either matrix at a point, in the stored coordinates of the
+fit's entries, as a `(P, P)` float64 array (it needs `jax_enable_x64`).
+
+- `kind="observed"` is the exact Hessian of the negative log density. It is the width at
+  a converged maximum, the matrix of the Laplace evidence, and the test of whether a
+  point is a regular maximum. It is not positive definite away from one.
+- `kind="fisher"` is `J^T J` of the terms' `fisher_root`, the expected curvature of the
+  likelihood at the point. It does not depend on the data, is always positive
+  semidefinite, and costs about half the time of the observed matrix, so it scales an
+  optimizer or forecasts a width before data exist. It cannot flag a bad point, so it is
+  not the reported width: for an undetected source it gives a finite, smaller width at a
+  larger fitted amplitude, the opposite of the honest statement. Every term of the fit
+  needs a root (`ImageTerm`, and `ForwardTerm` or `ExposureTerm` over a Gaussian or
+  robust builder have one); if one does not, the call raises and names it.
+
+```python continuation
+x = {"amplitude": estimate.value["amplitude"]}
+fisher = fit.information(x, kind="fisher", include_prior=False)
+observed = fit.information(x, kind="observed", include_prior=False)
+# a Gaussian likelihood linear in the amplitude: the two matrices coincide
+np.testing.assert_allclose(observed, fisher, rtol=1e-9)
+```
+
+`include_prior=True` (the default) adds the Hessian of the negative log prior, in which
+case the sum is not positive semidefinite in general. `batch_size` is the number of
+Hessian columns (or Jacobian tangents) built at once: `None` builds all at once, which
+is the fast choice on a GPU with the memory for it, and `1` builds one at a time, which
+holds one gradient's intermediates and is the choice on a CPU with a large image.
+`max_bytes` refuses, before anything is built, a matrix whose closed-form size (the
+`P` by `P` result and the tangents) is above the limit, and names the batch size that
+fits.

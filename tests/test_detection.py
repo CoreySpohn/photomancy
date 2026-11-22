@@ -16,6 +16,7 @@ from image_scene import (
 from priorities import Uniform
 
 from photomancy.detection import (
+    _correlation_inverse,
     curvature_block,
     detect,
     likelihood_ratio_map,
@@ -23,6 +24,7 @@ from photomancy.detection import (
     profile_amplitude,
 )
 from photomancy.image import ImageTerm
+from photomancy.infer import ForwardTerm
 from photomancy.infer.fit import AbstractTerm, Fit
 from photomancy.infer.likelihoods import (
     gaussian_loglike,
@@ -373,6 +375,9 @@ class _SkyImage(AbstractTerm):
     def predict(self, model):
         return self.image.predict(self._scene(model))
 
+    def fisher_root(self, model):
+        return self.image.fisher_root(self._scene(model))
+
     def draw(self, key, model):
         raise NotImplementedError
 
@@ -533,6 +538,9 @@ def test_measure_covariance_matches_the_curvature_block_and_the_fisher_matrix():
     )
     np.testing.assert_allclose(est.cov, np.linalg.inv(block), rtol=1e-8)
     np.testing.assert_allclose(est.sigma, np.sqrt(np.diag(est.cov)))
+    assert bool(est.regular)
+    np.testing.assert_allclose(est.min_eigenvalue, np.linalg.eigvalsh(block)[0])
+    np.testing.assert_allclose(np.diag(est.corr), 1.0, rtol=1e-12)
 
     h = 0.01
     pred = lambda pa, a: np.asarray(clean.predict(_sky(a, pa)))  # noqa: E731
@@ -581,3 +589,141 @@ def test_psf_template_filter_amplitude_equals_the_linear_profile_amplitude():
             gaussian_loglike(patch, sigma), np.full_like(patch, b), t_zm
         )
         np.testing.assert_allclose(got, want, rtol=1e-9)
+
+
+def _spd(n, seed, cond):
+    """A random symmetric positive definite matrix of the given condition number."""
+    q, _ = np.linalg.qr(np.random.default_rng(seed).normal(size=(n, n)))
+    return (q * np.geomspace(1.0, cond, n)) @ q.T
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.parametrize("span", [1e6, 1e8])
+def test_correlation_form_inverse_recovers_a_known_covariance_at_condition_1e12(span):
+    """The inverse and the flag survive a graded matrix (condition 1e12 and 1e16).
+
+    The information is ``D^-1 K D^-1`` with ``K`` of condition 5 and ``D`` spanning
+    ``span``, so the matrix has condition number near ``span**2`` and its covariance is
+    exactly ``D K^-1 D``. It is positive definite by construction.
+
+    Truth source: ``K^-1`` from NumPy on the well conditioned ``K``.
+    Tolerance basis: floating-point (rtol 1e-10 in the scaled covariance and the
+    correlation matrix).
+    Fails if: the diagonal scaling is dropped or applied once instead of twice, the
+    correlation matrix is not normalized, or a positive definite graded matrix is
+    reported as not regular.
+    """
+    scale = np.geomspace(1.0, span, 6)
+    k = _spd(6, seed=2, cond=5.0)
+    info = k / np.outer(scale, scale)
+    assert np.linalg.cond(info) > 0.5 * span**2
+    cov, corr, regular, min_eig = _correlation_inverse(jnp.asarray(info))
+    want = np.linalg.inv(k)
+    np.testing.assert_allclose(
+        np.asarray(cov) / np.outer(scale, scale), want, rtol=1e-10
+    )
+    assert bool(regular)
+    np.testing.assert_allclose(np.diag(corr), 1.0, rtol=1e-12)
+    np.testing.assert_allclose(
+        corr, want / np.sqrt(np.outer(np.diag(want), np.diag(want))), rtol=1e-10
+    )
+    assert abs(float(min_eig)) < 1e-6
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_regular_is_false_at_a_saddle_and_true_at_a_maximum():
+    """The flag is the sign of the information's eigenvalues, with finite output.
+
+    Truth source: the eigenvalues of ``diag(2, -3)`` (a saddle of the log density, so
+    information of mixed sign) and of ``diag(2, 3)``.
+    Tolerance basis: exact-algebra (the covariance is ``diag(1/2, -1/3)`` to
+    rounding; the smallest eigenvalue is exact).
+    Fails if: a saddle reports a covariance without the flag, or the inversion turns
+    the indefinite matrix into NaN or inf.
+    """
+    cov, _, regular, min_eig = _correlation_inverse(jnp.diag(jnp.array([2.0, -3.0])))
+    assert not bool(regular)
+    assert float(min_eig) == -3.0
+    np.testing.assert_allclose(cov, np.diag([0.5, -1.0 / 3.0]), rtol=1e-12)
+    assert np.all(np.isfinite(cov))
+    cov, _, regular, min_eig = _correlation_inverse(jnp.diag(jnp.array([2.0, 3.0])))
+    assert bool(regular) and float(min_eig) == 2.0
+
+
+class _Identity(eqx.Module):
+    def __call__(self, model):
+        return model.p
+
+
+class _Saddle(eqx.Module):
+    """``log L = -0.5 (p0**2 - p1**2)``, a saddle at the origin."""
+
+    def __call__(self, predicted):
+        return -0.5 * (predicted[0] ** 2 - predicted[1] ** 2)
+
+
+class _P(eqx.Module):
+    p: jax.Array
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_measure_flags_a_saddle_and_stays_there():
+    """``measure`` at a saddle skips the Newton step, reports ``regular == False``.
+
+    Truth source: the Hessian of the quadratic ``-0.5 (p0**2 - p1**2)`` is
+    ``diag(-1, 1)``, so the information is ``diag(1, -1)`` and the covariance
+    ``diag(1, -1)`` (the second width is NaN).
+    Tolerance basis: exact-algebra (rtol 1e-12).
+    Fails if: the flag is missing, a step is taken on an indefinite Hessian, or the
+    covariance is not finite.
+    """
+    term = ForwardTerm(_Identity(), _Saddle())
+    fit = Fit(_P(jnp.zeros(2)), {"p": Uniform(-5.0, 5.0)}, (term,))
+    start = {"p": jnp.array([0.2, -0.1])}
+    est = measure(fit, start)
+    assert not bool(est.regular)
+    assert float(est.min_eigenvalue) == pytest.approx(-1.0)
+    np.testing.assert_allclose(est.value["p"], start["p"], rtol=1e-12)
+    np.testing.assert_allclose(est.cov, np.diag([1.0, -1.0]), rtol=1e-12)
+    assert np.isnan(float(est.sigma[1])) and float(est.sigma[0]) == pytest.approx(1.0)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.medium(reason="forward-mode tangents through the renderer, two kinds")
+@pytest.mark.parametrize("kind", ["poisson", "constant"])
+def test_fisher_of_an_image_fit_equals_the_closed_form_on_a_linear_mean(kind):
+    """``Fit.information(kind="fisher")`` over an ``ImageTerm`` is ``sum t**2 / var``.
+
+    The mean is ``m0 + a t`` in the amplitude ``a``, so the information of ``a`` is
+    ``sum_used t**2 / m`` for a Poisson law (variance equal to the mean) and
+    ``sum_used t**2 / V`` for a Gaussian of fixed variance ``V``. Pixels the mask
+    removes carry none. The position angle's entries are checked against a central
+    difference of the rendered mean.
+
+    Truth source: ``t = predict(a=1) - predict(a=0)`` and the mean from ``predict``
+    (the renderer, not ``fisher_root``), NumPy sums over the unmasked pixels; the
+    position-angle Jacobian by a central difference of step 0.01 degree.
+    Tolerance basis: exact-algebra for the amplitude entry (rtol 1e-10); floating-point
+    for the entries with the position angle (rtol 1e-4, the central difference error).
+    Fails if: the mask is dropped from the root, the root is the square root of the
+    mean (half the Poisson information), or the variance enters twice.
+    """
+    fit, _, mask = _image_problem(kind)
+    sky = fit.terms[0]
+    point = _sky(_TRUE_AMP, _TRUE_PA)
+    x = {"amplitude": point.amplitude, "pa_deg": point.pa_deg}
+    mean = np.asarray(sky.predict(point))
+    t = np.asarray(sky.predict(_sky(1.0, _TRUE_PA))) - np.asarray(
+        sky.predict(_sky(0.0, _TRUE_PA))
+    )
+    variance = mean if kind == "poisson" else _VARIANCE
+    got = np.asarray(fit.information(x, kind="fisher", include_prior=False))
+    np.testing.assert_allclose(got[0, 0], np.sum(mask * t * t / variance), rtol=1e-10)
+    h = 0.01
+    pred = lambda pa: np.asarray(sky.predict(_sky(_TRUE_AMP, pa)))  # noqa: E731
+    d_pa = (pred(_TRUE_PA + h) - pred(_TRUE_PA - h)) / (2 * h)
+    w = mask / variance
+    np.testing.assert_allclose(got[0, 1], np.sum(w * t * d_pa), rtol=1e-4)
+    np.testing.assert_allclose(got[1, 1], np.sum(w * d_pa * d_pa), rtol=1e-4)
+    with_prior = fit.information(x, kind="fisher", include_prior=True)
+    assert np.all(np.isfinite(with_prior))
