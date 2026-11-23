@@ -94,38 +94,119 @@ def test_gaussian_value_is_the_summed_density_of_the_detector_moments():
     np.testing.assert_allclose(term(model), want, rtol=1e-12)
 
 
+_READ_NOISE_E = {"poisson": 0.0, "read": 3.0}
+
+
+def _contrast(model):
+    return model.scene.planets[0].physical_model.contrast_grid
+
+
 @vv.case("scene-fits", "code-verification", basis="floating-point")
-def test_residual_is_the_offset_in_detector_standard_deviations():
+@pytest.mark.parametrize("kind", ["poisson", "read"])
+def test_residual_is_the_offset_in_detector_standard_deviations(kind):
     """The residual returns the injected offsets in units of the detector's sigma.
 
-    Truth source: a frame built as ``mean + k * sqrt(variance)`` from the read-noise
-    detector's own moments, with known ``k``; ``Fit.residuals`` must give the same
-    array at ``x``.
+    Truth source: two frames built as ``mean + k * sqrt(variance)`` with known
+    ``k``, the variance typed from primitives: the shot noise equals the mean (no
+    gain excess, dark or clock-induced charge), plus the read noise squared once
+    for the single frame (3 electrons for ``read``, none for the photon counter,
+    whose residual is then the Pearson residual). ``Fit.residuals`` must give the
+    same array at ``x``.
     Tolerance basis: floating-point (rtol 1e-12, and an absolute floor of 8 ulp of
     the largest ``mean / sigma``, the rounding of ``mean + k sigma`` before it is
     subtracted again).
     Fails if: the residual is signed the wrong way, whitened by ``sqrt(mean)`` (the
-    Poisson part only) instead of the detector variance, or a masked pixel is not
-    NaN.
+    Poisson part only) where the detector adds read noise, mixes the frames of a
+    batch, or a masked pixel is not NaN.
     """
-    model, exposure = _setup("read")
+    model, exposure = _setup(kind)
     detector = model.instrument.detector
-    probe = _term(model, exposure, jnp.zeros((1, *detector.shape)))
-    _, rates, plan = probe._rates(model)
-    mean, variance = (np.asarray(x) for x in detector.mean_and_variance(rates, plan))
-    k = np.random.default_rng(6).normal(size=mean.shape)
+    read = _READ_NOISE_E[kind]
+    assert float(detector.read_noise_e_rms) == read
+    assert float(detector.excess_noise_factor_sq) == 1.0
+    assert float(detector.dark_current_e_per_pixel_s) == 0.0
+    assert float(detector.clock_induced_charge_e_per_pixel_frame) == 0.0
+    assert exposure.plan.n_frames == 1
+    mean = np.asarray(_mean(model, exposure))
+    variance = mean + read**2
+    k = np.random.default_rng(6).normal(size=(2, *mean.shape))
     observed = mean + k * np.sqrt(variance)
     term = _scored(model, exposure, observed)
-    mask = np.asarray(term.mask)
+    mask = np.broadcast_to(np.asarray(term.mask), observed.shape)
     out = np.asarray(term.residual(model))
     assert out.shape == observed.shape
-    floor = 8 * np.finfo(float).eps * np.max(mean / np.sqrt(variance))
+    scored = np.asarray(term.mask)
+    floor = 8 * np.finfo(float).eps * np.max(mean[scored] / np.sqrt(variance[scored]))
     np.testing.assert_allclose(out[mask], k[mask], rtol=1e-12, atol=floor)
     assert np.all(np.isnan(out[~mask])) and not mask.all()
     fit = Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
     x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid}
     (from_fit,) = fit.residuals(x)
     np.testing.assert_array_equal(from_fit, out)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_residual_reads_the_floored_rates_and_is_safe_to_differentiate():
+    """The residual uses the rates ``log_prob`` scores and has a finite Jacobian.
+
+    A planet of negative contrast drives the total rate at its peak pixel just
+    below zero, inside the detector's floor tolerance (half of 1e-4 of the frame
+    peak), where ``log_prob`` scores a rate of zero.
+    Truth source: there the mean is 0 and the variance is the read noise squared
+    (9, typed from primitives), so the residual of 2 electrons is ``2 / 3``; the
+    Jacobian against a central difference in the planet's contrast scale.
+    Tolerance basis: floating-point (rtol 1e-12 for ``2 / 3``; for the central
+    difference at a step of 1e-4, 1e-6 of the largest derivative, above both the
+    truncation error and the rounding of order-one residuals divided by the step).
+    Fails if: the residual whitens the unfloored (negative) mean, a masked or
+    undefined pixel puts NaN into ``jax.jacfwd``, or a photon-counter pixel whose
+    total is a tenth of the dark rate below zero (``log_prob`` is ``-inf``, the
+    variance zero) puts NaN into the reverse-mode gradient of the chi-square.
+    """
+    model, exposure = _setup("read")
+    term = _scored(model, exposure, _mean(model, exposure))
+    grid = model.scene.planets[0].physical_model.contrast_grid
+    dark = np.asarray(_mean(eqx.tree_at(_contrast, model, 0.0 * grid), exposure))
+    lit = np.asarray(_mean(model, exposure))
+    planet = np.where(np.asarray(term.mask), lit - dark, 0.0)
+    peak = np.unravel_index(np.argmax(planet), planet.shape)
+    eps = 0.5e-4
+    scale = -dark[peak] * (1 + eps) / (planet[peak] * (1 - eps))
+    negative = eqx.tree_at(_contrast, model, scale * grid)
+    observed = np.zeros(planet.shape)
+    observed[peak] = 2.0
+    out = np.asarray(
+        eqx.tree_at(lambda t: t.observed_e, term, observed).residual(negative)
+    )
+    np.testing.assert_allclose(out[peak], 2.0 / 3.0, rtol=1e-12)
+
+    def residual_at(s):
+        return term.residual(eqx.tree_at(_contrast, model, s * grid))
+
+    jac = np.asarray(jax.jacfwd(residual_at)(1.0))
+    assert np.all(np.isfinite(jac))
+    step = 1e-4
+    central = np.asarray(residual_at(1.0 + step)) - np.asarray(residual_at(1.0 - step))
+    used = np.asarray(term.mask)
+    assert np.all(np.isnan(np.asarray(residual_at(1.0))[~used]))
+    np.testing.assert_allclose(
+        jac[used],
+        central[used] / (2 * step),
+        rtol=0,
+        atol=1e-6 * np.max(np.abs(jac[used])),
+    )
+
+    counter, counter_exposure = _setup("poisson")
+    counted = _scored(counter, counter_exposure, _mean(counter, counter_exposure))
+    below = -dark[peak] * 1.1 / planet[peak]
+
+    def chi_square(s):
+        r = counted.residual(eqx.tree_at(_contrast, counter, s * grid))
+        return jnp.sum(jnp.where(jnp.isnan(r), 0.0, r) ** 2)
+
+    undefined = counted.residual(eqx.tree_at(_contrast, counter, below * grid))
+    assert np.isnan(np.asarray(undefined)[peak])
+    assert np.isfinite(jax.grad(chi_square)(below))
 
 
 def test_the_value_peaks_at_the_true_model():

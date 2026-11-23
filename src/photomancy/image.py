@@ -51,7 +51,7 @@ import jax.numpy as jnp
 import numpy as np
 from coronagraphoto import expected
 from hwoutils.model_paths import join, resolve
-from optixstuff import Exposure, Instrument
+from optixstuff import Exposure, Instrument, Rates
 from optixstuff.grids import Image, Measure, SkyOrientation
 from skyscapes.scene import Scene
 
@@ -65,6 +65,25 @@ _COUNTS = ("electron", "electrons")
 
 def _bool(x):
     return jnp.asarray(x, dtype=bool)
+
+
+def _clipped(rates):
+    """Rates holding only their total clipped at zero, the values ``log_prob`` scores.
+
+    :func:`optixstuff.rates.floor_rate` returns the total clipped at zero whatever
+    its tolerance; the tolerance only flags a total too negative to be integration
+    error, which ``log_prob`` scores as ``-inf``.
+    """
+    variance = None if rates.variance is None else _clipped(rates.variance)
+    return Rates(
+        rates.bands,
+        rates.carrier,
+        planet=jnp.maximum(rates.total(), 0.0),
+        n_pix=rates.n_pix,
+        variance=variance,
+        supported=rates.supported,
+        static_supported=rates.static_supported,
+    )
 
 
 def _same_angle(first, second):
@@ -380,23 +399,31 @@ class ImageTerm(AbstractTerm):
         """Return ``(observed - mean) / sqrt(variance)`` per pixel, NaN where unscored.
 
         The mean and variance are the detector's own
-        (:meth:`optixstuff.AbstractDetector.mean_and_variance`) at the expected rates,
-        so for a photon counter this is the Pearson residual. It is skewed where the
-        mean is a few electrons, and a pixel scored with a zero mean is infinite or
-        NaN.
+        (:meth:`optixstuff.AbstractDetector.mean_and_variance`) of the rates
+        ``log_prob`` scores: the total rate clipped at zero, as
+        :func:`optixstuff.rates.floor_rate` returns it. For a photon counter this is
+        the Pearson residual, skewed where the mean is a few electrons. A pixel is NaN
+        where it is not scored, where ``log_prob`` is ``-inf`` (a total below the
+        floor's tolerance, or a count a zero mean cannot produce) and where the
+        variance is zero. The NaN entries have a zero derivative, so the residual is
+        safe to differentiate.
 
         Args:
             model: The model PyTree holding the scene, and the instrument and exposure
                 at their paths when they are not held by the term.
 
         Returns:
-            Whitened residual with the shape of ``observed_e``, NaN where ``mask`` is
-            false.
+            Whitened residual with the shape of ``observed_e``, NaN where a pixel is not
+            scored or has no residual.
         """
         detector, rates, plan = self._rates(model)
-        mean, variance = detector.mean_and_variance(rates, plan)
-        whitened = (self.observed_e - mean) / jnp.sqrt(variance)
-        return jnp.where(self._used(rates), whitened, jnp.nan)
+        used = self._used(rates)
+        observed = jnp.where(used, self.observed_e, 0.0)
+        mean, variance = detector.mean_and_variance(_clipped(rates), plan)
+        defined = jnp.isfinite(detector.log_prob(observed, rates, plan))
+        ok = used & defined & (variance > 0)
+        whitened = (observed - mean) / jnp.sqrt(jnp.where(ok, variance, 1.0))
+        return jnp.where(ok, whitened, jnp.nan)
 
     def fisher_root(self, model) -> jax.Array:
         """Return the detector's Fisher root of the expected rates, flat and masked.
