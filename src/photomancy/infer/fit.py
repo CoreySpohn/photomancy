@@ -25,7 +25,8 @@ A model node may declare fields derived from others (``tied_fields``, see
 :func:`hwoutils.blocks.check_ties`), as the orbix ``System`` does for its stored orbits,
 which its star and planet masses rate. ``Fit`` refuses an entry inside a derived field
 (a leaf law on one field of a stored orbit) and an entry that writes a source of a
-derived field while no entry writes that field (a free mass with no orbit block).
+derived field while no entry that reads or writes that source also writes the field (a
+free mass with no orbit block that reads it).
 
 A block may have walls (:attr:`hwoutils.blocks.AbstractBlock.walls`): bounds of its
 law that its coordinates do not map, so the density is zero on part of the
@@ -524,6 +525,7 @@ class Fit(eqx.Module):
                 **{path: (path,) for path in leaf_paths},
                 **{key: block.writes for key, block in blocks.items()},
             },
+            {key: block.reads for key, block in blocks.items()},
         )
         check_writers(blocks, leaf_paths)
         block_order(blocks)
