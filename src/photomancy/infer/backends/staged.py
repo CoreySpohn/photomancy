@@ -769,7 +769,10 @@ class MAP(AbstractBackend):
     sees), so the optimum is its mode there. The result is a one-draw posterior at the
     optimum with weight one, no evidence and ``info = MAPInfo`` (the stage traces).
     The optimizer is :func:`map_fit` and is host-driven, so ``MAP`` runs one fit at a
-    time and is not mapped over a stack of worlds.
+    time and is not mapped over a stack of worlds. A fit with walls
+    (:attr:`Fit.walls`) is not refused: an optimum inside the support is unaffected
+    by a wall elsewhere, and an optimum at a wall is a boundary optimum that ``MAP``
+    does not certify.
 
     With no ``stages`` the fit is one stage of ``n_steps`` L-BFGS iterations over every
     parameter. Pass ``labels``, ``transforms`` and ``stages`` as for :func:`map_fit`

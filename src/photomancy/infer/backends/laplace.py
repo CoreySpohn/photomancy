@@ -176,7 +176,9 @@ class Laplace(AbstractBackend):
        gate them.
     4. Expected to be poor: a posterior that is flat or nearly flat in an angle (a
        Gaussian cannot match a flat density on a circle), a posterior with more than one
-       mode, and a mode near a zero-density region of a block.
+       mode, and a mode near a zero-density region of a block. A fit with walls
+       (:attr:`Fit.walls`) is not refused: a mode at a wall is a boundary optimum the
+       Hessian does not certify, and a wall within the bulk makes the Gaussian wrong.
     5. In those cases the cloud is a seed for
        ``AdaptiveImportance(MixtureProposal.from_cloud(key, z, log_weights,
        n_centers=...), n_draws)``, with ``z = fit.to_flat(posterior.samples)`` the

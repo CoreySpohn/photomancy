@@ -889,3 +889,57 @@ def test_a_free_mass_with_an_orbit_block_keeps_every_row_keplerian(prefix):
         assert float(jnp.max(residual)) <= 1e-12, key
     ti = ThieleInnesBlock(block.law, Uniform(0.9, 1.3), rows=(0,), system=prefix)
     Fit(model, {path("orbits"): ti})
+
+
+def _walled_fits():
+    """The prior-recovery orbit sets: Cartesian, Thiele-Innes and the classical chart.
+
+    Log-uniform a on 1 to 100 AU and uniform e on 0 to 0.95; the Thiele-Innes block
+    adds a uniform star mass on 0.8 to 1.2.
+    """
+    from orbix.system import CartesianChart, ThieleInnesBlock
+
+    law = OrbitLaw(Uniform(0.0, 0.95), a_AU=LogUniform(1.0, 100.0))
+    scene = _scene()
+    orbit = lambda chart: OrbitBlock(chart, law, rows=(0,), system="dynamics")  # noqa: E731
+    ti = ThieleInnesBlock(law, Uniform(0.8, 1.2), rows=(0,), system="dynamics")
+    return {
+        "cartesian": (
+            Fit(scene, {"dynamics.orbits": orbit(CartesianChart())}),
+            "a_AU, e",
+        ),
+        "thiele-innes": (Fit(scene, {"dynamics.orbits": ti}), "a_AU, star_mass_Msun"),
+        "classical": (Fit(scene, {"dynamics.orbits": orbit(ClassicalChart())}), None),
+    }
+
+
+def test_gradient_samplers_refuse_a_fit_with_walls():
+    """Fails if NUTS or MCLMC samples a density with walls, or refuses one without.
+
+    Against a wall every rejected step is flagged as a divergence (75 and 99.9 percent
+    of transitions on these two sets), so the samplers refuse before sampling and name
+    the entry and every wall. The same fits still draw from the prior and map the unit
+    cube for nested sampling, and the classical fit, which maps both bounds, is not
+    refused. Truth: definitional. No sampling.
+    """
+    from photomancy.infer import MCLMC, NUTS, run
+    from photomancy.infer.backends._flat import require_no_walls
+
+    for name, (fit, walls) in _walled_fits().items():
+        if walls is None:
+            assert fit.walls == {}
+            require_no_walls(fit, "NUTS")
+            continue
+        assert fit.walls == {"dynamics.orbits": tuple(walls.split(", "))}, name
+        for backend in (NUTS(n_warmup=10, n_draws=10), MCLMC(n_warmup=10, n_draws=10)):
+            label = type(backend).__name__
+            with pytest.raises(
+                ValueError, match=rf"{label} needs .*'dynamics.orbits'.*{walls}"
+            ):
+                run(fit, backend, jax.random.key(0))
+        x = fit.sample_prior(jax.random.key(1), (4,))
+        assert all(bool(jnp.all(jnp.isfinite(v))) for v in jax.tree.leaves(x))
+        unit = jax.tree.map(lambda a: a + 0.5, fit.unit_template())
+        assert all(
+            bool(jnp.all(jnp.isfinite(v))) for v in jax.tree.leaves(fit.from_unit(unit))
+        )

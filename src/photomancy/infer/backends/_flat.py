@@ -29,6 +29,34 @@ def draw_template(fit):
     return jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), shapes)
 
 
+def require_no_walls(fit, name) -> None:
+    """Refuse a fit whose density has walls, for a backend that needs a gradient.
+
+    Against a wall every rejected step is flagged as a divergence, so the sampler's
+    own diagnostic carries no information.
+
+    Args:
+        fit: The fit to check.
+        name: Name of the backend, for the message.
+
+    Raises:
+        ValueError: Naming each entry and its walls, and the ways out.
+    """
+    walls = fit.walls
+    if not walls:
+        return
+    entries = "; ".join(
+        f"free[{key!r}] does not map the bounds of {', '.join(names)} onto its "
+        "coordinates"
+        for key, names in walls.items()
+    )
+    raise ValueError(
+        f"{name} needs a density with no wall. {entries}: use a block whose "
+        "coordinates carry them, a law without those bounds, or Importance or "
+        "NestedSampling."
+    )
+
+
 def flat_problem(fit):
     """Return ``(unravel, logdensity, dim)`` for the unconstrained flat vector.
 

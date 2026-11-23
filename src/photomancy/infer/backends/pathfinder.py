@@ -88,7 +88,7 @@ class Pathfinder(AbstractBackend):
     ``info.importance.khat``); the draws and weights are not gated. A path whose ELBO
     is not finite leaves the mixture; with none left the slice is NaN. The cases where
     a Gaussian is a poor proposal, and the seed for ``AdaptiveImportance``, are those
-    of ``Laplace``.
+    of ``Laplace``, walls (:attr:`Fit.walls`) included: they are not refused.
 
     Attributes:
         n_draws: Importance draws.

@@ -26,6 +26,13 @@ A model node may declare fields derived from others (``tied_fields``, see
 which its star and planet masses rate. ``Fit`` refuses an entry inside a derived field
 (a leaf law on one field of a stored orbit) and an entry that writes a source of a
 derived field while no entry writes that field (a free mass with no orbit block).
+
+A block may have walls (:attr:`hwoutils.blocks.AbstractBlock.walls`): bounds of its
+law that its coordinates do not map, so the density is zero on part of the
+coordinates. :attr:`Fit.walls` collects them; a gradient sampler refuses such a fit. A
+leaf law is assumed to have none: every ``bounds`` kind of ``priorities.to_real`` maps
+onto the real line, and a law whose support has an interior gap (a mixture of disjoint
+bounded components) is not detected.
 """
 
 import hashlib
@@ -604,6 +611,16 @@ class Fit(eqx.Module):
     def blocks(self) -> dict[str, AbstractBlock]:
         """The free entries that are blocks."""
         return {k: v for k, v in self.free.items() if isinstance(v, AbstractBlock)}
+
+    @property
+    def walls(self) -> dict[str, tuple[str, ...]]:
+        """The non-empty ``walls`` of the blocks, by entry key.
+
+        A wall is a bound of a block's law that its coordinates do not map, so the
+        density is zero on a set of positive measure at finite coordinates. Leaf laws
+        contribute none (see the module docstring for the assumption).
+        """
+        return {k: b.walls for k, b in self.blocks.items() if b.walls}
 
     @property
     def block_order(self) -> tuple[str, ...]:

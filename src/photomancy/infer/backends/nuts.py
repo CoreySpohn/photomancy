@@ -14,7 +14,12 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from photomancy.infer.backends._flat import flat_problem, start_points, to_x
+from photomancy.infer.backends._flat import (
+    flat_problem,
+    require_no_walls,
+    start_points,
+    to_x,
+)
 from photomancy.infer.backends.base import (
     AbstractBackend,
     BackendDraws,
@@ -82,7 +87,8 @@ class NUTS(AbstractBackend):
     on one flat draw axis, and carry no evidence: ``log_evidence`` is NaN (use
     ``Laplace(init=posterior)`` or ``NestedSampling`` for an evidence). Angle
     coordinates of an orbit block are plain reals, so a chain may wander across copies
-    of the same cell.
+    of the same cell. A fit with walls (:attr:`Fit.walls`) is refused before sampling:
+    against a wall every rejected step is flagged as a divergence.
 
     Attributes:
         n_warmup: Window-adaptation steps per chain.
@@ -106,6 +112,7 @@ class NUTS(AbstractBackend):
 
     def _run(self, fit, key, *, batch_size=None):
         """Adapt and sample every chain; return flat draws with uniform weights."""
+        require_no_walls(fit, "NUTS")
         key_init, key_run = jax.random.split(key)
         starts = start_points(fit, self.init, key_init, self.n_chains)
         positions, divergent, depth, step = _nuts_chains(

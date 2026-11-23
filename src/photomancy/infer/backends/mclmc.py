@@ -21,7 +21,12 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 
-from photomancy.infer.backends._flat import flat_problem, start_points, to_x
+from photomancy.infer.backends._flat import (
+    flat_problem,
+    require_no_walls,
+    start_points,
+    to_x,
+)
 from photomancy.infer.backends.base import (
     AbstractBackend,
     BackendDraws,
@@ -94,7 +99,8 @@ class MCLMC(AbstractBackend):
 
     Tunes the trajectory length, step size and a diagonal mass matrix, then samples.
     Draws are equally weighted, stored chain by chain, and carry no evidence
-    (``log_evidence`` is NaN).
+    (``log_evidence`` is NaN). A fit with walls (:attr:`Fit.walls`) is refused before
+    sampling, as by ``NUTS``.
 
     Attributes:
         n_warmup: Warmup (tuning) steps per chain.
@@ -116,6 +122,7 @@ class MCLMC(AbstractBackend):
 
     def _run(self, fit, key, *, batch_size=None):
         """Tune and sample every chain; return flat draws with uniform weights."""
+        require_no_walls(fit, "MCLMC")
         key_init, key_run = jax.random.split(key)
         starts = start_points(fit, self.init, key_init, self.n_chains)
         positions, energy, length, step = _mclmc_chains(
