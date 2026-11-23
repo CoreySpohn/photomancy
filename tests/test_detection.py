@@ -14,6 +14,7 @@ from image_scene import (
     make_scene,
 )
 from priorities import Uniform
+from scipy import stats
 from skyscapes.physical_model import GridPhysicalModel
 
 from photomancy.detection import (
@@ -505,6 +506,64 @@ def test_detect_on_poisson_counts_recovers_the_planet():
     assert abs(float(out.a_hat[best]) - _TRUE_AMP) < 4.0 * float(out.sigma[best])
     more = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude", n_newton=8)
     np.testing.assert_allclose(out.a_hat, more.a_hat, rtol=1e-6, atol=1e-9)
+
+
+_NULL_FRAMES = 1600
+_NULL_PAS = jnp.arange(0.0, 360.0, 45.0)
+
+
+@vv.case("scene-fits", "code-verification", basis="monte-carlo")
+@pytest.mark.slow(reason="12800 null trials, past the 2000-draw unit limit")
+def test_detect_false_alarms_match_the_poisson_null():
+    """On planet-free Poisson frames ``z`` is a unit normal, per trial and per map.
+
+    1600 frames of the toy scene with no planet, drawn from the detector's own law
+    (NumPy Poisson of the expected counts, about 1160 electrons per pixel,
+    ``default_rng(0)``), and ``detect`` at 8 position angles 45 degrees apart at
+    2.6 lambda/D (template overlap below 1e-3, so the trials are independent).
+
+    Truth source: the null by construction; under it the signed root of the
+    likelihood ratio is a unit normal for each trial, and the maximum of 8
+    independent trials exceeds ``t8 = Phi^-1(0.99 ** (1 / 8))`` in one map in 100.
+    Tolerance basis: monte-carlo. Over n = 12800 trials, mean within ``4 / sqrt(n)``
+    (0.035) and standard deviation within ``4 sqrt(2 / (n - 1))`` (0.050, so a 5
+    percent scale error fails); the count above 3 sigma and the count of maps above
+    ``t8`` inside their binomial bands at 0.01 two sided (p = 1.35e-3 of 12800 and
+    p = 0.01 of 1600). A correct implementation passes for a random seed with
+    probability above 0.97.
+    Fails if: the statistic is scaled by the wrong factor or curvature (a missing
+    factor 2 in the likelihood ratio gives a standard deviation of 0.71), the
+    Newton profile does not reach the maximum, or the trials are not scored
+    against the planet-free model.
+    """
+    detector = make_detector("poisson")
+    instrument = make_instrument(detector)
+    empty = make_scene(contrast=0.0)
+    exposure = make_exposure(empty, instrument)
+    shape = (1, *detector.shape)
+    blank = ImageTerm(jnp.zeros(shape), instrument=instrument, exposure=exposure)
+    mean = np.asarray(_SkyImage(blank).predict(_sky(0.0, 0.0)))
+    rng = np.random.default_rng(0)
+    frames = rng.poisson(mean, size=(_NULL_FRAMES, *mean.shape)).astype(float)
+    image = ImageTerm(
+        frames[0], blank.supported_mask(empty), instrument=instrument, exposure=exposure
+    )
+    fit = _fit(_SkyImage(image))
+
+    def z_of(frame):
+        one = eqx.tree_at(lambda f: f.terms[0].image.observed_e, fit, frame)
+        return detect(one, {"pa_deg": _NULL_PAS}, amplitude="amplitude").z
+
+    z = np.asarray(jax.vmap(z_of)(jnp.asarray(frames)))
+    assert not np.isnan(z).any()
+    n = z.size
+    assert abs(z.mean()) < 4.0 / np.sqrt(n)
+    assert abs(z.std(ddof=1) - 1.0) < 4.0 * np.sqrt(2.0 / (n - 1))
+    low, high = stats.binom.ppf([0.005, 0.995], n, stats.norm.sf(3.0))
+    assert low <= int((z > 3.0).sum()) <= high
+    t8 = stats.norm.isf(1.0 - 0.99 ** (1.0 / _NULL_PAS.size))
+    low, high = stats.binom.ppf([0.005, 0.995], _NULL_FRAMES, 0.01)
+    assert low <= int((z.max(axis=1) > t8).sum()) <= high
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
