@@ -24,7 +24,7 @@ from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
 from system_helpers import _TIMES, _data, _new_term
-from term_utils import both
+from term_utils import ExposureRecord, ExposureRender, both
 
 from photomancy import (
     PhotometryTerm,
@@ -32,8 +32,7 @@ from photomancy import (
     RadialVelocityTerm,
     RelativeAstrometryTerm,
 )
-from photomancy.exposure import ExposureModel, ExposureTerm
-from photomancy.infer import AbstractTerm, Fit
+from photomancy.infer import AbstractTerm, Fit, ForwardTerm
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.measurements import (
     AstrometryData,
@@ -284,9 +283,11 @@ def test_mixed_terms_sum_in_a_fit():
     ``Fit`` routes a term to the wrong model, drops or double counts a term, or
     counts the prior in the likelihood.
     """
-    model = ExposureModel(jnp.array(2.0), (jnp.array(3.0),), _system())
-    image = ExposureTerm(
-        lambda instrument, exposure, scene: instrument * exposure + scene.dist_pc,
+    model = ExposureRecord(jnp.array(2.0), (jnp.array(3.0),), _system())
+    image = ForwardTerm(
+        ExposureRender(
+            lambda instrument, exposure, scene: instrument * exposure + scene.dist_pc
+        ),
         gaussian_loglike(jnp.array(15.0), 1.0),
     )
     astrometry = RelativeAstrometryTerm(_data(), system_path="scene")

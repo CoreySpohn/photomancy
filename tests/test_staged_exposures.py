@@ -1,4 +1,4 @@
-"""Exposure terms: routing in a ``Fit`` and a staged self-fit through ``MAP``."""
+"""A staged self-fit of two exposures that share one instrument, through ``MAP``."""
 
 import json
 from pathlib import Path
@@ -13,64 +13,18 @@ import pytest
 import toy_coronagraph as toy
 from hwoutils.model_paths import resolve
 from priorities import Normal
+from term_utils import ExposureRecord, ExposureRender
 
-from photomancy.exposure import ExposureModel, ExposureTerm
-from photomancy.infer import Fit, run
+from photomancy.infer import Fit, ForwardTerm, run
 from photomancy.infer.backends.staged import (
     MAP,
     MAPStage,
     group_labels,
     rescaled_transform,
 )
-from photomancy.infer.likelihoods import huber_loglike, laplace_loglike
+from photomancy.infer.likelihoods import huber_loglike
 
 _GOLDEN = Path(__file__).parent / "data" / "exposure_staged_golden.json"
-
-
-def _affine_render(instrument, exposure, scene):
-    return instrument * exposure + scene
-
-
-@vv.case("scene-fits", "code-verification", basis="exact-algebra")
-def test_terms_read_their_exposure_block_and_a_fit_sums_them():
-    """The fit sums the terms; each term reads its own exposure block.
-
-    Truth source: hand-summed Laplace log-likelihoods of the affine images
-    ``instrument * exposure[k] + scene`` (two terms on block 0, one on block 1).
-    Tolerance basis: exact-algebra (rtol 1e-12; the same expression).
-    Fails if: a term reads the wrong exposure block, a term is dropped or counted
-    twice, a subset of the terms (a stage view) scores more than its own terms, or
-    ``predict`` returns an image other than the one the term scores.
-    """
-    model = ExposureModel(
-        instrument=jnp.asarray([1.0, 2.0]),
-        exposures=(jnp.asarray(3.0), jnp.asarray(-1.0)),
-        scene=jnp.asarray([0.5, 0.5]),
-    )
-    data = [jnp.asarray([3.0, 6.0]), jnp.asarray([0.0, 0.0]), jnp.asarray([1.0, 2.0])]
-    terms = tuple(
-        ExposureTerm(_affine_render, laplace_loglike(d, 1.0), idx)
-        for d, idx in zip(data, (0, 1, 0), strict=True)
-    )
-    images = [
-        np.asarray([3.5, 6.5]),
-        np.asarray([-0.5, -1.5]),
-        np.asarray([3.5, 6.5]),
-    ]
-    expected = [
-        float(-np.sum(np.abs(img - np.asarray(d))) - 2.0 * np.log(2.0))
-        for img, d in zip(images, data, strict=True)
-    ]
-    free = {"scene": Normal(jnp.zeros(2), jnp.ones(2))}
-    x = {"scene": model.scene}
-    fit = Fit(model, free, terms)
-    np.testing.assert_allclose(fit.log_likelihood(x), sum(expected), rtol=1e-12)
-    for term, want in zip(terms, images, strict=True):
-        np.testing.assert_array_equal(term.predict(model), want)
-    view = Fit(model, free, (terms[2], terms[1]))
-    np.testing.assert_allclose(
-        view.log_likelihood(x), expected[2] + expected[1], rtol=1e-12
-    )
 
 
 _N_STEPS = 1000  # optimizer steps of the long reference and science stages
@@ -169,10 +123,10 @@ def _self_fit(companion_peak):
     n_used = int(mask.sum())
     sigma = 0.1 * float(jnp.median(ref_data))
     terms = (
-        ExposureTerm(render, huber_loglike(ref_data, sigma, mask), 0),
-        ExposureTerm(render, huber_loglike(sci_data, sigma, mask), 0),
+        ForwardTerm(ExposureRender(render), huber_loglike(ref_data, sigma, mask)),
+        ForwardTerm(ExposureRender(render), huber_loglike(sci_data, sigma, mask)),
     )
-    init = ExposureModel(
+    init = ExposureRecord(
         instrument,
         (toy.Star(jnp.zeros(2), 0.8 * ref_star.flux),),
         toy.Companion(offset, jnp.asarray(0.0)),

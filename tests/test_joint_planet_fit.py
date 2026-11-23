@@ -13,10 +13,10 @@ import pytest
 import toy_coronagraph as toy
 from hwoutils.model_paths import resolve
 from priorities import Normal
+from term_utils import ExposureRecord, ExposureRender
 
 from photomancy.detection import likelihood_ratio_map
-from photomancy.exposure import ExposureModel, ExposureTerm
-from photomancy.infer import Fit, run
+from photomancy.infer import Fit, ForwardTerm, run
 from photomancy.infer.backends.staged import (
     MAP,
     MAPStage,
@@ -108,10 +108,10 @@ def _joint_fit(peak_fraction):
     n_used = int(mask.sum())
     sigma = 0.1 * float(jnp.median(ref_data))
     terms = (
-        ExposureTerm(render, huber_loglike(ref_data, sigma, mask), 0),
-        ExposureTerm(render, huber_loglike(sci_data, sigma, mask), 0),
+        ForwardTerm(ExposureRender(render), huber_loglike(ref_data, sigma, mask)),
+        ForwardTerm(ExposureRender(render), huber_loglike(sci_data, sigma, mask)),
     )
-    init = ExposureModel(
+    init = ExposureRecord(
         instrument,
         (toy.Star(jnp.zeros(2), 0.8 * ref_star.flux),),
         absent,

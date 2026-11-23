@@ -199,8 +199,8 @@ fit's entries, as a `(P, P)` float64 array (it needs `jax_enable_x64`).
   optimizer or forecasts a width before data exist. It cannot flag a bad point, so it is
   not the reported width: for an undetected source it gives a finite, smaller width at a
   larger fitted amplitude, the opposite of the honest statement. Every term of the fit
-  needs a root (`ImageTerm`, and `ForwardTerm` or `ExposureTerm` over a Gaussian or
-  robust builder have one); if one does not, the call raises and names it.
+  needs a root (`ImageTerm`, and `ForwardTerm` over a Gaussian or robust builder
+  have one); if one does not, the call raises and names it.
 
 ```python continuation
 x = {"amplitude": estimate.value["amplitude"]}
