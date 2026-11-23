@@ -358,7 +358,10 @@ def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
     cropped = ImageTerm(
         observed[:, lo:hi, lo:hi],
         jnp.ones((1, hi - lo, hi - lo), bool),
-        exposure=make_exposure(model.scene, instrument),
+        # The wide exposure: the spectral field follows the detector extent, so a
+        # rebuilt exposure would place different nodes and the two log densities
+        # would differ by quadrature error rather than agree exactly.
+        exposure=exposure,
         **_PATHS,
     )
     cropped_model = ImageModel(model.scene, instrument)
