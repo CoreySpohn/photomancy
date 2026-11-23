@@ -27,6 +27,16 @@ nothing, so a term with a plain exposure reads nothing. A built product that car
 as the exposure has its entries prefixed with the scene path
 (:func:`hwoutils.model_paths.join`) and declared in ``reads``.
 
+**What the term refuses.** The coronagraph renders only what its data hold: a detector
+pixel its tables do not cover is zero with ``Rates.supported`` False, and a planet
+outside its source domain contributes zero. A likelihood scored there would compare
+the data with a model that says nothing, so :meth:`ImageTerm.check` raises when the
+mask scores such a pixel or a lit planet is outside the domain, and
+:meth:`ImageTerm.supported_mask` is the boolean to AND into the mask. ``Fit`` calls
+``check`` once at setup, and again at both ends of the prior of any free leaf that
+moves the field of view (the wavelength nodes, the primary, the detector); nothing is
+ever dropped inside ``__call__``.
+
 Count regime. The Poisson form needs integer counts, and a detector that is not
 ``photon_counting`` scores the moment-matched Gaussian, which is not exact at a few
 electrons per pixel with read noise.
@@ -37,9 +47,11 @@ from typing import Self
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from coronagraphoto import expected
 from hwoutils.model_paths import join, resolve
 from optixstuff import Exposure, Instrument
+from optixstuff.grids import SkyOrientation
 from skyscapes.scene import Scene
 
 from photomancy.infer.fit import AbstractTerm
@@ -49,6 +61,34 @@ __all__ = ["ImageModel", "ImageTerm"]
 
 def _bool(x):
     return jnp.asarray(x, dtype=bool)
+
+
+@eqx.filter_jit
+def _supported(scene, instrument, exposure):
+    """The ``(W, ny, nx)`` read support of the expected rates, all True when unset."""
+    rates = expected(scene, instrument, exposure)
+    if rates.supported is None:
+        return jnp.ones(rates.planet.shape, bool)
+    return rates.supported
+
+
+def _lit_planets_outside(scene, instrument, exposure):
+    """Number of lit planets outside the coronagraph's source domain at band centre."""
+    if not scene.planets:
+        return 0
+    times = jnp.atleast_1d(exposure.time_d)
+    ephemeris = scene.ephemeris(times)
+    east, north = scene.positions(times, ephemeris=ephemeris)[:, :, 0]
+    x, y = SkyOrientation(exposure.roll_deg).sky_to_detector(east, north)
+    frame = instrument.coronagraph.grid.frame
+    outside = np.zeros(np.shape(x), bool)
+    for band in exposure.quadrature.bands:
+        centre = band.center_nm
+        lod = frame.lod_to_arcsec(centre)
+        psfs = instrument.coronagraph.source_psfs(centre, x / lod, y / lod)
+        lit = scene.planet_flux_densities(centre, times, ephemeris=ephemeris)[:, 0] > 0
+        outside |= np.asarray(~psfs.valid & lit)
+    return int(outside.sum())
 
 
 class ImageModel(eqx.Module):
@@ -128,6 +168,60 @@ class ImageTerm(AbstractTerm):
         exposure = self._exposure(model)
         rates = expected(resolve(model, self.scene_path), instrument, exposure)
         return instrument.detector, rates, exposure.plan
+
+    @property
+    def footprint_paths(self) -> tuple[str, ...]:
+        """Model paths that move the field of view (band nodes, primary, detector)."""
+        paths = []
+        if self.exposure_path is not None:
+            paths.append(join(self.exposure_path, "quadrature"))
+        if self.instrument_path is not None:
+            paths += [
+                join(self.instrument_path, "primary"),
+                join(self.instrument_path, "detector"),
+            ]
+        return tuple(paths)
+
+    def supported_mask(self, model) -> jax.Array:
+        """Return the detector pixels the coronagraph data cover, shape ``(W, ny, nx)``.
+
+        It is ``coronagraphoto.expected(...).supported`` at ``model``, all True when
+        the rates carry no flag. AND it into ``mask`` (it broadcasts over leading frame
+        axes) to score only pixels the model can speak for; ``check`` passes then.
+        """
+        scene = resolve(model, self.scene_path)
+        return _supported(scene, self._instrument(model), self._exposure(model))
+
+    def check(self, model) -> None:
+        """Raise when the term would score light the coronagraph data do not hold.
+
+        Call it where ``model`` is concrete (``Fit`` does, once, at setup).
+
+        Raises:
+            ValueError: Naming the count, when ``mask`` is true on a pixel that is not
+                ``supported_mask(model)``, or when a lit planet of the scene is outside
+                the coronagraph's source domain at band centre (it would render zero
+                while the data may show it).
+        """
+        supported = np.asarray(self.supported_mask(model))
+        scored = np.broadcast_to(np.asarray(self.mask), self.observed_e.shape)
+        bad = int((scored & ~supported).reshape(-1, *supported.shape).any(0).sum())
+        if bad:
+            raise ValueError(
+                f"the mask scores {bad} pixel(s) the coronagraph data do not cover "
+                "(zero rate, unsupported); AND ImageTerm.supported_mask(model) into "
+                "the mask or crop the detector"
+            )
+        planets = _lit_planets_outside(
+            resolve(model, self.scene_path),
+            self._instrument(model),
+            self._exposure(model),
+        )
+        if planets:
+            raise ValueError(
+                f"{planets} lit planet(s) lie outside the coronagraph's source domain "
+                "and render as zero; start the fit inside the domain or hold them"
+            )
 
     def __call__(self, model) -> jax.Array:
         """Return the scalar log likelihood, summed over scored pixels in float64."""

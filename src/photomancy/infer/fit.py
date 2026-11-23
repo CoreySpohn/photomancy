@@ -91,6 +91,22 @@ class AbstractTerm(eqx.Module):
         """Return the prediction of ``model`` for this term's data, where it has one."""
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
 
+    @property
+    def footprint_paths(self) -> tuple[str, ...]:
+        """Model paths whose value changes what the term can read (the field of view).
+
+        ``Fit`` runs :meth:`check` at both ends of the prior of a free leaf under one
+        of these paths. Empty by default.
+        """
+        return ()
+
+    def check(self, model) -> None:
+        """Raise when the term cannot be scored at ``model``; the default accepts all.
+
+        ``Fit`` calls it once at setup on the concrete base model, and at both ends of
+        the prior of every free leaf under :attr:`footprint_paths`.
+        """
+
     def fisher_root(self, model) -> jax.Array:
         """Return a flat vector ``r(model)`` whose Jacobian gives the information.
 
@@ -461,6 +477,33 @@ class Fit(eqx.Module):
                             f"free path {path!r} meets {type(term).__name__}.reads "
                             f"entry {read!r}: the term holds a build that cached it"
                         )
+        self._check_terms(leaf_paths)
+
+    def _check_terms(self, leaf_paths):
+        """Run each term's :meth:`AbstractTerm.check` on the concrete model.
+
+        The base model is checked once; every free leaf under a term's
+        ``footprint_paths`` is also set to each end of its prior and checked there,
+        because the field of view moves with it. A model with traced leaves (a fit
+        built inside a transformation) is not checked.
+        """
+        if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(self.model)):
+            return
+        for i, term in enumerate(self.terms):
+            term.check(self.model)
+            for path in leaf_paths:
+                if not any(paths_overlap(path, f) for f in term.footprint_paths):
+                    continue
+                leaf = resolve(self.model, path)
+                for end in self.free[path].support():
+                    if not bool(jnp.all(jnp.isfinite(end))):
+                        raise ValueError(
+                            f"free path {path!r} moves the field of view of "
+                            f"terms[{i}] and its prior has an unbounded end: bound "
+                            "the prior or hold the path"
+                        )
+                    moved = assign(self.model, path, jnp.broadcast_to(end, leaf.shape))
+                    term.check(moved)
 
     def _require_path(self, path, who):
         try:

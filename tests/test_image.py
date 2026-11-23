@@ -280,3 +280,139 @@ def test_a_count_where_the_mean_is_zero_is_minus_infinity_not_nan():
     one = _term(model, exposure, jnp.zeros(shape).at[0, 5, 5].set(1.0))
     assert float(zero(model)) == 0.0
     assert float(one(model)) == -np.inf
+
+
+def _wide(kind="poisson", n=48):
+    """The toy setup on a detector ``n`` pixels wide: wider than the 24 pixel tables."""
+    small = make_detector(kind)
+    wide = type(small)(
+        photon_counting=True,
+        pixel_scale_arcsec=small.pixel_scale_arcsec,
+        shape=(n, n),
+        qe=0.8,
+    )
+    instrument = make_instrument(wide)
+    scene = make_scene(contrast=1e-10, sky_pa_deg=40.0)
+    return ImageModel(scene, instrument), make_exposure(scene, instrument)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.medium(reason="renders on two detector sizes, 8 s cold")
+def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
+    """Fails if a fit scores pixels the coronagraph tables do not cover.
+
+    Basis: exact. On a detector twice the tables, an all-True mask scores zero-rate
+    pixels: ``check`` and ``Fit`` raise and name the count (the pixels outside
+    ``supported_mask``). With ``mask & supported_mask`` the fit builds, and its
+    log density equals that of the same data on a detector cropped to the supported
+    square (an all-True mask there) to 1e-10 in the sum of Poisson masses.
+    """
+    model, exposure = _wide()
+    rng = np.random.default_rng(0)
+    observed = jnp.asarray(rng.poisson(_mean(model, exposure)).astype(float))
+    full = _term(model, exposure, observed)
+    supported = np.asarray(full.supported_mask(model))
+    n_bad = int((~supported).sum())
+    assert 0 < n_bad < supported.size
+    with pytest.raises(ValueError, match=rf"scores {n_bad} pixel"):
+        full.check(model)
+    law = {_CONTRAST: LogUniform(1e-12, 1e-8)}
+    with pytest.raises(ValueError, match=rf"scores {n_bad} pixel"):
+        Fit(model, law, (full,))
+
+    scored = _term(model, exposure, observed, jnp.asarray(supported))
+    scored.check(model)
+    fit = Fit(model, law, (scored,))
+    x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid * 1.2}
+
+    # The supported pixels are a centred square; crop the detector to it.
+    rows, _cols = np.nonzero(supported[0])
+    lo, hi = int(rows.min()), int(rows.max()) + 1
+    assert supported[0, lo:hi, lo:hi].all() and supported.sum() == (hi - lo) ** 2
+    assert lo + hi == supported.shape[-1]
+    small = make_detector("poisson")
+    crop = type(small)(
+        photon_counting=True,
+        pixel_scale_arcsec=small.pixel_scale_arcsec,
+        shape=(hi - lo, hi - lo),
+        qe=0.8,
+    )
+    instrument = make_instrument(crop)
+    cropped = ImageTerm(
+        observed[:, lo:hi, lo:hi],
+        jnp.ones((1, hi - lo, hi - lo), bool),
+        exposure=make_exposure(model.scene, instrument),
+        **_PATHS,
+    )
+    cropped_model = ImageModel(model.scene, instrument)
+    cropped.check(cropped_model)
+    other = Fit(cropped_model, law, (cropped,))
+    np.testing.assert_allclose(
+        fit.log_likelihood(x), other.log_likelihood(x), rtol=0, atol=1e-10
+    )
+
+
+def test_a_lit_planet_outside_the_source_domain_is_refused():
+    """Fails if a planet the coronagraph cannot render passes the check as zero light.
+
+    Basis: exact. A coronagraph whose source domain is a disk of 2 lambda/D, and a
+    planet at 2.65 lambda/D: with the mask restricted to supported pixels the only
+    cause left is the planet, and ``check`` names it. A planet inside the domain
+    passes.
+    """
+
+    class Bounded(type(make_instrument(make_detector()).coronagraph)):
+        def _native_source_psfs(self, x_lod, y_lod):
+            psfs = super()._native_source_psfs(x_lod, y_lod)
+            inside = jnp.hypot(jnp.atleast_1d(x_lod), jnp.atleast_1d(y_lod)) <= 2.0
+            return type(psfs)(psfs.image, inside)
+
+    detector = make_detector("poisson")
+    instrument = eqx.tree_at(
+        lambda i: i.coronagraph, make_instrument(detector), Bounded()
+    )
+    for separation, refused in ((0.05, True), (0.02, False)):
+        scene = make_scene(contrast=1e-10, separation_arcsec=separation)
+        exposure = make_exposure(scene, instrument)
+        model = ImageModel(scene, instrument)
+        observed = jnp.zeros((1, *detector.shape))
+        probe = _term(model, exposure, observed)
+        term = _term(model, exposure, observed, probe.supported_mask(model))
+        if refused:
+            with pytest.raises(ValueError, match="outside the coronagraph's source"):
+                term.check(model)
+        else:
+            term.check(model)
+
+
+def test_a_free_leaf_that_moves_the_field_of_view_is_checked_at_both_ends():
+    """Fails if a fit frees the band nodes and scores pixels uncovered at an end.
+
+    Basis: exact. The scored pixels are supported at the start nodes (500-600 nm),
+    but the tables are fixed in lambda/D, so their footprint on the detector
+    shrinks at the blue end: a prior reaching 450 nm makes ``Fit`` raise, a prior
+    that stays inside the start nodes builds, and an unbounded prior on a leaf
+    that moves the footprint is refused as unverifiable.
+    """
+    from priorities import Normal, Uniform
+
+    model, exposure = _setup("poisson")
+    model = ImageModel(model.scene, model.instrument, (exposure,))
+    observed = jnp.zeros((1, *model.instrument.detector.shape))
+    probe = ImageTerm(
+        observed,
+        jnp.ones(observed.shape, bool),
+        scene_path="scene",
+        instrument_path="instrument",
+        exposure_path="exposures[0]",
+    )
+    term = eqx.tree_at(
+        lambda t: t.mask, probe, jnp.asarray(probe.supported_mask(model))
+    )
+    path = "exposures[0].quadrature.nodes_nm"
+    nodes = exposure.quadrature.nodes_nm
+    Fit(model, {path: Uniform(nodes, nodes * 1.001)}, (term,))
+    with pytest.raises(ValueError, match=r"scores .* pixel"):
+        Fit(model, {path: Uniform(nodes * 0.9, nodes)}, (term,))
+    with pytest.raises(ValueError, match="unbounded"):
+        Fit(model, {path: Normal(nodes, jnp.ones_like(nodes))}, (term,))
