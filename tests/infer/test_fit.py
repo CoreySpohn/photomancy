@@ -347,13 +347,18 @@ def test_refuses_a_block_write_that_meets_term_reads():
 
 
 def test_refuses_two_writers():
-    """A leaf law inside a block's written node, and two blocks on one node."""
+    """A leaf law on a path a block writes, and a block not keyed by its node."""
+    from orbix.system import ThieleInnesBlock
+
+    block = ThieleInnesBlock(
+        _block().law, Uniform(0.9, 1.3), rows=(0,), system="dynamics"
+    )
     with pytest.raises(ValueError, match="two writers"):
         Fit(
             _scene(),
             {
-                "dynamics.orbits": _block(),
-                "dynamics.orbits.a_AU": LogUniform(0.1, 10.0),
+                "dynamics.orbits": block,
+                "dynamics.star.mass_Msun": Uniform(0.9, 1.3),
             },
         )
     with pytest.raises(ValueError, match="must be keyed by the path it owns"):
@@ -798,3 +803,89 @@ def test_a_prior_swap_ratio_averages_to_one_under_the_old_prior(kind):
         new = fit.with_priors({"dynamics.orbits": _block()})
     mean, se = _mean_ratio(fit, new)
     assert abs(mean - 1.0) < 4.0 * se
+
+
+def _kepler_residual(model):
+    """``|n^2 a^3 / (G M_enclosed) - 1|`` per row of the model's orbits."""
+    from orbix.system import enclosed_mu
+
+    system = model.dynamics if hasattr(model, "dynamics") else model
+    mu = enclosed_mu(system.star.mass_Msun, system.planets.mass_Msun)
+    orbit = system.orbits
+    return jnp.abs(orbit.n_rad_per_d**2 * orbit.a_AU**3 / mu - 1.0)
+
+
+def _orbit_leaf_laws(system):
+    """A leaf law on each tied field of the stored orbits, shaped like the leaf."""
+    orbit = system.orbits
+    return {
+        "a_AU": LogUniform(jnp.ones_like(orbit.a_AU), 100 * jnp.ones_like(orbit.a_AU)),
+        "ex": Normal(jnp.zeros_like(orbit.ex), 2 * jnp.ones_like(orbit.ex)),
+        "n_rad_per_d": LogUniform(
+            1e-3 * jnp.ones_like(orbit.a_AU), 1e-1 * jnp.ones_like(orbit.a_AU)
+        ),
+        "quat": Normal(jnp.zeros_like(orbit.quat), jnp.ones_like(orbit.quat)),
+    }
+
+
+@pytest.mark.parametrize("prefix", ["dynamics", ""], ids=["scene", "root-system"])
+def test_refuses_a_leaf_law_inside_a_stored_orbit_or_a_lone_mass(prefix):
+    """Fails if a fit can return orbits that break Kepler's third law.
+
+    A stored orbit's fields are tied to each other and to the masses. Before the
+    refusal, a log-uniform law on ``a_AU`` with no block gave ``n^2 a^3`` of 7.9e-4 to
+    23 AU^3/d^2 against the system's 2.96e-4 (``n^2 a^3 / (G M)`` from 9.0 to 2.6e5 on
+    a root System), a Normal(0, 2) on ``ex`` gave ``ex`` of 2.6, and a log-normal star
+    mass with no orbit block gave ``n^2 a^3 / (G M)`` from 0.77 to 1.22. Each leaf
+    inside the orbits and each mass leaf alone is refused, with the System under a
+    Scene and as the model itself. Truth: definitional.
+    """
+    scene = _two_planet_scene()
+    model = scene if prefix else scene.dynamics
+    system = scene.dynamics
+    path = lambda p: f"{prefix}.{p}" if prefix else p  # noqa: E731
+    for name, law in _orbit_leaf_laws(system).items():
+        with pytest.raises(ValueError, match=r"inside .*orbits.*block"):
+            Fit(model, {path(f"orbits.{name}"): law})
+    planets = system.planets.mass_Msun
+    for key, law in (
+        ("star.mass_Msun", Uniform(0.7, 1.6)),
+        ("planets.mass_Msun", Uniform(0.5 * planets, 1.5 * planets)),
+    ):
+        with pytest.raises(ValueError, match=r"source of .*orbits.*block"):
+            Fit(model, {path(key): law})
+
+
+@pytest.mark.parametrize("prefix", ["dynamics", ""], ids=["scene", "root-system"])
+def test_a_free_mass_with_an_orbit_block_keeps_every_row_keplerian(prefix):
+    """Fails if a mass leaf beside an orbit block leaves a row off Kepler's third law.
+
+    The star mass and the planet masses, each free beside an ``OrbitBlock`` that frees
+    row 0 and holds row 1, at 100 ``sample_prior`` draws: ``|n^2 a^3 / (G M) - 1|`` at
+    most 1e-12 on both rows, with ``M`` the enclosed mass of each row (measured
+    4.4e-16 for a free star mass). A ``ThieleInnesBlock`` alone writes the orbits and
+    the star mass, and is accepted. Truth: Kepler's third law. Tolerance basis:
+    ``exact-algebra``.
+    """
+    from orbix.system import ThieleInnesBlock
+
+    scene = _two_planet_scene()
+    model = scene if prefix else scene.dynamics
+    path = lambda p: f"{prefix}.{p}" if prefix else p  # noqa: E731
+    block = OrbitBlock(
+        ClassicalChart(),
+        OrbitLaw(Uniform(0.05, 0.8), a_AU=LogUniform(0.8, 3.0)),
+        rows=(0,),
+        system=prefix,
+    )
+    planets = scene.dynamics.planets.mass_Msun
+    for key, law in (
+        ("star.mass_Msun", Uniform(0.7, 1.6)),
+        ("planets.mass_Msun", Uniform(0.5 * planets, 1.5 * planets)),
+    ):
+        fit = Fit(model, {path(key): law, path("orbits"): block})
+        x = fit.sample_prior(jax.random.key(7), (100,))
+        residual = jax.vmap(lambda one, f=fit: _kepler_residual(f.model_at(one)))(x)
+        assert float(jnp.max(residual)) <= 1e-12, key
+    ti = ThieleInnesBlock(block.law, Uniform(0.9, 1.3), rows=(0,), system=prefix)
+    Fit(model, {path("orbits"): ti})

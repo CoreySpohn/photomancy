@@ -21,10 +21,11 @@ leading batch axes, and a block entry is a dict of arrays whose leading axes are
 batch. ``model_at`` is per draw; ``jax.vmap(fit.model_at)(samples)`` builds models for a
 cloud.
 
-A free star mass with no orbit block on a model whose orbits store a mean motion leaves
-the orbits at the old mass (a held orbit does not follow the mass). That fit is
-inconsistent until the orbits carry no stored rate; free the mass through the block that
-owns the orbits.
+A model node may declare fields derived from others (``tied_fields``, see
+:func:`hwoutils.blocks.check_ties`), as the orbix ``System`` does for its stored orbits,
+which its star and planet masses rate. ``Fit`` refuses an entry inside a derived field
+(a leaf law on one field of a stored orbit) and an entry that writes a source of a
+derived field while no entry writes that field (a free mass with no orbit block).
 """
 
 import hashlib
@@ -35,7 +36,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from hwoutils.blocks import AbstractBlock, block_order, check_writers
+from hwoutils.blocks import AbstractBlock, block_order, check_ties, check_writers
 from hwoutils.constants import two_pi
 from hwoutils.memory import DEFAULT_MAX_BYTES, MemoryLimit, largest_batch
 from hwoutils.model_paths import assign, paths_overlap, resolve
@@ -484,9 +485,10 @@ class Fit(eqx.Module):
             RuntimeError: When ``jax_enable_x64`` is off.
             TypeError: For an entry that is neither a distribution nor a block, or a
                 term that is not an :class:`AbstractTerm`.
-            ValueError: For an unknown path, a leaf law that does not fit its leaf, two
-                writers of one path, a block cycle, a free path or block write that
-                meets a term's ``reads``, or two terms that marginalize the same latent
+            ValueError: For an unknown path, a leaf law that does not fit its leaf, an
+                entry that breaks a declared tie (``check_ties``), two writers of one
+                path, a block cycle, a free path or block write that meets a term's
+                ``reads``, or two terms that marginalize the same latent
                 (``AbstractTerm.marginalizes``), named in the message.
         """
         if not jax.config.jax_enable_x64:
@@ -506,11 +508,18 @@ class Fit(eqx.Module):
                     f"free[{path!r}] is a {type(entry).__name__}; "
                     "expected a priorities distribution or a block"
                 )
-        check_writers(blocks, leaf_paths)
-        block_order(blocks)
         for key, block in blocks.items():
             for path in (*block.reads, *block.writes):
                 self._require_path(path, f"block {key!r}")
+        check_ties(
+            self.model,
+            {
+                **{path: (path,) for path in leaf_paths},
+                **{key: block.writes for key, block in blocks.items()},
+            },
+        )
+        check_writers(blocks, leaf_paths)
+        block_order(blocks)
         written = [*leaf_paths, *(w for b in blocks.values() for w in b.writes)]
         summed = {}
         for i, term in enumerate(self.terms):
