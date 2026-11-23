@@ -52,7 +52,7 @@ import numpy as np
 from coronagraphoto import expected
 from hwoutils.model_paths import join, resolve
 from optixstuff import Exposure, Instrument
-from optixstuff.grids import Image, SkyOrientation
+from optixstuff.grids import Image, Measure, SkyOrientation
 from skyscapes.scene import Scene
 
 from photomancy.infer.fit import AbstractTerm
@@ -60,32 +60,54 @@ from photomancy.infer.fit import AbstractTerm
 __all__ = ["ImageModel", "ImageTerm"]
 
 
+_COUNTS = ("electron", "electrons")
+
+
 def _bool(x):
     return jnp.asarray(x, dtype=bool)
 
 
-def _check_grid(image, instrument, exposure):
-    """Refuse an ``Image`` whose pixels are not the detector's pixels at this roll.
+def _same_angle(first, second):
+    """Equal modulo 360 degrees, to the float32 resolution of the larger angle."""
+    difference = abs((first - second + 180.0) % 360.0 - 180.0)
+    return difference <= np.spacing(np.float32(max(abs(first), abs(second))))
 
-    The pixel geometry (shape, pitch, center, unit) must equal the detector's grid.
-    The sky orientation is compared too when the image carries one and the held
-    exposure's roll is a concrete number.
+
+def _check_image(image, instrument, exposure):
+    """Refuse an ``Image`` that is not detector counts on this detector at this roll.
+
+    The image must hold electrons per pixel (an integral measure). Its pixel
+    geometry (shape, pitch, center, unit) must equal the detector's grid when the
+    instrument is held. When the exposure is held with a concrete roll, the image
+    must carry a sky orientation, and that orientation must be the roll's.
     """
-    detector = instrument.detector.grid
-    if replace(image.grid, orientation=None) != detector:
+    if image.measure != Measure.integral() or image.quantity not in _COUNTS:
         raise ValueError(
-            f"the observed Image is on {image.grid}, not on the detector grid "
-            f"{detector}: score data on the instrument's own pixels"
+            f"the observed Image holds {image.quantity!r} as {image.measure}, not "
+            "electrons per pixel: score the detector counts observe returns"
         )
+    if instrument is not None:
+        detector = instrument.detector.grid
+        if replace(image.grid, orientation=None) != detector:
+            raise ValueError(
+                f"the observed Image is on {image.grid}, not on the detector grid "
+                f"{detector}: score data on the instrument's own pixels"
+            )
     roll = None if exposure is None else exposure.roll_deg
-    if image.grid.orientation is None or isinstance(roll, jax.core.Tracer):
+    if roll is None or isinstance(roll, jax.core.Tracer):
         return
-    want = SkyOrientation(np.asarray(roll).item())
-    if image.grid.orientation != want:
+    have = image.grid.orientation
+    if have is None:
         raise ValueError(
-            f"the observed Image has sky orientation {image.grid.orientation}, but "
-            f"the exposure's roll gives {want}: the data and the term are at "
-            "different rolls"
+            "the observed Image carries no sky orientation (observe under a JAX "
+            "transformation drops it), so its roll cannot be checked against the "
+            "exposure's; pass Image.data when the roll is known to match"
+        )
+    want = SkyOrientation(roll)
+    if have.parity != want.parity or not _same_angle(have.pa_y_deg, want.pa_y_deg):
+        raise ValueError(
+            f"the observed Image has sky orientation {have}, but the exposure's "
+            f"roll gives {want}: the data and the term are at different rolls"
         )
 
 
@@ -140,21 +162,24 @@ class ImageTerm(AbstractTerm):
 
     The observed frame may be given as the :class:`optixstuff.grids.Image` that
     :func:`coronagraphoto.observe` returns or as a bare array. An ``Image`` is checked
-    at construction against the held instrument: its pixel grid must be the
-    detector's grid and, when it carries a sky orientation and the held exposure has
-    a concrete roll, that orientation must be the roll's. Only the data are kept.
-    When the instrument is read from the model (``instrument_path``) the detector is
-    not known at construction and the grid is not checked; nor is the orientation
-    when the exposure is read from the model.
+    at construction: it must hold electrons per pixel; with a held instrument its
+    pixel grid must be the detector's grid; with a held exposure of concrete roll it
+    must carry a sky orientation equal to the roll's (modulo 360 degrees, to the
+    float32 resolution of the angle). Only the data are kept. When the instrument is
+    read from the model (``instrument_path``) the detector is not known at
+    construction and the grid is not checked; when the exposure is read from the
+    model the roll is not checked.
 
     Attributes:
         observed_e: Observed electrons, shape ``(*batch, W, ny, nx)``. Leading batch
             axes are further frames of the same exposure model (scored jointly).
         mask: Boolean, broadcastable to ``observed_e``; true where a pixel is scored.
-            Observed values at masked pixels are never read. ``None`` at
-            construction scores every pixel (stored as all True, shape
-            ``(W, ny, nx)``); :meth:`check` then refuses a pixel the coronagraph
-            data do not cover, as for any mask.
+            Observed values at masked pixels are never read; :meth:`check` refuses a
+            mask that scores a pixel the coronagraph data do not cover. ``None``
+            scores the supported pixels: those the render marks
+            ``Rates.supported`` at the model being scored. The scored set then
+            follows the model, so a fit that frees a leaf moving the field of view
+            (:attr:`footprint_paths`) should give an explicit mask.
         instrument: A held :class:`optixstuff.Instrument`, or ``None``.
         exposure: A held :class:`optixstuff.Exposure` with a ``plan``, or ``None``.
         scene_path: Model path of the :class:`skyscapes.Scene`; ``""`` is the model
@@ -165,8 +190,8 @@ class ImageTerm(AbstractTerm):
             ``exposure`` and ``exposure_path``, is given.
     """
 
-    observed_e: jax.Array = eqx.field(converter=jnp.asarray)
-    mask: jax.Array = eqx.field(converter=_bool)
+    observed_e: jax.Array
+    mask: jax.Array | None = None
     instrument: Instrument | None = None
     exposure: Exposure | None = None
     scene_path: str = eqx.field(static=True, default="")
@@ -188,8 +213,8 @@ class ImageTerm(AbstractTerm):
         Args:
             observed_e: Observed electrons, an :class:`optixstuff.grids.Image` or an
                 array of shape ``(*batch, W, ny, nx)``.
-            mask: Boolean broadcastable to the frame, or ``None`` to score every
-                pixel.
+            mask: Boolean broadcastable to the frame, or ``None`` to score the
+                supported pixels.
             instrument: The held instrument, or ``None`` with ``instrument_path``.
             exposure: The held exposure, or ``None`` with ``exposure_path``.
             scene_path: Model path of the scene.
@@ -197,17 +222,15 @@ class ImageTerm(AbstractTerm):
             exposure_path: Model path of the exposure, or ``None``.
 
         Raises:
-            ValueError: When an ``Image`` is not on the held detector's grid, or its
-                sky orientation is not the held exposure's roll.
+            ValueError: When an ``Image`` does not hold electrons per pixel, is not
+                on the held detector's grid, or lacks or contradicts the held
+                exposure's roll.
         """
         if isinstance(observed_e, Image):
-            if instrument is not None:
-                _check_grid(observed_e, instrument, exposure)
+            _check_image(observed_e, instrument, exposure)
             observed_e = observed_e.data
         self.observed_e = jnp.asarray(observed_e)
-        if mask is None:
-            mask = jnp.ones(self.observed_e.shape[-3:], bool)
-        self.mask = _bool(mask)
+        self.mask = None if mask is None else _bool(mask)
         self.instrument = instrument
         self.exposure = exposure
         self.scene_path = scene_path
@@ -247,6 +270,14 @@ class ImageTerm(AbstractTerm):
         exposure = self._exposure(model)
         rates = expected(resolve(model, self.scene_path), instrument, exposure)
         return instrument.detector, rates, exposure.plan
+
+    def _used(self, rates) -> jax.Array:
+        """The scored pixels: the mask, else the render's support, else every pixel."""
+        if self.mask is not None:
+            return self.mask
+        if rates.supported is not None:
+            return rates.supported
+        return jnp.ones(jnp.shape(rates.total()), bool)
 
     @property
     def footprint_paths(self) -> tuple[str, ...]:
@@ -290,13 +321,15 @@ class ImageTerm(AbstractTerm):
 
         Raises:
             ValueError: Naming the count, when ``mask`` is true on a pixel that is not
-                ``supported_mask(model)``, or when a lit planet of the scene is outside
-                the coronagraph's source domain at band centre (it would render zero
-                while the data may show it).
+                ``supported_mask(model)`` (a ``None`` mask scores only those), or when
+                a lit planet of the scene is outside the coronagraph's source domain
+                at band centre (it would render zero while the data may show it).
         """
-        supported = np.asarray(self.supported_mask(model))
-        scored = np.broadcast_to(np.asarray(self.mask), self.observed_e.shape)
-        bad = int((scored & ~supported).reshape(-1, *supported.shape).any(0).sum())
+        bad = 0
+        if self.mask is not None:
+            supported = np.asarray(self.supported_mask(model))
+            scored = np.broadcast_to(np.asarray(self.mask), self.observed_e.shape)
+            bad = int((scored & ~supported).reshape(-1, *supported.shape).any(0).sum())
         if bad:
             raise ValueError(
                 f"the mask scores {bad} pixel(s) the coronagraph data do not cover "
@@ -325,9 +358,10 @@ class ImageTerm(AbstractTerm):
             The scalar log likelihood of the scored pixels.
         """
         detector, rates, plan = self._rates(model)
-        observed = jnp.where(self.mask, self.observed_e, 0.0)
+        used = self._used(rates)
+        observed = jnp.where(used, self.observed_e, 0.0)
         log_prob = detector.log_prob(observed, rates, plan)
-        return jnp.sum(jnp.where(self.mask, log_prob, 0.0), dtype=jnp.float64)
+        return jnp.sum(jnp.where(used, log_prob, 0.0), dtype=jnp.float64)
 
     def predict(self, model) -> jax.Array:
         """Return the expected electron counts per pixel, shape ``(W, ny, nx)``.
@@ -362,7 +396,7 @@ class ImageTerm(AbstractTerm):
         detector, rates, plan = self._rates(model)
         mean, variance = detector.mean_and_variance(rates, plan)
         whitened = (self.observed_e - mean) / jnp.sqrt(variance)
-        return jnp.where(self.mask, whitened, jnp.nan)
+        return jnp.where(self._used(rates), whitened, jnp.nan)
 
     def fisher_root(self, model) -> jax.Array:
         """Return the detector's Fisher root of the expected rates, flat and masked.
@@ -385,7 +419,7 @@ class ImageTerm(AbstractTerm):
         detector, rates, plan = self._rates(model)
         root = detector.fisher_root(rates, plan)
         parts = root if root.ndim == 4 else root[None]
-        used = jnp.broadcast_to(self.mask, self.observed_e.shape)
+        used = jnp.broadcast_to(self._used(rates), self.observed_e.shape)
         return jnp.ravel(jnp.where(used[..., None, :, :, :], parts, 0.0))
 
     def draw(self, key, model) -> Self:
@@ -408,5 +442,5 @@ class ImageTerm(AbstractTerm):
         keys = jax.random.split(key, n_frames)
         frames = jax.vmap(lambda k: detector.draw(k, rates, plan))(keys)
         frames = frames.reshape(*batch, *frames.shape[1:])
-        observed = jnp.where(self.mask, frames, self.observed_e)
+        observed = jnp.where(self._used(rates), frames, self.observed_e)
         return eqx.tree_at(lambda term: term.observed_e, self, observed)
