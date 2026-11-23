@@ -14,6 +14,7 @@ from image_scene import (
     make_scene,
 )
 from priorities import Uniform
+from skyscapes.physical_model import GridPhysicalModel
 
 from photomancy.detection import (
     _correlation_inverse,
@@ -362,12 +363,16 @@ class _SkyImage(AbstractTerm):
     """
 
     image: ImageTerm
+    unit_model: GridPhysicalModel = eqx.field(
+        default_factory=lambda: make_scene(contrast=1.0).planets[0].physical_model
+    )
     reads = ()
 
     def _scene(self, model):
-        return make_scene(
-            contrast=model.amplitude * _UNIT_CONTRAST, sky_pa_deg=model.pa_deg
-        )
+        # The planet table is built once on the host; only its values vary here.
+        grid = self.unit_model.contrast_grid * model.amplitude * _UNIT_CONTRAST
+        planet_model = eqx.tree_at(lambda m: m.contrast_grid, self.unit_model, grid)
+        return make_scene(sky_pa_deg=model.pa_deg, model=planet_model)
 
     def __call__(self, model):
         return self.image(self._scene(model))

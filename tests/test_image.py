@@ -191,10 +191,16 @@ def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument():
 
 
 def test_reads_are_the_held_products_reads_under_the_scene_path():
-    """A held exposure that declares reads has them prefixed with the scene path."""
+    """A held exposure that declares reads has them prefixed with the scene path.
+
+    The exposure builder declares the knot leaves of every tabulated source it
+    resolved; the toy scene's planet table is one, so its wavelength grid is read.
+    """
     model, exposure = _setup("poisson")
     observed = jnp.zeros((1, *model.instrument.detector.shape))
-    assert _term(model, exposure, observed).reads == ()
+    assert _term(model, exposure, observed).reads == (
+        "scene.planets[0].physical_model.wavelengths_nm",
+    )
 
     class Built(type(exposure)):
         reads: tuple[str, ...] = eqx.field(static=True, default=())

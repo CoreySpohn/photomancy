@@ -138,15 +138,21 @@ def make_instrument(detector):
     )
 
 
-def make_scene(*, contrast=1e-10, sky_pa_deg=0.0, separation_arcsec=0.05):
-    """One planet on a face-on circular orbit at the given sky position."""
-    wavelengths = jnp.array([400.0, 500.0, 600.0, 700.0])
-    values = jnp.broadcast_to(jnp.asarray(contrast), (4,))
-    model = GridPhysicalModel(
-        wavelengths,
-        jnp.array([0.0, 90.0, 180.0]),
-        jnp.broadcast_to(values[None, :, None], (1, 4, 3)),
-    )
+def make_scene(*, contrast=1e-10, sky_pa_deg=0.0, separation_arcsec=0.05, model=None):
+    """One planet on a face-on circular orbit at the given sky position.
+
+    ``model`` is a planet model built on the host; pass it when the scene is
+    rebuilt inside a trace, since a tabulated model built under a trace has no
+    knot digest.
+    """
+    if model is None:
+        wavelengths = jnp.array([400.0, 500.0, 600.0, 700.0])
+        values = jnp.broadcast_to(jnp.asarray(contrast), (4,))
+        model = GridPhysicalModel(
+            wavelengths,
+            jnp.array([0.0, 90.0, 180.0]),
+            jnp.broadcast_to(values[None, :, None], (1, 4, 3)),
+        )
     return Scene.from_classical(
         FlatStar(flux_phot_per_nm_m2=1e6),
         (Planet(jnp.ones(1), model),),
