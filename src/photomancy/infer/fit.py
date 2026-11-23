@@ -585,6 +585,11 @@ class Fit(eqx.Module):
 
     def _check_leaf(self, path, dist):
         leaf = self._require_path(path, "free")
+        if isinstance(leaf, bool | int | float | complex | str | tuple):
+            raise ValueError(
+                f"free path {path!r} names a {type(leaf).__name__}, a static field "
+                "that fixes structure and cannot be free"
+            )
         if not eqx.is_array(leaf):
             raise ValueError(
                 f"free path {path!r} names a {type(leaf).__name__}, not one array "

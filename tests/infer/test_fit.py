@@ -943,3 +943,25 @@ def test_gradient_samplers_refuse_a_fit_with_walls():
         assert all(
             bool(jnp.all(jnp.isfinite(v))) for v in jax.tree.leaves(fit.from_unit(unit))
         )
+
+
+def test_refuses_a_static_detector_field_as_static_structure():
+    """Fails if the pixel scale is reported as a node to free through a block.
+
+    The pixel scale and shape are static: the detector grid, every resampling operator
+    onto it and every support mask are built from them on the host. The refusal says
+    so instead of pointing at a block that cannot exist. Truth: definitional.
+    """
+    from optixstuff.detector import IdealDetector
+
+    class _Instrument(eqx.Module):
+        detector: IdealDetector
+
+    class _Model(eqx.Module):
+        instrument: _Instrument
+
+    model = _Model(_Instrument(IdealDetector(pixel_scale_arcsec=0.01, shape=(8, 8))))
+    with pytest.raises(ValueError, match="static field that fixes structure"):
+        Fit(model, {"instrument.detector.pixel_scale_arcsec": Normal(0.01, 0.001)})
+    with pytest.raises(ValueError, match="free the node through a block"):
+        Fit(model, {"instrument.detector": Normal(0.01, 0.001)})
