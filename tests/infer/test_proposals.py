@@ -338,8 +338,15 @@ def _modes_and_evidence(label, backend):
         # Only the converged modes are matched, and the stalled ones must stay
         # negligible.
         best = max(m["score"] for m in modes)
+        converged = score > score[kept].max() - _STALLED_NATS
+        if label == "pathfinder":
+            # Every Pathfinder path is kept, so the stalled ones are counted: as many
+            # as stored on each seed, each more than 100 nats below the best.
+            stalled = sum(m["score"] <= best - _STALLED_NATS for m in modes)
+            assert int(np.sum(kept)) == len(modes), (seed, label)
+            assert int(np.sum(kept & ~converged)) == stalled, (seed, label)
         modes = [m for m in modes if m["score"] > best - _STALLED_NATS]
-        kept = kept & (score > score[kept].max() - _STALLED_NATS)
+        kept = kept & converged
         order = [i for i in np.argsort(-score) if kept[i]]
         assert len(order) == len(modes), (seed, label)
         means = np.asarray(info.flat_means)
@@ -393,8 +400,11 @@ def test_pathfinder_keeps_its_paths_and_refuses_the_evidence_above_the_khat_limi
 
     Tolerances and the evidence contract as for ``Laplace``. The weights of this fit
     are heavy tailed (k-hat 0.95 to 1.08 at 2,000 draws), so the evidence is refused
-    on all four seeds; the finite branch is exercised by the ``Laplace`` test.
-    Fails if: a path moves, or an evidence is published past the k-hat limit or
+    on all four seeds; the finite branch is exercised by the ``Laplace`` test. As
+    there, only the converged paths are matched; the stalled ones (3, 1, 1 and 3 of
+    the four paths on the stored seeds) are counted, and each must stay more than 100
+    nats below the best. Fails if: a converged path moves, the number of kept or
+    stalled paths changes, or an evidence is published past the k-hat limit or
     differs from the importance mean.
     """
     _modes_and_evidence("pathfinder", Pathfinder(n_draws=2000, n_modes=4))
