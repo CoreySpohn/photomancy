@@ -57,7 +57,7 @@ The first three coordinates fix the size and the shape of the orbit.
 
 The first is the log of the mean motion `n` in radians per day. Because the period law is
 bounded, the block maps the log mean motion from its bounded interval onto the whole real
-line with a logit, and the coordinate takes the prefix `logit_`. Every real value of every
+line with a logit, and the coordinate takes the prefix `mapped_`. Every real value of every
 coordinate is then a valid orbit, so a sampler or an optimizer never meets a wall, and the
 density gains the log derivative of the map.
 
