@@ -19,7 +19,7 @@ from optixstuff.spectral import Quadrature, Resolution, Transmission
 from orbix.system import System
 
 from photomancy.infer.fit import AbstractTerm
-from photomancy.measurements._observables import _band_contrasts
+from photomancy.measurements._observables import _band_contrasts, _check_reads
 from photomancy.measurements._padding import (
     MAX_CC_PTS,
     _pad_1d,
@@ -617,7 +617,8 @@ class PhotometryTerm(AbstractTerm):
             sources are sampled at the nodes.
         reads: Model paths of the knot leaves ``resolution`` was built on, so a
             fit refuses to free one: ``Scene.knot_leaves()`` of the system, each
-            prefixed with ``system_path``. ``TargetData.terms`` fills it.
+            prefixed with ``system_path``. ``TargetData.terms`` fills it; a
+            resolution with rules and no reads is refused.
     """
 
     data: PhotometryData
@@ -628,15 +629,12 @@ class PhotometryTerm(AbstractTerm):
     reads: tuple[str, ...] = eqx.field(static=True, default=())
 
     def __check_init__(self):
-        """Require a transmission per band and string read paths."""
+        """Require a transmission per band, and reads for a held resolution."""
         if len(self.transmissions) != len(self.quadrature.bands):
             raise ValueError(
                 "PhotometryTerm needs one transmission per quadrature band"
             )
-        if not isinstance(self.reads, tuple) or not all(
-            isinstance(path, str) for path in self.reads
-        ):
-            raise TypeError("reads must be a tuple of model path strings")
+        _check_reads("PhotometryTerm", self.resolution, self.reads)
 
     def _score(self, model):
         valid = self.data.valid

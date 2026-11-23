@@ -31,6 +31,7 @@ from photomancy.infer import Fit
 from photomancy.measurements import (
     CountRateTable,
     PhotometryData,
+    PhotometryTerm,
     PrecomputedReportPredictor,
     ReportData,
     ReportRule,
@@ -299,7 +300,10 @@ def test_a_fit_refuses_to_free_a_knot_leaf_a_photometric_term_was_built_on():
     Truth, named by hand: the star's and the tabulated planet's knot grids,
     under the system's model path. Freeing the planet's knot grid must then be
     refused by ``Fit`` naming the term; a free planet radius is not a read and
-    is accepted.
+    is accepted. A term or a count-rate table built directly on a resolution
+    that holds rules, without reads, is refused at construction (otherwise
+    ``Fit`` could free the knots under the operators); with an empty
+    resolution, a scene with no table, no reads are needed.
     """
     scene = _scene()
     (term,) = _target().terms("system", system=scene, transmissions={"F": _filter()})
@@ -311,3 +315,13 @@ def test_a_fit_refuses_to_free_a_knot_leaf_a_photometric_term_was_built_on():
     with pytest.raises(ValueError, match=r"meets PhotometryTerm\.reads"):
         Fit(_Holder(scene), {knots: Normal(jnp.asarray(PLANET_NM), 1.0)}, (term,))
     Fit(_Holder(scene), {"system.planets[0].Rp_Rearth": LogUniform(0.5, 4.0)}, (term,))
+
+    parts = (term.data, term.quadrature, term.transmissions, "system")
+    with pytest.raises(ValueError, match="declares no reads"):
+        PhotometryTerm(*parts, resolution=term.resolution)
+    PhotometryTerm(*parts, resolution=Resolution())
+    grid = (jnp.array([[0.0, 10.0]]), jnp.array([[2.0, 2.0]]), jnp.array([0.03]))
+    table = (*grid, term.quadrature, term.transmissions, scene.epoch)
+    with pytest.raises(ValueError, match="declares no reads"):
+        CountRateTable(*table, resolution=term.resolution)
+    CountRateTable(*table)

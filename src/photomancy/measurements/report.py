@@ -25,6 +25,7 @@ from optixstuff.spectral import Quadrature, Resolution, Transmission
 from photomancy.infer.fit import AbstractProposingTerm, LeafProposal
 from photomancy.measurements._observables import (
     _band_contrasts,
+    _check_reads,
     _relative_positions,
 )
 from photomancy.measurements.astrometry import AstrometryData
@@ -321,7 +322,8 @@ class CountRateTable(eqx.Module):
         epoch: Origin of the report times.
         resolution: Host-built reduction of the system's tabulated spectra onto
             ``quadrature``; empty for a system with no table.
-        reads: Model paths of the knot leaves ``resolution`` was built on.
+        reads: Model paths of the knot leaves ``resolution`` was built on;
+            required when ``resolution`` holds rules.
     """
 
     separation_arcsec: jax.Array = eqx.field(converter=_float64)
@@ -334,11 +336,8 @@ class CountRateTable(eqx.Module):
     reads: tuple[str, ...] = eqx.field(static=True, default=())
 
     def __check_init__(self):
-        """Require compatible mode-bank dimensions and string read paths."""
-        if not isinstance(self.reads, tuple) or not all(
-            isinstance(path, str) for path in self.reads
-        ):
-            raise TypeError("reads must be a tuple of model path strings")
+        """Require compatible mode-bank dimensions, and reads for a resolution."""
+        _check_reads("CountRateTable", self.resolution, self.reads)
         if (
             self.separation_arcsec.ndim != 2
             or self.counts_per_contrast_s.shape != self.separation_arcsec.shape

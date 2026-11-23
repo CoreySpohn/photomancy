@@ -40,3 +40,19 @@ def _band_contrasts(
         quadrature, time_d, resolution=resolution, transmission=response
     )
     return bands[band_id, planet, jnp.arange(time_d.size)]
+
+
+def _check_reads(owner, resolution, reads):
+    """Refuse read paths that are not strings, or a resolution with no reads.
+
+    Operators built by ``Resolution.build`` are fixed to the knots they saw, so
+    a holder of one must name the knot leaves for ``Fit`` to keep them fixed.
+    """
+    if not isinstance(reads, tuple) or not all(isinstance(p, str) for p in reads):
+        raise TypeError("reads must be a tuple of model path strings")
+    if resolution.rules and not reads:
+        raise ValueError(
+            f"{owner} holds a resolution of tabulated spectra but declares no "
+            "reads; pass the knot leaves it was built on, "
+            "Scene.knot_leaves() prefixed with the system's model path"
+        )
