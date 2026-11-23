@@ -945,6 +945,68 @@ def test_gradient_samplers_refuse_a_fit_with_walls():
         )
 
 
+def _stack_two(fit):
+    """Two copies of ``fit`` stacked along a new leading world axis."""
+    arrays, static = eqx.partition(fit, eqx.is_array)
+    return eqx.combine(jax.tree.map(lambda a: jnp.stack([a, a]), arrays), static)
+
+
+def test_walls_are_evaluated_once_and_survive_stacking_jit_and_edits():
+    """Fails if a stacked, jitted or edited fit reports walls its source did not have.
+
+    Inside ``filter_jit`` or ``filter_vmap`` every law parameter is traced, and a block
+    asked for its walls there counts a traced unmapped edge as a wall. The fit
+    evaluates the walls when it is built on the host, so a copy under either
+    transformation, and an edit made under ``filter_vmap``, reports the eager walls.
+    Truth: the eager ``Fit.walls`` of each table fit and of a frame-chart fit (none).
+    """
+    from orbix.system import FrameChart
+
+    fits = {k: f for k, (f, _) in _walled_fits().items()}
+    fits["frame"] = Fit(_scene(), {"dynamics.orbits": _block(chart=FrameChart())})
+    assert fits["frame"].walls == {}
+    for name, fit in fits.items():
+        seen = {}
+
+        @eqx.filter_jit
+        def jitted(f, seen=seen):
+            seen["jit"] = f.walls
+            return jnp.zeros(())
+
+        @eqx.filter_vmap
+        def mapped(f, seen=seen):
+            seen["vmap"] = f.walls
+            seen["edit"] = f.append_term(_ReadsNothing()).walls
+            return jnp.zeros(())
+
+        jitted(fit)
+        mapped(_stack_two(fit))
+        assert seen == {"jit": fit.walls, "vmap": fit.walls, "edit": fit.walls}, name
+
+
+@pytest.mark.medium(reason="two-world NUTS compile, about 10 s cold")
+def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack():
+    """Fails if a stack of wall-free fits is refused, or a stack of walled fits runs.
+
+    ``eqx.filter_vmap(run)`` over two stacked worlds is the documented way to run a
+    stack. A frame-chart fit has no walls and runs; the Cartesian table fit has walls
+    on ``a_AU`` and ``e`` and is refused before sampling. Truth: definitional; the
+    run is checked for finite draws only.
+    """
+    from orbix.system import FrameChart
+
+    from photomancy.infer import NUTS, run
+
+    nuts = NUTS(n_warmup=10, n_draws=10, n_chains=1)
+    keys = jax.random.split(jax.random.key(0), 2)
+    frame = Fit(_scene(), {"dynamics.orbits": _block(chart=FrameChart())})
+    out = eqx.filter_vmap(lambda f, k: run(f, nuts, k))(_stack_two(frame), keys)
+    assert all(bool(jnp.all(jnp.isfinite(v))) for v in jax.tree.leaves(out.samples))
+    cartesian = _walled_fits()["cartesian"][0]
+    with pytest.raises(ValueError, match=r"NUTS needs .*'dynamics.orbits'.*a_AU, e"):
+        eqx.filter_vmap(lambda f, k: run(f, nuts, k))(_stack_two(cartesian), keys)
+
+
 def test_refuses_a_static_detector_field_as_static_structure():
     """Fails if the pixel scale is reported as a node to free through a block.
 

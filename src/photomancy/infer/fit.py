@@ -28,12 +28,17 @@ which its star and planet masses rate. ``Fit`` refuses an entry inside a derived
 derived field while no entry that reads or writes that source also writes the field (a
 free mass with no orbit block that reads it).
 
-A block may have walls (:attr:`hwoutils.blocks.AbstractBlock.walls`): bounds of its
-law that its coordinates do not map, so the density is zero on part of the
-coordinates. :attr:`Fit.walls` collects them; a gradient sampler refuses such a fit. A
-leaf law is assumed to have none: every ``bounds`` kind of ``priorities.to_real`` maps
-onto the real line, and a law whose support has an interior gap (a mixture of disjoint
-bounded components) is not detected.
+A block may have walls (:attr:`hwoutils.blocks.AbstractBlock.walls`): bounds of its law
+that its coordinates do not map, so the density is zero on part of the coordinates.
+``Fit`` evaluates them once, when it is built on the host from concrete laws, and keeps
+them as static data, so a stacked or jitted fit (whose law parameters are traced)
+reports the walls of the fit it was made from. :attr:`Fit.walls` returns them; a
+gradient sampler refuses such a fit. The edits (``with_priors``, ``append_term``,
+``replace_term``) keep the walls of the entries they do not replace; a fit built anew
+inside a transformation from traced laws counts an unmapped edge whose value is traced
+as a wall. A leaf law is assumed to have none: every ``bounds`` kind of
+``priorities.to_real`` maps onto the real line, and a law whose support has an interior
+gap (a mixture of disjoint bounded components) is not detected.
 """
 
 import hashlib
@@ -485,6 +490,29 @@ class Fit(eqx.Module):
     model: eqx.Module
     free: dict[str, AbstractDistribution | AbstractBlock]
     terms: tuple[AbstractTerm, ...] = ()
+    _walls: tuple[tuple[str, tuple[str, ...]], ...] = eqx.field(static=True)
+
+    def __init__(
+        self,
+        model: eqx.Module,
+        free: dict[str, AbstractDistribution | AbstractBlock],
+        terms: tuple[AbstractTerm, ...] = (),
+    ):
+        """Store the entries and evaluate the walls of the blocks once.
+
+        Args:
+            model: The base model.
+            free: The free entries by path.
+            terms: The data terms.
+        """
+        self.model = model
+        self.free = free
+        self.terms = terms
+        self._walls = tuple(
+            (key, tuple(entry.walls))
+            for key, entry in free.items()
+            if isinstance(entry, AbstractBlock) and entry.walls
+        )
 
     def __check_init__(self):
         """Refuse an inconsistent fit on the host.
@@ -624,10 +652,12 @@ class Fit(eqx.Module):
         """The non-empty ``walls`` of the blocks, by entry key.
 
         A wall is a bound of a block's law that its coordinates do not map, so the
-        density is zero on a set of positive measure at finite coordinates. Leaf laws
-        contribute none (see the module docstring for the assumption).
+        density is zero on a set of positive measure at finite coordinates. Evaluated
+        when the fit is built and kept as static data, so a stacked or jitted copy
+        reports the same walls. Leaf laws contribute none (see the module docstring
+        for the assumption).
         """
-        return {k: b.walls for k, b in self.blocks.items() if b.walls}
+        return dict(self._walls)
 
     @property
     def block_order(self) -> tuple[str, ...]:
@@ -1197,7 +1227,10 @@ class Fit(eqx.Module):
                     )
             elif not isinstance(new, AbstractDistribution):
                 raise ValueError(f"leaf law {key!r} needs a priorities distribution")
-        return Fit(self.model, {**self.free, **priors}, self.terms)
+        new = Fit(self.model, {**self.free, **priors}, self.terms)
+        kept = {k: w for k, w in self._walls if k not in priors}
+        fresh = {k: w for k, w in new._walls if k in priors}
+        return _carry_walls(new, {**kept, **fresh})
 
     def append_term(self, term: AbstractTerm) -> "Fit":
         """Return a fit with one more term; the free set is unchanged.
@@ -1208,7 +1241,9 @@ class Fit(eqx.Module):
         Returns:
             A new fit with the extra term.
         """
-        return Fit(self.model, self.free, (*self.terms, term))
+        return _carry_walls(
+            Fit(self.model, self.free, (*self.terms, term)), dict(self._walls)
+        )
 
     def replace_term(self, index: int, term: AbstractTerm) -> "Fit":
         """Return a fit with ``terms[index]`` replaced; the free set is unchanged.
@@ -1233,7 +1268,7 @@ class Fit(eqx.Module):
                 f"replace_term index {index} outside range({len(self.terms)})"
             )
         terms = (*self.terms[:index], term, *self.terms[index + 1 :])
-        return Fit(self.model, self.free, terms)
+        return _carry_walls(Fit(self.model, self.free, terms), dict(self._walls))
 
     def digest(self) -> str:
         """Hash of the free keys, prior records, term kinds and model structure.
@@ -1263,3 +1298,15 @@ class Fit(eqx.Module):
             h.update(f"term={type(term).__module__}.{type(term).__qualname__}".encode())
         h.update(str(jax.tree.structure(self.model)).encode())
         return h.hexdigest()
+
+
+def _carry_walls(fit: Fit, walls: dict[str, tuple[str, ...]]) -> Fit:
+    """Give an edited fit the walls of the entries it kept from its source.
+
+    An edit inside a transformation (an update mapped over worlds) rebuilds the fit
+    from traced laws, whose edges ``Fit.__init__`` would count as walls; the entries
+    the edit did not replace keep the walls evaluated when the source was built.
+    """
+    order = tuple((key, walls[key]) for key in fit.free if walls.get(key))
+    object.__setattr__(fit, "_walls", order)
+    return fit
