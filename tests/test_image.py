@@ -1,5 +1,8 @@
 """The pixel likelihood ``ImageTerm`` over ``coronagraphoto.expected``."""
 
+from dataclasses import replace
+
+import coronagraphoto as cp
 import equinox as eqx
 import ineedvalidation as vv
 import jax
@@ -7,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from image_scene import make_detector, make_exposure, make_instrument, make_scene
+from optixstuff.grids import PixelGrid, SkyOrientation
 from priorities import LogUniform
 from scipy import stats
 
@@ -224,6 +228,48 @@ def test_reads_are_the_held_products_reads_under_the_scene_path():
         exposure=built,
     )
     assert rooted.reads == ("star.flux_phot_per_nm_m2", "dynamics.orbits")
+
+
+def test_an_observed_image_is_checked_against_the_held_detector():
+    """An ``Image`` from ``observe`` scores as its data; a foreign grid is refused.
+
+    Truth source: the same term built from the bare ``Image.data`` array, and an
+    all-True mask for ``mask=None``.
+    Tolerance basis: exact (the same pixels and the same renderer, compared bit for
+    bit).
+    Fails if: the term drops or reorders the data of an ``Image``, accepts data on
+    pixels that are not the detector's (another pitch) or at another roll, or
+    ``mask=None`` scores anything but every pixel.
+    """
+    model, exposure = _setup("poisson")
+    instrument = model.instrument
+    image = cp.observe(jax.random.PRNGKey(2), model.scene, instrument, exposure)
+    mask = _scored(model, exposure, image.data).mask
+    from_image = ImageTerm(image, mask, instrument=instrument, exposure=exposure)
+    from_array = ImageTerm(image.data, mask, instrument=instrument, exposure=exposure)
+    assert float(from_image(model.scene)) == float(from_array(model.scene))
+    every = ImageTerm(image, instrument=instrument, exposure=exposure)
+    assert every.mask.shape == image.data.shape[-3:] and bool(jnp.all(every.mask))
+    full = ImageTerm(
+        image.data,
+        jnp.ones(image.data.shape, bool),
+        instrument=instrument,
+        exposure=exposure,
+    )
+    assert float(every(model.scene)) == float(full(model.scene))
+    grid = image.grid
+    coarse = PixelGrid.regular(
+        grid.shape, 2.0 * grid.step, grid.unit, orientation=grid.orientation
+    )
+    with pytest.raises(ValueError, match="detector grid"):
+        ImageTerm(replace(image, grid=coarse), instrument=instrument, exposure=exposure)
+    turned = replace(grid, orientation=SkyOrientation(grid.orientation.pa_y_deg + 30))
+    with pytest.raises(ValueError, match="roll"):
+        ImageTerm(replace(image, grid=turned), instrument=instrument, exposure=exposure)
+    unchecked = ImageTerm(replace(image, grid=coarse), exposure=exposure, **_PATHS)
+    assert float(unchecked(model)) == float(
+        ImageTerm(image.data, exposure=exposure, **_PATHS)(model)
+    )
 
 
 _CONTRAST = "scene.planets[0].physical_model.contrast_grid"

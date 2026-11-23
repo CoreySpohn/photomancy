@@ -42,6 +42,7 @@ Count regime. The Poisson form needs integer counts, and a detector that is not
 electrons per pixel with read noise.
 """
 
+from dataclasses import replace
 from typing import Self
 
 import equinox as eqx
@@ -51,7 +52,7 @@ import numpy as np
 from coronagraphoto import expected
 from hwoutils.model_paths import join, resolve
 from optixstuff import Exposure, Instrument
-from optixstuff.grids import SkyOrientation
+from optixstuff.grids import Image, SkyOrientation
 from skyscapes.scene import Scene
 
 from photomancy.infer.fit import AbstractTerm
@@ -61,6 +62,31 @@ __all__ = ["ImageModel", "ImageTerm"]
 
 def _bool(x):
     return jnp.asarray(x, dtype=bool)
+
+
+def _check_grid(image, instrument, exposure):
+    """Refuse an ``Image`` whose pixels are not the detector's pixels at this roll.
+
+    The pixel geometry (shape, pitch, center, unit) must equal the detector's grid.
+    The sky orientation is compared too when the image carries one and the held
+    exposure's roll is a concrete number.
+    """
+    detector = instrument.detector.grid
+    if replace(image.grid, orientation=None) != detector:
+        raise ValueError(
+            f"the observed Image is on {image.grid}, not on the detector grid "
+            f"{detector}: score data on the instrument's own pixels"
+        )
+    roll = None if exposure is None else exposure.roll_deg
+    if image.grid.orientation is None or isinstance(roll, jax.core.Tracer):
+        return
+    want = SkyOrientation(np.asarray(roll).item())
+    if image.grid.orientation != want:
+        raise ValueError(
+            f"the observed Image has sky orientation {image.grid.orientation}, but "
+            f"the exposure's roll gives {want}: the data and the term are at "
+            "different rolls"
+        )
 
 
 @eqx.filter_jit
@@ -112,11 +138,23 @@ class ImageModel(eqx.Module):
 class ImageTerm(AbstractTerm):
     """Log likelihood of one frame of observed electrons under the expected rates.
 
+    The observed frame may be given as the :class:`optixstuff.grids.Image` that
+    :func:`coronagraphoto.observe` returns or as a bare array. An ``Image`` is checked
+    at construction against the held instrument: its pixel grid must be the
+    detector's grid and, when it carries a sky orientation and the held exposure has
+    a concrete roll, that orientation must be the roll's. Only the data are kept.
+    When the instrument is read from the model (``instrument_path``) the detector is
+    not known at construction and the grid is not checked; nor is the orientation
+    when the exposure is read from the model.
+
     Attributes:
         observed_e: Observed electrons, shape ``(*batch, W, ny, nx)``. Leading batch
             axes are further frames of the same exposure model (scored jointly).
         mask: Boolean, broadcastable to ``observed_e``; true where a pixel is scored.
-            Observed values at masked pixels are never read.
+            Observed values at masked pixels are never read. ``None`` at
+            construction scores every pixel (stored as all True, shape
+            ``(W, ny, nx)``); :meth:`check` then refuses a pixel the coronagraph
+            data do not cover, as for any mask.
         instrument: A held :class:`optixstuff.Instrument`, or ``None``.
         exposure: A held :class:`optixstuff.Exposure` with a ``plan``, or ``None``.
         scene_path: Model path of the :class:`skyscapes.Scene`; ``""`` is the model
@@ -134,6 +172,47 @@ class ImageTerm(AbstractTerm):
     scene_path: str = eqx.field(static=True, default="")
     instrument_path: str | None = eqx.field(static=True, default=None)
     exposure_path: str | None = eqx.field(static=True, default=None)
+
+    def __init__(
+        self,
+        observed_e,
+        mask=None,
+        instrument: Instrument | None = None,
+        exposure: Exposure | None = None,
+        scene_path: str = "",
+        instrument_path: str | None = None,
+        exposure_path: str | None = None,
+    ):
+        """Store the frame, checking an ``Image`` against the held instrument.
+
+        Args:
+            observed_e: Observed electrons, an :class:`optixstuff.grids.Image` or an
+                array of shape ``(*batch, W, ny, nx)``.
+            mask: Boolean broadcastable to the frame, or ``None`` to score every
+                pixel.
+            instrument: The held instrument, or ``None`` with ``instrument_path``.
+            exposure: The held exposure, or ``None`` with ``exposure_path``.
+            scene_path: Model path of the scene.
+            instrument_path: Model path of the instrument, or ``None``.
+            exposure_path: Model path of the exposure, or ``None``.
+
+        Raises:
+            ValueError: When an ``Image`` is not on the held detector's grid, or its
+                sky orientation is not the held exposure's roll.
+        """
+        if isinstance(observed_e, Image):
+            if instrument is not None:
+                _check_grid(observed_e, instrument, exposure)
+            observed_e = observed_e.data
+        self.observed_e = jnp.asarray(observed_e)
+        if mask is None:
+            mask = jnp.ones(self.observed_e.shape[-3:], bool)
+        self.mask = _bool(mask)
+        self.instrument = instrument
+        self.exposure = exposure
+        self.scene_path = scene_path
+        self.instrument_path = instrument_path
+        self.exposure_path = exposure_path
 
     def __check_init__(self):
         """Require one source each for instrument and exposure, and a frame array."""
