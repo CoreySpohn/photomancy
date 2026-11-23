@@ -139,6 +139,29 @@ class MaskedLogLikelihood(eqx.Module):
         kernel = _KERNELS[self.kind](z, self.shape_param)
         return self.log_norm - jnp.sum(jnp.where(self.mask, kernel, 0.0))
 
+    def residual(self, predicted):
+        """Return ``(data - predicted) / sigma``, NaN at excluded elements.
+
+        Defined for the Gaussian density only, where it has mean zero and unit
+        variance at the right prediction. A robust density (Laplace, Huber,
+        Student-t) has no residual with that null and raises.
+
+        Args:
+            predicted: Model prediction, broadcastable to ``data``.
+
+        Returns:
+            Whitened residual with the shape of ``data``, NaN where ``mask`` is false.
+
+        Raises:
+            NotImplementedError: When the density is not the Gaussian.
+        """
+        if self.kind != "gaussian":
+            raise NotImplementedError(
+                f"the {self.kind} likelihood has no residual with a unit-variance null"
+            )
+        predicted = jnp.broadcast_to(jnp.asarray(predicted), self.data.shape)
+        return jnp.where(self.mask, (self.data - predicted) / self.sigma, jnp.nan)
+
     def fisher_root(self, predicted):
         """Return the flat vector whose Jacobian gives the expected information.
 

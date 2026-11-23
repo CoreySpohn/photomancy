@@ -342,6 +342,28 @@ class ImageTerm(AbstractTerm):
         detector, rates, plan = self._rates(model)
         return detector.mean_and_variance(rates, plan)[0]
 
+    def residual(self, model) -> jax.Array:
+        """Return ``(observed - mean) / sqrt(variance)`` per pixel, NaN where unscored.
+
+        The mean and variance are the detector's own
+        (:meth:`optixstuff.AbstractDetector.mean_and_variance`) at the expected rates,
+        so for a photon counter this is the Pearson residual. It is skewed where the
+        mean is a few electrons, and a pixel scored with a zero mean is infinite or
+        NaN.
+
+        Args:
+            model: The model PyTree holding the scene, and the instrument and exposure
+                at their paths when they are not held by the term.
+
+        Returns:
+            Whitened residual with the shape of ``observed_e``, NaN where ``mask`` is
+            false.
+        """
+        detector, rates, plan = self._rates(model)
+        mean, variance = detector.mean_and_variance(rates, plan)
+        whitened = (self.observed_e - mean) / jnp.sqrt(variance)
+        return jnp.where(self.mask, whitened, jnp.nan)
+
     def fisher_root(self, model) -> jax.Array:
         """Return the detector's Fisher root of the expected rates, flat and masked.
 

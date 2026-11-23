@@ -93,6 +93,40 @@ def test_gaussian_value_is_the_summed_density_of_the_detector_moments():
     np.testing.assert_allclose(term(model), want, rtol=1e-12)
 
 
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_residual_is_the_offset_in_detector_standard_deviations():
+    """The residual returns the injected offsets in units of the detector's sigma.
+
+    Truth source: a frame built as ``mean + k * sqrt(variance)`` from the read-noise
+    detector's own moments, with known ``k``; ``Fit.residuals`` must give the same
+    array at ``x``.
+    Tolerance basis: floating-point (rtol 1e-12, and an absolute floor of 8 ulp of
+    the largest ``mean / sigma``, the rounding of ``mean + k sigma`` before it is
+    subtracted again).
+    Fails if: the residual is signed the wrong way, whitened by ``sqrt(mean)`` (the
+    Poisson part only) instead of the detector variance, or a masked pixel is not
+    NaN.
+    """
+    model, exposure = _setup("read")
+    detector = model.instrument.detector
+    probe = _term(model, exposure, jnp.zeros((1, *detector.shape)))
+    _, rates, plan = probe._rates(model)
+    mean, variance = (np.asarray(x) for x in detector.mean_and_variance(rates, plan))
+    k = np.random.default_rng(6).normal(size=mean.shape)
+    observed = mean + k * np.sqrt(variance)
+    term = _scored(model, exposure, observed)
+    mask = np.asarray(term.mask)
+    out = np.asarray(term.residual(model))
+    assert out.shape == observed.shape
+    floor = 8 * np.finfo(float).eps * np.max(mean / np.sqrt(variance))
+    np.testing.assert_allclose(out[mask], k[mask], rtol=1e-12, atol=floor)
+    assert np.all(np.isnan(out[~mask])) and not mask.all()
+    fit = Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
+    x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid}
+    (from_fit,) = fit.residuals(x)
+    np.testing.assert_array_equal(from_fit, out)
+
+
 def test_the_value_peaks_at_the_true_model():
     """Noise-free counts are likelier at the truth than at 5 percent off."""
     model, exposure = _setup("poisson")

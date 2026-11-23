@@ -253,6 +253,31 @@ def test_gradients_match_finite_differences(name):
         )
 
 
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_gaussian_residual_recovers_the_injected_offsets_and_robust_kinds_refuse():
+    """The Gaussian residual is ``(data - predicted) / sigma``; robust kinds raise.
+
+    Truth source: data built as ``predicted + sigma * k`` with known offsets ``k``,
+    so the residual must return ``k`` (sign and scale), NaN off the mask.
+    Tolerance basis: exact-algebra (rtol 1e-12).
+    Fails if: the residual is signed the wrong way, divides by a variance instead of
+    a scale, leaks a masked element, or a robust or low-rank density reports a
+    residual that has no unit-variance null.
+    """
+    _, sigma, predicted, mask = _problem()
+    k = np.random.default_rng(5).normal(size=predicted.shape)
+    data = predicted + sigma * k
+    out = np.asarray(gaussian_loglike(data, sigma, mask).residual(predicted))
+    np.testing.assert_allclose(out[mask], k[mask], rtol=1e-12)
+    assert np.all(np.isnan(out[~mask]))
+    for name in ("laplace", "huber", "student_t"):
+        with pytest.raises(NotImplementedError, match="unit-variance"):
+            BUILDERS[name](data, sigma, mask).residual(predicted)
+    assert not hasattr(
+        low_rank_gaussian_loglike(data, sigma, np.zeros((20, 1))), "residual"
+    )
+
+
 @pytest.mark.parametrize("name", ["huber", "student_t"])
 def test_shape_parameters_must_be_positive(name):
     """A non-positive delta or nu raises at build time.

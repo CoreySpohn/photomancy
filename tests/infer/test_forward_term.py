@@ -104,6 +104,34 @@ def test_refuses_a_forward_that_is_not_a_module():
         ForwardTerm(lambda model: model.mu, gaussian_loglike(jnp.zeros(3), 1.0))
 
 
+def test_residuals_come_from_the_likelihood_and_a_fit_names_a_term_without_one():
+    """``Fit.residuals`` gives each term's residual at ``model_at(x)``.
+
+    Truth source: the Gaussian builder's residual of the forward at the model of
+    ``x`` (``(data - weights * mu) / sigma``), computed by hand.
+    Tolerance basis: exact-algebra (rtol 1e-12).
+    Fails if: ``Fit.residuals`` evaluates at the base model instead of ``x``, drops or
+    reorders a term, or a term whose likelihood has no residual (a robust law) is
+    passed over silently.
+    """
+    weights = jnp.array([1.0, 2.0, 0.5])
+    data = jnp.array([1.0, 2.0, 3.0])
+    first = ForwardTerm(_Scale(weights), gaussian_loglike(data, 0.5))
+    second = ForwardTerm(_Scale(weights), gaussian_loglike(2 * data, 0.25))
+    law = Normal(jnp.zeros(3), jnp.ones(3))
+    fit = Fit(_Model(jnp.zeros(3)), {"mu": law}, (first, second))
+    mu = jnp.array([0.9, 1.1, 5.0])
+    out = fit.residuals({"mu": mu})
+    assert len(out) == 2
+    np.testing.assert_allclose(out[0], (data - weights * mu) / 0.5, rtol=1e-12)
+    np.testing.assert_allclose(out[1], (2 * data - weights * mu) / 0.25, rtol=1e-12)
+    robust = ForwardTerm(_Scale(weights), huber_loglike(data, 0.5))
+    with pytest.raises(NotImplementedError, match=r"terms\[1\]"):
+        fit.replace_term(1, robust).residuals({"mu": mu})
+    with pytest.raises(NotImplementedError, match="residual"):
+        ForwardTerm(_Scale(weights), _Drawable(data)).residual(_Model(mu))
+
+
 def test_draw_replaces_only_the_data():
     """Draw returns a term whose likelihood holds a draw around the prediction."""
     model = _Model(jnp.array([0.9, 1.1, 5.0]))

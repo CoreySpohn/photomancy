@@ -126,6 +126,28 @@ class AbstractTerm(eqx.Module):
         """
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
 
+    def residual(self, model) -> jax.Array:
+        """Return the whitened residual of the data at ``model``, shaped like the data.
+
+        Each scored element is ``(observed - mean) / standard deviation`` under the
+        term's own noise law at ``model``, so where the model is right it has mean
+        zero and unit variance; unscored elements are NaN. Positive means the data
+        are above the model.
+
+        Optional, like :meth:`fisher_root`. The default raises
+        ``NotImplementedError``: a robust law (Laplace, Huber, Student-t) has no
+        residual with a unit-variance null, and a correlated law has no unique
+        element-wise one.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            Whitened residual with the shape of the term's data, NaN where an element
+            is not scored.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no whitened residual")
+
     @property
     def footprint_paths(self) -> tuple[str, ...]:
         """Model paths whose value changes what the term can read (the field of view).
@@ -789,6 +811,34 @@ class Fit(eqx.Module):
             Summed log likelihood of the terms, with the batch shape of ``x``.
         """
         return self._over_batch(self._log_likelihood_one, x, batch_size)
+
+    def residuals(self, x: dict) -> tuple[jax.Array, ...]:
+        """Return each term's whitened residual at one draw ``x``.
+
+        One entry per term, in the order of ``terms``, each
+        :meth:`AbstractTerm.residual` at ``model_at(x)``: shaped like that term's
+        data, NaN where an element is not scored. A term is one exposure or one data
+        set, so the sum of squares of an entry is the per-frame statistic that shows
+        a frame the model does not describe.
+
+        Args:
+            x: Entry dict of one draw, in the stored coordinates.
+
+        Returns:
+            Tuple of whitened residuals, one per term.
+
+        Raises:
+            NotImplementedError: When a term has no whitened residual (a robust or
+                correlated law), naming the term.
+        """
+        model = self.model_at(x)
+        out = []
+        for i, term in enumerate(self.terms):
+            try:
+                out.append(term.residual(model))
+            except NotImplementedError as err:
+                raise NotImplementedError(f"terms[{i}]: {err}") from err
+        return tuple(out)
 
     def _log_density_one(self, x):
         model, prior = self._walk(x)

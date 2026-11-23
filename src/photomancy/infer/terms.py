@@ -91,6 +91,25 @@ class ForwardTerm(AbstractTerm):
             )
         return self.likelihood.fisher_root(self.forward(model))
 
+    def residual(self, model):
+        """Return the likelihood's whitened residual of the forward model's output.
+
+        Available when the likelihood has one (the Gaussian builder); any other
+        likelihood raises ``NotImplementedError``.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            The whitened residual, shaped like the likelihood's data, NaN where an
+            element is not used.
+        """
+        if not hasattr(self.likelihood, "residual"):
+            raise NotImplementedError(
+                f"{type(self.likelihood).__name__} has no whitened residual"
+            )
+        return self.likelihood.residual(self.forward(model))
+
     def draw(self, key, model) -> Self:
         """Copy holding data drawn from the likelihood at ``model``.
 
