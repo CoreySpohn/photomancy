@@ -90,7 +90,7 @@ class Pathfinder(AbstractBackend):
     a Gaussian is a poor proposal, and the seed for ``AdaptiveImportance``, are those
     of ``Laplace``.
 
-    Args:
+    Attributes:
         n_draws: Importance draws.
         n_modes: Number of starts and proposal components.
         n_steps: Maximum L-BFGS iterations along the path.

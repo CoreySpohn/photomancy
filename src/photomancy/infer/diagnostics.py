@@ -87,6 +87,14 @@ def normalize_log_weights(log_weights):
     common offsets. NaNs count as zero weight. A nonfinite maximum gives
     ``no_support=True``, all ``-inf`` normalized weights and a total of ``-inf``.
     Leading axes are batch axes; the draw axis is last.
+
+    Args:
+        log_weights: Unnormalized log weights, shape ``(*batch, S)``.
+
+    Returns:
+        ``normalized`` are the log weights with the log total removed, shape
+        ``(*batch, S)``; ``log_total`` is the log of the summed weights and
+        ``no_support`` is the boolean flag, both with shape ``(*batch,)``.
     """
     return _over_batch(_normalize, log_weights)
 
@@ -102,6 +110,12 @@ def kish_ess(log_weights):
     """Return the Kish effective sample size, or zero without support.
 
     Leading axes are batch axes; the draw axis is last.
+
+    Args:
+        log_weights: Unnormalized log weights, shape ``(*batch, S)``.
+
+    Returns:
+        Kish effective sample size in draws, shape ``(*batch,)``.
     """
     return _over_batch(_kish, log_weights)
 
@@ -113,6 +127,12 @@ def khat_threshold(n_draws):
     ratios of ``S`` iid proposal draws; above it the variance of the weighted
     mean is not trustworthy. ``S`` must exceed 10 (the formula is negative or
     undefined below that).
+
+    Args:
+        n_draws: Number of proposal draws ``S``.
+
+    Returns:
+        The largest usable k-hat for ``n_draws`` draws, as a float.
     """
     return min(1.0 - 1.0 / math.log10(n_draws), 0.7)
 
@@ -228,6 +248,12 @@ def pareto_khat(log_weights):
     (the fit fails closed); flat weights return ``-inf``. Gate on
     ``~(khat <= limit)`` so that NaN refuses and ``-inf`` passes. Leading axes
     are batch axes.
+
+    Args:
+        log_weights: Unnormalized log importance ratios, shape ``(*batch, S)``.
+
+    Returns:
+        Pareto tail shape k-hat, shape ``(*batch,)``.
     """
     return _over_batch(_khat, log_weights)
 
@@ -254,6 +280,13 @@ def weighted_mean(log_weights, values):
 
     Zero-weight draws are skipped, so a non-finite value attached to a zero
     weight does not poison the result.
+
+    Args:
+        log_weights: Unnormalized log weights, shape ``(*batch, S)``.
+        values: Draws, shape ``(*batch, S, *event)``.
+
+    Returns:
+        Weighted mean, shape ``(*batch, *event)``; NaN for a slice without support.
     """
     return _over_batch(_mean, log_weights, values)
 
@@ -280,6 +313,14 @@ def weighted_cov(log_weights, values):
     result is ``(*batch, d, d)``; scalar draws ``(*batch, S)`` give the
     variance ``(*batch,)``. Weights are normalized to sum to one and no
     small-sample correction is applied (the plain plug-in estimator).
+
+    Args:
+        log_weights: Unnormalized log weights, shape ``(*batch, S)``.
+        values: Draws, shape ``(*batch, S, d)`` or ``(*batch, S)`` for scalars.
+
+    Returns:
+        Weighted covariance, shape ``(*batch, d, d)``, or the variance
+        ``(*batch,)`` for scalar draws; NaN for a slice without support.
     """
     return _over_batch(_cov, log_weights, values)
 
@@ -311,6 +352,15 @@ def weighted_quantile(log_weights, values, q):
     ``numpy.quantile(..., method="inverted_cdf")`` of the sample expanded by
     repetition for integer weights. ``q`` is a scalar or array in ``[0, 1]``
     shared by every slice; the result has shape ``(*batch, *q.shape, *event)``.
+
+    Args:
+        log_weights: Unnormalized log weights, shape ``(*batch, S)``.
+        values: Draws, shape ``(*batch, S, *event)``.
+        q: Quantile level or levels in ``[0, 1]``, shared by every slice.
+
+    Returns:
+        Weighted quantiles, shape ``(*batch, *q.shape, *event)``; NaN for a slice
+        without support.
     """
     return _over_batch(_quantile, log_weights, values, q=q)
 
@@ -361,6 +411,15 @@ def mc_se(log_weights, values, *, r_eff=None):
     correlated (MCMC) draws; a given ``r_eff`` (effective draws over total
     draws, scalar or with the batch shape) divides the variance by ``r_eff``.
     The result has shape ``(*batch, *event)``; a slice without support gives NaN.
+
+    Args:
+        log_weights: Unnormalized log weights, shape ``(*batch, S)``.
+        values: Draws, shape ``(*batch, S, *event)``.
+        r_eff: Effective draws over total draws, scalar or with the batch shape, or
+            ``None`` for iid draws.
+
+    Returns:
+        Standard error of the weighted mean, shape ``(*batch, *event)``.
     """
     return _over_batch_r_eff(_mc_se, log_weights, values, r_eff=r_eff)
 
@@ -374,6 +433,17 @@ def ratio_mc_se(log_weights, numerator, denominator, *, r_eff=None):
     error is ``sqrt(sum w^2 (h - q g)^2) / sum w g``. The result is ``inf`` when
     the condition has zero weight (``sum w g = 0``) and NaN for a slice without
     support. ``r_eff`` is as in :func:`mc_se`.
+
+    Args:
+        log_weights: Unnormalized log weights, shape ``(*batch, S)``.
+        numerator: Joint of condition and value ``h``, shape ``(*batch, S, *event)``.
+        denominator: Per-draw probability of the condition ``g``, shape
+            ``(*batch, S)``.
+        r_eff: Effective draws over total draws, scalar or with the batch shape, or
+            ``None`` for iid draws.
+
+    Returns:
+        Standard error of the ratio estimate, shape ``(*batch, *event)``.
     """
     log_weights = jnp.asarray(log_weights)
     denominator = jnp.broadcast_to(jnp.asarray(denominator), log_weights.shape)

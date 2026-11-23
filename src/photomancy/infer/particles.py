@@ -18,6 +18,14 @@ def systematic_indices(key, log_weights, n):
 
     ``log_weights`` is a normalized log-weight vector with at least one finite
     entry. ``n`` is a static output size, independent of the input size.
+
+    Args:
+        key: PRNG key for the single random offset.
+        log_weights: Normalized log weights, shape ``(N,)``.
+        n: Number of indices to draw.
+
+    Returns:
+        Integer indices into the ``N`` source draws, shape ``(n,)``.
     """
     cdf = jnp.cumsum(jnp.exp(log_weights))
     cdf = cdf / cdf[-1]
@@ -32,6 +40,14 @@ def categorical_indices(key, log_weights, shape=()):
 
     ``log_weights`` is ``(N,)`` and normalized; memory is linear in ``N``. A slice
     with a NaN weight is drawn uniformly (the caller marks it). Returns ``shape``.
+
+    Args:
+        key: PRNG key.
+        log_weights: Normalized log weights, shape ``(N,)``.
+        shape: Shape of the returned index array.
+
+    Returns:
+        Integer indices into the ``N`` source draws, with shape ``shape``.
     """
     lw = jnp.asarray(log_weights)
     n = lw.shape[-1]
@@ -44,5 +60,13 @@ def categorical_indices(key, log_weights, shape=()):
 
 
 def take_draws(samples, idx):
-    """Take the draws ``idx`` along the leading (draw) axis of every leaf."""
+    """Take the draws ``idx`` along the leading (draw) axis of every leaf.
+
+    Args:
+        samples: Pytree whose every leaf has a leading draw axis.
+        idx: Integer indices of the draws to keep.
+
+    Returns:
+        The pytree with every leaf indexed by ``idx`` along its draw axis.
+    """
     return jax.tree.map(lambda leaf: jnp.take(leaf, idx, axis=0), samples)

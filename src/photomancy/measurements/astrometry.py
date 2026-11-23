@@ -47,7 +47,7 @@ class AstrometryData(eqx.Module):
     host star; the stellar term reads each row as the reflex offset of the star about
     the system barycenter (one body, so ``planet`` is not read).
 
-    Args:
+    Attributes:
         time_d: Observation epochs (days). Shape ``(N,)``.
         east_arcsec: East offset Delta alpha* = Delta RA cos Dec (arcsec).
             Shape ``(N,)``.
@@ -88,6 +88,19 @@ class AstrometryData(eqx.Module):
         are propagated to a first-order Cartesian covariance. Inputs have one
         entry per epoch; ``planet`` defaults to zero for every row.
         ``max_n=None`` keeps all rows valid; otherwise pad to ``max_n``.
+
+        Args:
+            time_d: Observation epochs in days from the system's epoch, one per row.
+            separation_arcsec: Separation of the planet from its star (arcsec).
+            separation_err_arcsec: Separation uncertainty (arcsec).
+            pa_deg: Position angle, east of north (degrees).
+            pa_err_deg: Position angle uncertainty (degrees).
+            planet: Zero-based planet index per row. Defaults to zero for every row.
+            max_n: Row capacity to pad to. None keeps the rows as given, all valid.
+
+        Returns:
+            East/north astrometry with the first-order propagated errors and
+            correlation.
         """
         time_d = jnp.asarray(time_d)
         sep, sep_err = (
@@ -129,7 +142,25 @@ class AstrometryData(eqx.Module):
         planet=None,
         max_n,
     ):
-        """Pad to ``max_n`` with an ``valid`` mask; ``planet`` defaults to 0."""
+        """Pad to ``max_n`` with an ``valid`` mask; ``planet`` defaults to 0.
+
+        Args:
+            time_d: Observation epochs in days from the system's epoch. Shape ``(N,)``.
+            east_arcsec: East offsets (arcsec). Shape ``(N,)``.
+            north_arcsec: North offsets (arcsec). Shape ``(N,)``.
+            east_err_arcsec: East offset uncertainties (arcsec). Shape ``(N,)``. Padded
+                rows hold 1.0.
+            north_err_arcsec: North offset uncertainties (arcsec). Shape ``(N,)``.
+                Padded
+                rows hold 1.0.
+            corr: East/north correlation coefficients. Shape ``(N,)``.
+            planet: Zero-based planet index per row. Shape ``(N,)``. Defaults to zero.
+            max_n: Row capacity of the result.
+
+        Returns:
+            The data padded to shape ``(max_n,)``, with ``valid`` true for the first N
+            rows.
+        """
         n = jnp.asarray(time_d).shape[0]
         if planet is None:
             planet = jnp.zeros(n, dtype=int)
@@ -146,7 +177,14 @@ class AstrometryData(eqx.Module):
 
     @classmethod
     def zeros(cls, max_n):
-        """Create an all-invalid placeholder (for model tracing)."""
+        """Create an all-invalid placeholder (for model tracing).
+
+        Args:
+            max_n: Row capacity of the placeholder.
+
+        Returns:
+            Data of shape ``(max_n,)`` with every row invalid and unit errors.
+        """
         return cls(
             time_d=jnp.zeros(max_n),
             east_arcsec=jnp.zeros(max_n),
@@ -279,6 +317,8 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
             ``orbix.system.System`` is also accepted, using ``solve`` and its public
             ``offset_arcsec`` observable; planet indices then refer to zero-based
             Jacobi chain order.
+        reads: Model paths a held build cached. Empty: the term reads the model
+            directly.
 
     Predictions have shape ``(2, T)``; invalid rows are returned as zeros.
     """
@@ -308,15 +348,40 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
         return loglike_relative_astrom(east, north, data), prediction
 
     def __call__(self, model):
-        """Return the scalar log-likelihood."""
+        """Return the scalar log-likelihood.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            Scalar log-likelihood of the valid rows.
+        """
         return self._score(model)[0]
 
     def predict(self, model):
-        """Return each row's planet offset at its own epoch, ``(2, T)``."""
+        """Return each row's planet offset at its own epoch, ``(2, T)``.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            East/north offsets (arcsec) of each row's planet at its epoch, zero on
+            invalid
+            rows. Shape ``(2, T)``.
+        """
         return self._score(model)[1]
 
     def draw(self, key, model) -> Self:
-        """Copy with correlated Gaussian positions at the same epochs."""
+        """Copy with correlated Gaussian positions at the same epochs.
+
+        Args:
+            key: JAX random key.
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            The term with east/north offsets drawn about the prediction, using the data
+            errors and correlation. Invalid rows are unchanged.
+        """
         return _sample_radec(key, self, self.predict(model))
 
     def linear_gaussian(self, model, planet=0) -> LinearGaussian:
@@ -334,6 +399,10 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
         Args:
             model: The model holding the system at ``system_path``.
             planet: Zero-based Jacobi chain index of the planet.
+
+        Returns:
+            The linear Gaussian form of the term in the four sky constants, with the
+            design in arcsec per AU.
         """
         dynamics = _dynamics(resolve(model, self.system_path))
         shape = jax.tree.map(lambda a: a[planet], dynamics.orbits)
@@ -361,6 +430,12 @@ class StellarAstrometryTerm(AbstractTerm):
     returns east/north offsets of shape ``(2, T)``; the empty path is the model itself.
     Data ``time_d`` is in days from the system's epoch.
     Invalid rows are sanitized before prediction and returned as zeros.
+
+    Attributes:
+        data: Stellar reflex astrometry in arcsec.
+        system_path: Model path of the system whose ``star_reflex(time_d)`` is read.
+        reads: Model paths a held build cached. Empty: the term reads the model
+            directly.
     """
 
     data: AstrometryData
@@ -385,13 +460,38 @@ class StellarAstrometryTerm(AbstractTerm):
         return loglike_stellar_astrom(*prediction, data), prediction
 
     def __call__(self, model):
-        """Return the scalar log-likelihood."""
+        """Return the scalar log-likelihood.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            Scalar log-likelihood of the valid rows.
+        """
         return self._score(model)[0]
 
     def predict(self, model):
-        """Return the stellar east/north path, ``(2, T)``."""
+        """Return the stellar east/north path, ``(2, T)``.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            East/north reflex offsets (arcsec) at each row's epoch, zero on invalid
+            rows.
+            Shape ``(2, T)``.
+        """
         return self._score(model)[1]
 
     def draw(self, key, model) -> Self:
-        """Copy with correlated Gaussian positions at the same epochs."""
+        """Copy with correlated Gaussian positions at the same epochs.
+
+        Args:
+            key: JAX random key.
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            The term with east/north offsets drawn about the prediction, using the data
+            errors and correlation. Invalid rows are unchanged.
+        """
         return _sample_radec(key, self, self.predict(model))

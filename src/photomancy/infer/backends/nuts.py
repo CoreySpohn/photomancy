@@ -84,7 +84,7 @@ class NUTS(AbstractBackend):
     coordinates of an orbit block are plain reals, so a chain may wander across copies
     of the same cell.
 
-    Args:
+    Attributes:
         n_warmup: Window-adaptation steps per chain.
         n_draws: Transitions per chain after warmup.
         n_chains: Number of chains, vectorized.

@@ -61,32 +61,71 @@ class ApertureFilter(AbstractFilter):
     The prepared map is the aperture flux map (convolution with a circular
     kernel); evaluation samples it with sub-pixel interpolation. This is the
     Mawet et al. (2014) signal measurement.
+
+    Attributes:
+        kernel: 2D aperture kernel convolved with the image to form the flux map.
+        order: Interpolation order used to sample the flux map.
     """
 
     kernel: jnp.ndarray
     order: int = eqx.field(static=True)
 
     def prepare(self, image: jnp.ndarray) -> jnp.ndarray:
-        """Aperture flux map of the image."""
+        """Aperture flux map of the image.
+
+        Args:
+            image: 2D science image.
+
+        Returns:
+            Aperture flux map, same shape as the image.
+        """
         return flux_map(image, self.kernel)
 
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
-        """Sample the flux map at one position."""
+        """Sample the flux map at one position.
+
+        Args:
+            filtered: Aperture flux map from prepare().
+            position_yx: (2,) position (y, x) in pixels.
+
+        Returns:
+            Scalar flux-map value interpolated at the position.
+        """
         return map_coordinates(filtered, position_yx.reshape(2, 1), order=self.order)[0]
 
 
 class GaussianFilter(AbstractFilter):
-    """Gaussian matched filter: separable convolution plus point sampling."""
+    """Gaussian matched filter: separable convolution plus point sampling.
+
+    Attributes:
+        kernel_1d: Normalized 1D Gaussian kernel applied along each axis.
+        order: Interpolation order used to sample the filtered image.
+    """
 
     kernel_1d: jnp.ndarray
     order: int = eqx.field(static=True)
 
     def prepare(self, image: jnp.ndarray) -> jnp.ndarray:
-        """Gaussian-filtered image."""
+        """Gaussian-filtered image.
+
+        Args:
+            image: 2D science image.
+
+        Returns:
+            Gaussian-filtered image, same shape as the image.
+        """
         return gaussian_filter_2d(image, self.kernel_1d)
 
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
-        """Sample the filtered image at one position."""
+        """Sample the filtered image at one position.
+
+        Args:
+            filtered: Filtered image from prepare().
+            position_yx: (2,) position (y, x) in pixels.
+
+        Returns:
+            Scalar filtered-image value interpolated at the position.
+        """
         return map_coordinates(filtered, position_yx.reshape(2, 1), order=self.order)[0]
 
 
@@ -102,6 +141,9 @@ class MapFilter(AbstractFilter):
     Non-finite map pixels are replaced by zero in prepare() so they cannot
     poison the reference statistics; mark the same pixels as unusable in the
     estimator's validity_map so the samplers drop them.
+
+    Attributes:
+        order: Interpolation order used to sample the map (0 nearest, 1 bilinear).
     """
 
     order: int = eqx.field(static=True)
@@ -116,11 +158,26 @@ class MapFilter(AbstractFilter):
         self.order = order
 
     def prepare(self, image: jnp.ndarray) -> jnp.ndarray:
-        """The statistic map with non-finite pixels set to zero."""
+        """The statistic map with non-finite pixels set to zero.
+
+        Args:
+            image: 2D precomputed statistic map.
+
+        Returns:
+            The map with non-finite pixels replaced by zero.
+        """
         return jnp.where(jnp.isfinite(image), image, 0.0)
 
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
-        """Sample the statistic map at one position."""
+        """Sample the statistic map at one position.
+
+        Args:
+            filtered: Statistic map from prepare().
+            position_yx: (2,) position (y, x) in pixels.
+
+        Returns:
+            Scalar map value interpolated at the position.
+        """
         return map_coordinates(filtered, position_yx.reshape(2, 1), order=self.order)[0]
 
 
@@ -143,6 +200,14 @@ class PSFTemplateFilter(AbstractFilter):
     The template is bound per candidate (see AbstractFilter.bind): the
     estimator queries the provider once per candidate and evaluates the
     same bound template at the candidate and at every reference position.
+
+    Attributes:
+        provider: Template source; its stamp_size sets the patch size.
+        order: Interpolation order for image patch extraction.
+        noise_variance: Optional (ny, nx) per-pixel variance of the detection
+            image, or None for the unweighted fit.
+        template: Stamp bound to the current candidate, or None until bind() is
+            called.
     """
 
     provider: AbstractTemplateProvider
@@ -173,7 +238,16 @@ class PSFTemplateFilter(AbstractFilter):
         self.template = template
 
     def bind(self, position_yx: jnp.ndarray) -> "PSFTemplateFilter":
-        """Fetch and attach the template for this candidate position."""
+        """Fetch and attach the template for this candidate position.
+
+        Args:
+            position_yx: (2,) candidate position (y, x) in pixels, passed to the
+                template provider.
+
+        Returns:
+            Copy of this filter with template set to the provider stamp at the
+            position.
+        """
         return eqx.tree_at(
             lambda f: f.template,
             self,
@@ -182,11 +256,27 @@ class PSFTemplateFilter(AbstractFilter):
         )
 
     def prepare(self, image: jnp.ndarray) -> jnp.ndarray:
-        """Identity: a position-dependent template admits no precompute."""
+        """Identity: a position-dependent template admits no precompute.
+
+        Args:
+            image: 2D science image.
+
+        Returns:
+            The image unchanged.
+        """
         return image
 
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
-        """Best-fit template amplitude at one position."""
+        """Best-fit template amplitude at one position.
+
+        Args:
+            filtered: Image returned by prepare().
+            position_yx: (2,) position (y, x) in pixels at which the patch is taken.
+
+        Returns:
+            Scalar best-fit template amplitude, in image units per unit template
+            amplitude.
+        """
         if self.template is None:
             raise ValueError(
                 "PSFTemplateFilter is unbound; DetectionEstimator binds it per "

@@ -27,6 +27,14 @@ class TargetData:
     A transmission mapping supplied at load time is the default for ``terms``.
     Observation containers retain ``time_d``, in days from ``epoch``, the same
     origin required by the system used to evaluate their terms.
+
+    Attributes:
+        target: Target metadata table from the file.
+        relative_astrometry: Relative astrometry rows, or None when there are none.
+        photometry: Photometry rows, or None when there are none.
+        band_names: Filter names in first-used order.
+        comparisons: Raw comparison, pending and pixel rows by table name.
+        epoch: Origin of the observation times.
     """
 
     target: dict
@@ -46,6 +54,15 @@ class TargetData:
         Photometric terms require the concrete reference system to split the
         integration at its spectral breaks before tracing the likelihood.
         Missing photometric filters raise ``ValueError`` naming those filters.
+
+        Args:
+            system_path: Model path of the system the terms read.
+            transmissions: Mapping from filter name to transmission. Defaults to the
+                mapping given to ``load_target``.
+            system: Concrete reference system, required when photometry is present.
+
+        Returns:
+            A tuple of the terms for the data that are present.
         """
         result = []
         if self.relative_astrometry is not None:
@@ -99,6 +116,16 @@ def load_target(
     to prevent counting the same measurement twice. Pending rows become term
     rows when requested; any unknown ``use`` value raises. ``transmissions`` may
     supply the default filter mapping for the returned object's ``terms`` method.
+
+    Args:
+        path: Path of the TOML file.
+        epoch: Origin of the observation times.
+        pixel_data_ids: Identifiers of the data used by image terms.
+        include_pending: Whether pending rows become term rows.
+        transmissions: Default mapping from filter name to transmission for ``terms``.
+
+    Returns:
+        The target metadata and converted observations.
     """
     with Path(path).open("rb") as stream:
         document = tomllib.load(stream)

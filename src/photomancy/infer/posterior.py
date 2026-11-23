@@ -357,6 +357,9 @@ class Posterior(eqx.Module):
         Args:
             key: PRNG key.
             n: Static number of draws, default the stored count.
+
+        Returns:
+            The resampled posterior, with uniform log weights ``-log(n)``.
         """
         self._require_slice("resample")
         lw = jnp.asarray(self.log_weights)
@@ -504,6 +507,10 @@ class Posterior(eqx.Module):
             batch_size: Draws whose priors are evaluated at once (a ``jax.lax.map``
                 chunk, the same values to rounding), default all at once.
 
+        Returns:
+            The reweighted posterior on the new fit, with ``info`` a
+            :class:`ReweightInfo`.
+
         Raises:
             ValueError: On the host, for a static fault in ``priors``, a NaN
                 ``min_n_eff`` or ``max_khat``, or gate arguments that do not match
@@ -590,6 +597,10 @@ class Posterior(eqx.Module):
             max_khat: As in :meth:`with_priors`.
             batch_size: As in :meth:`with_priors`, for the term evaluations.
 
+        Returns:
+            The reweighted posterior on the new fit, with ``info`` a
+            :class:`ReweightInfo`.
+
         Raises:
             ValueError: On the host, for a term whose reads meet a free path, a NaN
                 gate limit, or gate arguments that do not match ``kind``.
@@ -623,6 +634,10 @@ class Posterior(eqx.Module):
             max_khat: As in :meth:`with_priors`.
             batch_size: As in :meth:`with_priors`, for the term evaluations.
 
+        Returns:
+            The reweighted posterior on the new fit, with ``info`` a
+            :class:`ReweightInfo`.
+
         Raises:
             IndexError: For an ``index`` outside ``fit.terms``.
             ValueError: As :meth:`append_term`.
@@ -635,7 +650,14 @@ class Posterior(eqx.Module):
     # ----- reading the draws through the fit -------------------------------------
 
     def model_at(self, i):
-        """Return the model of stored draw ``i``, every held leaf included."""
+        """Return the model of stored draw ``i``, every held leaf included.
+
+        Args:
+            i: Index of the stored draw along the draw axis.
+
+        Returns:
+            The base model with the free entries of draw ``i`` written.
+        """
         self._require_slice("model_at")
         x = jax.tree.map(lambda a: jnp.take(a, i, axis=0), self.samples)
         return self.fit.model_at(x)
@@ -660,6 +682,10 @@ class Posterior(eqx.Module):
             fn: ``model -> (mean, variance)``.
             batch_size: Draws evaluated at once (``jax.lax.map`` chunk), default all
                 at once with ``jax.vmap``.
+
+        Returns:
+            A :class:`Forecast` of the weighted mean, noise variance and spread
+            variance.
         """
         self._require_slice("forecast")
         fit = self.fit
@@ -695,6 +721,10 @@ def ravel_samples(posterior, keys=None):
     Args:
         posterior: A :class:`Posterior`.
         keys: Entries to flatten, default all of ``posterior.samples``.
+
+    Returns:
+        ``(flat, unravel)``: the draws as an array ``(*batch, N, D)`` and the
+        function that maps an array ``(..., D)`` back to the entry dict.
     """
     samples = (
         posterior.samples

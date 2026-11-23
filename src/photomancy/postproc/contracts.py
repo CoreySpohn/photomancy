@@ -102,7 +102,11 @@ class FrameSet(eqx.Module):
         return self.frames / self.frame_time_s[:, None, None]
 
     def coadd(self) -> jnp.ndarray:
-        """Exposure-weighted coadd: total electrons / total time, (ny, nx) e-/s."""
+        """Exposure-weighted coadd: total electrons / total time, (ny, nx) e-/s.
+
+        Returns:
+            Coadded count rate in electrons per second, shape (ny, nx).
+        """
         return jnp.sum(self.frames, axis=0) / jnp.sum(self.frame_time_s)
 
 

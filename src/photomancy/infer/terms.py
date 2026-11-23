@@ -29,6 +29,8 @@ class ForwardTerm(AbstractTerm):
             ``eqx.Module`` for the same reason as ``forward``. Draws need one with a
             ``draw(key, predicted)`` method that returns the likelihood holding the
             drawn data.
+        reads: Empty tuple: the term holds no build made from model values, so it
+            reads no model path.
     """
 
     forward: eqx.Module
@@ -46,11 +48,25 @@ class ForwardTerm(AbstractTerm):
                 )
 
     def predict(self, model):
-        """Return the forward model's output at ``model``."""
+        """Return the forward model's output at ``model``.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            The output of ``forward`` at ``model``.
+        """
         return self.forward(model)
 
     def __call__(self, model):
-        """Return the scalar log likelihood of the data at ``model``."""
+        """Return the scalar log likelihood of the data at ``model``.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            Scalar log likelihood of the held data at ``model``.
+        """
         return self.likelihood(self.forward(model))
 
     def fisher_root(self, model):
@@ -58,6 +74,12 @@ class ForwardTerm(AbstractTerm):
 
         Available when the likelihood is a :class:`MaskedLogLikelihood` (the Gaussian
         and the robust builders); any other likelihood raises ``NotImplementedError``.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            The likelihood's flat Fisher root of the forward output.
         """
         if not hasattr(self.likelihood, "fisher_root"):
             raise NotImplementedError(
@@ -67,6 +89,13 @@ class ForwardTerm(AbstractTerm):
 
     def draw(self, key, model) -> Self:
         """Copy holding data drawn from the likelihood at ``model``.
+
+        Args:
+            key: PRNG key for the data realization.
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            A copy of the term whose likelihood holds the drawn data.
 
         Raises:
             TypeError: When the likelihood has no ``draw(key, predicted)`` method.

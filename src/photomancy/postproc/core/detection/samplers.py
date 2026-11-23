@@ -19,6 +19,12 @@ class ApertureSampler(AbstractSampler):
     circle, spaced by the aperture diameter with an exclusion buffer on both
     sides of the candidate. The validity map is sampled nearest-neighbor with
     off-chip positions invalid, exactly matching the fused v1.1.1 core.
+
+    Attributes:
+        fwhm: Aperture diameter (resolution element) in pixels.
+        exclusion_buffer: Gap between the candidate and the first and last
+            reference aperture, in units of the angular step.
+        max_apertures: Static size of the sample buffer.
     """
 
     fwhm: float
@@ -51,7 +57,21 @@ class ApertureSampler(AbstractSampler):
         validity_map: jnp.ndarray,
         center_yx: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Sample the filter response at same-radius reference apertures."""
+        """Sample the filter response at same-radius reference apertures.
+
+        Args:
+            filtered: Output of filt.prepare() for the current image.
+            position_yx: (2,) candidate position (y, x) in pixels.
+            filt: Filter evaluated at each reference aperture.
+            validity_map: (ny, nx) map, 1 = usable pixel, 0 = excluded.
+            center_yx: (2,) star center (y, x) in pixels.
+
+        Returns:
+            Tuple of (samples, mask, geom_ok): the (max_apertures,) filter responses
+            at the reference apertures, the boolean mask of valid references, and a
+            scalar bool that is True when the candidate lies at least one fwhm from
+            the star center.
+        """
         cy, cx = center_yx[0], center_yx[1]
         py, px = position_yx[0], position_yx[1]
 
@@ -101,6 +121,14 @@ class AnnulusSampler(AbstractSampler):
     template)) while the annulus spread is the raw-pixel sigma, so the test
     is conservative or anti-conservative depending on that normalization.
     Same-scale noise references for such filters come from ApertureSampler.
+
+    Attributes:
+        fwhm: Resolution element in pixels; the candidate exclusion disk has
+            radius 1.5 fwhm and the automatic annulus half-width is one fwhm.
+        annulus_inner: Inner annulus radius in pixels; negative selects the
+            automatic bound.
+        annulus_outer: Outer annulus radius in pixels; negative selects the
+            automatic bound.
     """
 
     fwhm: float
@@ -132,7 +160,20 @@ class AnnulusSampler(AbstractSampler):
         validity_map: jnp.ndarray,
         center_yx: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Collect every valid annulus pixel of the prepared image."""
+        """Collect every valid annulus pixel of the prepared image.
+
+        Args:
+            filtered: Prepared image whose pixels are the noise samples.
+            position_yx: (2,) candidate position (y, x) in pixels.
+            filt: Unused; the samples are the prepared image's own pixels.
+            validity_map: (ny, nx) map, 1 = usable pixel, 0 = excluded.
+            center_yx: (2,) star center (y, x) in pixels.
+
+        Returns:
+            Tuple of (samples, mask, geom_ok): the flattened prepared image, the
+            flattened boolean mask of valid annulus pixels, and a scalar bool that is
+            always True.
+        """
         del filt  # Annulus samples are the prepared image's own pixels.
         ny, nx = filtered.shape
         cy, cx = center_yx[0], center_yx[1]

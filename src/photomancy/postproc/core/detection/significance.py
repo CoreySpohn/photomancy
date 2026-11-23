@@ -24,6 +24,9 @@ class TwoSampleTTest(AbstractTest):
     Bessel-corrected std, distributed as Student-t with n - 1 degrees of
     freedom under the null. Fewer than 3 valid references NaN the statistic;
     dof is reported regardless.
+
+    Attributes:
+        kind: Statistic label, "two_sample_t".
     """
 
     kind: ClassVar[str] = "two_sample_t"
@@ -34,7 +37,18 @@ class TwoSampleTTest(AbstractTest):
         samples: jnp.ndarray,
         mask: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Small-sample-corrected t statistic, its FPF, and dof."""
+        """Small-sample-corrected t statistic, its FPF, and dof.
+
+        Args:
+            signal: Scalar filter response at the candidate.
+            samples: Reference-aperture filter responses from the sampler.
+            mask: Boolean validity mask over samples.
+
+        Returns:
+            Tuple of scalars (statistic, fpf, dof): the t statistic (NaN with fewer
+            than 3 valid references), its Student-t upper-tail probability, and the
+            number of valid references minus one.
+        """
         n_valid = jnp.sum(mask)
         bg_mean = masked_mean(samples, mask)
         bg_std = masked_std(samples, mask, mean=bg_mean)
@@ -53,6 +67,9 @@ class AnnulusSigmaTest(AbstractTest):
     masked samples and the v1.1.1 fallbacks (mean 0, std 1) when the annulus
     is empty; the null is standard normal (large-sample convention), so the
     degrees of freedom are infinite.
+
+    Attributes:
+        kind: Statistic label, "annulus_sigma".
     """
 
     kind: ClassVar[str] = "annulus_sigma"
@@ -63,7 +80,18 @@ class AnnulusSigmaTest(AbstractTest):
         samples: jnp.ndarray,
         mask: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Sigma statistic against the annulus, its Gaussian FPF, and dof."""
+        """Sigma statistic against the annulus, its Gaussian FPF, and dof.
+
+        Args:
+            signal: Scalar filter response at the candidate.
+            samples: Annulus pixel values from the sampler.
+            mask: Boolean validity mask over samples.
+
+        Returns:
+            Tuple of scalars (statistic, fpf, dof): the sigma statistic, its
+            standard-normal upper-tail probability, and infinity for the degrees of
+            freedom.
+        """
         bg_mean = nanmasked_mean(samples, mask)
         bg_std = nanmasked_population_std(samples, mask, mean=bg_mean)
         bg_mean = jnp.nan_to_num(bg_mean, nan=0.0)
@@ -81,6 +109,9 @@ class GrubbsTest(AbstractTest):
     whether the pooled MAXIMUM is an outlier (Grubbs 1950): a blind-search
     statistic free of aperture-placement bias. dof is N - 2 for pooled size
     N; a pool smaller than 3 NaNs the statistic.
+
+    Attributes:
+        kind: Statistic label, "grubbs_g".
     """
 
     kind: ClassVar[str] = "grubbs_g"
@@ -91,7 +122,18 @@ class GrubbsTest(AbstractTest):
         samples: jnp.ndarray,
         mask: jnp.ndarray,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        """Pooled-maximum Grubbs statistic, its ESD FPF, and dof."""
+        """Pooled-maximum Grubbs statistic, its ESD FPF, and dof.
+
+        Args:
+            signal: Scalar filter response at the candidate.
+            samples: Reference sample buffer from the sampler.
+            mask: Boolean validity mask over samples.
+
+        Returns:
+            Tuple of scalars (statistic, fpf, dof): the Grubbs statistic of the pooled
+            maximum (NaN for a pool smaller than 3), its extreme studentized deviate
+            false positive fraction, and the pooled size minus two.
+        """
         n_refs = jnp.sum(mask)
         n_pooled = n_refs + 1
         pooled_sum = jnp.sum(samples * mask) + signal

@@ -24,6 +24,11 @@ def midpoint_rule(low, high, n):
 
     Returns:
         ``(nodes, weights)``, both ``(n,)``; the weights are the cell width.
+
+    Args:
+        low: Lower end of the interval.
+        high: Upper end of the interval.
+        n: Number of cells and nodes.
     """
     width = (high - low) / n
     nodes = low + width * (jnp.arange(n) + 0.5)
@@ -35,6 +40,11 @@ def gauss_legendre_rule(low, high, n):
 
     Returns:
         ``(nodes, weights)``, both ``(n,)``.
+
+    Args:
+        low: Lower end of the interval.
+        high: Upper end of the interval.
+        n: Number of nodes.
     """
     x, w = np.polynomial.legendre.leggauss(n)
     half = 0.5 * (high - low)
@@ -56,7 +66,7 @@ class Grid(AbstractBackend):
     are those of ``fit.sample_prior`` (a block's own, unconstrained, coordinates), so
     choose the nodes in them and cover the posterior mass.
 
-    Args:
+    Attributes:
         axes: ``{name: (nodes, weights)}``, one entry per scalar degree of freedom.
     """
 

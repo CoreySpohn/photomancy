@@ -689,6 +689,9 @@ class _RealLogProb(eqx.Module):
 
     ``value_and_aux`` also returns the prediction of every term at ``u`` (``None`` for
     a term without one), the pre-step images a ``closed_form`` reads.
+
+    Attributes:
+        fit: The fit whose ``real_log_prob`` is the objective.
     """
 
     fit: Fit
@@ -697,7 +700,15 @@ class _RealLogProb(eqx.Module):
         return self.fit.real_log_prob(u)
 
     def value_and_aux(self, u):
-        """Return ``(real_log_prob(u), per-term predictions)``."""
+        """Return ``(real_log_prob(u), per-term predictions)``.
+
+        Args:
+            u: Unconstrained entry dict of one draw.
+
+        Returns:
+            ``(real_log_prob(u), predictions)``, the scalar objective and the tuple of
+            per-term predictions.
+        """
         model = self.fit.model_at(self.fit.from_real(u)[0])
         preds = []
         for term in self.fit.terms:
@@ -777,7 +788,7 @@ class MAP(AbstractBackend):
     set raises ``ValueError`` on the host, and anything but a ``Fit`` raises
     ``TypeError``.
 
-    Args:
+    Attributes:
         n_steps: L-BFGS iterations of the default stage.
         labels: Group label PyTree from :func:`group_labels`, or ``None`` for one
             group ``"all"`` over every leaf.

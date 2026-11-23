@@ -14,7 +14,14 @@ __all__ = ["contrast_forward"]
 
 
 class _ContrastForward(eqx.Module):
-    """``pm -> reflected-light contrast spectrum`` at a fixed observing geometry."""
+    """``pm -> reflected-light contrast spectrum`` at a fixed observing geometry.
+
+    Attributes:
+        phase_angle_rad: Orbital phase angles in radians, shape ``(K, 1)``.
+        dist_AU: Star-planet distances in AU, shape ``(K, 1)``.
+        wavelengths_nm: Wavelength grid in nm, shape ``(n_wavelengths,)``.
+        Rp_Rearth: Planet radii in Earth radii, shape ``(K,)``.
+    """
 
     phase_angle_rad: jnp.ndarray
     dist_AU: jnp.ndarray

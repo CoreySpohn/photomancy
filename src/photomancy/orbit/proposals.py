@@ -44,6 +44,13 @@ def eccentricity_table(block):
     of the orbit proposals; its density is piecewise constant, :func:`log_density_e`.
     The law's own inverse distribution function iterates a root find that costs seconds
     per ``2**17`` draws, the distribution function costs a millisecond.
+
+    Args:
+        block: The ``ThieleInnesBlock`` whose law gives the eccentricity distribution.
+
+    Returns:
+        The grid of eccentricities, shape ``(n + 1,)``, and the distribution function of
+        the law on that grid, same shape.
     """
     low, high = block.law.support()["e"]
     grid = jnp.linspace(low, high, _TABLE + 1)
@@ -51,13 +58,30 @@ def eccentricity_table(block):
 
 
 def draw_eccentricity(key, table, n):
-    """``n`` eccentricities from the table of :func:`eccentricity_table`."""
+    """``n`` eccentricities from the table of :func:`eccentricity_table`.
+
+    Args:
+        key: PRNG key.
+        table: The ``(grid, cdf)`` pair from :func:`eccentricity_table`.
+        n: Number of draws.
+
+    Returns:
+        Eccentricities, shape ``(n,)``.
+    """
     grid, cdf = table
     return jnp.interp(jax.random.uniform(key, (n,)), cdf, grid)
 
 
 def log_density_e(e, table):
-    """Log density of :func:`draw_eccentricity` at ``e`` (zero outside the table)."""
+    """Log density of :func:`draw_eccentricity` at ``e`` (zero outside the table).
+
+    Args:
+        e: Eccentricities, any shape.
+        table: The ``(grid, cdf)`` pair from :func:`eccentricity_table`.
+
+    Returns:
+        Log density of the piecewise-constant eccentricity law at ``e``, shape of ``e``.
+    """
     grid, cdf = table
     k = jnp.clip(jnp.searchsorted(grid, e) - 1, 0, _TABLE - 1)
     mass = cdf[k + 1] - cdf[k]
@@ -89,7 +113,15 @@ class ShapePriorProposal(AbstractDensityProposal):
     bandwidth: float = eqx.field(static=True, default=2.0)
 
     def log_prob(self, z, fit):
-        """Log density of ``z (n, 3)`` in the stored coordinates."""
+        """Log density of ``z (n, 3)`` in the stored coordinates.
+
+        Args:
+            z: Stored coordinates of the three block shape entries, shape ``(n, 3)``.
+            fit: The :class:`~photomancy.orbit.completion.Completion` of the fit.
+
+        Returns:
+            Log density of each row, shape ``(n,)``.
+        """
         block = fit.block
         y = jnp.concatenate([z, _pad(z)], -1)
         x, log_jac = block.chart.constrain(y, block.chart_support(fit.model))
@@ -101,7 +133,17 @@ class ShapePriorProposal(AbstractDensityProposal):
         return log_x + log_jac
 
     def sample(self, key, fit, n):
-        """Draw ``n`` points; return ``(z, log_q)``."""
+        """Draw ``n`` points; return ``(z, log_q)``.
+
+        Args:
+            key: PRNG key.
+            fit: The :class:`~photomancy.orbit.completion.Completion` of the fit.
+            n: Number of draws.
+
+        Returns:
+            The draws ``z``, shape ``(n, 3)``, and their log density ``log_q``, shape
+            ``(n,)``.
+        """
         block = fit.block
         k_n, k_e, k_a = jax.random.split(key, 3)
         lo, hi = block.chart_support(fit.model)["ln_size"]
@@ -116,7 +158,19 @@ class ShapePriorProposal(AbstractDensityProposal):
         return z, self.log_prob(z, fit)
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
-        """Refit a mixture on the cloud, with this prior as the defensive component."""
+        """Refit a mixture on the cloud, with this prior as the defensive component.
+
+        Args:
+            key: PRNG key.
+            z: Draws in the stored shape coordinates, shape ``(N, 3)``.
+            log_weights: Their log weights, shape ``(N,)``.
+            fit: The :class:`~photomancy.orbit.completion.Completion` of the fit.
+            n_centers: Kernels of the mixture.
+            defensive_fraction: Share of the defensive component.
+
+        Returns:
+            A :class:`~photomancy.infer.DefensiveProposal` over the refit mixture.
+        """
         mixture = MixtureProposal.from_cloud(
             key,
             z,
@@ -276,7 +330,18 @@ class ScaleRotateProposal(AbstractDensityProposal):
         return z, log_q, inside
 
     def sample(self, key, fit, n):
-        """Draw ``n`` orbits; return ``(z, log_q)`` (NaN and ``-inf`` when dead)."""
+        """Draw ``n`` orbits; return ``(z, log_q)`` (NaN and ``-inf`` when dead).
+
+        Args:
+            key: PRNG key.
+            fit: The fit with one ``ThieleInnesBlock`` and one
+                ``RelativeAstrometryTerm``.
+            n: Number of draws.
+
+        Returns:
+            The flat draws ``z``, shape ``(n, d)``, and their log density ``log_q``,
+            shape ``(n,)``.
+        """
         z, log_q, inside = self._draw(key, fit, n)
         return z, jnp.where(inside, log_q, -jnp.inf)
 
@@ -284,6 +349,18 @@ class ScaleRotateProposal(AbstractDensityProposal):
         """Draw and weigh ``n`` orbits; a draw outside the period bounds is dead.
 
         The proposal has a density, so ``valid`` (the fourth value) is true.
+
+        Args:
+            key: PRNG key.
+            fit: The fit with one ``ThieleInnesBlock`` and one
+                ``RelativeAstrometryTerm``.
+            n: Number of draws.
+            batch_size: Draws per batch of the fit's density.
+
+        Returns:
+            The flat draws ``z``, shape ``(n, d)``, their log weights, shape ``(n,)``,
+            ``fit.log_density`` at the draws, shape ``(n,)``, and the boolean scalar
+            ``valid``.
         """
         z, log_q, inside = self._draw(key, fit, n)
         x, volume = fit.from_flat(z)
@@ -293,7 +370,16 @@ class ScaleRotateProposal(AbstractDensityProposal):
         return z, log_w, log_target, jnp.asarray(True)
 
     def log_prob(self, z, fit):
-        """Log density of flat vectors ``z (n, d)`` (zero outside the period bounds)."""
+        """Log density of flat vectors ``z (n, d)`` (zero outside the period bounds).
+
+        Args:
+            z: Flat vectors, shape ``(n, d)``.
+            fit: The fit with one ``ThieleInnesBlock`` and one
+                ``RelativeAstrometryTerm``.
+
+        Returns:
+            Log density of each row, shape ``(n,)``.
+        """
         block, data, row, position, system, _, inner, epoch = self._setup(fit)
         support = block.chart_support(fit.model)
         x, log_jac = block.chart.constrain(z[:, jnp.asarray(position)], support)

@@ -47,7 +47,15 @@ def _float64(value):
 
 
 class ReportRule(eqx.Module):
-    """Static detection threshold and observable-based centroid error rule."""
+    """Static detection threshold and observable-based centroid error rule.
+
+    Attributes:
+        threshold: Detection threshold, in multiples of the noise level of the limit
+            counts.
+        kappa: Scale of the centroid error, in multiples of the diffraction scale
+            divided by the signal-to-noise ratio.
+        corr: Correlation coefficient of the east and north centroid errors.
+    """
 
     threshold: float = eqx.field(static=True, default=5.0)
     kappa: float = eqx.field(static=True, default=1.0)
@@ -63,18 +71,44 @@ class ReportRule(eqx.Module):
             raise ValueError("corr must be finite and lie in (-1, 1)")
 
     def detection_limit(self, limit_counts):
-        """Minimum reported counts for a detection at the given noise level."""
+        """Minimum reported counts for a detection at the given noise level.
+
+        Args:
+            limit_counts: Planet-free noise level in counts. Shape ``(R,)`` or scalar.
+
+        Returns:
+            Minimum reported counts for a detection, with the shape of ``limit_counts``.
+        """
         return self.threshold * limit_counts
 
     def log_null_probability(self, limit_counts, prediction):
-        """Log probability of counts below the detection threshold, shape (R,)."""
+        """Log probability of counts below the detection threshold, shape (R,).
+
+        Args:
+            limit_counts: Planet-free noise level in counts. Shape ``(R,)`` or scalar.
+            prediction: Predicted counts and variance for each row.
+
+        Returns:
+            Log probability that the counts fall below the detection limit, shape
+            ``(R,)``.
+        """
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
         return log_ndtr(
             (self.detection_limit(limit_counts) - prediction.counts) / noise
         )
 
     def log_counts_density(self, counts, limit_counts, prediction):
-        """Unconditional counts log density on the detection region, shape (R,)."""
+        """Unconditional counts log density on the detection region, shape (R,).
+
+        Args:
+            counts: Reported counts. Shape ``(R,)``.
+            limit_counts: Planet-free noise level in counts. Shape ``(R,)`` or scalar.
+            prediction: Predicted counts and variance for each row.
+
+        Returns:
+            Log density of the counts, minus infinity below the detection limit and NaN
+            where ``counts`` is NaN. Shape ``(R,)``.
+        """
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
         value = norm.logpdf(counts, prediction.counts, noise)
         return jnp.where(
@@ -90,6 +124,20 @@ class ReportData(eqx.Module):
     ``planned`` stores valid exposure metadata with zero placeholders for outcomes.
     Call ``ReportTerm.draw`` to realize these rows before treating them as data.
     Null outcome floats are zero. Padding may contain arbitrary stored values.
+
+    Attributes:
+        time_d: Exposure epochs in days from the system's epoch.
+        science_s: Science exposure time (s).
+        limit_counts: Planet-free noise level of the exposure (counts).
+        mode: Integer index of the observing mode in the count-rate table.
+        valid: True for real rows, False for padding.
+        is_detected: True where the exposure reported a detection.
+        counts: Reported planet counts of a detection, zero for a null.
+        east_arcsec: Reported east offset of a detection (arcsec).
+        north_arcsec: Reported north offset of a detection (arcsec).
+        east_err_arcsec: East offset uncertainty of a detection (arcsec).
+        north_err_arcsec: North offset uncertainty of a detection (arcsec).
+        corr: East/north correlation coefficient of a detection.
     """
 
     time_d: jax.Array = eqx.field(converter=_float64)
@@ -114,7 +162,14 @@ class ReportData(eqx.Module):
 
     @classmethod
     def zeros(cls, n_rows) -> Self:
-        """All-invalid rows with zero payloads."""
+        """All-invalid rows with zero payloads.
+
+        Args:
+            n_rows: Number of rows, R.
+
+        Returns:
+            Rows of shape ``(R,)`` with every row invalid and every payload zero.
+        """
         z = jnp.zeros(n_rows, jnp.float64)
         return cls(
             z,
@@ -133,7 +188,17 @@ class ReportData(eqx.Module):
 
     @classmethod
     def planned(cls, time_d, science_s, limit_counts, mode) -> Self:
-        """Valid exposure metadata, with no outcome yet; each input has shape (R,)."""
+        """Valid exposure metadata, with no outcome yet; each input has shape (R,).
+
+        Args:
+            time_d: Exposure epochs in days from the system's epoch.
+            science_s: Science exposure time (s).
+            limit_counts: Planet-free noise level of each exposure (counts).
+            mode: Integer observing-mode index per exposure.
+
+        Returns:
+            Valid rows holding this metadata, with zero outcomes.
+        """
         rows = cls.zeros(jnp.asarray(time_d).size)
         return cls(
             time_d,
@@ -158,6 +223,9 @@ class ReportData(eqx.Module):
 
         Args:
             planet: Index of the planet the rows report (the predictor's ``planet``).
+
+        Returns:
+            Relative astrometry data of shape ``(R,)``, valid on the detected rows.
         """
         return AstrometryData(
             time_d=self.time_d,
@@ -172,7 +240,14 @@ class ReportData(eqx.Module):
 
 
 class ReportPrediction(eqx.Module):
-    """Expected counts, total count variance and east/north position, each (R,)."""
+    """Expected counts, total count variance and east/north position, each (R,).
+
+    Attributes:
+        counts: Expected planet counts per row.
+        variance: Total count variance per row (counts^2).
+        east_arcsec: Predicted east offset per row (arcsec).
+        north_arcsec: Predicted north offset per row (arcsec).
+    """
 
     counts: jax.Array = eqx.field(converter=_float64)
     variance: jax.Array = eqx.field(converter=_float64)
@@ -183,7 +258,17 @@ class ReportPrediction(eqx.Module):
     def from_limit(
         cls, counts, limit_counts, east_arcsec=None, north_arcsec=None
     ) -> Self:
-        """Combine planet-free variance and shot noise, with optional positions."""
+        """Combine planet-free variance and shot noise, with optional positions.
+
+        Args:
+            counts: Expected planet counts per row.
+            limit_counts: Planet-free noise level per row (counts).
+            east_arcsec: Predicted east offset per row (arcsec). Defaults to zero.
+            north_arcsec: Predicted north offset per row (arcsec). Defaults to zero.
+
+        Returns:
+            A prediction whose variance is ``limit_counts**2 + counts``.
+        """
         return cls(
             counts,
             limit_counts**2 + counts,
@@ -197,7 +282,15 @@ class AbstractReportPredictor(eqx.Module):
 
     @abstractmethod
     def __call__(self, model, rows: ReportData) -> ReportPrediction:
-        """Return one prediction per row, without reading the outcomes."""
+        """Return one prediction per row, without reading the outcomes.
+
+        Args:
+            model: The model holding the system to read.
+            rows: The exposure rows to predict.
+
+        Returns:
+            The predicted counts, variance and position of each row.
+        """
         raise NotImplementedError
 
 
@@ -211,6 +304,17 @@ class CountRateTable(eqx.Module):
     the system and these responses, as for PhotometryTerm.
     Diffraction scales have shape (n_modes,). ``epoch`` is the static origin of
     the report times; a predictor raises if the model's epoch differs.
+
+    Attributes:
+        separation_arcsec: Separation knots of each mode (arcsec). Shape
+            ``(n_modes, P)``.
+        counts_per_contrast_s: Expected planet counts per unit linear contrast per
+            second at each knot. Shape ``(n_modes, P)``.
+        lod_arcsec: Diffraction scale lambda/D of each mode (arcsec). Shape
+            ``(n_modes,)``.
+        quadrature: Host-built spectral quadrature, one band per mode.
+        transmissions: Filter response of each mode.
+        epoch: Origin of the report times.
     """
 
     separation_arcsec: jax.Array = eqx.field(converter=_float64)
@@ -237,7 +341,12 @@ class CountRateTable(eqx.Module):
 
 
 class PrecomputedReportPredictor(AbstractReportPredictor):
-    """Read the bare system model using the astrometry/photometry term helpers."""
+    """Read the bare system model using the astrometry/photometry term helpers.
+
+    Attributes:
+        table: The count-rate table to interpolate.
+        planet: Zero-based index of the planet the rows report.
+    """
 
     table: CountRateTable
     planet: int = eqx.field(static=True)
@@ -248,7 +357,16 @@ class PrecomputedReportPredictor(AbstractReportPredictor):
             raise ValueError("planet must be a nonnegative static integer")
 
     def __call__(self, model, rows: ReportData) -> ReportPrediction:
-        """Predict linear-interpolated counts and sky positions for all rows."""
+        """Predict linear-interpolated counts and sky positions for all rows.
+
+        Args:
+            model: The model holding the system, whose epoch must match the table's.
+            rows: The exposure rows to predict.
+
+        Returns:
+            The predicted counts, variance and position of each row, zero counts outside
+            the tabulated separations.
+        """
         if model.epoch != self.table.epoch:
             raise ValueError(
                 f"count-rate table epoch {self.table.epoch} differs from "
@@ -352,10 +470,17 @@ class ReportTerm(AbstractProposingTerm):
     likelihood.
 
     Attributes:
+        rule: Detection threshold and centroid error rule.
+        data: The exposure rows, planned or realized.
+        predictor: Predicts counts, variance and position for each row.
+        lod_arcsec: Diffraction scale lambda/D of each row (arcsec). Shape ``(R,)``.
+            Required unless the predictor is precomputed.
         leaf_path: Path of the positive photometric leaf (a radius, say), or ``None``
             when the term offers no leaf proposal.
         leaf_exponent: Power of the leaf in the expected counts (2 for a radius). It
             shapes the proposal only; the likelihood reads the model.
+        reads: Model paths a held build cached. Empty: the term reads the model
+            directly.
     """
 
     rule: ReportRule
@@ -410,7 +535,14 @@ class ReportTerm(AbstractProposingTerm):
         return jnp.where(rows.valid, value, 0.0), prediction
 
     def __call__(self, model) -> jax.Array:
-        """Sum valid null log probabilities and detection counts log densities."""
+        """Sum valid null log probabilities and detection counts log densities.
+
+        Args:
+            model: The model holding the system read by the predictor.
+
+        Returns:
+            Scalar log-likelihood of the valid rows.
+        """
         return jnp.sum(self._row_density(model, self.data)[0])
 
     def leaf_proposal(self, model) -> LeafProposal:
@@ -423,6 +555,13 @@ class ReportTerm(AbstractProposingTerm):
 
         Raises:
             ValueError: With no ``leaf_path``, or a leaf that is not a single value.
+
+        Args:
+            model: The model holding the system and the photometric leaf at
+                ``leaf_path``.
+
+        Returns:
+            A one-component proposal for the leaf.
         """
         if self.leaf_path is None:
             raise ValueError("this ReportTerm has no leaf_path to propose")
@@ -449,11 +588,26 @@ class ReportTerm(AbstractProposingTerm):
         )
 
     def predict(self, model) -> ReportPrediction:
-        """Return the predictor's report for every row."""
+        """Return the predictor's report for every row.
+
+        Args:
+            model: The model holding the system read by the predictor.
+
+        Returns:
+            Predicted counts, variance and position of every row.
+        """
         return self._row_density(model, self.data)[1]
 
     def draw(self, key, model) -> Self:
-        """Draw counts then two position normals per row, preserving padding."""
+        """Draw counts then two position normals per row, preserving padding.
+
+        Args:
+            key: JAX random key.
+            model: The model holding the system read by the predictor.
+
+        Returns:
+            The term with a drawn report: outcomes, positions and errors on valid rows.
+        """
         rows = self.data
         valid = rows.valid & (rows.science_s > 0) & (rows.limit_counts > 0)
         clean = _prediction_rows(eqx.tree_at(lambda r: r.valid, rows, valid))
@@ -523,7 +677,16 @@ class ReportTerm(AbstractProposingTerm):
         return eqx.tree_at(lambda t: t.data, self, sampled)
 
     def surrogate(self, table, planet) -> Self:
-        """Copy with a precomputed predictor and its diffraction scales."""
+        """Copy with a precomputed predictor and its diffraction scales.
+
+        Args:
+            table: Count-rate table for the precomputed predictor.
+            planet: Zero-based index of the planet the rows report.
+
+        Returns:
+            A term with the same rule, data and leaf settings and a precomputed
+            predictor.
+        """
         return ReportTerm(
             self.rule,
             self.data,
@@ -533,7 +696,15 @@ class ReportTerm(AbstractProposingTerm):
         )
 
     def log_ratio(self, model, other) -> jax.Array:
-        """Per-row log p(this) - log p(other), both scored on this term's rows."""
+        """Per-row log p(this) - log p(other), both scored on this term's rows.
+
+        Args:
+            model: The model holding the system read by both predictors.
+            other: Another term to score on this term's rows.
+
+        Returns:
+            Per-row difference of log densities, shape ``(R,)``.
+        """
         return (
             self._row_density(model, self.data)[0]
             - other._row_density(model, self.data)[0]

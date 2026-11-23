@@ -16,7 +16,15 @@ from photomancy.infer.posterior import Posterior
 
 
 def draw_template(fit):
-    """Zeros with the structure and shapes of one draw ``x`` of ``fit`` (float64)."""
+    """Zeros with the structure and shapes of one draw ``x`` of ``fit`` (float64).
+
+    Args:
+        fit: The fit whose prior draw sets the structure and shapes.
+
+    Returns:
+        Entry dict of zeros, one leaf (or block of leaves) per entry of a draw of
+        ``fit``, in the stored coordinates.
+    """
     shapes = eqx.filter_eval_shape(lambda k: fit.sample_prior(k), jax.random.key(0))
     return jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), shapes)
 
@@ -26,6 +34,14 @@ def flat_problem(fit):
 
     ``logdensity(z)`` is ``fit.real_log_prob(unravel(z))``, the density in ``u``
     including the log volume of the map from the stored coordinates.
+
+    Args:
+        fit: The fit whose unconstrained density is flattened.
+
+    Returns:
+        ``unravel`` maps a flat vector ``(d,)`` to the unconstrained entry dict,
+        ``logdensity`` maps a flat vector to a scalar log density, and ``dim`` is the
+        length ``d`` of the flat vector.
     """
     template = fit.to_real(draw_template(fit))
     flat, unravel = ravel_pytree(template)
@@ -37,7 +53,18 @@ def flat_problem(fit):
 
 
 def to_x(fit, unravel, z):
-    """Stored-coordinate entries ``x`` of a batch of flat vectors ``z (N, d)``."""
+    """Stored-coordinate entries ``x`` of a batch of flat vectors ``z (N, d)``.
+
+    Args:
+        fit: The fit that defines the coordinate map.
+        unravel: Function mapping one flat vector ``(d,)`` to the unconstrained entry
+            dict, as returned by :func:`flat_problem`.
+        z: Batch of flat unconstrained vectors, shape ``(N, d)``.
+
+    Returns:
+        Entry dict of the draws in the stored coordinates, with a leading axis of
+        length ``N``.
+    """
     x, _ = fit.from_real(jax.vmap(unravel)(z))
     return x
 
@@ -53,6 +80,9 @@ def start_points(fit, init, key, n):
             or a :class:`Posterior` (``n`` draws by its weights).
         key: PRNG key (unused for a single draw).
         n: Number of starts.
+
+    Returns:
+        Flat starting vectors in unconstrained coordinates, shape ``(n, d)``.
     """
     if init is None:
         x = fit.sample_prior(key, (n,))
@@ -109,17 +139,36 @@ class FlatDensity(eqx.Module):
     The unravel function is rebuilt from ``template`` (zeros of one unconstrained draw)
     on every call, so the module has array leaves only and a ``filter_jit`` that
     receives it neither recompiles for a new instance nor bakes the fit's arrays in.
+
+    Attributes:
+        fit: The fit whose ``real_log_prob`` is evaluated.
+        template: Zeros of one unconstrained draw, from which the unravel function is
+            rebuilt.
     """
 
     fit: object
     template: dict
 
     def __call__(self, z):
-        """Density of the flat unconstrained vector ``z``."""
+        """Density of the flat unconstrained vector ``z``.
+
+        Args:
+            z: Flat unconstrained vector, shape ``(d,)``.
+
+        Returns:
+            Scalar log density of ``z`` in the unconstrained coordinates.
+        """
         unravel = ravel_pytree(self.template)[1]
         return self.fit.real_log_prob(unravel(z))
 
 
 def flat_density(fit):
-    """Return the :class:`FlatDensity` of ``fit``."""
+    """Return the :class:`FlatDensity` of ``fit``.
+
+    Args:
+        fit: The fit to wrap.
+
+    Returns:
+        The flat density module of ``fit``.
+    """
     return FlatDensity(fit, fit.to_real(draw_template(fit)))

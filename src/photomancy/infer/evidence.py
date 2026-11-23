@@ -27,6 +27,10 @@ def importance_evidence(log_weights):
 
     Args:
         log_weights: Unnormalized log weights, draw axis last, one slice.
+
+    Returns:
+        ``log_evidence`` is the log of the mean unnormalized weight and
+        ``standard_error`` is its delta-method standard error, both scalars.
     """
     log_weights = jnp.asarray(log_weights)
     n = log_weights.shape[-1]

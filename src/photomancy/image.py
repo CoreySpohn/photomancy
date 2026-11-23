@@ -188,6 +188,14 @@ class ImageTerm(AbstractTerm):
         It is ``coronagraphoto.expected(...).supported`` at ``model``, all True when
         the rates carry no flag. AND it into ``mask`` (it broadcasts over leading frame
         axes) to score only pixels the model can speak for; ``check`` passes then.
+
+        Args:
+            model: The model PyTree holding the scene, and the instrument and exposure
+                at their paths when they are not held by the term.
+
+        Returns:
+            Boolean array of shape ``(W, ny, nx)``, true where the coronagraph data
+            cover the pixel.
         """
         scene = resolve(model, self.scene_path)
         return _supported(scene, self._instrument(model), self._exposure(model))
@@ -196,6 +204,10 @@ class ImageTerm(AbstractTerm):
         """Raise when the term would score light the coronagraph data do not hold.
 
         Call it where ``model`` is concrete (``Fit`` does, once, at setup).
+
+        Args:
+            model: The concrete model PyTree holding the scene, and the instrument
+                and exposure at their paths when they are not held by the term.
 
         Raises:
             ValueError: Naming the count, when ``mask`` is true on a pixel that is not
@@ -224,14 +236,30 @@ class ImageTerm(AbstractTerm):
             )
 
     def __call__(self, model) -> jax.Array:
-        """Return the scalar log likelihood, summed over scored pixels in float64."""
+        """Return the scalar log likelihood, summed over scored pixels in float64.
+
+        Args:
+            model: The model PyTree holding the scene, and the instrument and exposure
+                at their paths when they are not held by the term.
+
+        Returns:
+            The scalar log likelihood of the scored pixels.
+        """
         detector, rates, plan = self._rates(model)
         observed = jnp.where(self.mask, self.observed_e, 0.0)
         log_prob = detector.log_prob(observed, rates, plan)
         return jnp.sum(jnp.where(self.mask, log_prob, 0.0), dtype=jnp.float64)
 
     def predict(self, model) -> jax.Array:
-        """Return the expected electron counts per pixel, shape ``(W, ny, nx)``."""
+        """Return the expected electron counts per pixel, shape ``(W, ny, nx)``.
+
+        Args:
+            model: The model PyTree holding the scene, and the instrument and exposure
+                at their paths when they are not held by the term.
+
+        Returns:
+            Expected electron counts per pixel, shape ``(W, ny, nx)``.
+        """
         detector, rates, plan = self._rates(model)
         return detector.mean_and_variance(rates, plan)[0]
 
@@ -244,6 +272,14 @@ class ImageTerm(AbstractTerm):
         false, so ``J^T J`` of this vector is the expected information of
         ``__call__``. Masked entries are zeroed in place, not removed: the mask is a
         traced leaf under ``jit``, and a zero entry adds nothing to ``J^T J``.
+
+        Args:
+            model: The model PyTree holding the scene, and the instrument and exposure
+                at their paths when they are not held by the term.
+
+        Returns:
+            Flat vector holding the Fisher root of every pixel of every frame of
+            ``observed_e``, zero where ``mask`` is false.
         """
         detector, rates, plan = self._rates(model)
         root = detector.fisher_root(rates, plan)
@@ -252,7 +288,17 @@ class ImageTerm(AbstractTerm):
         return jnp.ravel(jnp.where(used[..., None, :, :, :], parts, 0.0))
 
     def draw(self, key, model) -> Self:
-        """Copy with frames drawn at ``model``; masked pixels keep their values."""
+        """Copy with frames drawn at ``model``; masked pixels keep their values.
+
+        Args:
+            key: PRNG key; one subkey is used per frame of ``observed_e``.
+            model: The model PyTree holding the scene, and the instrument and exposure
+                at their paths when they are not held by the term.
+
+        Returns:
+            A copy of this term whose ``observed_e`` holds the drawn electron counts at
+            scored pixels.
+        """
         detector, rates, plan = self._rates(model)
         batch = self.observed_e.shape[:-3]
         n_frames = 1

@@ -15,7 +15,14 @@ __all__ = ["abundance_paths", "default_abundance_prior"]
 
 
 def abundance_paths(pm):
-    """The per-species ``log_mmr`` model paths, in species order (abundance target)."""
+    """The per-species ``log_mmr`` model paths, in species order (abundance target).
+
+    Args:
+        pm: The atmosphere model; its ``species`` sequence sets the number of paths.
+
+    Returns:
+        One model path string ``"species[k].profile.log_mmr"`` per species.
+    """
     return tuple(f"species[{k}].profile.log_mmr" for k in range(len(pm.species)))
 
 

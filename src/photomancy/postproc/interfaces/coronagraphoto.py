@@ -10,6 +10,13 @@ def extract_image(detector_readout: Image) -> jnp.ndarray:
     """Return the 2D data, or the first band plane of an observed Image.
 
     Counts retain their electron units. Geometry remains on detector_readout.grid.
+
+    Args:
+        detector_readout: Observed Image of per-pixel electron counts, either 2D
+            or (band, y, x).
+
+    Returns:
+        2D array of electron counts, shape (ny, nx).
     """
     if (
         detector_readout.measure != Measure.integral()
@@ -28,6 +35,14 @@ def get_fwhm(grid: PixelGrid, frame: Frame, wavelength_nm: float) -> float:
 
     frame is supplied by the caller from the primary's diameter convention.
     A lod grid's own Frame defines its reference angular sampling.
+
+    Args:
+        grid: Detector PixelGrid, in arcsec or lod units.
+        frame: Frame that defines one lambda/D from the primary diameter.
+        wavelength_nm: Wavelength in nm.
+
+    Returns:
+        Size of one lambda/D in pixels.
     """
     if grid.unit == "arcsec":
         step_arcsec = grid.step
@@ -45,6 +60,14 @@ def sky_offset_to_position(
 
     Pixel (row j, column i) is centered at (x, y) = (i, j). The oriented
     arcsec grid supplies both the star center and the detector handedness.
+
+    Args:
+        image: Observed Image on an oriented arcsec detector grid.
+        east_arcsec: Offset toward sky east from the star, in arcsec.
+        north_arcsec: Offset toward sky north from the star, in arcsec.
+
+    Returns:
+        (2,) array of the position (y, x) in pixel-center coordinates.
     """
     grid = image.grid
     if grid.unit != "arcsec" or grid.orientation is None:
@@ -66,6 +89,16 @@ def analyze_observation(
     planet_pos is (y, x) in this image's pixel coordinates, as returned by
     sky_offset_to_position. The grid supplies the reference-aperture center;
     frame supplies the primary diameter for one lambda/D at wavelength_nm.
+
+    Args:
+        image: Observed Image of per-pixel electron counts.
+        planet_pos: Planet position (y, x) in pixels of this image.
+        wavelength_nm: Wavelength in nm, used to size one lambda/D.
+        frame: Frame that supplies the primary diameter for lambda/D.
+        max_apertures: Static reference-aperture buffer size.
+
+    Returns:
+        Mawet t-statistic of the planet position.
     """
     fwhm = get_fwhm(image.grid, frame, wavelength_nm)
     estimator = DetectionEstimator.mawet(fwhm, max_apertures=max_apertures)

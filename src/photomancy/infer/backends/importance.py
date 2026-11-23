@@ -135,6 +135,21 @@ def modes_importance(fit, key, means, covs, log_pi, kept, n_draws, batch_size):
     are replaced by harmless placeholders so a NaN cannot reach the density). With no
     mode kept the slice is NaN: weights, evidence and standard error. Returns
     :class:`BackendDraws` whose ``info`` is the importance diagnostics.
+
+    Args:
+        fit: The fit to weight the draws to.
+        key: PRNG key for the draws.
+        means: Mode means in the unconstrained coordinates, shape ``(n_modes, d)``.
+        covs: Mode covariances, shape ``(n_modes, d, d)``.
+        log_pi: Log mixture weight of each mode, shape ``(n_modes,)``.
+        kept: Boolean mask of the modes that stay in the mixture, shape ``(n_modes,)``.
+        n_draws: Number of importance draws.
+        batch_size: ``jax.lax.map`` chunk of density evaluations, or ``None`` to
+            evaluate every draw at once.
+
+    Returns:
+        The draws, weights, evidence and standard error of the mixture of the kept
+        modes.
     """
     any_kept = jnp.any(kept)
     d = means.shape[-1]

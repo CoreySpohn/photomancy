@@ -148,6 +148,9 @@ class AbstractProposal(eqx.Module):
             fit: The fit.
             n_centers: Kernels of the mixture.
             defensive_fraction: Share of the defensive prior component.
+
+        Returns:
+            The proposal for the next round.
         """
         mixture = MixtureProposal.from_cloud(
             key,
@@ -171,17 +174,46 @@ class AbstractDensityProposal(AbstractProposal):
 
     @abstractmethod
     def sample(self, key, fit, n: int) -> tuple[jax.Array, jax.Array]:
-        """Draw ``n`` points; return ``(z, log_q)`` with ``z`` of shape ``(n, d)``."""
+        """Draw ``n`` points; return ``(z, log_q)`` with ``z`` of shape ``(n, d)``.
+
+        Args:
+            key: PRNG key.
+            fit: The fit, which sets the flat vector and its periods.
+            n: Number of draws.
+
+        Returns:
+            ``z`` is the draws in the flat vector, shape ``(n, d)``, and ``log_q`` is
+            the proposal log density of the draws, shape ``(n,)``.
+        """
 
     @abstractmethod
     def log_prob(self, z, fit) -> jax.Array:
-        """Return the proposal log density of ``z (n, d)`` as ``(n,)``."""
+        """Return the proposal log density of ``z (n, d)`` as ``(n,)``.
+
+        Args:
+            z: Points in the flat vector, shape ``(n, d)``.
+            fit: The fit, which sets the flat vector and its periods.
+
+        Returns:
+            Proposal log density of ``z``, shape ``(n,)``.
+        """
 
     def weigh(self, key, fit, n, *, batch_size=None):
         """Draw ``n`` points; weigh each by ``fit.log_density + volume - log_q``.
 
         A draw in a zero-density region of the fit has weight zero. A density proposal
         has no condition of its own, so ``valid`` is true.
+
+        Args:
+            key: PRNG key.
+            fit: The fit.
+            n: Number of draws.
+            batch_size: Draws per batch of the fit's density, or ``None`` for all at
+                once.
+
+        Returns:
+            ``(z, log_weights, log_target, valid)`` as in
+            :meth:`AbstractProposal.weigh`; ``valid`` is always true.
         """
         z, log_q = self.sample(key, fit, n)
         x, volume = fit.from_flat(z)
@@ -216,7 +248,17 @@ class PriorProposal(AbstractDensityProposal):
             )
 
     def sample(self, key, fit, n):
-        """Draw ``n`` prior points; return ``(z, log_q)``."""
+        """Draw ``n`` prior points; return ``(z, log_q)``.
+
+        Args:
+            key: PRNG key.
+            fit: The fit whose prior is drawn.
+            n: Number of draws.
+
+        Returns:
+            ``z`` is the draws in the flat vector, shape ``(n, d)``, and ``log_q`` is
+            their log density, shape ``(n,)``.
+        """
         if self.sequence == "random":
             x = fit.sample_prior(key, (n,))
         else:
@@ -228,7 +270,15 @@ class PriorProposal(AbstractDensityProposal):
         return z, self.log_prob(z, fit)
 
     def log_prob(self, z, fit):
-        """Prior log density in the unconstrained coordinates."""
+        """Prior log density in the unconstrained coordinates.
+
+        Args:
+            z: Points in the flat vector, shape ``(n, d)``.
+            fit: The fit whose prior is evaluated.
+
+        Returns:
+            Log density of ``z`` under the prior, shape ``(n,)``.
+        """
         x, volume = fit.from_flat(z)
         return fit.log_prior(x) + volume
 
@@ -336,6 +386,9 @@ class MixtureProposal(AbstractDensityProposal):
             periods: Periods of the flat vector (``fit.periods()``): ``None``, or a
                 tuple with ``None`` for a non-periodic coordinate.
             n_images: Images of the resulting mixture.
+
+        Returns:
+            The kernel mixture proposal.
         """
         d = x.shape[1]
         factor = 1.0 if bandwidth == "silverman" else float(bandwidth)
@@ -369,7 +422,15 @@ class MixtureProposal(AbstractDensityProposal):
         return _wrap_cell(self.means, periods)
 
     def log_prob(self, z, fit):
-        """Wrapped mixture log density of ``z (n, d)``, in blocks of draws."""
+        """Wrapped mixture log density of ``z (n, d)``, in blocks of draws.
+
+        Args:
+            z: Points in the flat vector, shape ``(n, d)``.
+            fit: The fit, which supplies the periods of the coordinates.
+
+        Returns:
+            Wrapped mixture log density of ``z``, shape ``(n,)``.
+        """
         periods = fit.periods()
         z = _wrap_cell(z, periods)
         means = self._reduced_means(periods)
@@ -419,6 +480,15 @@ class MixtureProposal(AbstractDensityProposal):
         (``jax.random.categorical`` draws ``n * K`` Gumbel variates, which at
         ``K = 256`` costs more than the rest of a round); a component of zero weight is
         never picked.
+
+        Args:
+            key: PRNG key.
+            fit: The fit, which supplies the periods of the coordinates.
+            n: Number of draws.
+
+        Returns:
+            ``z`` is the draws in the flat vector, shape ``(n, d)``, and ``log_q`` is
+            their wrapped log density, shape ``(n,)``.
         """
         periods = fit.periods()
         k_comp, k_eps = jax.random.split(key)
@@ -458,14 +528,32 @@ class DefensiveProposal(AbstractDensityProposal):
             raise ValueError(f"fraction must be in (0, 1), got {self.fraction}")
 
     def log_prob(self, z, fit):
-        """Log density of the two-component mixture."""
+        """Log density of the two-component mixture.
+
+        Args:
+            z: Points in the flat vector, shape ``(n, d)``.
+            fit: The fit.
+
+        Returns:
+            Mixture log density of ``z``, shape ``(n,)``.
+        """
         return jnp.logaddexp(
             math.log(self.fraction) + self.prior.log_prob(z, fit),
             math.log1p(-self.fraction) + self.base.log_prob(z, fit),
         )
 
     def sample(self, key, fit, n):
-        """Draw each point from the prior with probability ``fraction``."""
+        """Draw each point from the prior with probability ``fraction``.
+
+        Args:
+            key: PRNG key.
+            fit: The fit.
+            n: Number of draws.
+
+        Returns:
+            ``z`` is the draws in the flat vector, shape ``(n, d)``, and ``log_q`` is
+            their mixture log density, shape ``(n,)``.
+        """
         k_base, k_prior, k_pick = jax.random.split(key, 3)
         z_base, _ = self.base.sample(k_base, fit, n)
         z_prior, _ = self.prior.sample(k_prior, fit, n)
@@ -474,7 +562,19 @@ class DefensiveProposal(AbstractDensityProposal):
         return z, self.log_prob(z, fit)
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
-        """The default refit, keeping this proposal's prior component and bandwidth."""
+        """The default refit, keeping this proposal's prior component and bandwidth.
+
+        Args:
+            key: PRNG key.
+            z: Draws in the flat vector, shape ``(N, d)``.
+            log_weights: Their log weights, shape ``(N,)``.
+            fit: The fit.
+            n_centers: Kernels of the refitted mixture.
+            defensive_fraction: Share of the prior component in the new proposal.
+
+        Returns:
+            A :class:`DefensiveProposal` whose base is the refitted kernel mixture.
+        """
         mixture = MixtureProposal.from_cloud(
             key,
             z,

@@ -83,7 +83,14 @@ class SheetSum(AbstractProposingTerm):
         return proposers[0].leaf_path if proposers else None
 
     def reflected(self, model):
-        """``model`` with the planet orbit reflected through the sky plane."""
+        """``model`` with the planet orbit reflected through the sky plane.
+
+        Args:
+            model: The model PyTree holding the stacked orbits at ``orbit_path``.
+
+        Returns:
+            A copy of ``model`` with the orbit of ``planet`` reflected.
+        """
         orbits = resolve(model, self.orbit_path)
         return assign(
             model, self.orbit_path, reflect_line_of_sight(orbits, self.planet)
@@ -93,13 +100,27 @@ class SheetSum(AbstractProposingTerm):
         return sum(t(model) for t in self.terms)
 
     def __call__(self, model) -> jax.Array:
-        """The log of the mean of the two sheets' likelihoods."""
+        """The log of the mean of the two sheets' likelihoods.
+
+        Args:
+            model: The model PyTree to score.
+
+        Returns:
+            The scalar log of the mean likelihood over the two sheets.
+        """
         return jnp.logaddexp(
             self._total(model), self._total(self.reflected(model))
         ) - jnp.log(2.0)
 
     def leaf_proposal(self, model) -> LeafProposal:
         """The proposing term's record on both sheets, components concatenated.
+
+        Args:
+            model: The model PyTree at which the record is built.
+
+        Returns:
+            The proposing term's :class:`~photomancy.infer.LeafProposal` with the
+            components of both sheets concatenated.
 
         Raises:
             ValueError: When no held term proposes a leaf.
@@ -120,7 +141,15 @@ class SheetSum(AbstractProposingTerm):
         )
 
     def draw(self, key, model) -> Self:
-        """Draw each held term's data at ``model``, on the sheet the model holds."""
+        """Draw each held term's data at ``model``, on the sheet the model holds.
+
+        Args:
+            key: PRNG key; one subkey is used per held term.
+            model: The model PyTree at which the data are drawn.
+
+        Returns:
+            A copy of this sum whose held terms hold the drawn data.
+        """
         keys = jax.random.split(key, len(self.terms))
         terms = tuple(t.draw(k, model) for t, k in zip(self.terms, keys, strict=True))
         return eqx.tree_at(lambda s: s.terms, self, terms)

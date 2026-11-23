@@ -35,6 +35,12 @@ class DetectionEstimator(eqx.Module):
     resolves defaults (all-valid map, geometric star center), vmaps the
     per-candidate computation, and NaNs statistic and FPF where the sampler
     reports the geometry invalid.
+
+    Attributes:
+        filter: Signal-extraction step that measures the response at a position.
+        sampler: Noise-reference step that collects samples of the filter response.
+        test: Significance step that turns signal and noise samples into a
+            statistic, false positive fraction and degrees of freedom.
     """
 
     filter: AbstractFilter
@@ -61,6 +67,10 @@ class DetectionEstimator(eqx.Module):
             max_apertures: Static reference-aperture buffer size.
             exclusion_buffer: Gap between the candidate and first reference
                 aperture, in units of the angular step.
+
+        Returns:
+            Estimator with an aperture filter, same-radius aperture sampler and
+            two-sample t-test.
         """
         kernel = make_aperture_kernel(radius=fwhm / 2.0, soft=soft, sharpness=sharpness)
         return cls(
@@ -91,6 +101,9 @@ class DetectionEstimator(eqx.Module):
                 None selects the automatic bound.
             annulus_outer: Outer radius of the noise annulus in pixels.
                 None selects the automatic bound.
+
+        Returns:
+            Estimator with a Gaussian filter, annulus sampler and annulus sigma test.
         """
         return cls(
             filter=GaussianFilter(
@@ -167,6 +180,10 @@ class DetectionEstimator(eqx.Module):
             image: 2D science image.
             validity_map: Optional (ny, nx) mask (1 = usable, 0 = excluded).
             center_yx: Optional (2,) star center; geometric center when None.
+
+        Returns:
+            Detection statistic at every pixel, shape (ny, nx). Entries are NaN where
+            the sampler reports the geometry invalid or the test gate fails.
         """
         ny, nx = image.shape
         y_coords, x_coords = jnp.meshgrid(jnp.arange(ny), jnp.arange(nx), indexing="ij")

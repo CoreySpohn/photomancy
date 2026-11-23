@@ -126,7 +126,14 @@ class MaskedLogLikelihood(eqx.Module):
     shape_param: float = eqx.field(static=True)
 
     def __call__(self, predicted):
-        """Return the log-likelihood of ``predicted`` (broadcastable to ``data``)."""
+        """Return the log-likelihood of ``predicted`` (broadcastable to ``data``).
+
+        Args:
+            predicted: Model prediction, broadcastable to ``data``.
+
+        Returns:
+            Scalar normalized log likelihood over the unmasked elements.
+        """
         z = (jnp.asarray(predicted) - self.data) / self.sigma
         z = jnp.where(self.mask, z, 0.0)
         kernel = _KERNELS[self.kind](z, self.shape_param)
@@ -142,6 +149,12 @@ class MaskedLogLikelihood(eqx.Module):
         the normalization (see ``_information_constant``). The root is
         ``sqrt(c) * predicted / sigma``, zero at excluded elements, shape
         ``(data.size,)``.
+
+        Args:
+            predicted: Model prediction, broadcastable to ``data``.
+
+        Returns:
+            Flat Fisher root, shape ``(data.size,)``, zero at excluded elements.
         """
         predicted = jnp.broadcast_to(jnp.asarray(predicted), self.data.shape)
         scale = math.sqrt(_information_constant(self.kind, self.shape_param))
@@ -242,6 +255,12 @@ class LowRankGaussianLogLikelihood(eqx.Module):
 
         ``image`` is broadcastable to ``data``. Excluded pixels return zero,
         including where the input is NaN.
+
+        Args:
+            image: Image to apply the inverse covariance to, broadcastable to ``data``.
+
+        Returns:
+            Image with the shape of ``data``, zero at excluded pixels.
         """
         z = self._whiten(image)
         if self.U.shape[1]:
@@ -253,6 +272,12 @@ class LowRankGaussianLogLikelihood(eqx.Module):
 
         ``predicted`` is broadcastable to ``data``. The result has the data shape
         and is zero outside the mask; rank zero returns an all-zero image.
+
+        Args:
+            predicted: Model prediction, broadcastable to ``data``.
+
+        Returns:
+            Image with the shape of ``data``, zero outside the mask.
         """
         z = self._whiten(self.data - jnp.where(self.mask, predicted, 0))
         if not self.U.shape[1]:
@@ -260,7 +285,14 @@ class LowRankGaussianLogLikelihood(eqx.Module):
         return (self.U @ self._coefficients(z)).reshape(self.data.shape)
 
     def __call__(self, predicted):
-        """Return the normalized log density; ``predicted`` broadcasts to data."""
+        """Return the normalized log density; ``predicted`` broadcasts to data.
+
+        Args:
+            predicted: Model prediction, broadcastable to ``data``.
+
+        Returns:
+            Scalar normalized log density of ``data`` given ``predicted``.
+        """
         z = self._whiten(jnp.where(self.mask, predicted, 0) - self.data)
         if not self.U.shape[1]:
             return self.log_norm - jnp.sum(0.5 * z**2)

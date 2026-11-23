@@ -96,7 +96,7 @@ class MCLMC(AbstractBackend):
     Draws are equally weighted, stored chain by chain, and carry no evidence
     (``log_evidence`` is NaN).
 
-    Args:
+    Attributes:
         n_warmup: Warmup (tuning) steps per chain.
         n_draws: Transitions per chain after warmup.
         n_chains: Number of chains, vectorized.

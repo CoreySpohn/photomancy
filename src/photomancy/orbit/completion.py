@@ -127,6 +127,9 @@ class Completion(eqx.Module):
             leaf_widen: Factor on the standard deviation of a term's leaf proposal.
             leaf_uniform: Share of a free leaf's support drawn uniformly.
 
+        Returns:
+            The completion of ``fit``.
+
         Raises:
             ValueError: With no linear term, when a term's system is not the
                 block's system (named in the message), when two terms propose one
@@ -215,13 +218,25 @@ class Completion(eqx.Module):
         return self.fit_rest.model
 
     def periods(self):
-        """Periods of the ``shape`` entries (what a proposal over ``shape`` reads)."""
+        """Periods of the ``shape`` entries (what a proposal over ``shape`` reads).
+
+        Returns:
+            Period of each ``shape`` entry, with ``None`` where an entry is not
+            periodic.
+        """
         return self.shape_periods
 
     def split(self, z):
         """Return ``(shape, constants)`` of flat vectors ``z (..., d)``.
 
         The proposed leaves belong to neither.
+
+        Args:
+            z: Flat unconstrained vectors, shape ``(..., d)``.
+
+        Returns:
+            The ``shape`` entries, shape ``(..., dt)``, and the four constants, shape
+            ``(..., 4)``.
         """
         idx = jnp.asarray(self.shape_idx), jnp.asarray(self.constants_idx)
         return z[..., idx[0]], z[..., idx[1]]
@@ -230,6 +245,13 @@ class Completion(eqx.Module):
         """Flat vectors from ``shape (..., dt)`` and ``constants (..., 4)``.
 
         The proposed leaves are zero (a valid real value of any leaf law).
+
+        Args:
+            shape: The ``shape`` entries of the orbit block, shape ``(..., dt)``.
+            constants: The four sky constants ``A, B, F, G``, shape ``(..., 4)``.
+
+        Returns:
+            Flat unconstrained vectors, shape ``(..., d)``.
         """
         batch = jnp.broadcast_shapes(shape.shape[:-1], constants.shape[:-1])
         z = jnp.zeros((*batch, self.dim))
@@ -279,6 +301,10 @@ class Completion(eqx.Module):
 
     def conditional(self, shape):
         """Gaussian conditional of the constants given one ``shape (dt,)``.
+
+        Args:
+            shape: The ``shape`` entries of the orbit block at one orbit, shape
+                ``(dt,)``.
 
         Returns:
             ``(mean (4,), chol (4, 4), log_marginal)``: ``chol`` is the lower Cholesky
@@ -360,6 +386,17 @@ class Completion(eqx.Module):
         kept draw, from the form, and ``-inf`` where ``lw`` is; ``pool_kish`` is the
         Kish size of the screen over the pool of each shape (see :meth:`_one`).
         ``n_scored`` is not read when the fit has no term left to score.
+
+        Args:
+            key: PRNG key.
+            shapes: Orbit shapes to complete, shape ``(n, dt)``.
+            n_pool: Size of the pool of constants drawn at each shape.
+            n_scored: Pool members that are resampled and scored per shape.
+
+        Returns:
+            The kept draws ``z``, shape ``(n, d)``, the log marginal weights ``lw``,
+            shape ``(n,)``, the log target density ``log_target``, shape ``(n,)``, and
+            the pool Kish size ``pool_kish``, shape ``(n,)``.
         """
         keys = jax.random.split(key, shapes.shape[0])
         return jax.lax.map(
@@ -505,6 +542,17 @@ class CompletedProposal(AbstractProposal):
         The completion evaluates in its own batches, so ``batch_size`` is not read.
         ``valid`` is the pool condition of the class docstring; a cloud with no live
         draw has nothing to read and is valid (its evidence is ``-inf``).
+
+        Args:
+            key: PRNG key.
+            fit: The fit with one ``ThieleInnesBlock`` and at least one linear term.
+            n: Number of shapes drawn from ``base``.
+            batch_size: Not read.
+
+        Returns:
+            The flat draws ``z``, shape ``(n, d)``, their log weights, shape ``(n,)``,
+            ``fit.log_density`` at the kept draws, shape ``(n,)``, and the boolean
+            scalar ``valid``.
         """
         completion = self._completion(fit)
         n_pool = self.n_pool
@@ -527,7 +575,20 @@ class CompletedProposal(AbstractProposal):
         return z, log_w, log_target, valid
 
     def adapt(self, key, z, log_weights, fit, *, n_centers, defensive_fraction):
-        """Refit the base over the orbit shapes of the weighted cloud."""
+        """Refit the base over the orbit shapes of the weighted cloud.
+
+        Args:
+            key: PRNG key.
+            z: Draws in the flat vector, shape ``(N, d)``.
+            log_weights: Log weights of the draws, shape ``(N,)``.
+            fit: The fit that the draws were weighed against.
+            n_centers: Kernels of the refit mixture.
+            defensive_fraction: Share of the defensive prior component.
+
+        Returns:
+            A copy of this proposal whose ``base`` is refit over the orbit shapes of the
+            cloud.
+        """
         completion = self._completion(fit)
         shapes, _ = completion.split(z)
         base = self.base.adapt(

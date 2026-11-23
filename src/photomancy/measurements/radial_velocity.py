@@ -20,7 +20,7 @@ __all__ = ["RadialVelocityData", "RadialVelocityTerm", "loglike_rv_marginalized"
 class RadialVelocityData(eqx.Module):
     """Radial velocity observations from one or more instruments.
 
-    Args:
+    Attributes:
         time_d: Observation epochs (days). Shape ``(N,)``.
         rv: Measured radial velocities (m/s). Shape ``(N,)``.
         rv_err: RV measurement uncertainties (m/s). Shape ``(N,)``.
@@ -39,7 +39,20 @@ class RadialVelocityData(eqx.Module):
 
     @classmethod
     def pad(cls, *, time_d, rv, rv_err, inst_ids, n_inst, max_n):
-        """Create a padded RadialVelocityData with ``valid`` mask."""
+        """Create a padded RadialVelocityData with ``valid`` mask.
+
+        Args:
+            time_d: Observation epochs (days). Shape ``(N,)``.
+            rv: Measured radial velocities (m/s). Shape ``(N,)``.
+            rv_err: Velocity uncertainties (m/s). Shape ``(N,)``. Padded rows hold 1.0.
+            inst_ids: Instrument index per row, ``0..n_inst-1``. Shape ``(N,)``.
+            n_inst: Number of distinct instruments.
+            max_n: Row capacity of the result.
+
+        Returns:
+            The data padded to shape ``(max_n,)``, with ``valid`` true for the first N
+            rows.
+        """
         n = jnp.asarray(time_d).shape[0]
         return cls(
             time_d=_pad_1d(time_d, max_n),
@@ -52,7 +65,15 @@ class RadialVelocityData(eqx.Module):
 
     @classmethod
     def zeros(cls, max_n, n_inst=1):
-        """Create an all-invalid placeholder (for model tracing)."""
+        """Create an all-invalid placeholder (for model tracing).
+
+        Args:
+            max_n: Row capacity of the placeholder.
+            n_inst: Number of instruments.
+
+        Returns:
+            Data of shape ``(max_n,)`` with every row invalid and unit errors.
+        """
         return cls(
             time_d=jnp.zeros(max_n),
             rv=jnp.zeros(max_n),
@@ -132,6 +153,15 @@ class RadialVelocityTerm(AbstractTerm):
     ``jitters``, a model leaf read at ``jitter_path`` (so a fit can free it), or zeros
     when neither is given. Predictions have shape ``(T,)`` with invalid rows zeroed.
     Data ``time_d`` is in days from the system's epoch.
+
+    Attributes:
+        data: Radial velocity observations.
+        system_path: Model path of the system whose ``star_radial_velocity(time_d)`` is
+            read.
+        jitters: Fixed per-instrument jitter (m/s), shape ``(data.n_inst,)``, or None.
+        jitter_path: Model path of the jitter leaf (m/s), or None.
+        reads: Model paths a held build cached. Empty: the term reads the model
+            directly.
     """
 
     data: RadialVelocityData
@@ -188,11 +218,26 @@ class RadialVelocityTerm(AbstractTerm):
         return value, prediction
 
     def __call__(self, model):
-        """Score RVs with the jitter of ``jitters`` or ``jitter_path`` (m/s)."""
+        """Score RVs with the jitter of ``jitters`` or ``jitter_path`` (m/s).
+
+        Args:
+            model: The model holding the system at ``system_path`` and any
+                ``jitter_path``.
+
+        Returns:
+            Scalar log-likelihood with the instrument offsets marginalized.
+        """
         return self._score(model)[0]
 
     def predict(self, model):
-        """Return the stellar radial velocity at each epoch (m/s), invalid rows zero."""
+        """Return the stellar radial velocity at each epoch (m/s), invalid rows zero.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            Stellar radial velocity (m/s) at each epoch, shape ``(T,)``.
+        """
         return self._score(model)[1]
 
     def draw(self, key, model) -> Self:
@@ -202,6 +247,15 @@ class RadialVelocityTerm(AbstractTerm):
         improper on raw RVs. Zero offsets choose a representative; its residual
         contrasts have exactly the marginalized Gaussian law. Jitter is added
         in quadrature, as in the score.
+
+        Args:
+            key: JAX random key.
+            model: The model holding the system at ``system_path`` and any
+                ``jitter_path``.
+
+        Returns:
+            The term with velocities drawn about the prediction. Invalid rows are
+            unchanged.
         """
         data = self.data
         valid = data.valid

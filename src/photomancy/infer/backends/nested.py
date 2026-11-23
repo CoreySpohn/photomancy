@@ -57,7 +57,7 @@ class NestedSampling(AbstractBackend):
     a reported 0.3, so read it as good to about 1 nat at the defaults. The sampler is
     jitted internally and runs one fit at a time.
 
-    Args:
+    Attributes:
         n_live: Number of independent root chains (jaxns ``root_allocation_degree``);
             ``None`` uses the jaxns default, ``30 * D``.
         max_samples: Hard cap on stored samples. If the buffer fills first, jaxns

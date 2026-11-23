@@ -17,7 +17,13 @@ __all__ = ["default_disk_prior", "radiance_forward"]
 
 
 class _RadianceForward(eqx.Module):
-    """``system -> photon radiance image`` at one wavelength and time."""
+    """``system -> photon radiance image`` at one wavelength and time.
+
+    Attributes:
+        wavelength_nm: Wavelength to render at, in nm.
+        time_d: Time in days from the system's epoch.
+        grid: The sky ``PixelGrid`` (arcsec) the radiance is sampled on.
+    """
 
     wavelength_nm: jnp.ndarray
     time_d: jnp.ndarray

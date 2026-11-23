@@ -209,7 +209,7 @@ class Laplace(AbstractBackend):
     ``run(fit, Laplace(init=posterior), key)`` is the route to an evidence for a NUTS
     result.
 
-    Args:
+    Attributes:
         n_draws: Importance draws.
         n_modes: Number of starts and proposal components.
         n_steps: L-BFGS iterations per start.

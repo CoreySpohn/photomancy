@@ -63,6 +63,10 @@ class MawetArm(AbstractDetectionArm):
     coadd regardless of frame count. References are ignored: the noise sample
     comes from the science image itself.
     FrameSet.grid supplies the star center for reference-aperture geometry.
+
+    Attributes:
+        estimator: Composed aperture-photometry t-test estimator (filter, sampler
+            and test) that the arm applies to the coadded frame.
     """
 
     estimator: DetectionEstimator
@@ -104,7 +108,16 @@ class MawetArm(AbstractDetectionArm):
         *,
         references: FrameSet | None = None,
     ) -> DetectionStats:
-        """Compute the Mawet t-statistic and FPF on the science coadd."""
+        """Compute the Mawet t-statistic and FPF on the science coadd.
+
+        Args:
+            science: Science frames plus metadata; the arm uses their coadd.
+            positions_yx: (n, 2) candidate positions, (y, x) pixels.
+            references: Ignored; the arm takes its noise sample from the science image.
+
+        Returns:
+            DetectionStats for the n candidates, with statistic_kind "mawet_t".
+        """
         del references  # Mawet self-references; see class docstring.
         image = science.coadd()
         stats = self.estimator(
@@ -138,6 +151,17 @@ class MatchedFilterArm(AbstractDetectionArm):
     References are ignored: the noise sample comes from the science image
     itself. FrameSet.grid supplies the reference-aperture center; the
     provider must use the same science grid.
+
+    Attributes:
+        provider: Template source whose stamp size sets the fit window.
+        fwhm_px: Resolution element (lambda/D) in pixels, used for the
+            reference-aperture geometry.
+        exclusion_buffer: Gap between the candidate and the first reference
+            aperture, in angular-step units.
+        order: Interpolation order for patch extraction.
+        max_apertures: Static reference-aperture buffer size.
+        whiten: Whether FrameSet.noise_variance, when present, inverse-variance
+            weights the template fit.
     """
 
     provider: AbstractTemplateProvider
@@ -183,7 +207,17 @@ class MatchedFilterArm(AbstractDetectionArm):
         *,
         references: FrameSet | None = None,
     ) -> DetectionStats:
-        """Compute the template-fit t-statistic and FPF on the science coadd."""
+        """Compute the template-fit t-statistic and FPF on the science coadd.
+
+        Args:
+            science: Science frames plus metadata; the arm uses their coadd and, when
+                whitening, the propagated noise variance.
+            positions_yx: (n, 2) candidate positions, (y, x) pixels.
+            references: Ignored; the arm takes its noise sample from the science image.
+
+        Returns:
+            DetectionStats for the n candidates, with statistic_kind "psf_template_t".
+        """
         del references  # Self-referencing arm; see class docstring.
         image = science.coadd()
         variance = None

@@ -81,14 +81,33 @@ class AbstractTerm(eqx.Module):
 
     @abstractmethod
     def __call__(self, model) -> jax.Array:
-        """Return the scalar log likelihood of the data, constants included."""
+        """Return the scalar log likelihood of the data, constants included.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            Scalar log likelihood of the held data, constants included.
+        """
 
     @abstractmethod
     def draw(self, key, model) -> Self:
-        """Return a copy of this term holding a data realization drawn at ``model``."""
+        """Return a copy of this term holding a data realization drawn at ``model``.
+
+        Args:
+            key: PRNG key for the data realization.
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            A copy of the term holding the drawn data.
+        """
 
     def predict(self, model):
-        """Return the prediction of ``model`` for this term's data, where it has one."""
+        """Return the prediction of ``model`` for this term's data, where it has one.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+        """
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
 
     @property
@@ -105,6 +124,9 @@ class AbstractTerm(eqx.Module):
 
         ``Fit`` calls it once at setup on the concrete base model, and at both ends of
         the prior of every free leaf under :attr:`footprint_paths`.
+
+        Args:
+            model: The model to test, with concrete values.
         """
 
     def fisher_root(self, model) -> jax.Array:
@@ -121,6 +143,12 @@ class AbstractTerm(eqx.Module):
         :meth:`Fit.information` with ``kind="fisher"`` raises and names the term when
         any term of the fit lacks a root, because a sum of expected and observed pieces
         is neither matrix.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            Flat vector ``r(model)`` of the term, with zero at masked entries.
         """
         raise NotImplementedError(f"{type(self).__name__} has no Fisher root")
 
@@ -157,7 +185,15 @@ class AbstractLinearGaussianTerm(AbstractTerm):
 
     @abstractmethod
     def linear_gaussian(self, model, planet: int = 0) -> LinearGaussian:
-        """The term as a Gaussian in the sky constants of ``planet`` of ``model``."""
+        """The term as a Gaussian in the sky constants of ``planet`` of ``model``.
+
+        Args:
+            model: The model whose planet sets the nonlinear orbit shape.
+            planet: Index of the planet whose sky constants the form is written in.
+
+        Returns:
+            The term's Gaussian in the four sky constants of that planet.
+        """
 
 
 class LeafProposal(eqx.Module):
@@ -203,6 +239,20 @@ class LeafProposal(eqx.Module):
         of it when no component has weight. ``log_q`` is the exact log density of the
         draw in ``ln(leaf)``; it is at least ``log(uniform) - log(high - low)`` for
         every draw inside the range. One record, unbatched; ``jax.vmap`` it for many.
+
+        Args:
+            key: PRNG key for one draw.
+            low: Lower bound of ``ln(leaf)`` from the leaf's law, intersected with the
+                record's own.
+            high: Upper bound of ``ln(leaf)`` from the leaf's law, intersected with the
+                record's own.
+            widen: Factor that multiplies every component standard deviation.
+            uniform: Share of the draw mass given to the uniform component on
+                ``[low, high]``, in ``[0, 1]``.
+
+        Returns:
+            ``ln_leaf`` is the drawn natural log of the leaf and ``log_q`` is the log
+            density of the draw in ``ln(leaf)``, both scalars.
         """
         low = jnp.maximum(low, self.low)
         high = jnp.minimum(high, self.high)
@@ -286,6 +336,12 @@ class AbstractProposingTerm(AbstractTerm):
 
         The value of the leaf in ``model`` is read only to scale the prediction; the
         record does not depend on it.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            The proposal record for the leaf at ``leaf_path``.
         """
 
 
@@ -605,7 +661,14 @@ class Fit(eqx.Module):
         return model, total
 
     def model_at(self, x: dict) -> eqx.Module:
-        """Return the model of one draw ``x``: leaf laws first, then blocks in order."""
+        """Return the model of one draw ``x``: leaf laws first, then blocks in order.
+
+        Args:
+            x: Entry dict of one draw, in the stored coordinates.
+
+        Returns:
+            The base model with every free entry written.
+        """
         return self._walk(x)[0]
 
     # ----- density ---------------------------------------------------------------
@@ -621,6 +684,15 @@ class Fit(eqx.Module):
         chain of normalized conditionals. ``batch_size`` evaluates that many draws at
         once (a ``jax.lax.map`` chunk over the leading axis), the same values to
         rounding; the default maps every draw at once with ``jax.vmap``.
+
+        Args:
+            x: Entry dict of draws in the stored coordinates, each leaf with leading
+                batch axes and then its leaf shape.
+            batch_size: Chunk size of the ``jax.lax.map`` over the outermost batch axis,
+                or ``None`` to map every draw at once.
+
+        Returns:
+            Normalized log prior, with the batch shape of ``x``.
         """
         return self._over_batch(self._log_prior_one, x, batch_size)
 
@@ -635,7 +707,17 @@ class Fit(eqx.Module):
         return self._terms_at(self.terms, self.model_at(x))
 
     def log_likelihood(self, x: dict, *, batch_size: int | None = None) -> jax.Array:
-        """Return the sum of the terms at ``x`` (``batch_size`` as in ``log_prior``)."""
+        """Return the sum of the terms at ``x`` (``batch_size`` as in ``log_prior``).
+
+        Args:
+            x: Entry dict of draws in the stored coordinates, each leaf with leading
+                batch axes and then its leaf shape.
+            batch_size: Chunk size of the ``jax.lax.map`` over the outermost batch axis,
+                or ``None`` to map every draw at once.
+
+        Returns:
+            Summed log likelihood of the terms, with the batch shape of ``x``.
+        """
         return self._over_batch(self._log_likelihood_one, x, batch_size)
 
     def _log_density_one(self, x):
@@ -647,6 +729,15 @@ class Fit(eqx.Module):
         """Return ``log_prior + log_likelihood`` (``-inf`` off the prior's support).
 
         ``batch_size`` is as in :meth:`log_prior`.
+
+        Args:
+            x: Entry dict of draws in the stored coordinates, each leaf with leading
+                batch axes and then its leaf shape.
+            batch_size: Chunk size of the ``jax.lax.map`` over the outermost batch axis,
+                or ``None`` to map every draw at once.
+
+        Returns:
+            Log density with the batch shape of ``x``.
         """
         return self._over_batch(self._log_density_one, x, batch_size)
 
@@ -775,6 +866,12 @@ class Fit(eqx.Module):
 
         A leaf law uses :func:`priorities.to_real`; a block entry is already
         unconstrained and passes through unchanged.
+
+        Args:
+            x: Entry dict of draws in the stored coordinates.
+
+        Returns:
+            Entry dict in unconstrained coordinates, with the shapes of ``x``.
         """
         return {
             key: to_real(entry, x[key])
@@ -791,6 +888,13 @@ class Fit(eqx.Module):
         coordinate with a period is reduced to its cell ``[0, period)``, so stored
         angles never leave one cell; the block density is periodic, so the reduction
         changes no density.
+
+        Args:
+            u: Entry dict in unconstrained coordinates, with leading batch axes.
+
+        Returns:
+            ``x`` is the entry dict in the stored coordinates and ``volume`` is the log
+            volume of the map, with the batch shape of ``u``.
         """
         x, volume = {}, jnp.zeros(())
         for key, entry in self.free.items():
@@ -834,6 +938,10 @@ class Fit(eqx.Module):
         through its ``coordinate_names`` and never by position. A leaf-law entry is
         never periodic. The tuple is static (host values) and has the length of the
         flat vector.
+
+        Returns:
+            Tuple with one period per element of the flat vector (in the units of the
+            block coordinate), or ``None`` where the element is not periodic.
         """
         names, sizes = self.flat_layout()
         out: list[float | None] = []
@@ -852,6 +960,12 @@ class Fit(eqx.Module):
         The flat vector is the ``ravel_pytree`` of one draw of :meth:`to_real` (see
         :meth:`flat_layout`); the result is an argument of :meth:`from_real` with the
         batch shape of ``z``.
+
+        Args:
+            z: Flat unconstrained vectors, shape ``(..., d)``.
+
+        Returns:
+            Entry dict in unconstrained coordinates, with the batch shape of ``z``.
         """
         shapes = eqx.filter_eval_shape(
             lambda k: self.to_real(self.sample_prior(k)), jax.random.key(0)
@@ -871,6 +985,13 @@ class Fit(eqx.Module):
         batch axes, which come before the flat axis of the result. It places a cloud
         (``posterior.samples``) in the coordinates of a proposal's ``adapt`` or of
         ``MixtureProposal.from_cloud``.
+
+        Args:
+            x: Entry dict of draws in the stored coordinates, with optional leading
+                batch axes.
+
+        Returns:
+            Flat unconstrained vectors, shape ``(*batch, d)``.
         """
         batch = self._batch_shape(x)
         n = int(np.prod(batch, dtype=int))
@@ -891,11 +1012,26 @@ class Fit(eqx.Module):
 
         ``from_real(unravel(z))``: the volume is that of the map from the flat
         unconstrained vector, so ``log_density(x) + volume`` is the density in ``z``.
+
+        Args:
+            z: Flat unconstrained vectors, shape ``(..., d)``.
+
+        Returns:
+            ``x`` is the entry dict in the stored coordinates and ``volume`` is the log
+            volume of the map, with the batch shape of ``z``.
         """
         return self.from_real(self.unravel(z))
 
     def real_log_prob(self, u: dict) -> jax.Array:
-        """Return the density in ``u``: the density of ``from_real(u)`` plus volume."""
+        """Return the density in ``u``: the density of ``from_real(u)`` plus volume.
+
+        Args:
+            u: Entry dict in unconstrained coordinates, with optional leading batch
+                axes.
+
+        Returns:
+            Log density in ``u``, with the batch shape of ``u``.
+        """
         x, volume = self.from_real(u)
         return self.log_density(x) + volume
 
@@ -923,6 +1059,13 @@ class Fit(eqx.Module):
 
         Returns entries shaped ``(*sample_shape, *leaf_shape)`` (a block entry is a
         dict of arrays shaped ``(*sample_shape, R)``).
+
+        Args:
+            key: PRNG key.
+            sample_shape: Leading batch shape of the draws.
+
+        Returns:
+            Entry dict of prior draws in the stored coordinates.
         """
         n = int(np.prod(sample_shape, dtype=int))
         flat = jax.vmap(self._sample_prior_one)(jax.random.split(key, n))
@@ -935,6 +1078,9 @@ class Fit(eqx.Module):
 
         A leaf-law entry has the shape of its model leaf; a block entry has shape
         ``(unit_size,)``, the length of the cube vector its ``from_unit`` consumes.
+
+        Returns:
+            Entry dict of zeros, one per free entry.
 
         Raises:
             ValueError: For a block with no unit-cube map (``unit_size`` is ``None``) or
@@ -966,6 +1112,9 @@ class Fit(eqx.Module):
         Args:
             u: One draw, each entry shaped like :meth:`unit_template`, values in
                 ``(0, 1)``.
+
+        Returns:
+            Entry dict of one draw in the stored coordinates, keyed like ``free``.
         """
         self.unit_template()
         x = {key: entry.icdf(u[key]) for key, entry in self.leaf_laws.items()}
@@ -989,6 +1138,13 @@ class Fit(eqx.Module):
         one; whether stored draws survive is for the caller to decide
         (:meth:`Posterior.with_priors` does, by ``same_map``).
 
+        Args:
+            priors: ``{path: law or block}`` of the replacements, a subset of the free
+                keys.
+
+        Returns:
+            A new fit with the replacements and the same terms.
+
         Raises:
             ValueError: For a key outside the free set, a replacement of the other
                 kind, or a block of another layout.
@@ -1011,7 +1167,14 @@ class Fit(eqx.Module):
         return Fit(self.model, {**self.free, **priors}, self.terms)
 
     def append_term(self, term: AbstractTerm) -> "Fit":
-        """Return a fit with one more term; the free set is unchanged."""
+        """Return a fit with one more term; the free set is unchanged.
+
+        Args:
+            term: The term to add at the end of ``terms``.
+
+        Returns:
+            A new fit with the extra term.
+        """
         return Fit(self.model, self.free, (*self.terms, term))
 
     def replace_term(self, index: int, term: AbstractTerm) -> "Fit":
@@ -1020,6 +1183,13 @@ class Fit(eqx.Module):
         The replacement may be any term whose reads pass the checks of ``Fit``. A stack
         of worlds that must not recompile needs a replacement with the same pytree
         structure as the old term (a padded row written in place).
+
+        Args:
+            index: Position in ``terms`` to replace.
+            term: The replacement term.
+
+        Returns:
+            A new fit with the replacement.
 
         Raises:
             IndexError: When ``index`` is outside ``range(len(terms))`` (negative
@@ -1037,6 +1207,9 @@ class Fit(eqx.Module):
 
         Evaluated on the host from concrete arrays. Equal for fits that share a
         density, so a stored result can be checked against the fit it targets.
+
+        Returns:
+            Hexadecimal SHA-256 digest.
         """
         h = hashlib.sha256()
 

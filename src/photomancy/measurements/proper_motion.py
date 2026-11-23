@@ -26,7 +26,7 @@ class ProperMotionAnomalyData(eqx.Module):
     no padding (the observable is a fixed 2-vector); the mission windows feed the
     25-epoch path-fit forward.
 
-    Args:
+    Attributes:
         t_hip: Hipparcos mean epoch (days). Scalar.
         t_gaia: Gaia mean epoch (days). Scalar.
         gaia_window: Gaia mission duration (days) for the proper-motion fit. Scalar.
@@ -46,7 +46,14 @@ class ProperMotionAnomalyData(eqx.Module):
 
     @classmethod
     def zeros(cls, n_epochs=25):
-        """Create an all-invalid placeholder (for model tracing)."""
+        """Create an all-invalid placeholder (for model tracing).
+
+        Args:
+            n_epochs: Epochs sampled per mission window.
+
+        Returns:
+            An invalid placeholder with a nonzero baseline and identity covariance.
+        """
         return cls(
             t_hip=jnp.array(0.0),
             t_gaia=jnp.array(9041.0),  # ~24.75 yr, nonzero baseline
@@ -108,6 +115,12 @@ class ProperMotionAnomalyTerm(AbstractTerm):
     least two). The prediction is an east/north vector in arcsec/day,
     zero when invalid.
     Data ``t_hip`` and ``t_gaia`` are days from the system's epoch.
+
+    Attributes:
+        data: The observed anomaly, its covariance and the mission epochs.
+        system_path: Model path of the system whose ``star_reflex(time_d)`` is read.
+        reads: Model paths a held build cached. Empty: the term reads the model
+            directly.
     """
 
     data: ProperMotionAnomalyData
@@ -145,15 +158,38 @@ class ProperMotionAnomalyTerm(AbstractTerm):
         return loglike_pm_anomaly(prediction, data), prediction
 
     def __call__(self, model):
-        """Return the scalar log-likelihood."""
+        """Return the scalar log-likelihood.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            Scalar log-likelihood, zero when the data are invalid.
+        """
         return self._score(model)[0]
 
     def predict(self, model):
-        """Return the proper-motion anomaly, ``(2,)``."""
+        """Return the proper-motion anomaly, ``(2,)``.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            Predicted anomaly (east, north) in arcsec/day, zero when the data are
+            invalid.
+        """
         return self._score(model)[1]
 
     def draw(self, key, model) -> Self:
-        """Copy with a full-covariance Gaussian proper-motion anomaly."""
+        """Copy with a full-covariance Gaussian proper-motion anomaly.
+
+        Args:
+            key: JAX random key.
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            The term with the anomaly drawn about the prediction using the covariance.
+        """
         valid = self.data.valid
         covariance = jnp.where(valid, self.data.pm_anomaly_cov, jnp.eye(2))
         eps = jax.random.normal(key, (2,), dtype=jnp.float64)

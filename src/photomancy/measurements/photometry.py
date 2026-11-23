@@ -50,13 +50,12 @@ class DMagData(eqx.Module):
     a Gaussian photometric likelihood (detections) and the flux-space
     z-score non-detection likelihood (nulls) via ``jnp.where``.
 
-    Args:
+    Attributes:
         time_d: Observation times (days). Shape ``(M,)``.
         sep_grid: Separation grid per epoch (arcsec), padded and monotonic.
             Shape ``(M, K)``.
         dmag0_grid: Limiting dMag per epoch, padded with ``-jnp.inf`` for
             undetectable regions. Shape ``(M, K)``.
-        snr_thresh: SNR detection threshold (static). Default 5.0.
         is_detected: Boolean mask -- ``True`` for detection epochs,
             ``False`` for null epochs. Shape ``(M,)``.
         dmag_obs: Measured delta-magnitude at detection epochs. Set to 0.0
@@ -64,6 +63,7 @@ class DMagData(eqx.Module):
         dmag_err: Measurement uncertainty on dMag at detection epochs.
             Set to 1.0 for null epochs (unused). Shape ``(M,)``.
         valid: Boolean validity mask. Shape ``(M,)``.
+        snr_thresh: SNR detection threshold (static). Default 5.0.
     """
 
     time_d: jnp.ndarray
@@ -173,6 +173,9 @@ class DMagData(eqx.Module):
             snr_thresh: SNR detection threshold.
             max_n: Padding size for epochs.
             max_pts: Padding size for contrast curve points.
+
+        Returns:
+            A ``DMagData`` instance with every epoch a null.
         """
         time_d = jnp.asarray(time_d)
         n = time_d.shape[0]
@@ -202,7 +205,25 @@ class DMagData(eqx.Module):
         max_n,
         max_pts=MAX_CC_PTS,
     ):
-        """Create a padded DMagData with an ``valid`` mask."""
+        """Create a padded DMagData with an ``valid`` mask.
+
+        Args:
+            time_d: Observation epochs (days). Shape ``(M,)``.
+            sep_grid: Separation grid per epoch (arcsec). Shape ``(M, K)``.
+            dmag0_grid: Limiting dMag per epoch. Shape ``(M, K)``.
+            is_detected: True for detection epochs, False for null epochs. Shape
+                ``(M,)``.
+            dmag_obs: Measured dMag at detection epochs. Shape ``(M,)``.
+            dmag_err: dMag uncertainty at detection epochs. Shape ``(M,)``.
+            snr_thresh: SNR detection threshold.
+            max_n: Row capacity of the result.
+            max_pts: Contrast-curve grid capacity of the result.
+
+        Returns:
+            The data padded to ``max_n`` rows and ``max_pts`` grid points, with
+            ``valid``
+            true for the first M rows.
+        """
         n = jnp.asarray(time_d).shape[0]
         return cls(
             time_d=_pad_1d(time_d, max_n),
@@ -217,7 +238,16 @@ class DMagData(eqx.Module):
 
     @classmethod
     def zeros(cls, max_n, max_pts=MAX_CC_PTS, snr_thresh=5.0):
-        """Create an all-invalid placeholder (for model tracing)."""
+        """Create an all-invalid placeholder (for model tracing).
+
+        Args:
+            max_n: Row capacity of the placeholder.
+            max_pts: Contrast-curve grid capacity of the placeholder.
+            snr_thresh: SNR detection threshold.
+
+        Returns:
+            Data with every row invalid and every limit undetectable.
+        """
         return cls(
             time_d=jnp.zeros(max_n),
             sep_grid=jnp.zeros((max_n, max_pts)),
@@ -238,6 +268,15 @@ class PhotometryData(eqx.Module):
     ``band_id`` and ``planet`` index the term's transmissions and system planets.
     ``is_upper_limit`` selects a Gaussian cumulative probability below the
     reported contrast; ``valid`` excludes padded rows.
+
+    Attributes:
+        time_d: Observation epochs (days).
+        contrast: Measured planet/star contrast (linear flux ratio).
+        contrast_err: Contrast standard deviation, or the noise scale of an upper limit.
+        band_id: Index into the term's transmissions, one per row.
+        planet: Zero-based planet index into the system, one per row.
+        is_upper_limit: True where the row is an upper limit on the contrast.
+        valid: True for real rows, False for padding.
     """
 
     time_d: jnp.ndarray
@@ -260,7 +299,21 @@ class PhotometryData(eqx.Module):
         is_upper_limit,
         max_n,
     ):
-        """Pad contrast observations, using unit errors on invalid rows."""
+        """Pad contrast observations, using unit errors on invalid rows.
+
+        Args:
+            time_d: Observation epochs (days). Shape ``(N,)``.
+            contrast: Measured linear contrasts. Shape ``(N,)``.
+            contrast_err: Contrast uncertainties. Shape ``(N,)``. Padded rows hold 1.0.
+            band_id: Band index per row. Shape ``(N,)``.
+            planet: Zero-based planet index per row. Shape ``(N,)``.
+            is_upper_limit: Upper-limit flag per row. Shape ``(N,)``.
+            max_n: Row capacity of the result.
+
+        Returns:
+            The data padded to shape ``(max_n,)``, with ``valid`` true for the first N
+            rows.
+        """
         n = jnp.asarray(time_d).shape[0]
         return cls(
             time_d=_pad_1d(time_d, max_n),
@@ -290,6 +343,18 @@ class PhotometryData(eqx.Module):
         ``0.4*ln(10)*contrast*dmag_err``. Upper-limit rows use that same
         conversion for the limit and its noise scale. Planet indices default
         to zero, limit flags to False, and ``max_n=None`` keeps all rows valid.
+
+        Args:
+            time_d: Observation epochs (days), one per row.
+            dmag: Magnitude difference between planet and star, one per row.
+            dmag_err: Magnitude difference uncertainty, one per row.
+            band_id: Band index per row.
+            planet: Zero-based planet index per row. Defaults to zero.
+            is_upper_limit: Upper-limit flag per row. Defaults to False.
+            max_n: Row capacity to pad to. None keeps the rows as given, all valid.
+
+        Returns:
+            Linear-contrast data converted from the magnitude differences.
         """
         time_d = jnp.asarray(time_d)
         contrast = delta_mag_to_contrast(jnp.asarray(dmag))
@@ -375,6 +440,14 @@ def lambertian_from_area(albedo_area_AU2):
 
     Reflected light identifies only the area product. Fix Ag=1 and put
     the sampled scale into radius; both returned arrays have shape (K,).
+
+    Args:
+        albedo_area_AU2: Geometric albedo times radius squared (AU^2), one value per
+            planet.
+
+    Returns:
+        A tuple of a unit-albedo Lambertian physical model and the planet radius
+        (Earth radii) that carries the area, each with shape ``(K,)``.
     """
     # Delay scene imports, keeping their module constants concrete under first JIT.
     with jax.ensure_compile_time_eval():
@@ -388,6 +461,16 @@ def lambertian_dmag(phase_rad, distance_AU, model, radius_Rearth, flux_scale=1.0
     """Convert a Lambertian reflector's contrast to dMag at the orbit-fit floor.
 
     ``flux_scale`` is the planet's dimensionless factor on its contrast.
+
+    Args:
+        phase_rad: Phase angle (radians). Shape ``(T,)``.
+        distance_AU: Planet-star distance (AU). Shape ``(T,)``.
+        model: Lambertian physical model of the planet.
+        radius_Rearth: Planet radius (Earth radii).
+        flux_scale: Dimensionless factor on the planet's contrast.
+
+    Returns:
+        The magnitude difference between planet and star, shape ``(T,)``.
     """
     contrast = (
         flux_scale
@@ -405,6 +488,17 @@ def system_separation_dmag(system, time_d, *, albedo_area_AU2=None):
     geometric-albedo times radius squared (AU^2) supplies the reflector
     for a bare dynamical system or a known photometric scale. A scene's planet
     ``flux_scale`` multiplies the contrast in either case.
+
+    Args:
+        system: A scene with one planet, or a bare orbix ``System`` with one planet.
+        time_d: Epochs in days from the system's epoch.
+        albedo_area_AU2: Geometric albedo times radius squared (AU^2) of the planet.
+            Required for a bare system; when given for a scene it replaces the scene's
+            reflector.
+
+    Returns:
+        A tuple of the star-planet separation (arcsec) and the magnitude difference at
+        each epoch, each with the shape of ``time_d``.
     """
     bare = isinstance(system, System)
     count = system.orbits.a_AU.size if bare else system.n_planets
@@ -511,6 +605,14 @@ class PhotometryTerm(AbstractTerm):
     contrasts. Each row selects its own band, planet and epoch. An upper limit
     contributes ``log Phi((limit - prediction) / contrast_err)``. Invalid rows return
     zero. Data ``time_d`` is in days from the system's epoch. Bands share one ephemeris.
+
+    Attributes:
+        data: Linear contrast measurements and upper limits.
+        quadrature: Host-built spectral quadrature, one band per transmission.
+        transmissions: Filter response of each band, in ``data.band_id`` order.
+        system_path: Model path of the system returning ``(W, K, T)`` band contrasts.
+        reads: Model paths a held build cached. Empty: the term reads the model
+            directly.
     """
 
     data: PhotometryData
@@ -553,11 +655,27 @@ class PhotometryTerm(AbstractTerm):
         return jnp.sum(jnp.where(valid, rows, 0.0)), prediction
 
     def __call__(self, model):
-        """Return the scalar log-likelihood."""
+        """Return the scalar log-likelihood.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            Scalar log-likelihood of the valid rows.
+        """
         return self._score(model)[0]
 
     def predict(self, model):
-        """Return each row's linear contrast, ``(T,)``."""
+        """Return each row's linear contrast, ``(T,)``.
+
+        Args:
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            Predicted linear contrast (planet/star flux ratio) of each row's band,
+            planet
+            and epoch, zero on invalid rows. Shape ``(T,)``.
+        """
         return self._score(model)[1]
 
     def draw(self, key, model) -> Self:
@@ -566,6 +684,14 @@ class PhotometryTerm(AbstractTerm):
         An upper-limit row retains its threshold and flag when the draw lies
         below the threshold. Above it, the row becomes a measured detection.
         Rows already measured as detections remain uncensored Gaussian draws.
+
+        Args:
+            key: JAX random key.
+            model: The model holding the system at ``system_path``.
+
+        Returns:
+            The term with contrasts drawn about the prediction, censored at stored upper
+            limits.
         """
         data = self.data
         valid = data.valid
@@ -603,6 +729,8 @@ class DMagTerm(AbstractTerm):
         data: Detection and null epochs with their contrast curves.
         system_path: Model path of the one-planet system; the empty path is the model.
         area_path: Model path of the photometric area, or None.
+        reads: Model paths a held build cached. Empty: the term reads the model
+            directly.
     """
 
     data: DMagData
@@ -622,11 +750,27 @@ class DMagTerm(AbstractTerm):
         return tuple(jnp.where(valid, x, 0.0) for x in prediction)
 
     def __call__(self, model):
-        """Return the combined dMag and null log likelihood."""
+        """Return the combined dMag and null log likelihood.
+
+        Args:
+            model: The model holding the system at ``system_path`` and any
+                ``area_path``.
+
+        Returns:
+            Scalar log-likelihood of the detection and null rows.
+        """
         return loglike_dmag(*self._prediction(model), self.data)
 
     def predict(self, model):
-        """Return (separation in arcsec, dMag) at each epoch, zero on padded rows."""
+        """Return (separation in arcsec, dMag) at each epoch, zero on padded rows.
+
+        Args:
+            model: The model holding the system at ``system_path`` and any
+                ``area_path``.
+
+        Returns:
+            A tuple of separation (arcsec) and dMag, each with shape ``(M,)``.
+        """
         return self._prediction(model)
 
     def draw(self, key, model) -> Self:
@@ -638,6 +782,14 @@ class DMagTerm(AbstractTerm):
         row refuses (:class:`~photomancy.measurements.ReportTerm` is the predictive
         for a detection outcome), so a planned non-detection never reports an
         information gain of exactly zero.
+
+        Args:
+            key: JAX random key.
+            model: The model holding the system at ``system_path`` and any
+                ``area_path``.
+
+        Returns:
+            The term with measured dMag drawn about the prediction at detection epochs.
         """
         data = self.data
         data = eqx.error_if(

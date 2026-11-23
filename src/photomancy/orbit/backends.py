@@ -24,6 +24,11 @@ def few_epoch(n_draws=2**17):
 
     Args:
         n_draws: Draws of the proposal, all returned.
+
+
+    Returns:
+        An :class:`~photomancy.infer.Importance` backend with the scale-and-rotate
+        proposal.
     """
     return Importance(ScaleRotateProposal(), n_draws)
 
@@ -65,6 +70,11 @@ def any_epoch(n_draws=2**16, n_rounds=3, **adaptive):
         **adaptive: Further settings of
             :class:`~photomancy.infer.AdaptiveImportance` (``n_adapt_draws``,
             ``n_centers``, ``defensive_fraction``, ``target_cess``).
+
+
+    Returns:
+        An :class:`~photomancy.infer.AdaptiveImportance` backend on the completed
+        proposal.
     """
     return AdaptiveImportance(
         CompletedProposal(ShapePriorProposal()),

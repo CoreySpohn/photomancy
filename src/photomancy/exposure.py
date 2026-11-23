@@ -72,6 +72,7 @@ class ExposureTerm(AbstractTerm):
             ``huber_loglike`` with scale 1 and ``delta=1`` is a smooth-L1 loss, and a
             noise array as the scale gives the noise-weighted kinds.
         exposure_index: Which entry of ``ExposureModel.exposures`` this term reads.
+        reads: Model paths a held build cached; empty, because the term holds no build.
     """
 
     render: Callable
@@ -80,13 +81,28 @@ class ExposureTerm(AbstractTerm):
     reads: ClassVar[tuple[str, ...]] = ()
 
     def predict(self, model):
-        """Render this exposure's image from ``model``."""
+        """Render this exposure's image from ``model``.
+
+        Args:
+            model: The :class:`ExposureModel` holding the instrument, the exposure
+                blocks and the scene.
+
+        Returns:
+            The image that ``render`` produces for this term's exposure block.
+        """
         return self.render(
             model.instrument, model.exposures[self.exposure_index], model.scene
         )
 
     def __call__(self, model):
-        """Return the scalar log-likelihood of the data at ``model``."""
+        """Return the scalar log-likelihood of the data at ``model``.
+
+        Args:
+            model: The :class:`ExposureModel` to score.
+
+        Returns:
+            The scalar log-likelihood of the held data at the rendered image.
+        """
         return self.likelihood(self.predict(model))
 
     def fisher_root(self, model):
@@ -94,6 +110,13 @@ class ExposureTerm(AbstractTerm):
 
         Available when the likelihood is a :class:`MaskedLogLikelihood`; an arbitrary
         callable raises ``NotImplementedError``.
+
+        Args:
+            model: The :class:`ExposureModel` at which the image is rendered.
+
+        Returns:
+            The flat Fisher-root vector that the likelihood's ``fisher_root`` gives for
+            the rendered image.
         """
         if not hasattr(self.likelihood, "fisher_root"):
             raise NotImplementedError(
@@ -107,6 +130,13 @@ class ExposureTerm(AbstractTerm):
         The likelihood must implement ``draw(key, predicted)`` returning a
         likelihood containing the drawn image; arbitrary score callables cannot
         define a generative law.
+
+        Args:
+            key: PRNG key for the draw.
+            model: The :class:`ExposureModel` at which the image is rendered.
+
+        Returns:
+            A copy of this term whose likelihood holds the drawn image.
         """
         if not hasattr(self.likelihood, "draw"):
             raise TypeError("image likelihood must implement draw(key, predicted)")

@@ -62,7 +62,12 @@ class AbstractFilter(eqx.Module):
 
 
 class AbstractSampler(eqx.Module):
-    """Noise-reference collection step for a candidate position."""
+    """Noise-reference collection step for a candidate position.
+
+    Attributes:
+        fwhm: Resolution element (full width at half maximum) in pixels that sets
+            the sampler geometry; reported as fwhm_px in the DetectionStats.
+    """
 
     fwhm: eqx.AbstractVar[float]
 
@@ -94,7 +99,12 @@ class AbstractSampler(eqx.Module):
 
 
 class AbstractTest(eqx.Module):
-    """Significance step: signal plus noise samples to (statistic, fpf, dof)."""
+    """Significance step: signal plus noise samples to (statistic, fpf, dof).
+
+    Attributes:
+        kind: Label of the statistic and null distribution pairing, copied to
+            DetectionStats.statistic_kind.
+    """
 
     kind: eqx.AbstractClassVar[str]
 

@@ -19,6 +19,14 @@ class YippyTemplateProvider(AbstractTemplateProvider):
     may declare sky orientation. An unoriented native grid shares the
     science detector axes; explicit orientations are transported through sky.
     The returned array is centered at ((stamp_size-1)/2, (stamp_size-1)/2).
+
+    Attributes:
+        coronagraph: Imaging coronagraph model evaluated at wavelength_nm that
+            supplies the off-axis PSFs.
+        grid: Science PixelGrid on which the stamps are sampled.
+        stamp_size: Side length of the square stamp, in pixels.
+        order: Interpolation order of stamp extraction (0, 1 or 3).
+        wavelength_nm: Wavelength in nm at which the PSFs are evaluated.
     """
 
     coronagraph: AbstractImagingCoronagraph
@@ -47,6 +55,13 @@ class YippyTemplateProvider(AbstractTemplateProvider):
         a lod science grid uses its own Frame. No separate scale is accepted.
         order selects nearest (0), linear (1), or cubic (3) stamp extraction.
         The source Image declares the reconstruction used for resampling.
+
+        Args:
+            coronagraph: Imaging coronagraph that supplies the off-axis PSFs.
+            grid: Science PixelGrid, in arcsec or lod units.
+            stamp_size: Side length of the square stamp, in pixels.
+            wavelength_nm: Wavelength in nm.
+            order: Stamp extraction order, one of 0, 1 or 3.
         """
         model = coronagraph.coronagraph_at(wavelength_nm)
         if not isinstance(model, AbstractImagingCoronagraph):
@@ -84,7 +99,16 @@ class YippyTemplateProvider(AbstractTemplateProvider):
         )
 
     def __call__(self, position_yx: jnp.ndarray) -> jnp.ndarray:
-        """Synthesize an Image, resample its grid, and extract a centered stamp."""
+        """Synthesize an Image, resample its grid, and extract a centered stamp.
+
+        Args:
+            position_yx: (2,) candidate position (y, x) in pixel-center coordinates
+                of the science grid.
+
+        Returns:
+            (stamp_size, stamp_size) stamp of the off-axis PSF, NaN where the PSF is
+            not valid.
+        """
         offset = self._science_arcsec.pixel_to_unit(position_yx[1], position_yx[0])
         x, y = offset.x, offset.y
         if self.grid.orientation != self._native_arcsec.orientation:
