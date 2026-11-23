@@ -29,6 +29,16 @@ def _term(model, exposure, observed, mask=None):
     return ImageTerm(observed, mask, exposure=exposure, **_PATHS)
 
 
+def _scored(model, exposure, observed):
+    """A term whose mask is the pixels the toy coronagraph's tables cover.
+
+    The detector is as wide as the tables, so the edge pixels (more at the blue
+    node of the band) are unsupported; ``Fit`` refuses a mask that scores them.
+    """
+    blank = _term(model, exposure, observed)
+    return _term(model, exposure, observed, blank.supported_mask(model))
+
+
 def _mean(model, exposure):
     shape = (1, *model.instrument.detector.shape)
     return _term(model, exposure, jnp.zeros(shape)).predict(model)
@@ -95,7 +105,8 @@ def test_draw_gives_counts_consistent_with_the_expectation_and_keeps_masked_pixe
     """
     model, exposure = _setup("poisson")
     mean = _mean(model, exposure)
-    mask = jnp.ones(mean.shape, bool).at[0, :3, :].set(False)
+    supported = _term(model, exposure, mean).supported_mask(model)
+    mask = supported & jnp.ones(mean.shape, bool).at[0, :3, :].set(False)
     term = _term(model, exposure, jnp.full(mean.shape, -7.0), mask)
     drawn = term.draw(jax.random.PRNGKey(5), model)
     out = np.asarray(drawn.observed_e)
@@ -163,7 +174,7 @@ def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument():
     """
     model, exposure = _setup("poisson")
     observed = jnp.round(_mean(model, exposure))
-    mask = jnp.ones(observed.shape, bool)
+    mask = _scored(model, exposure, observed).mask
     rooted = ImageTerm(observed, mask, instrument=model.instrument, exposure=exposure)
     held = _term(model, exposure, observed)
     np.testing.assert_allclose(rooted(model.scene), held(model), rtol=1e-12)
@@ -215,7 +226,7 @@ _CONTRAST = "scene.planets[0].physical_model.contrast_grid"
 def test_an_image_fit_frees_a_scene_leaf_and_gradients_flow():
     """``Fit`` accepts the term over a scene leaf: finite density and gradient."""
     model, exposure = _setup("poisson")
-    term = _term(model, exposure, jnp.round(_mean(model, exposure)))
+    term = _scored(model, exposure, jnp.round(_mean(model, exposure)))
     fit = Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
     x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid}
     assert np.isfinite(fit.log_density(x))
@@ -229,14 +240,14 @@ def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene():
     """A held-instrument term on ``Fit(scene, ...)`` scores like the record model."""
     model, exposure = _setup("poisson")
     observed = jnp.round(_mean(model, exposure))
-    mask = jnp.ones(observed.shape, bool)
+    mask = _scored(model, exposure, observed).mask
     rooted = ImageTerm(observed, mask, instrument=model.instrument, exposure=exposure)
     path = "planets[0].physical_model.contrast_grid"
     law = LogUniform(1e-12, 1e-8)
     grid = model.scene.planets[0].physical_model.contrast_grid
     on_scene = Fit(model.scene, {path: law}, (rooted,)).log_density({path: grid})
     on_record = Fit(
-        model, {f"scene.{path}": law}, (_term(model, exposure, observed),)
+        model, {f"scene.{path}": law}, (_scored(model, exposure, observed),)
     ).log_density({f"scene.{path}": grid})
     np.testing.assert_allclose(on_scene, on_record, rtol=1e-12)
 

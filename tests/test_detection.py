@@ -418,6 +418,8 @@ def _image_problem(kind, seed=11):
     mask = np.ones(shape, bool)
     mask[..., :3, :] = False
     mask[..., 10:13, 10:13] = False
+    # The detector is as wide as the toy tables: score only supported pixels.
+    mask &= np.asarray(blank.supported_mask(make_scene(contrast=0.0)))
     image = ImageTerm(
         jnp.asarray(observed),
         jnp.asarray(mask),
@@ -718,11 +720,12 @@ def test_fisher_of_an_image_fit_equals_the_closed_form_on_a_linear_mean(kind):
     )
     variance = mean if kind == "poisson" else _VARIANCE
     got = np.asarray(fit.information(x, kind="fisher", include_prior=False))
-    np.testing.assert_allclose(got[0, 0], np.sum(mask * t * t / variance), rtol=1e-10)
+    # Only scored pixels have a positive mean; the rest are 0 / 0 and carry no weight.
+    w = np.divide(mask, variance, out=np.zeros(mask.shape), where=mask)
+    np.testing.assert_allclose(got[0, 0], np.sum(w * t * t), rtol=1e-10)
     h = 0.01
     pred = lambda pa: np.asarray(sky.predict(_sky(_TRUE_AMP, pa)))  # noqa: E731
     d_pa = (pred(_TRUE_PA + h) - pred(_TRUE_PA - h)) / (2 * h)
-    w = mask / variance
     np.testing.assert_allclose(got[0, 1], np.sum(w * t * d_pa), rtol=1e-4)
     np.testing.assert_allclose(got[1, 1], np.sum(w * d_pa * d_pa), rtol=1e-4)
     with_prior = fit.information(x, kind="fisher", include_prior=True)
