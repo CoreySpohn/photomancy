@@ -984,6 +984,57 @@ def test_walls_are_evaluated_once_and_survive_stacking_jit_and_edits():
         assert seen == {"jit": fit.walls, "vmap": fit.walls, "edit": fit.walls}, name
 
 
+def test_walls_follow_a_law_edited_in_place_and_survive_replace():
+    """Fails if an edit that skips ``__init__`` leaves ``Fit.walls`` stale.
+
+    ``eqx.tree_at`` (and ``tree_deserialise_leaves``) rebuild a fit without
+    ``__init__``. Raising the eccentricity law's lower edge from 0 to 0.2 on the frame
+    chart, whose disk ignores the lower edge, adds a wall on ``e``; lowering it back
+    removes it; swapping the classical block for the Cartesian one adds walls on
+    ``a_AU`` and ``e``. NUTS follows: it refuses the walled edit before sampling.
+    ``dataclasses.replace`` builds a fit with the same walls. Truth: the walls of a
+    fit built afresh from the edited entries. No sampling.
+    """
+    import dataclasses
+
+    from orbix.system import FrameChart
+
+    from photomancy.infer import NUTS, run
+
+    a_law = LogUniform(1.0, 100.0)
+    frame = Fit(
+        _scene(),
+        {
+            "dynamics.orbits": OrbitBlock(
+                FrameChart(),
+                OrbitLaw(Uniform(0.0, 0.95), a_AU=a_law),
+                rows=(0,),
+                system="dynamics",
+            )
+        },
+    )
+    assert frame.walls == {}
+    law_e = lambda f: f.free["dynamics.orbits"].law.eccentricity  # noqa: E731
+    raised = eqx.tree_at(law_e, frame, Uniform(0.2, 0.95))
+    assert raised.walls == {"dynamics.orbits": ("e",)}
+    assert raised.walls == Fit(raised.model, raised.free, raised.terms).walls
+    with pytest.raises(ValueError, match=r"NUTS needs .*'dynamics.orbits'.*e"):
+        run(raised, NUTS(n_warmup=10, n_draws=10), jax.random.key(0))
+    assert eqx.tree_at(law_e, raised, Uniform(0.0, 0.95)).walls == {}
+    fits = _walled_fits()
+    classical, cartesian = fits["classical"][0], fits["cartesian"][0]
+    swapped = eqx.tree_at(
+        lambda f: f.free["dynamics.orbits"],
+        classical,
+        cartesian.free["dynamics.orbits"],
+    )
+    assert swapped.walls == {"dynamics.orbits": ("a_AU", "e")}
+    for fit in (frame, raised, cartesian):
+        replaced = dataclasses.replace(fit, terms=(_ReadsNothing(),))
+        assert replaced.walls == fit.walls
+        assert replaced.terms == (_ReadsNothing(),)
+
+
 @pytest.mark.medium(reason="two-world NUTS compile, about 10 s cold")
 def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack():
     """Fails if a stack of wall-free fits is refused, or a stack of walled fits runs.
