@@ -50,11 +50,31 @@ def _term(likelihood=None):
     )
 
 
-def test_is_a_term_that_reads_nothing():
-    """A ForwardTerm is an AbstractTerm with no cached build."""
+class _Built(eqx.Module):
+    """A forward holding a build that cached the model's ``mu``."""
+
+    weights: jax.Array
+    reads: tuple[str, ...] = eqx.field(static=True, default=("mu",))
+
+    def __call__(self, model):
+        return self.weights
+
+
+def test_reads_are_the_forwards_reads_and_a_fit_refuses_freeing_them():
+    """The term reports what its forward's build read; ``Fit`` refuses freeing it.
+
+    Truth source: the forward's own ``reads`` tuple.
+    Fails if: the term hides a held build's reads (a class-level empty tuple), so a
+    fit frees a path whose change the cached build never sees.
+    """
     term = _term()
     assert isinstance(term, AbstractTerm)
     assert term.reads == ()
+    built = ForwardTerm(_Built(jnp.ones(3)), gaussian_loglike(jnp.zeros(3), 1.0))
+    assert built.reads == ("mu",)
+    law = Normal(jnp.zeros(3), jnp.ones(3))
+    with pytest.raises(ValueError, match="reads"):
+        Fit(_Model(jnp.ones(3)), {"mu": law}, (built,))
 
 
 def test_value_and_prediction_follow_the_forward():

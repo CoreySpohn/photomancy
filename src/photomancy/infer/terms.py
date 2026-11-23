@@ -4,7 +4,7 @@
 function: the likelihood of a forward model's output.
 """
 
-from typing import ClassVar, Self
+from typing import Self
 
 import equinox as eqx
 
@@ -17,8 +17,10 @@ class ForwardTerm(AbstractTerm):
     """The likelihood of a forward model's output, as one term of a ``Fit``.
 
     ``predict(model)`` is ``forward(model)`` and the value is
-    ``likelihood(forward(model))``. The term holds no build made from model values,
-    so it reads no model path.
+    ``likelihood(forward(model))``. A forward that holds a build made from model
+    values (an exposure built from the scene, say) declares the model paths that
+    build read in its own ``reads``; the term reports them, so ``Fit`` refuses to free
+    a path the forward would not see change.
 
     Attributes:
         forward: ``model -> prediction``, an ``eqx.Module`` so that the arrays it
@@ -29,13 +31,15 @@ class ForwardTerm(AbstractTerm):
             ``eqx.Module`` for the same reason as ``forward``. Draws need one with a
             ``draw(key, predicted)`` method that returns the likelihood holding the
             drawn data.
-        reads: Empty tuple: the term holds no build made from model values, so it
-            reads no model path.
     """
 
     forward: eqx.Module
     likelihood: eqx.Module
-    reads: ClassVar[tuple[str, ...]] = ()
+
+    @property
+    def reads(self) -> tuple[str, ...]:
+        """Model paths the forward's held build read: its ``reads``, else none."""
+        return tuple(getattr(self.forward, "reads", ()))
 
     def __check_init__(self):
         """Refuse a forward or likelihood that is not an ``eqx.Module``."""
