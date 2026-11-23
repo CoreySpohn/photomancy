@@ -153,7 +153,7 @@ def load_target(
     astrometry = None
     if rows:
         astrometry = AstrometryData.from_separation_pa(
-            time_d=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
+            time_d=epoch.days(jd=np.asarray([r["jd"] for r in rows], dtype=np.float64)),
             separation_arcsec=[r["sep_mas"] / 1000.0 for r in rows],
             separation_err_arcsec=[
                 _mean_error(r["sep_err_mas"]) / 1000.0 for r in rows
@@ -167,7 +167,7 @@ def load_target(
     photometry = None
     if rows:
         photometry = PhotometryData.from_dmag(
-            time_d=epoch.days(np.asarray([r["jd"] for r in rows], dtype=np.float64)),
+            time_d=epoch.days(jd=np.asarray([r["jd"] for r in rows], dtype=np.float64)),
             dmag=[r["dmag"] for r in rows],
             dmag_err=[_mean_error(r["dmag_err"]) for r in rows],
             band_id=[band_names.index(r["filter"]) for r in rows],

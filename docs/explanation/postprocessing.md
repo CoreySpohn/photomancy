@@ -264,6 +264,6 @@ counts = detector.draw(key, image_electrons, plan)
 ```
 
 Construct `FrameSet` with a `Band` interval and an `Epoch` host value. Convert
-absolute dates once on the host with `epoch.days(dates)` and pass those offsets
+absolute dates once on the host with `epoch.days(jd=dates)` and pass those offsets
 as `time_d`; the detector frames remain counts and their variance remains in
 squared electrons.

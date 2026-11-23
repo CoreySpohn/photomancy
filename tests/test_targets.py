@@ -176,7 +176,7 @@ def test_target_epoch_invariance(tmp_path, include_pending):
         times = [np.asarray(getattr(data, name).time_d) for data in loaded]
         np.testing.assert_array_equal(times[0] - times[1], 100.25)
         dates = np.array([2460000.0, 2460100.0][: times[0].size], dtype=np.float64)
-        np.testing.assert_array_equal(times[0], epochs[0].days(dates))
+        np.testing.assert_array_equal(times[0], epochs[0].days(jd=dates))
     values = []
     for data in loaded:
         elements = _ELEMENTS.copy()
