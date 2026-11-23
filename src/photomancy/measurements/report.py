@@ -11,7 +11,7 @@ counts are data, so the joint density of a detection factorizes into the counts,
 
 import math
 from abc import abstractmethod
-from typing import ClassVar, Self
+from typing import Self
 
 import equinox as eqx
 import jax
@@ -20,7 +20,7 @@ from hwoutils.epoch import Epoch
 from hwoutils.model_paths import resolve
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
-from optixstuff.spectral import Quadrature, Transmission
+from optixstuff.spectral import Quadrature, Resolution, Transmission
 
 from photomancy.infer.fit import AbstractProposingTerm, LeafProposal
 from photomancy.measurements._observables import (
@@ -300,8 +300,12 @@ class CountRateTable(eqx.Module):
     Separations have shape (n_modes, P). Finite knots increase strictly;
     padding is a trailing +inf separation with zero rate. Rates are expected
     planet counts per unit linear contrast per second. ``transmissions`` contains
-    one response per mode. Build the matching quadrature on the host, with
-    the system and these responses, as for PhotometryTerm.
+    one response per mode. Build the matching quadrature on the host from these
+    responses, and the resolution of the system's tabulated spectra on it,
+    ``Resolution.build(quadrature, *system.spectral_tables())``, as for
+    PhotometryTerm; the contrast then integrates a tabulated star or planet
+    exactly over each band. ``reads`` names the knot leaves that build saw,
+    ``system.knot_leaves()``, so a fit refuses to free one.
     Diffraction scales have shape (n_modes,). ``epoch`` is the static origin of
     the report times; a predictor raises if the model's epoch differs.
 
@@ -315,6 +319,9 @@ class CountRateTable(eqx.Module):
         quadrature: Host-built spectral quadrature, one band per mode.
         transmissions: Filter response of each mode.
         epoch: Origin of the report times.
+        resolution: Host-built reduction of the system's tabulated spectra onto
+            ``quadrature``; empty for a system with no table.
+        reads: Model paths of the knot leaves ``resolution`` was built on.
     """
 
     separation_arcsec: jax.Array = eqx.field(converter=_float64)
@@ -323,9 +330,15 @@ class CountRateTable(eqx.Module):
     quadrature: Quadrature
     transmissions: tuple[Transmission, ...]
     epoch: Epoch = eqx.field(static=True)
+    resolution: Resolution = eqx.field(default_factory=Resolution)
+    reads: tuple[str, ...] = eqx.field(static=True, default=())
 
     def __check_init__(self):
-        """Require compatible mode-bank dimensions."""
+        """Require compatible mode-bank dimensions and string read paths."""
+        if not isinstance(self.reads, tuple) or not all(
+            isinstance(path, str) for path in self.reads
+        ):
+            raise TypeError("reads must be a tuple of model path strings")
         if (
             self.separation_arcsec.ndim != 2
             or self.counts_per_contrast_s.shape != self.separation_arcsec.shape
@@ -356,6 +369,11 @@ class PrecomputedReportPredictor(AbstractReportPredictor):
         if not isinstance(self.planet, int) or self.planet < 0:
             raise ValueError("planet must be a nonnegative static integer")
 
+    @property
+    def reads(self) -> tuple[str, ...]:
+        """Model paths of the knot leaves the table's resolution was built on."""
+        return self.table.reads
+
     def __call__(self, model, rows: ReportData) -> ReportPrediction:
         """Predict linear-interpolated counts and sky positions for all rows.
 
@@ -382,6 +400,7 @@ class PrecomputedReportPredictor(AbstractReportPredictor):
             clean.time_d,
             clean.mode,
             planet,
+            self.table.resolution,
         )
         radius2 = ra**2 + dec**2
         sep = jnp.sqrt(jnp.where(radius2 > 0, radius2, 1.0))
@@ -479,8 +498,6 @@ class ReportTerm(AbstractProposingTerm):
             when the term offers no leaf proposal.
         leaf_exponent: Power of the leaf in the expected counts (2 for a radius). It
             shapes the proposal only; the likelihood reads the model.
-        reads: Model paths a held build cached. Empty: the term reads the model
-            directly.
     """
 
     rule: ReportRule
@@ -491,7 +508,14 @@ class ReportTerm(AbstractProposingTerm):
     )
     leaf_path: str | None = eqx.field(static=True, default=None)
     leaf_exponent: float = eqx.field(static=True, default=2.0)
-    reads: ClassVar[tuple[str, ...]] = ()
+
+    @property
+    def reads(self) -> tuple[str, ...]:
+        """Model paths a held build cached: the knot leaves of a precomputed table.
+
+        Empty for a predictor that holds no build.
+        """
+        return getattr(self.predictor, "reads", ())
 
     def __check_init__(self):
         """Require row diffraction scales for an exact predictor."""
