@@ -367,13 +367,18 @@ class _SkyImage(AbstractTerm):
     unit_model: GridPhysicalModel = eqx.field(
         default_factory=lambda: make_scene(contrast=1.0).planets[0].physical_model
     )
+    separation_arcsec: float = eqx.field(static=True, default=0.05)
     reads = ()
 
     def _scene(self, model):
         # The planet table is built once on the host; only its values vary here.
         grid = self.unit_model.contrast_grid * model.amplitude * _UNIT_CONTRAST
         planet_model = eqx.tree_at(lambda m: m.contrast_grid, self.unit_model, grid)
-        return make_scene(sky_pa_deg=model.pa_deg, model=planet_model)
+        return make_scene(
+            sky_pa_deg=model.pa_deg,
+            separation_arcsec=self.separation_arcsec,
+            model=planet_model,
+        )
 
     def __call__(self, model):
         return self.image(self._scene(model))
@@ -510,31 +515,63 @@ def test_detect_on_poisson_counts_recovers_the_planet():
 
 _NULL_FRAMES = 1600
 _NULL_PAS = jnp.arange(0.0, 360.0, 45.0)
+# 3.2 lambda/D at 550 nm for the 6 m aperture; the toy field reaches 3.6.
+_NULL_SEPARATION = 0.06
+
+
+class _PoissonLoglike(eqx.Module):
+    """``sum k log(mu) - mu`` over the masked pixels of one frame of counts."""
+
+    counts: jax.Array
+    mask: jax.Array
+
+    def __call__(self, prediction):
+        safe = jnp.where(self.mask, prediction, 1.0)
+        return jnp.sum(jnp.where(self.mask, self.counts * jnp.log(safe) - safe, 0.0))
+
+
+class _Templates(eqx.Module):
+    """Unit-amplitude planet images, one per trial position index."""
+
+    images: jax.Array
+
+    def __call__(self, index):
+        return self.images[index]
 
 
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
 @pytest.mark.slow(reason="12800 null trials, past the 2000-draw unit limit")
 def test_detect_false_alarms_match_the_poisson_null():
-    """On planet-free Poisson frames ``z`` is a unit normal, per trial and per map.
+    """On planet-free Poisson frames ``z`` and the pull are unit normals.
 
     1600 frames of the toy scene with no planet, drawn from the detector's own law
     (NumPy Poisson of the expected counts, about 1160 electrons per pixel,
     ``default_rng(0)``), and ``detect`` at 8 position angles 45 degrees apart at
-    2.6 lambda/D (template overlap below 1e-3, so the trials are independent).
+    3.2 lambda/D, outside 3 lambda/D (template overlap below 1e-5, so the trials
+    are independent). ``likelihood_ratio_map`` scores the same frames with a
+    hand-written Poisson log-likelihood over the same base and templates.
 
     Truth source: the null by construction; under it the signed root of the
-    likelihood ratio is a unit normal for each trial, and the maximum of 8
-    independent trials exceeds ``t8 = Phi^-1(0.99 ** (1 / 8))`` in one map in 100.
+    likelihood ratio is a unit normal for each trial, and so is the pull
+    ``a_hat / sigma``; the maximum of 8 independent trials exceeds
+    ``t8 = Phi^-1(0.99 ** (1 / 8))`` in one map in 100. ``z`` is a difference of
+    log-likelihoods and does not see the curvature: a wrong curvature (and so a
+    wrong ``sigma``) leaves it unchanged, which only the pull detects. The map is
+    the same profile of the same likelihood up to a constant.
     Tolerance basis: monte-carlo. Over n = 12800 trials, mean within ``4 / sqrt(n)``
-    (0.035) and standard deviation within ``4 sqrt(2 / (n - 1))`` (0.050, so a 5
+    (0.035) and standard deviations within ``4 sqrt(2 / (n - 1))`` (0.050, so a 5
     percent scale error fails); the count above 3 sigma and the count of maps above
     ``t8`` inside their binomial bands at 0.01 two sided (p = 1.35e-3 of 12800 and
     p = 0.01 of 1600). A correct implementation passes for a random seed with
-    probability above 0.97.
-    Fails if: the statistic is scaled by the wrong factor or curvature (a missing
-    factor 2 in the likelihood ratio gives a standard deviation of 0.71), the
-    Newton profile does not reach the maximum, or the trials are not scored
-    against the planet-free model.
+    probability above 0.97. Map against ``detect``: floating-point (atol 1e-9 on
+    ``a_hat``, whose standard error is about 0.5; rtol 1e-10 on ``sigma``; atol
+    1e-7 on ``z**2``, the rounding of a difference of log-likelihoods near 3e6,
+    measured at 2.4e-9 on 480 trials).
+    Fails if: the statistic is scaled by the wrong factor (a missing factor 2 in the
+    likelihood ratio gives a standard deviation of 0.71), the curvature is (doubled
+    it gives a pull standard deviation of 1.41, with ``z`` unchanged to 1e-9), the
+    Newton profile does not reach the maximum, the trials are not scored against
+    the planet-free model, or the map and ``detect`` profile different likelihoods.
     """
     detector = make_detector("poisson")
     instrument = make_instrument(detector)
@@ -542,28 +579,44 @@ def test_detect_false_alarms_match_the_poisson_null():
     exposure = make_exposure(empty, instrument)
     shape = (1, *detector.shape)
     blank = ImageTerm(jnp.zeros(shape), instrument=instrument, exposure=exposure)
-    mean = np.asarray(_SkyImage(blank).predict(_sky(0.0, 0.0)))
+    sky = _SkyImage(blank, separation_arcsec=_NULL_SEPARATION)
+    mean = np.asarray(sky.predict(_sky(0.0, 0.0)))
     rng = np.random.default_rng(0)
     frames = rng.poisson(mean, size=(_NULL_FRAMES, *mean.shape)).astype(float)
-    image = ImageTerm(
-        frames[0], blank.supported_mask(empty), instrument=instrument, exposure=exposure
+    mask = blank.supported_mask(empty)
+    image = ImageTerm(frames[0], mask, instrument=instrument, exposure=exposure)
+    fit = _fit(_SkyImage(image, separation_arcsec=_NULL_SEPARATION))
+    templates = _Templates(
+        jnp.stack([sky.predict(_sky(1.0, pa)) - mean for pa in _NULL_PAS])
     )
-    fit = _fit(_SkyImage(image))
 
-    def z_of(frame):
+    def scored(frame):
         one = eqx.tree_at(lambda f: f.terms[0].image.observed_e, fit, frame)
-        return detect(one, {"pa_deg": _NULL_PAS}, amplitude="amplitude").z
+        found = detect(one, {"pa_deg": _NULL_PAS}, amplitude="amplitude")
+        loglike = _PoissonLoglike(frame, mask)
+        mapped = likelihood_ratio_map(
+            ((loglike, mean, templates),), jnp.arange(_NULL_PAS.size)
+        )
+        return found, mapped
 
-    z = np.asarray(jax.vmap(z_of)(jnp.asarray(frames)))
+    found, mapped = jax.vmap(scored)(jnp.asarray(frames))
+    z = np.asarray(found.z)
+    pull = np.asarray(found.a_hat / found.sigma)
     assert not np.isnan(z).any()
+    assert not np.isnan(pull).any()
     n = z.size
+    band = 4.0 * np.sqrt(2.0 / (n - 1))
     assert abs(z.mean()) < 4.0 / np.sqrt(n)
-    assert abs(z.std(ddof=1) - 1.0) < 4.0 * np.sqrt(2.0 / (n - 1))
+    assert abs(z.std(ddof=1) - 1.0) < band
+    assert abs(pull.std(ddof=1) - 1.0) < band
     low, high = stats.binom.ppf([0.005, 0.995], n, stats.norm.sf(3.0))
     assert low <= int((z > 3.0).sum()) <= high
     t8 = stats.norm.isf(1.0 - 0.99 ** (1.0 / _NULL_PAS.size))
     low, high = stats.binom.ppf([0.005, 0.995], _NULL_FRAMES, 0.01)
     assert low <= int((z.max(axis=1) > t8).sum()) <= high
+    np.testing.assert_allclose(mapped.a_hat, found.a_hat, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(mapped.sigma, found.sigma, rtol=1e-10)
+    np.testing.assert_allclose(mapped.z**2, z**2, rtol=0, atol=1e-7)
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
