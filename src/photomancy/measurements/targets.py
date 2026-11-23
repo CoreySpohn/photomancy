@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from hwoutils.epoch import Epoch
+from hwoutils.model_paths import join
 from optixstuff.spectral import Band, Quadrature, Resolution
 
 from photomancy.measurements.astrometry import (
@@ -55,7 +56,9 @@ class TargetData:
         the nonzero extent of its filter curve and is split at the curve's knots;
         the system's tabulated star and planet spectra are integrated exactly
         over each piece, so they need no knots of their own as breaks and must
-        cover every band.
+        cover every band. The photometric term declares the system's knot
+        leaves (``Scene.knot_leaves``, under ``system_path``) as its reads, so a
+        fit refuses to free a knot grid its operators were built on.
         Missing photometric filters raise ``ValueError`` naming those filters.
 
         Args:
@@ -89,9 +92,15 @@ class TargetData:
             bands = tuple(_nonzero_band(curve) for curve in curves)
             rule = Quadrature.build(bands, *curves)
             resolution = _resolve(system, rule)
+            reads = tuple(join(system_path, path) for path in system.knot_leaves())
             result.append(
                 PhotometryTerm(
-                    self.photometry, rule, curves, system_path, resolution=resolution
+                    self.photometry,
+                    rule,
+                    curves,
+                    system_path,
+                    resolution=resolution,
+                    reads=reads,
                 )
             )
         return tuple(result)

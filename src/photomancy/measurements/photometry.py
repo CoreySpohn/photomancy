@@ -613,9 +613,11 @@ class PhotometryTerm(AbstractTerm):
         system_path: Model path of the system returning ``(W, K, T)`` band contrasts.
         resolution: Host-built reduction of the system's tabulated spectra onto
             ``quadrature``. The contrast integrates the star, planet and filter
-            tables over each band; empty, the contrast is point-sampled at the nodes.
-        reads: Model paths a held build cached. Empty: the term reads the model
-            directly.
+            tables over each band; empty, it serves a system with no table, whose
+            sources are sampled at the nodes.
+        reads: Model paths of the knot leaves ``resolution`` was built on, so a
+            fit refuses to free one: ``Scene.knot_leaves()`` of the system, each
+            prefixed with ``system_path``. ``TargetData.terms`` fills it.
     """
 
     data: PhotometryData
@@ -623,14 +625,18 @@ class PhotometryTerm(AbstractTerm):
     transmissions: tuple[Transmission, ...]
     system_path: str = eqx.field(static=True, default="")
     resolution: Resolution = eqx.field(default_factory=Resolution)
-    reads: ClassVar[tuple[str, ...]] = ()
+    reads: tuple[str, ...] = eqx.field(static=True, default=())
 
     def __check_init__(self):
-        """Require a transmission for contrast prediction."""
+        """Require a transmission per band and string read paths."""
         if len(self.transmissions) != len(self.quadrature.bands):
             raise ValueError(
                 "PhotometryTerm needs one transmission per quadrature band"
             )
+        if not isinstance(self.reads, tuple) or not all(
+            isinstance(path, str) for path in self.reads
+        ):
+            raise TypeError("reads must be a tuple of model path strings")
 
     def _score(self, model):
         valid = self.data.valid

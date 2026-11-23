@@ -23,10 +23,20 @@ from hwoutils.epoch import Epoch
 from jax.test_util import check_grads
 from numpy.polynomial.legendre import leggauss
 from optixstuff.spectral import Band, Quadrature, Resolution, Transmission
+from priorities import LogUniform, Normal
 from skyscapes.physical_model import TimeSeriesPhysicalModel
 from skyscapes.scene import Planet, Scene, Star
 
-from photomancy.measurements import PhotometryData, TargetData
+from photomancy.infer import Fit
+from photomancy.measurements import (
+    CountRateTable,
+    PhotometryData,
+    PrecomputedReportPredictor,
+    ReportData,
+    ReportRule,
+    ReportTerm,
+    TargetData,
+)
 from photomancy.measurements.targets import _nonzero_band
 
 STAR_NM = np.arange(400.0, 900.0001, 0.1)
@@ -106,6 +116,16 @@ def _target(n_rows=1):
     )
 
 
+def _point_sampled(scene, quadrature, time_d):
+    """Band contrast from point samples of the star and planet at the nodes."""
+    nodes = quadrature.nodes_nm
+    planet = jax.vmap(jax.vmap(lambda w: scene.planet_flux_densities(w, time_d)))(nodes)
+    star = scene.star.photon_flux_density(
+        nodes[..., None], time_d, dist_pc=scene.dist_pc
+    )
+    return quadrature.integrate(planet) / quadrature.integrate(star)[:, None, :]
+
+
 def _term(scene):
     (term,) = _target().terms(system=scene, transmissions={"F": _filter()})
     return term
@@ -145,7 +165,7 @@ def test_photometry_integrates_the_star_over_a_tabulated_filter():
     prediction = float(term.predict(scene)[0])
     np.testing.assert_allclose(prediction, _truth(scene), rtol=1e-4)
 
-    sampled = scene.band_contrasts(term.quadrature, jnp.zeros(1), transmission=None)
+    sampled = _point_sampled(scene, term.quadrature, jnp.zeros(1))
     assert abs(float(sampled[0, 0, 0]) / _truth(scene) - 1.0) > 1e-3
 
 
@@ -215,7 +235,7 @@ def test_warm_cost_of_the_integrated_contrast():
     term = _term(scene)
     times = jnp.zeros(1)
     integrated = jax.jit(lambda model: term(model))
-    sampled = jax.jit(lambda model: model.band_contrasts(term.quadrature, times))
+    sampled = jax.jit(lambda model: _point_sampled(model, term.quadrature, times))
 
     def warm(fun):
         jax.block_until_ready(fun(scene))
@@ -229,3 +249,65 @@ def test_warm_cost_of_the_integrated_contrast():
     print(f"warm call ms: integrated {ms[0]:.3f}, point sample {ms[1]:.3f}")
     assert np.isfinite(float(integrated(scene)))
     assert np.all(np.isfinite(np.asarray(sampled(scene))))
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_the_report_predictor_integrates_a_tabulated_star():
+    """Fails if a precomputed report predictor point-samples a rough star.
+
+    Truth: the same Gauss-cell band ratio as the photometric term (``_truth``)
+    times the flat tabulated rate and the exposure time. Tolerance basis:
+    both are exact quadratures of piecewise polynomials, so they agree to
+    float64 rounding over a few hundred cells; rtol 1e-10 (measured 1e-16).
+    The point sample at the nodes is off by 4.5e-2 on this star, and a table
+    without a resolution is refused rather than sampled.
+    """
+    scene = _scene()
+    curve = _filter()
+    rule = Quadrature.build((_nonzero_band(curve),), curve)
+    resolution = Resolution.build((rule,), *scene.spectral_tables())
+    table = CountRateTable(
+        jnp.array([[0.0, 10.0]]),
+        jnp.array([[2.0, 2.0]]),
+        jnp.array([0.03]),
+        rule,
+        (curve,),
+        scene.epoch,
+        resolution=resolution,
+        reads=scene.knot_leaves(),
+    )
+    rows = ReportData.planned(
+        jnp.zeros(1), jnp.array([5.0]), jnp.array([1.0]), jnp.array([0])
+    )
+    predictor = PrecomputedReportPredictor(table, 0)
+    counts = float(predictor(scene, rows).counts[0])
+    np.testing.assert_allclose(counts, _truth(scene) * 2.0 * 5.0, rtol=1e-10)
+    term = ReportTerm(ReportRule(threshold=4.5, kappa=1.3, corr=0.4), rows, predictor)
+    assert term.reads == scene.knot_leaves() != ()
+    bare = eqx.tree_at(lambda t: t.resolution, table, Resolution())
+    with pytest.raises(LookupError):
+        PrecomputedReportPredictor(bare, 0)(scene, rows)
+
+
+class _Holder(eqx.Module):
+    system: Scene
+
+
+def test_a_fit_refuses_to_free_a_knot_leaf_a_photometric_term_was_built_on():
+    """Fails if the photometric term declares no reads, or the wrong ones.
+
+    Truth, named by hand: the star's and the tabulated planet's knot grids,
+    under the system's model path. Freeing the planet's knot grid must then be
+    refused by ``Fit`` naming the term; a free planet radius is not a read and
+    is accepted.
+    """
+    scene = _scene()
+    (term,) = _target().terms("system", system=scene, transmissions={"F": _filter()})
+    assert term.reads == (
+        "system.star._wavelengths_nm",
+        "system.planets[0].physical_model.wavelengths_nm",
+    )
+    knots = "system.planets[0].physical_model.wavelengths_nm"
+    with pytest.raises(ValueError, match=r"meets PhotometryTerm\.reads"):
+        Fit(_Holder(scene), {knots: Normal(jnp.asarray(PLANET_NM), 1.0)}, (term,))
+    Fit(_Holder(scene), {"system.planets[0].Rp_Rearth": LogUniform(0.5, 4.0)}, (term,))

@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
-from optixstuff.spectral import Band, Quadrature, Transmission
+from optixstuff.spectral import Band, Quadrature, Resolution, Transmission
 from scipy.special import ndtr
 from scipy.stats import norm
 
@@ -230,7 +230,10 @@ def test_surrogate_and_routing(report_case):
     contrasts = jnp.stack(
         [
             system.band_contrasts(
-                table.quadrature.band(i), term.data.time_d, transmission=b
+                table.quadrature.band(i),
+                term.data.time_d,
+                resolution=Resolution(),
+                transmission=b,
             )[0]
             for i, b in enumerate(table.transmissions)
         ]

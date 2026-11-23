@@ -16,7 +16,7 @@ from kinematics import (
     predict_rv,
     predict_stellar_astrometry,
 )
-from optixstuff.spectral import Band, Quadrature, Transmission
+from optixstuff.spectral import Band, Quadrature, Resolution, Transmission
 from priorities import Normal
 from scipy import integrate
 from skyscapes.physical_model import LambertianPhysicalModel
@@ -502,7 +502,9 @@ def test_contrast_detection_and_limits():
     band = Transmission.from_band(Band(550.0, 650.0))
     times = jnp.asarray(_TIMES[:3])
     rule = Quadrature.build((Band(550.0, 650.0),), system, band)
-    model = system.band_contrasts(rule, times, transmission=band)[0, 0]
+    model = system.band_contrasts(
+        rule, times, resolution=Resolution(), transmission=band
+    )[0, 0]
     err = model / 100.0
     observed = model + jnp.array([0.7, 12.0, -40.0]) * err
     data = PhotometryData(
@@ -593,9 +595,12 @@ def test_photometry_band_planet_epoch_routing():
         _Holder(system)
     )
     expected = [
-        system.band_contrasts(rule.band(b), jnp.array([t]), transmission=bands[b])[
-            0, p, 0
-        ]
+        system.band_contrasts(
+            rule.band(b),
+            jnp.array([t]),
+            resolution=Resolution(),
+            transmission=bands[b],
+        )[0, p, 0]
         for b, p, t in zip(band_ids, planet_ids, _TIMES, strict=True)
     ]
     np.testing.assert_allclose(prediction, expected, rtol=1e-13, atol=0)
