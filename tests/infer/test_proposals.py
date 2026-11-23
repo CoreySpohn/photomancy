@@ -329,16 +329,17 @@ def _modes_and_evidence(label, backend):
             assert np.isnan(float(draws.log_evidence_se)), (seed, label, khat)
         score = np.asarray(info.mode_log_evidence if label == "laplace" else info.elbo)
         kept = np.asarray(info.kept)
-        if label == "laplace":
-            # A start that stalls against a wall (gradient norm 3 to 200 after 100
-            # steps) sits about 1285 nats below the converged modes, so it carries no
-            # proposal weight. Whether it is kept depends on its Hessian eigenvalue
-            # against the indefiniteness threshold, which round-off decides (jax
-            # 0.12.1 drops one that jax 0.12.0.1 keeps): only the converged modes
-            # are matched, and the stalled ones must stay negligible.
-            best = max(m["score"] for m in modes)
-            modes = [m for m in modes if m["score"] > best - _STALLED_NATS]
-            kept = kept & (score > score[kept].max() - _STALLED_NATS)
+        # A start that stalls (gradient norm 3 to 200 after 100 steps) sits 600 to
+        # 1300 nats below the converged modes, so it carries no proposal weight. Where
+        # it stops is decided by round-off: for Laplace, whether its Hessian passes the
+        # indefiniteness threshold (jax 0.12.1 drops one that jax 0.12.0.1 keeps); for
+        # Pathfinder, its ELBO (a change in how one density compiles moved a stalled
+        # path from -664.05 to -664.58 nats while the converged ones agreed to 1e-8).
+        # Only the converged modes are matched, and the stalled ones must stay
+        # negligible.
+        best = max(m["score"] for m in modes)
+        modes = [m for m in modes if m["score"] > best - _STALLED_NATS]
+        kept = kept & (score > score[kept].max() - _STALLED_NATS)
         order = [i for i in np.argsort(-score) if kept[i]]
         assert len(order) == len(modes), (seed, label)
         means = np.asarray(info.flat_means)
