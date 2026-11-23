@@ -26,7 +26,9 @@ def _stellar_reflex(system, time_d):
     return system.star_reflex(time_d=time_d)
 
 
-def _band_contrasts(system, quadrature, transmissions, time_d, band_id, planet):
+def _band_contrasts(
+    system, quadrature, transmissions, time_d, band_id, planet, resolution=None
+):
     """Select each row's filter, planet and epoch from a single scene evaluation."""
 
     def response(nodes_nm):
@@ -34,5 +36,6 @@ def _band_contrasts(system, quadrature, transmissions, time_d, band_id, planet):
             [curve(row) for curve, row in zip(transmissions, nodes_nm, strict=True)]
         )
 
-    bands = system.band_contrasts(quadrature, time_d, transmission=response)
+    options = {} if resolution is None else {"resolution": resolution}
+    bands = system.band_contrasts(quadrature, time_d, transmission=response, **options)
     return bands[band_id, planet, jnp.arange(time_d.size)]

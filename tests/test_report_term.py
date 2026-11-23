@@ -32,7 +32,7 @@ class _Scene(eqx.Module):
     def ephemeris(self, time_d):
         return time_d
 
-    def band_contrasts(self, quadrature, time_d, *, transmission=None):
+    def band_contrasts(self, quadrature, time_d, *, transmission=None, resolution=None):
         # Mode, planet and time dependence makes all three row indices observable.
         scale = (
             jnp.asarray([b.center_nm for b in quadrature.bands])[:, None, None] / 600.0

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from hwoutils.epoch import Epoch
-from optixstuff.spectral import Band, Quadrature
+from optixstuff.spectral import Band, Quadrature, Resolution
 
 from photomancy.measurements.astrometry import (
     AstrometryData,
@@ -51,8 +51,11 @@ class TargetData:
         ``system_path`` is the model path of the system the terms read; the empty
         default is the model itself.
         An explicit mapping overrides the mapping supplied to ``load_target``.
-        Photometric terms require the concrete reference system to split the
-        integration at its spectral breaks before tracing the likelihood.
+        Photometric terms require the concrete reference system. Each band spans
+        the nonzero extent of its filter curve and is split at the curve's knots;
+        the system's tabulated star and planet spectra are integrated exactly
+        over each piece, so they need no knots of their own as breaks and must
+        cover every band.
         Missing photometric filters raise ``ValueError`` naming those filters.
 
         Args:
@@ -83,10 +86,58 @@ class TargetData:
                     "Photometric terms need a system to build the quadrature"
                 )
             curves = tuple(mapping[name] for name in self.band_names)
-            bands = tuple(Band(curve.low_nm, curve.high_nm) for curve in curves)
-            rule = Quadrature.build(bands, system, *curves)
-            result.append(PhotometryTerm(self.photometry, rule, curves, system_path))
+            bands = tuple(_nonzero_band(curve) for curve in curves)
+            rule = Quadrature.build(bands, *curves)
+            resolution = _resolve(system, rule)
+            result.append(
+                PhotometryTerm(
+                    self.photometry, rule, curves, system_path, resolution=resolution
+                )
+            )
         return tuple(result)
+
+
+def _nonzero_band(curve):
+    """Return the band a filter curve responds over, trimmed to its nonzero extent.
+
+    The response is linear between knots, so it is nonzero strictly between the
+    knot before its first positive value and the knot after its last. Zero tails
+    beyond that carry no signal and would only leave a tabulated source's range.
+    An all-zero curve keeps its full range.
+    """
+    wave = np.asarray(curve.wavelength_nm, dtype=float)
+    positive = np.flatnonzero(np.asarray(curve.transmission) > 0.0)
+    if positive.size == 0:
+        return Band(float(wave[0]), float(wave[-1]))
+    first, last = positive[0], positive[-1]
+    low = wave[first - 1] if first > 0 else wave[first]
+    high = wave[last + 1] if last < wave.size - 1 else wave[last]
+    return Band(float(low), float(high))
+
+
+def _resolve(system, quadrature):
+    """Build the Resolution of the system's tabulated spectra on ``quadrature``.
+
+    A disk calibrated under the bolometric luminosity rule averages a tabulated
+    star over its own band, so each such band gets a quadrature resolved for the
+    star's table only.
+    """
+    tables = system.spectral_tables()
+    resolution = Resolution.build((quadrature,), *tables)
+    star = system.star
+    if not any(table is star for table in tables):
+        return resolution
+    quadratures = list(resolution.quadratures)
+    keys, rules = list(resolution.keys), list(resolution.rules)
+    for band in system.calibration_bands():
+        extra = Quadrature.build((band,))
+        added = Resolution.build((extra,), star)
+        quadratures.append(extra)
+        for key, rule in zip(added.keys, added.rules, strict=True):
+            if key not in keys:
+                keys.append(key)
+                rules.append(rule)
+    return Resolution(tuple(quadratures), tuple(keys), tuple(rules))
 
 
 def _mean_error(value):

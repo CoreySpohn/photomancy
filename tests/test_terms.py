@@ -699,7 +699,7 @@ class _SamplingSystem(eqx.Module):
     def star_radial_velocity(self, time_d):
         return time_d * 0.01
 
-    def band_contrasts(self, quadrature, time_d, *, transmission=None):
+    def band_contrasts(self, quadrature, time_d, *, transmission=None, resolution=None):
         return jnp.full((len(quadrature.bands), 1, time_d.size), 1e-10)
 
 

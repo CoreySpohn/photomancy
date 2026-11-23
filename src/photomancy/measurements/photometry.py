@@ -15,7 +15,7 @@ from hwoutils.constants import Rearth2AU
 from hwoutils.conversions import contrast_to_delta_mag, delta_mag_to_contrast
 from hwoutils.model_paths import resolve
 from jax.scipy.stats import norm
-from optixstuff.spectral import Quadrature, Transmission
+from optixstuff.spectral import Quadrature, Resolution, Transmission
 from orbix.system import System
 
 from photomancy.infer.fit import AbstractTerm
@@ -611,6 +611,9 @@ class PhotometryTerm(AbstractTerm):
         quadrature: Host-built spectral quadrature, one band per transmission.
         transmissions: Filter response of each band, in ``data.band_id`` order.
         system_path: Model path of the system returning ``(W, K, T)`` band contrasts.
+        resolution: Host-built reduction of the system's tabulated spectra onto
+            ``quadrature``. The contrast integrates the star, planet and filter
+            tables over each band; empty, the contrast is point-sampled at the nodes.
         reads: Model paths a held build cached. Empty: the term reads the model
             directly.
     """
@@ -619,6 +622,7 @@ class PhotometryTerm(AbstractTerm):
     quadrature: Quadrature
     transmissions: tuple[Transmission, ...]
     system_path: str = eqx.field(static=True, default="")
+    resolution: Resolution = eqx.field(default_factory=Resolution)
     reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
@@ -647,6 +651,7 @@ class PhotometryTerm(AbstractTerm):
             data.time_d,
             data.band_id,
             data.planet,
+            self.resolution,
         )
         prediction = jnp.where(valid, prediction, 0.0)
         z = (data.contrast - prediction) / data.contrast_err
