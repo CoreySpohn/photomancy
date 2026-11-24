@@ -6,6 +6,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+from hwoutils.leaves import canonical
 
 matplotlib.use("Agg")
 
@@ -72,7 +73,7 @@ def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
         period_d=LogUniform(600.0, 1600.0), eccentricity=kipping_eccentricity()
     )
     block = OrbitBlock(ClassicalChart(), law, rows=(0,), system="dynamics")
-    fit = Fit(model, {"dynamics.orbits": block}, ())
+    fit = Fit(canonical(model), {"dynamics.orbits": block}, ())
     draws = fit.sample_prior(jax.random.key(0), (2,))
     posterior = Posterior(
         samples=draws,

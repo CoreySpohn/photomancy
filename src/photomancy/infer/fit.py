@@ -53,6 +53,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock, block_order, check_ties, check_writers
 from hwoutils.constants import two_pi
+from hwoutils.leaves import as_float_leaf, is_param, require_tree
 from hwoutils.memory import DEFAULT_MAX_BYTES, MemoryLimit, largest_batch
 from hwoutils.model_paths import assign, paths_overlap, resolve
 from jax.flatten_util import ravel_pytree
@@ -587,6 +588,9 @@ class Fit(eqx.Module):
                 path, a block cycle, a free path or block write that meets a term's
                 ``reads``, or two terms that marginalize the same latent
                 (``AbstractTerm.marginalizes``), named in the message.
+            TypeError: Also when the model holds a leaf that is not a JAX array of the
+                active precision (:func:`hwoutils.leaves.require_tree`); convert it
+                with :func:`hwoutils.leaves.canonical`.
         """
         if not jax.config.jax_enable_x64:
             raise RuntimeError(
@@ -605,6 +609,7 @@ class Fit(eqx.Module):
                     f"free[{path!r}] is a {type(entry).__name__}; "
                     "expected a priorities distribution or a block"
                 )
+        require_tree(self.model)
         for key, block in blocks.items():
             for path in (*block.reads, *block.writes):
                 self._require_path(path, f"block {key!r}")
@@ -665,7 +670,11 @@ class Fit(eqx.Module):
                             f"terms[{i}] and its prior has an unbounded end: bound "
                             "the prior or hold the path"
                         )
-                    moved = assign(self.model, path, jnp.broadcast_to(end, leaf.shape))
+                    moved = assign(
+                        self.model,
+                        path,
+                        as_float_leaf(jnp.broadcast_to(end, leaf.shape)),
+                    )
                     term.check(moved)
 
     def _require_path(self, path, who):
@@ -676,12 +685,18 @@ class Fit(eqx.Module):
 
     def _check_leaf(self, path, dist):
         leaf = self._require_path(path, "free")
-        if isinstance(leaf, bool | int | float | complex | str | tuple):
-            raise ValueError(
-                f"free path {path!r} names a {type(leaf).__name__}, a static field "
-                "that fixes structure and cannot be free"
-            )
-        if not eqx.is_array(leaf):
+        if not is_param(leaf):
+            if eqx.is_array(leaf):
+                raise ValueError(
+                    f"free path {path!r} names an array of dtype {leaf.dtype}, not a "
+                    "floating leaf; an integer or boolean array fixes structure and "
+                    "cannot be free"
+                )
+            if isinstance(leaf, bool | int | float | complex | str | tuple):
+                raise ValueError(
+                    f"free path {path!r} names a {type(leaf).__name__}, a static "
+                    "field that fixes structure and cannot be free"
+                )
             raise ValueError(
                 f"free path {path!r} names a {type(leaf).__name__}, not one array "
                 "leaf; free the node through a block"
@@ -775,7 +790,7 @@ class Fit(eqx.Module):
 
     def _assign_leaf_laws(self, x, model):
         for path in self.leaf_laws:
-            model = assign(model, path, x[path])
+            model = assign(model, path, as_float_leaf(x[path]))
         return model
 
     def _walk(self, x):

@@ -237,7 +237,7 @@ class MAPStage(eqx.Module):
             invalidate its curvature pairs) and ``transforms``.
         name: Label carried into the trace.
         prepare: ``params -> density`` called once on the host when the stage
-            starts, even with zero steps. It receives independent host copies of
+            starts, even with zero steps. It receives independent JAX arrays of
             the current parameters, with the structure of ``init``. The returned
             density is used for this and later stages until another stage supplies
             ``prepare`` or ``fit``. Excludes ``fit`` on the same stage.
@@ -300,7 +300,7 @@ class StageTrace(eqx.Module):
 
 
 class StepRecord(eqx.Module):
-    """What a callback receives: the state at one step, as host copies.
+    """What a callback receives: the state at one step, as JAX arrays.
 
     Everything is evaluated at the same point, the parameters before the step.
 
@@ -308,9 +308,9 @@ class StepRecord(eqx.Module):
         step: Global step index across all stages.
         stage: The :class:`MAPStage` being run.
         stage_step: Step index within the stage.
-        params: The parameter PyTree before the step (NumPy arrays).
+        params: The parameter PyTree before the step (JAX arrays).
         loss: The scaled objective at ``params``.
-        aux: The ``aux`` of the log-density at ``params`` (NumPy arrays).
+        aux: The ``aux`` of the log-density at ``params`` (JAX arrays).
         metrics: ``{name: float}`` at ``params``.
     """
 
@@ -353,9 +353,9 @@ def _strong_copy(x):
     return jax.lax.convert_element_type(jnp.array(x, copy=True), jnp.asarray(x).dtype)
 
 
-def _host_copy(tree):
-    """Copy every array leaf to host memory (a real copy, safe under donation)."""
-    return jax.tree.map(lambda x: np.array(x) if eqx.is_array(x) else x, tree)
+def _device_copy(tree):
+    """Fresh device buffers for every array leaf, safe under donation."""
+    return jax.tree.map(lambda x: _strong_copy(x) if eqx.is_array(x) else x, tree)
 
 
 def map_fit(
@@ -379,7 +379,7 @@ def map_fit(
     the result holds fresh buffers. There is no randomness, and on CPU a repeated run
     is bitwise identical.
 
-    A stage's ``prepare`` hook runs on the host with independent copies of the
+    A stage's ``prepare`` hook runs on the host with independent JAX-array copies of the
     current parameters before any step in that stage. Its returned log density
     persists until another stage supplies ``prepare`` or ``fit``. Before the
     first hook, explicit stage densities remain local to their stage, preserving
@@ -426,13 +426,13 @@ def map_fit(
             for a new fit.
         metrics: ``{name: fn(params, aux) -> scalar}`` evaluated inside every step
             at the pre-step parameters and recorded in the trace.
-        callback: ``callback(record)`` called with a :class:`StepRecord` of host
-            copies on the global steps ``callback_every`` selects; its return value is
-            ignored. It costs a host copy of the parameters on those steps.
+        callback: ``callback(record)`` called with a :class:`StepRecord` of JAX
+            arrays on the global steps ``callback_every`` selects; its return value is
+            ignored. It costs a copy of the parameters on those steps.
         callback_every: Steps between callbacks (an int), or a predicate
             ``step -> bool`` on the global step index (for example a set's
             ``__contains__``), so a fit can report at stage boundaries without a
-            host copy of the parameters every step.
+            copy of the parameters every step.
 
     Returns:
         A :class:`MAPResult`.
@@ -648,7 +648,7 @@ def map_fit(
     density = logdensity
     for stage in stages:
         if stage.prepare is not None:
-            density = stage.prepare(_host_copy(rebuild(dyn)))
+            density = stage.prepare(_device_copy(rebuild(dyn)))
             prepared = True
         elif stage.fit is not None:
             density = stage.fit
@@ -680,7 +680,7 @@ def map_fit(
         n_run = 0
         for j in range(stage.n_steps):
             gi = offset + j
-            pre = _host_copy(rebuild(dyn)) if want_aux and due(gi) else None
+            pre = _device_copy(rebuild(dyn)) if want_aux and due(gi) else None
             if solver_state is None:
                 dyn, states, bufs, count, aux = step(
                     static_args, dyn, states, bufs, count
@@ -698,7 +698,7 @@ def map_fit(
                         stage_step=j,
                         params=pre,
                         loss=float(bufs["loss"][gi]),
-                        aux=_host_copy(aux),
+                        aux=aux,
                         metrics={name: float(bufs[name][gi]) for name in metrics},
                     )
                 )
@@ -740,6 +740,48 @@ def map_fit(
         for name, start, n, stopped in records
     )
     return MAPResult(params=rebuild(dyn), stages=traces, opt_states=states)
+
+
+STOP_PATIENCE = 5
+"""Consecutive steps without a gain of ``STOP_MIN_DELTA`` that stall a default stage."""
+
+STOP_MIN_DELTA = 1e-7
+"""Smallest decrease of the best objective that counts as a gain in a default stage."""
+
+STOP_CHECK_EVERY = 5
+"""Steps between the stopping checks of a default stage."""
+
+
+def default_stage(n_steps, solver, scale):
+    """The default L-BFGS stage over every parameter.
+
+    With a ``scale`` (the ``information_scale`` entry dict of ``photomancy.infer``)
+    the solver runs in the scaled coordinates and the stage stops when the loss has
+    stalled for ``STOP_PATIENCE`` steps (read every ``STOP_CHECK_EVERY``) and the scaled
+    gradient norm is below ``_GRAD_TOL``. Without one the stage runs ``n_steps``.
+
+    Args:
+        n_steps: The most iterations.
+        solver: The optax solver to run, usually ``optax.lbfgs()``.
+        scale: The information scale entry dict, or ``None`` for an unscaled stage.
+
+    Returns:
+        The :class:`MAPStage` named ``"lbfgs"`` over the group ``"all"``.
+    """
+    stopping = None
+    if scale is not None:
+        table = {"all": tuple(jax.tree.leaves(scale))}
+        solver = rescaled_transform(solver, table)
+        stopping = EarlyStopping(
+            patience=STOP_PATIENCE,
+            min_delta=STOP_MIN_DELTA,
+            check_every=STOP_CHECK_EVERY,
+            grad_tol=_GRAD_TOL,
+            grad_scale=table,
+        )
+    return MAPStage(
+        n_steps, ("all",), solver=solver, early_stopping=stopping, name="lbfgs"
+    )
 
 
 class _RealLogProb(eqx.Module):
@@ -914,30 +956,15 @@ class MAP(AbstractBackend):
         stages = self.stages
         transforms = self.transforms
         if stages is None:
-            solver = optax.lbfgs()
-            scale = (
-                information_scale(fit, start, include_prior=True)
-                if self.scale
-                else None
-            )
-            stopping = None
-            if scale is not None:
-                table = {"all": tuple(jax.tree.leaves(scale))}
-                solver = rescaled_transform(solver, table)
-                stopping = EarlyStopping(
-                    patience=5,
-                    min_delta=1e-7,
-                    check_every=5,
-                    grad_tol=_GRAD_TOL,
-                    grad_scale=table,
-                )
             stages = (
-                MAPStage(
+                default_stage(
                     self.n_steps,
-                    ("all",),
-                    solver=solver,
-                    early_stopping=stopping,
-                    name="lbfgs",
+                    optax.lbfgs(),
+                    (
+                        information_scale(fit, start, include_prior=True)
+                        if self.scale
+                        else None
+                    ),
                 ),
             )
         stages = tuple(_real_stage(stage, fit) for stage in stages)

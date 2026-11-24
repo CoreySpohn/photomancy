@@ -243,7 +243,7 @@ def test_cluster_to_mixture_recovers_period_aliases_from_the_laplace_modes():
         "phi": jnp.full(3, 0.5),
     }
     fit = Fit(
-        _Sinusoid(jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)),
+        _Sinusoid(*(jnp.zeros((), jnp.float64) for _ in range(3))),
         laws,
         (ForwardTerm(_SinusoidForward(t), gaussian_loglike(y, 0.4)),),
     )
@@ -576,6 +576,38 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     a = run(rootless, MAP(n_steps=10, init=start_r), jax.random.key(0))
     b = run(rootless, MAP(n_steps=10, init=start_r, scale=False), jax.random.key(0))
     np.testing.assert_array_equal(a.samples["mu"], b.samples["mu"])
+
+
+@pytest.mark.medium(
+    reason="a Laplace and a MAP run of at most 200 steps and two scale passes"
+)
+def test_laplace_finds_the_mode_with_the_default_map_stage():
+    """Laplace reaches the optimum of the badly scaled fit and equals ``MAP``'s result.
+
+    Truth source: ``numpy.linalg.lstsq``, the exact maximizer of the Gaussian
+    likelihood (as in the MAP scaling test); the gap is the log likelihood below that
+    optimum, asserted under 1e-9 nat. The mode is compared with the default ``MAP``
+    result on the same fit and start (same scaled stage, same stopping rule), in the
+    flat unconstrained coordinates, to rtol 1e-6. Both are given 40 steps: the scaled
+    stage converges and stops at 35, while an unscaled L-BFGS cut at 40 steps is
+    thousands of nat below the optimum. Tolerance basis: floating-point.
+    Fails if the Laplace optimizer is a separate unscaled L-BFGS (fixed count or a
+    stall-only stop): it leaves the optimum by more than the bound or differs from the
+    ``MAP`` result.
+    """
+    fit, start, best = _badly_scaled_fit()
+    top = float(fit.log_likelihood({"mu": jnp.asarray(best)}))
+    key = jax.random.key(0)
+    laplace = run(fit, Laplace(n_draws=50, n_steps=40, init=start), key)
+    mode = jax.tree.map(lambda a: a[0], laplace.info.modes)
+    assert abs(top - float(fit.log_likelihood(mode))) < 1e-9
+    reference = run(fit, MAP(n_steps=40, init=start), key)
+    assert reference.info.stages[0].stopped_early
+    np.testing.assert_allclose(
+        laplace.info.flat_means[0],
+        fit.to_flat(jax.tree.map(lambda a: a[0], reference.samples)),
+        rtol=1e-6,
+    )
 
 
 def test_nested_sampling_recovers_the_evidence():

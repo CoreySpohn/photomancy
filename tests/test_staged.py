@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+from hwoutils.leaves import check_tree
 from priorities import Normal
 
 from photomancy.infer.backends.staged import (
@@ -425,7 +426,7 @@ def test_early_stopping_ends_a_stage_at_the_expected_step():
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_callbacks_metrics_scale_and_stage_logdensity():
-    """Callbacks get pre-step host copies; metrics, scale and stage densities apply.
+    """Callbacks get pre-step device copies; metrics, scale and stage densities apply.
 
     Truth source: ``sgd(lr)`` on ``scale * 0.5 (x - t)^2`` moves ``x`` by
     ``-lr * scale * (x - t)``; with ``lr * scale = 1`` it lands on ``t``. The loss
@@ -467,7 +468,11 @@ def test_callbacks_metrics_scale_and_stage_logdensity():
     np.testing.assert_array_equal(second.metrics["x0"], [2.0, 4.0])
     np.testing.assert_array_equal(third.loss, [2.0])
     assert [r.step for r in seen] == [0, 2, 4]
-    assert all(isinstance(r.params.x, np.ndarray) for r in seen)
+    # the record holds device arrays of the active dtype (params and aux): no host copy
+    for record in seen:
+        assert check_tree(record.params) == () and check_tree(record.aux) == ()
+        assert isinstance(record.params.x, jax.Array)
+        assert isinstance(record.aux, jax.Array)
     np.testing.assert_array_equal(seen[0].params.x, [8.0, -4.0])
     np.testing.assert_array_equal(seen[1].params.x, [2.0, 2.0])
     np.testing.assert_array_equal(seen[1].aux, [2.0, 2.0])
@@ -508,10 +513,10 @@ def test_prepare_uses_current_host_parameters_and_reuses_the_step(
 
     def prepare(params):
         assert jax.tree.structure(params) == jax.tree.structure(init)
-        assert all(isinstance(x, np.ndarray) for x in jax.tree.leaves(params))
+        # device arrays of the active dtype, not host copies
+        assert check_tree(params) == ()
+        assert all(isinstance(x, jax.Array) for x in jax.tree.leaves(params))
         seen.append(params)
-        # Host edits must not change the live parameters, including frozen leaves.
-        params.y[:] = 123.0
         return _PreStepAux(params.x + 2.0)
 
     tx = {"x": optax.sgd(0.5)}
@@ -644,7 +649,7 @@ class _BowlTerm(AbstractTerm):
 
 
 def _bowl_fit(terms=None):
-    model = _Bowl(x=jnp.asarray([8.0, -4.0]), y=jnp.asarray(0.0))
+    model = _Bowl(x=jnp.asarray([8.0, -4.0]), y=jnp.asarray(0.0, jnp.float64))
     terms = terms or (
         _BowlTerm(jnp.asarray([1.0, 2.0])),
         _BowlTerm(jnp.asarray([3.0, 0.0])),

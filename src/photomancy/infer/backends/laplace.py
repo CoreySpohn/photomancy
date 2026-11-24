@@ -1,7 +1,8 @@
 """Laplace backend: MAP + Hessian -> Gaussian mixture Posterior.
 
 The MAP is found with ``optax.lbfgs`` (a quasi-Newton line search that
-converges to high precision). The covariance is the inverse of the
+converges to high precision) in the scaled coordinates and with the stopping rule of
+the default ``MAP`` stage. The covariance is the inverse of the
 negative-log-density Hessian at the MAP, computed by Hessian-vector products
 (forward-over-reverse AD) and regularized by flooring its eigenvalues at
 ``min_eigenvalue`` -- so a direction the data barely constrains gets a bounded
@@ -12,41 +13,89 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
+from jax.flatten_util import ravel_pytree
 
+from photomancy.infer._scale import information_scale
 from photomancy.infer.backends._flat import flat_density, start_points
 from photomancy.infer.backends.base import AbstractBackend
 from photomancy.infer.backends.importance import ImportanceInfo, modes_importance
+from photomancy.infer.backends.staged import (
+    _GRAD_TOL,
+    STOP_CHECK_EVERY,
+    STOP_MIN_DELTA,
+    STOP_PATIENCE,
+    default_stage,
+)
 from photomancy.infer.fit import observed_hessian
 from photomancy.infer.posterior import Posterior
 
 
-def _map_optimize(neg_logdensity, init, n_steps):
-    """Minimize ``neg_logdensity`` from ``init`` with ``optax.lbfgs``.
+def _map_optimize(neg_logdensity, init, n_steps, scale=None):
+    """Minimize ``neg_logdensity`` from ``init`` with ``optax.lbfgs``, as ``MAP`` does.
 
-    Returns the iterate with the lowest value. The scan runs all ``n_steps``, and
-    once the gradient has reached round-off the quasi-Newton update is built from
-    curvature pairs that are themselves round-off, so a step can leave the minimum
-    by many orders of magnitude (seen with jax 0.12.1: an exactly converged fit
-    stepped to 1e10 at iteration 27 of 100). A diverging step costs the run
-    nothing only if it is not the one returned.
+    The solver and the stopping rule are those of :func:`default_stage`: with a
+    ``scale`` (the flat information scale at ``init``) L-BFGS runs in the scaled
+    coordinates and the run stops, read every ``STOP_CHECK_EVERY`` steps, once the loss
+    has failed to gain ``STOP_MIN_DELTA`` for ``STOP_PATIENCE`` steps and the scaled
+    gradient norm is below ``_GRAD_TOL``; without one it runs all ``n_steps``. A
+    traced ``while_loop`` runs the steps because ``map_fit`` is host-driven and a
+    ``Laplace`` run must stay mappable.
+
+    Returns the iterate with the lowest value. Once the gradient has reached round-off
+    the quasi-Newton update is built from curvature pairs that are themselves
+    round-off, so a step can leave the minimum by many orders of magnitude (seen with
+    jax 0.12.1: an exactly converged fit stepped to 1e10 at iteration 27 of 100). A
+    diverging step costs the run nothing only if it is not the one returned.
     """
-    opt = optax.lbfgs()
-    value_and_grad = optax.value_and_grad_from_state(neg_logdensity)
+    stage = default_stage(n_steps, optax.lbfgs(), None if scale is None else scale)
+    opt = stage.solver
+    gated = stage.early_stopping is not None
+    # the stage's scale table is keyed like a staged fit's groups: ``{"all": (leaf,)}``
+    pack = lambda z: {"all": (z,)}  # noqa: E731
+    neg_packed = lambda p: neg_logdensity(p["all"][0])  # noqa: E731
+    value_and_grad = jax.value_and_grad(neg_packed)
 
-    def step(carry, _):
-        z, state, best_z, best_value = carry
-        value, grad = value_and_grad(z, state=state)
+    def cond(carry):
+        i, stalled = carry[0], carry[-1]
+        at_check = (i % STOP_CHECK_EVERY == 0) | (i == n_steps)
+        return (i < n_steps) & ~(stalled & at_check)
+
+    def body(carry):
+        i, z, state, best_z, best_value, track, bad, stalled = carry
+        value, grad = value_and_grad(pack(z))
+        grad = grad["all"][0]
         better = value < best_value
         best_z = jnp.where(better, z, best_z)
         best_value = jnp.where(better, value, best_value)
+        gain = value < track - STOP_MIN_DELTA
+        track = jnp.where(gain, value, track)
+        bad = jnp.where(gain, 0, bad + 1)
+        if gated:
+            norm = jnp.linalg.norm(grad * scale)
+            stalled = stalled | ((bad >= STOP_PATIENCE) & (norm < _GRAD_TOL))
         updates, state = opt.update(
-            grad, state, z, value=value, grad=grad, value_fn=neg_logdensity
+            pack(grad),
+            state,
+            pack(z),
+            value=value,
+            grad=pack(grad),
+            value_fn=neg_packed,
         )
-        z = optax.apply_updates(z, updates)
-        return (z, state, best_z, best_value), None
+        z = optax.apply_updates(pack(z), updates)["all"][0]
+        return i + 1, z, state, best_z, best_value, track, bad, stalled
 
-    start = (init, opt.init(init), init, jnp.asarray(jnp.inf, init.dtype))
-    (z, _, best_z, best_value), _ = jax.lax.scan(step, start, None, length=n_steps)
+    inf = jnp.asarray(jnp.inf, init.dtype)
+    start = (
+        jnp.asarray(0, jnp.int32),
+        init,
+        opt.init(pack(init)),
+        init,
+        inf,
+        inf,
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(False),
+    )
+    _, z, _, best_z, best_value, *_ = jax.lax.while_loop(cond, body, start)
     return jnp.where(neg_logdensity(z) < best_value, z, best_z)
 
 
@@ -64,7 +113,10 @@ def _laplace_mode(logdensity, init, n_steps, min_eigenvalue):
     def neg(z):
         return -logdensity(z)
 
-    z_map = _map_optimize(neg, init, n_steps)
+    unravel = ravel_pytree(logdensity.template)[1]
+    scale = information_scale(logdensity.fit, unravel(init), include_prior=True)
+    flat_scale = None if scale is None else ravel_pytree(scale)[0]
+    z_map = _map_optimize(neg, init, n_steps, flat_scale)
     grad = jax.grad(neg)(z_map)
     eigvals, eigvecs = jnp.linalg.eigh(observed_hessian(neg, z_map, batch_size=1))
     floored = jnp.maximum(eigvals, min_eigenvalue)
@@ -214,7 +266,8 @@ class Laplace(AbstractBackend):
     Attributes:
         n_draws: Importance draws.
         n_modes: Number of starts and proposal components.
-        n_steps: L-BFGS iterations per start.
+        n_steps: The most L-BFGS iterations per start; a start stops earlier on the
+            ``MAP`` rule when the fit has an information scale (see :class:`MAP`).
         min_eigenvalue: Floor on the precision eigenvalues of the proposal covariance
             and the indefiniteness threshold, in units of inverse squared unconstrained
             coordinate (the standard deviation of a flat direction is at most

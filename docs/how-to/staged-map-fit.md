@@ -134,7 +134,8 @@ terms have no Fisher root) runs all `n_steps` and never reports `stopped_early`.
   in the next section.
 - `fit` replaces the run's density for the stage with a `Fit` over a subset of the
   terms, as above. `prepare` is the same replacement made late: a function from the current
-  parameters to the `Fit`, called once on the host when the stage starts.
+  parameters to the `Fit`, called once on the host when the stage starts. It receives JAX arrays, and so does a
+  callback record.
 - `transforms` replaces the table of optimizers and starts them fresh at the current values.
   Without it the stage continues the optimizer states and their schedule clocks.
 - `early_stopping` ends the stage once the objective stops improving.
@@ -190,7 +191,11 @@ the same L-BFGS steps in every coordinate. Pass `scale=False` to start from unsc
 coordinates; a fit whose terms have no Fisher root falls back to them. The scaled stage
 stops once it has converged (the loss has stalled and the scaled gradient norm is below
 1e-3), so `n_steps` is the most steps it takes; the unscaled stage has no step-size-free
-convergence test and runs all `n_steps`.
+convergence test and runs all `n_steps`. `Laplace` finds each mode with the same stage
+and the same stopping rule.
+
+`Fit` refuses a model that holds NumPy arrays, NumPy scalars or Python numbers as leaves.
+Convert such a model with `hwoutils.leaves.canonical` first.
 
 ## Give the solved coefficients a wide prior
 

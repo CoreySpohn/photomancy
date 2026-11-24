@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.leaves import canonical
 from hwoutils.model_paths import resolve
 from image_scene import (
     GaussianCoronagraph,
@@ -148,7 +149,7 @@ def test_residual_is_the_offset_in_detector_standard_deviations(kind):
     floor = 8 * np.finfo(float).eps * np.max(mean[scored] / np.sqrt(variance[scored]))
     np.testing.assert_allclose(out[mask], k[mask], rtol=1e-12, atol=floor)
     assert np.all(np.isnan(out[~mask])) and not mask.all()
-    fit = Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
+    fit = Fit(canonical(model), {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
     x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid}
     (from_fit,) = fit.residuals(x)
     np.testing.assert_array_equal(from_fit, out)
@@ -357,7 +358,7 @@ def test_an_observed_image_is_checked_against_the_held_detector_and_roll():
     supported = ImageTerm(image, instrument=instrument, exposure=exposure)
     assert supported.mask is None
     law = {"planets[0].physical_model.contrast_grid": LogUniform(1e-12, 1e-8)}
-    fit = Fit(model.scene, law, (supported,))
+    fit = Fit(canonical(model.scene), law, (supported,))
     x = {k: resolve(model.scene, k) for k in law}
     assert float(fit.log_likelihood(x)) == float(from_array(model.scene))
     grid = image.grid
@@ -397,7 +398,7 @@ def test_an_image_fit_frees_a_scene_leaf_and_gradients_flow():
     """``Fit`` accepts the term over a scene leaf: finite density and gradient."""
     model, exposure = _setup("poisson")
     term = _scored(model, exposure, jnp.round(_mean(model, exposure)))
-    fit = Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
+    fit = Fit(canonical(model), {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
     x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid}
     assert np.isfinite(fit.log_density(x))
     grad = jax.grad(fit.real_log_prob)(fit.to_real(x))
@@ -415,9 +416,11 @@ def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene():
     path = "planets[0].physical_model.contrast_grid"
     law = LogUniform(1e-12, 1e-8)
     grid = model.scene.planets[0].physical_model.contrast_grid
-    on_scene = Fit(model.scene, {path: law}, (rooted,)).log_density({path: grid})
+    on_scene = Fit(canonical(model.scene), {path: law}, (rooted,)).log_density(
+        {path: grid}
+    )
     on_record = Fit(
-        model, {f"scene.{path}": law}, (_scored(model, exposure, observed),)
+        canonical(model), {f"scene.{path}": law}, (_scored(model, exposure, observed),)
     ).log_density({f"scene.{path}": grid})
     np.testing.assert_allclose(on_scene, on_record, rtol=1e-12)
 
@@ -480,19 +483,19 @@ def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
         full.check(model)
     law = {_CONTRAST: LogUniform(1e-12, 1e-8)}
     with pytest.raises(ValueError, match=rf"scores {n_bad} pixel"):
-        Fit(model, law, (full,))
+        Fit(canonical(model), law, (full,))
     # Held in a SheetSum the term is refused exactly as it is bare, and the sum reports
     # the footprint the term does.
     held = SheetSum((full,), orbit_path="orbits")
     with pytest.raises(ValueError, match=rf"scores {n_bad} pixel"):
         held.check(model)
     with pytest.raises(ValueError, match=rf"scores {n_bad} pixel"):
-        Fit(model, law, (held,))
+        Fit(canonical(model), law, (held,))
     assert held.footprint_paths == full.footprint_paths != ()
 
     scored = _term(model, exposure, observed, jnp.asarray(supported))
     scored.check(model)
-    fit = Fit(model, law, (scored,))
+    fit = Fit(canonical(model), law, (scored,))
     x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid * 1.2}
 
     # The supported pixels are a centred square; crop the detector to it.
@@ -519,7 +522,7 @@ def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
     )
     cropped_model = ImageModel(model.scene, instrument)
     cropped.check(cropped_model)
-    other = Fit(cropped_model, law, (cropped,))
+    other = Fit(canonical(cropped_model), law, (cropped,))
     np.testing.assert_allclose(
         fit.log_likelihood(x), other.log_likelihood(x), rtol=0, atol=1e-10
     )
@@ -584,11 +587,11 @@ def test_a_free_leaf_that_moves_the_field_of_view_is_checked_at_both_ends():
     )
     path = "exposures[0].quadrature.nodes_nm"
     nodes = exposure.quadrature.nodes_nm
-    Fit(model, {path: Uniform(nodes, nodes * 1.001)}, (term,))
+    Fit(canonical(model), {path: Uniform(nodes, nodes * 1.001)}, (term,))
     with pytest.raises(ValueError, match=r"scores .* pixel"):
-        Fit(model, {path: Uniform(nodes * 0.9, nodes)}, (term,))
+        Fit(canonical(model), {path: Uniform(nodes * 0.9, nodes)}, (term,))
     with pytest.raises(ValueError, match="unbounded"):
-        Fit(model, {path: Normal(nodes, jnp.ones_like(nodes))}, (term,))
+        Fit(canonical(model), {path: Normal(nodes, jnp.ones_like(nodes))}, (term,))
 
 
 class _Patch(AbstractSpeckleField):
@@ -745,7 +748,7 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     with pytest.raises(ValueError, match=refused):
         strict.check(model)
     with pytest.raises(ValueError, match=refused):
-        Fit(model, law, (strict,))
+        Fit(canonical(model), law, (strict,))
     kept.check(model)
     assert np.asarray(kept.supported_mask(model)).all()
 
@@ -768,9 +771,9 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     a, b = term(observed, inside, False), term(observed, inside, True)
     assert float(a(model)) == float(b(model))
 
-    fit = Fit(model, law, (kept,))
+    fit = Fit(canonical(model), law, (kept,))
     assert fit.assumptions == ("static_beyond_speckle",)
-    assert Fit(model, law, (a,)).assumptions == ()
+    assert Fit(canonical(model), law, (a,)).assumptions == ()
     start = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid}
     estimate = detection.measure(fit, start, n_newton=1)
     assert estimate.assumptions == ("static_beyond_speckle",)

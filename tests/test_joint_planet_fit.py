@@ -11,6 +11,7 @@ import numpy as np
 import optax
 import pytest
 import toy_coronagraph as toy
+from hwoutils.leaves import canonical
 from hwoutils.model_paths import resolve
 from priorities import Normal
 from term_utils import ExposureRecord, ExposureRender
@@ -124,8 +125,11 @@ def _joint_fit(peak_fraction):
         )
         for path in _PATHS
     }
-    fit = Fit(init, free, terms)
-    ref, sci = Fit(init, free, terms[:1]), Fit(init, free, terms[1:])
+    fit = Fit(canonical(init), free, terms)
+    ref, sci = (
+        Fit(canonical(init), free, terms[:1]),
+        Fit(canonical(init), free, terms[1:]),
+    )
     labels = group_labels(
         fit.to_real(_entries(init)),
         {

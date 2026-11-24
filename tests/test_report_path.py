@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
+from hwoutils.leaves import canonical
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.system import OrbitLaw, ThieleInnesBlock
 from priorities import LogUniform
@@ -167,7 +168,9 @@ def build_fit(term=None):
         LEAF: LogUniform(float(np.exp(-0.5625)), float(np.exp(0.5625))),
     }
     term = report_term() if term is None else term
-    return Fit(scene(), free, (RelativeAstrometryTerm(records), sheet_sum(term)))
+    return Fit(
+        canonical(scene()), free, (RelativeAstrometryTerm(records), sheet_sum(term))
+    )
 
 
 @pytest.fixture(scope="module")

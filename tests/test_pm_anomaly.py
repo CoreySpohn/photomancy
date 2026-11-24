@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.leaves import canonical
 
 jax.config.update("jax_enable_x64", True)
 
@@ -176,7 +177,9 @@ def test_joint_relative_astrom_and_pma_recovers_mass():
     prior = {p: Uniform(lo, hi) for p, lo, hi in zip(paths, low, high, strict=True)}
     x0 = {p: getattr(truth, p) for p in paths}
     x0["log_Mp"] = x0["log_Mp"] + 0.3
-    fit = Fit(truth, prior, (ForwardTerm(forward, gaussian_loglike(obs, sigma)),))
+    fit = Fit(
+        canonical(truth), prior, (ForwardTerm(forward, gaussian_loglike(obs, sigma)),)
+    )
     post = run(fit, Laplace(n_draws=512, n_steps=100, init=x0), jax.random.key(3))
     lw, mass = post.log_weights, post.samples["log_Mp"]
     mean = float(weighted_mean(lw, mass))

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import jax
 import pytest
+from hwoutils.leaves import canonical
 
 jax.config.update("jax_enable_x64", True)
 
@@ -57,7 +58,9 @@ def _data(truth, forward, rng_seed=0):
 def _fit(system, data, sigma, forward, prior_system=None):
     """The disk fit: laws centered on ``prior_system`` (default ``system``)."""
     prior = default_disk_prior(system if prior_system is None else prior_system)
-    return Fit(system, prior, (ForwardTerm(forward, gaussian_loglike(data, sigma)),))
+    return Fit(
+        canonical(system), prior, (ForwardTerm(forward, gaussian_loglike(data, sigma)),)
+    )
 
 
 @pytest.fixture(scope="module")
@@ -266,7 +269,7 @@ def test_default_disk_prior_is_keyed_by_path_and_centers_on_system(make_system):
 
     # the laws are accepted by a Fit over the system and sit on its values: each
     # median recovers the current value.
-    fit = Fit(system, prior)
+    fit = Fit(canonical(system), prior)
     x0 = _x(system)
     assert jnp.isfinite(fit.log_prior(x0))
     for path, law in prior.items():

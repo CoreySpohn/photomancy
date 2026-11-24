@@ -283,7 +283,7 @@ def test_information_scale_is_the_root_norm_in_unconstrained_coordinates():
         "faint": Normal(jnp.asarray(0.0), jnp.asarray(0.5)),
         "other": Normal(jnp.asarray(0.0), jnp.asarray(1e9)),
     }
-    base = _Two(*(jnp.asarray(v) for v in (1.0, 0.0, 0.0)))
+    base = _Two(*(jnp.asarray(v, jnp.float64) for v in (1.0, 0.0, 0.0)))
     fit = Fit(base, laws, (term,))
     x = {"flux": jnp.asarray(1.5), "faint": jnp.asarray(0.0), "other": jnp.asarray(0.0)}
     u = fit.to_real(x)

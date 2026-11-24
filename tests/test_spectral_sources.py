@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
+from hwoutils.leaves import canonical
 from jax.test_util import check_grads
 from numpy.polynomial.legendre import leggauss
 from optixstuff.spectral import Band, Quadrature, Resolution, Transmission
@@ -339,7 +340,7 @@ def test_a_fit_frees_the_star_flux_table_under_a_held_resolution():
     (term,) = _target().terms("system", system=scene, transmissions={"F": _filter()})
     flux = scene.star._flux_density_phot
     path = "system.star._flux_density_phot"
-    Fit(_Holder(scene), {path: Normal(flux, 1.0)}, (term,))
+    Fit(canonical(_Holder(scene)), {path: Normal(flux, 1.0)}, (term,))
     ripple = 1.0 + 0.3 * jnp.sin(jnp.arange(flux.shape[0]) / 37.0)[:, None]
     moved = eqx.tree_at(lambda s: s.star._flux_density_phot, scene, flux * ripple)
     held = float(term.predict(_Holder(moved))[0])
