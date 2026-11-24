@@ -77,6 +77,11 @@ class SheetSum(AbstractProposingTerm):
         return (own, *(m for t in self.terms for m in t.marginalizes))
 
     @property
+    def assumptions(self) -> tuple[str, ...]:
+        """The sorted union of the held terms' assumptions."""
+        return tuple(sorted({a for t in self.terms for a in t.assumptions}))
+
+    @property
     def leaf_path(self) -> str | None:
         """The leaf the held proposing term offers, or ``None``."""
         proposers = self._proposers()

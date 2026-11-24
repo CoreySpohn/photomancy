@@ -33,6 +33,7 @@ from photomancy.infer.likelihoods import (
     huber_loglike,
     laplace_loglike,
 )
+from photomancy.orbit.sheets import SheetSum
 from photomancy.postproc.core.detection import PSFTemplateFilter
 from photomancy.postproc.templates.base import ArrayTemplateProvider
 
@@ -826,12 +827,13 @@ class _Assuming(ForwardTerm):
 
 
 def test_the_detection_results_copy_the_fit_assumptions():
-    """Fails if ``detect`` or ``measure`` loses the record of the fit's assumptions.
+    """Fails if ``detect``, ``measure`` or a ``SheetSum`` loses the fit's assumptions.
 
     Truth source: the names the terms declare; ``Fit.assumptions`` is their sorted
-    union (a name two terms share appears once). Tolerance basis: exact (tuples of
-    strings). A cheap Gaussian forward term stands in for an image term, since the
-    record is generic over term types.
+    union (a name two terms share appears once), and a ``SheetSum`` reports the
+    union of the terms it holds. Tolerance basis: exact (tuples of strings). A
+    cheap Gaussian forward term stands in for an image term, since the record is
+    generic over term types.
     """
     data = gaussian_loglike(jnp.array([1.0, 0.5]), 1.0)
     terms = (
@@ -846,6 +848,9 @@ def test_the_detection_results_copy_the_fit_assumptions():
     start = {"amplitude": jnp.asarray(1.0), "pa_deg": jnp.asarray(180.0)}
     assert measure(fit, start, n_newton=1).assumptions == fit.assumptions
     assert Fit(_sky(0.0, 0.0), free, (ForwardTerm(_Line(), data),)).assumptions == ()
+    sheets = SheetSum(terms, orbit_path="orbits")
+    assert sheets.assumptions == ("flat_field", "no_drift")
+    assert Fit(_sky(0.0, 0.0), free, (sheets,)).assumptions == sheets.assumptions
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
