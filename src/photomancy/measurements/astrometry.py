@@ -346,7 +346,8 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
             self.data.planet,
             self.data.valid,
             "RelativeAstrometryTerm",
-            lambda: _sky_positions(system, jnp.zeros(1)).shape[1],
+            lambda t: _sky_positions(system, t).shape[1],
+            self.data.time_d,
         )
 
     def _score(self, model):

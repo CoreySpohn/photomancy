@@ -543,3 +543,33 @@ def test_rv_score_is_unchanged_by_a_large_common_offset():
             jnp.ones(2, dtype=bool),
         )
         np.testing.assert_allclose(float(value), expected, rtol=0, atol=1e-7)
+
+
+def test_a_single_row_instrument_scores_zero_whatever_its_offset():
+    """One row of 90000 m/s with a tiny error contributes exactly nothing.
+
+    Truth: an instrument with one valid row has no residual contrast, so with its
+    offset marginalized the score is ``-0.5 * (log A + log var - log 1) = 0`` for any
+    value or error. The centred sums gave -3.4 for this float64 row.
+    Fails if: the residual is not anchored to a row of the instrument before the sums.
+    """
+    from photomancy.measurements import loglike_rv_marginalized
+
+    for dtype, err, atol in (
+        (jnp.float64, 5.5979819791232904e-12, 1e-12),
+        (jnp.float32, 1e-3, 1e-4),
+    ):
+        args = (
+            jnp.array([9.0e4], dtype),
+            jnp.zeros(1, dtype),
+            jnp.array([err], dtype),
+            jnp.zeros(1, dtype=int),
+            1,
+            jnp.zeros(1, dtype),
+            jnp.ones(1, dtype=bool),
+        )
+        for call in (
+            loglike_rv_marginalized,
+            jax.jit(loglike_rv_marginalized, static_argnums=4),
+        ):
+            np.testing.assert_allclose(float(call(*args)), 0.0, rtol=0, atol=atol)

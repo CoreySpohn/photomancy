@@ -657,13 +657,10 @@ class PhotometryTerm(AbstractTerm):
             self.data.planet,
             self.data.valid,
             "PhotometryTerm",
-            lambda: _band_table(
-                system,
-                self.quadrature,
-                self.transmissions,
-                jnp.zeros(1),
-                self.resolution,
+            lambda t: _band_table(
+                system, self.quadrature, self.transmissions, t, self.resolution
             ).shape[1],
+            self.data.time_d,
         )
         _check_indices(
             self.data.band_id,

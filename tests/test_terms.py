@@ -899,3 +899,51 @@ def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check():
         (jnp.full(4, 9), jnp.zeros(4, bool)),
     )
     eqx.tree_at(lambda t: t.data, term, padded).check(system)
+
+
+def test_a_traced_planet_count_and_a_late_epoch_model_pass_check():
+    """A traced ``n_planets`` skips the check; a model covering only later days fits.
+
+    Truth: under ``jit`` the count is unknown, so nothing can be tested and nothing may
+    raise. A band-only model that has no prediction before day 1 still predicts every
+    valid row, whose epochs are all after day 1, so the planet count is read there, not
+    at a synthetic day zero; with no valid row the model is not called at all.
+    Fails if: ``int()`` is taken of a traced count, or the forward call is made at
+    day zero or with no valid selector.
+    """
+    system = _system()
+    astrometry = _data()
+    photometry = _new_term("photometry")
+
+    class Counted(eqx.Module):
+        n_planets: jax.Array
+
+        def positions(self, *, time_d):
+            return jnp.zeros((2, 1, time_d.size))
+
+    def run(n):
+        RelativeAstrometryTerm(astrometry).check(Counted(n))
+        photometry.check(Counted(n))
+        return n
+
+    jax.jit(run)(jnp.asarray(1))
+
+    class Late(eqx.Module):
+        scale: jax.Array
+
+        def band_contrasts(self, quadrature, time_d, *, resolution, transmission):
+            if np.any(np.asarray(time_d) < 1.0):
+                raise ValueError("no prediction before day 1")
+            return self.scale * jnp.ones((len(quadrature.bands), 1, time_d.size))
+
+    late = eqx.tree_at(
+        lambda d: (d.time_d, d.valid),
+        photometry.data,
+        (jnp.array([5.0, 6.0, 7.0, 8.0]), jnp.ones(4, bool)),
+    )
+    term = eqx.tree_at(lambda t: t.data, photometry, late)
+    term.check(Late(jnp.asarray(1e-10)))
+    Fit(Late(jnp.asarray(1e-10)), {}, (term,))
+    unused = eqx.tree_at(lambda d: d.valid, late, jnp.zeros(4, bool))
+    eqx.tree_at(lambda t: t.data, term, unused).check(Late(jnp.asarray(1e-10)))
+    assert system is not None

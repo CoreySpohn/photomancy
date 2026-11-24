@@ -157,12 +157,19 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
     r = jnp.where(mask, rv_obs, 0.0) - jnp.where(mask, rv_model, 0.0)
 
     # Segment sums collapse the matrix algebra to O(N)
+    # The weighted spread about each instrument's weighted mean. Residuals are first
+    # anchored to the instrument's first valid row, so a large common offset never
+    # enters the sums and a one-row instrument contributes exactly zero.
+    rows = jnp.arange(r.size)
+    first = jax.ops.segment_min(
+        jnp.where(mask, rows, r.size), inst_ids, num_segments=n_inst
+    )
+    anchor = jnp.where(first < r.size, r[jnp.minimum(first, r.size - 1)], 0.0)
+    shifted = jnp.where(mask, r - anchor[inst_ids], 0.0)
     A = jax.ops.segment_sum(w, inst_ids, num_segments=n_inst)
-    B = jax.ops.segment_sum(w * r, inst_ids, num_segments=n_inst)
-    # The weighted spread about each instrument's weighted mean, formed after
-    # centring so a large common offset does not cancel two nearly equal sums.
+    B = jax.ops.segment_sum(w * shifted, inst_ids, num_segments=n_inst)
     centre = B / jnp.where(A > 0, A, 1.0)
-    spread = jnp.where(mask, r - centre[inst_ids], 0.0)
+    spread = jnp.where(mask, shifted - centre[inst_ids], 0.0)
     C_centred = jax.ops.segment_sum(w * spread**2, inst_ids, num_segments=n_inst)
 
     counts = jax.ops.segment_sum(mask.astype(float), inst_ids, num_segments=n_inst)

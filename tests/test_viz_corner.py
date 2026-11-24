@@ -181,3 +181,24 @@ def test_classical_elements_refuses_a_planet_outside_the_orbit_rows():
         )
     )(0)
     assert traced["period_d"].shape == (4,)
+    # A concrete JAX array captured by the closure is a host integer, not a tracer.
+    captured = jnp.asarray(0)
+    for wrap in (jax.jit, lambda f: jax.jit(jax.vmap(f))):
+        call = wrap(
+            lambda key: classical_elements(
+                posterior, key, 3, orbit_path="dynamics.orbits", planet=captured
+            )
+        )
+        keys = (
+            jax.random.key(1)
+            if wrap is jax.jit
+            else jax.random.split(jax.random.key(1), 2)
+        )
+        assert call(keys)["period_d"].shape[-1] == 3
+    outside = jnp.asarray(1)
+    with pytest.raises(ValueError, match="planet 1"):
+        jax.jit(
+            lambda key: classical_elements(
+                posterior, key, 3, orbit_path="dynamics.orbits", planet=outside
+            )
+        )(jax.random.key(1))

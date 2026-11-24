@@ -366,3 +366,69 @@ def test_report_planet_and_sheet_sum_planet_outside_the_model_are_refused():
             SheetSum((good,), ORBITS, planet).check(model)
         with pytest.raises(ValueError, match="SheetSum planet"):
             Fit(model, {}, (SheetSum((good,), ORBITS, planet),))
+
+
+def test_report_planet_check_holds_under_jit_and_a_late_epoch_model_passes():
+    """A static planet 2 is refused under ``jit``; a model without day 0 passes.
+
+    Truth: the model has one planet, so planet 2 is outside ``[0, 1)`` however the
+    model leaves are traced; the check compares the host index and never builds a
+    tracer. A predictor model that has no positions before day 1 predicts every valid
+    row of rows at later epochs, so its planet count is read at those epochs.
+    Fails if: the selector is made with ``jnp`` inside ``check``, or the count is
+    probed at day zero.
+    """
+    model = scene()
+    good = report_term(leaf=None)
+    bad = eqx.tree_at(
+        lambda t: t.predictor, good, PrecomputedReportPredictor(table(), 2)
+    )
+    with pytest.raises(ValueError, match="planet"):
+        jax.jit(lambda m: bad.check(m))(model)
+
+    class Late(eqx.Module):
+        inner: object
+
+        def positions(self, *, time_d):
+            if np.any(np.asarray(time_d) < 1.0):
+                raise ValueError("no positions before day 1")
+            return self.inner.positions(time_d=time_d)
+
+    late_rows = rows(epochs=np.array([5.0, 200.0, 410.0, 5.0, 5.0]))
+    late = eqx.tree_at(lambda t: t.data, good, late_rows)
+    # ``Late`` has no ``n_planets``, so the count comes from its positions.
+    late.check(Late(model))
+    far = eqx.tree_at(
+        lambda t: t.predictor, late, PrecomputedReportPredictor(table(), 1)
+    )
+    with pytest.raises(ValueError, match="planet"):
+        far.check(Late(model))
+
+
+def test_sheet_sum_requires_a_resolvable_path_and_counts_the_last_axis():
+    """An unresolvable ``orbit_path`` refuses at fit setup; planets index the last axis.
+
+    Truth: reflection indexes the last batch axis of the quaternions, so orbits of
+    shape ``(2, 1)`` hold one planet and ``(1, 2)`` hold two. A path that does not
+    resolve fails at scoring, so it must fail at ``Fit``.
+    Fails if: the first axis is counted or an unresolved path is skipped.
+    """
+    from hwoutils.model_paths import assign, resolve
+
+    model = scene()
+    good = report_term(leaf=None)
+    for path in ("dynamics.orbit", "planets[99].orbits"):
+        with pytest.raises(ValueError, match="does not resolve"):
+            SheetSum((good,), path, 0).check(model)
+        with pytest.raises(ValueError, match="does not resolve"):
+            Fit(model, {}, (SheetSum((good,), path, 0),))
+    orbits = resolve(model, ORBITS)
+    for shape, planet, accepted in (((2, 1, 4), 1, False), ((1, 2, 4), 1, True)):
+        stacked = eqx.tree_at(lambda o: o.quat, orbits, jnp.zeros(shape))
+        changed = assign(model, ORBITS, stacked)
+        term = SheetSum((good,), ORBITS, planet)
+        if accepted:
+            term.check(changed)
+        else:
+            with pytest.raises(ValueError, match="SheetSum planet"):
+                term.check(changed)

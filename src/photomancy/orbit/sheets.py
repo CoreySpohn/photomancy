@@ -99,21 +99,24 @@ class SheetSum(AbstractProposingTerm):
             model: The model to test, with concrete values.
 
         Raises:
-            ValueError: When ``planet`` is outside the orbit rows at ``orbit_path``.
+            ValueError: When ``orbit_path`` does not resolve to stacked orbits, or
+                ``planet`` is outside the last batch axis of the orbits there.
         """
-        try:
-            rows = jax.tree.leaves(resolve(model, self.orbit_path))
-        except (AttributeError, KeyError, IndexError):
-            rows = []
-        if rows:
-            count = rows[0].shape[0]
-            if not 0 <= self.planet < count:
-                raise ValueError(
-                    f"SheetSum planet {self.planet} is outside the {count} orbit "
-                    f"row(s) at {self.orbit_path!r}; indices lie in [0, {count})"
-                )
         for term in self.terms:
             term.check(model)
+        try:
+            quat = resolve(model, self.orbit_path).quat
+        except (AttributeError, KeyError, IndexError) as error:
+            raise ValueError(
+                f"SheetSum orbit_path {self.orbit_path!r} does not resolve to "
+                "stacked orbits in the model"
+            ) from error
+        count = quat.shape[-2]
+        if not 0 <= self.planet < count:
+            raise ValueError(
+                f"SheetSum planet {self.planet} is outside the {count} orbit "
+                f"row(s) at {self.orbit_path!r}; indices lie in [0, {count})"
+            )
 
     @property
     def leaf_path(self) -> str | None:

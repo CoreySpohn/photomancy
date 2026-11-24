@@ -16,6 +16,7 @@ from typing import ClassVar, Self
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from hwoutils.epoch import Epoch
 from hwoutils.model_paths import resolve
 from jax.scipy.special import log_ndtr
@@ -526,12 +527,14 @@ class ReportTerm(AbstractProposingTerm):
                 planets.
         """
         if isinstance(self.predictor, PrecomputedReportPredictor):
+            rows = self.data
             _check_planets(
                 model,
-                jnp.asarray([self.predictor.planet]),
-                jnp.ones(1, bool),
+                np.full(rows.time_d.shape, self.predictor.planet),
+                rows.valid,
                 "ReportTerm",
-                lambda: _sky_positions(model, jnp.zeros(1)).shape[1],
+                lambda t: _sky_positions(model, t).shape[1],
+                rows.time_d,
             )
 
     def __check_init__(self):
