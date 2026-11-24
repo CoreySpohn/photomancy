@@ -13,6 +13,7 @@ from term_utils import both
 
 from photomancy import RadialVelocityTerm
 from photomancy.measurements import RadialVelocityData
+from photomancy.orbit.sheets import SheetSum
 
 jax.config.update("jax_enable_x64", True)
 
@@ -373,3 +374,57 @@ def test_minimum_mass_rv_matches_inclined_true_mass():
         17.0,
     )
     np.testing.assert_allclose(minimum, true_rv, rtol=(2.0 / 3.0) * mass / Msun2kg)
+
+
+@pytest.mark.medium(reason="4096 vmapped draws of two RV children, 5.5 s cold")
+def test_sheet_sum_draw_samples_the_density_it_scores():
+    """``SheetSum.draw`` marginalizes the sheet: a fair coin shared by every child.
+
+    Truth source: ``__call__`` is the log of the mean of the two sheets' likelihoods,
+    so the data it scores are drawn from the sheet mixture with weights one half
+    each. The two sheets predict opposite signs for the velocity change between two
+    epochs (about 3 m/s here against 0.01 m/s noise), so the sign of the change
+    identifies the sheet.
+    Tolerance basis: monte-carlo. 4096 draws, a binomial fraction within
+    ``3 sqrt(0.25 / 4096)`` = 0.0234 of one half (a 0.3 percent false-rejection
+    rate); the second child must agree with the first in every draw, exactly. The
+    children's noise is independent: their difference has standard deviation
+    ``sqrt(2) * 0.01`` m/s, to a relative ``4 / sqrt(2 * 8191)`` = 0.031 (four sigma
+    of a sample standard deviation from 8192 differences).
+    Fails if: every draw keeps the model's own sheet (all changes positive), each
+    child flips its own sheet (the children then disagree in about half the draws), or
+    the children share one noise key (their difference is then zero).
+    """
+    mass = 300.0 * Mearth2kg
+    mu = G * (Msun2kg + mass)
+    orbit = FrameOrbit.from_classical(
+        period_to_sma(jnp.array([300.0]), Msun2kg + mass),
+        0.2,
+        jnp.arccos(0.3),
+        0.4,
+        0.7,
+        0.0,
+        mu_AU3_per_d2=mu,
+    )
+    system = System(
+        Body(1.0), Body(jnp.array([mass / Msun2kg])), orbit, SkyFrame(10.0, Epoch())
+    )
+    data = RadialVelocityData(
+        time_d=jnp.array([0.0, 60.0]),
+        rv=jnp.zeros(2),
+        rv_err=jnp.full(2, 0.01),
+        inst_ids=jnp.zeros(2, dtype=int),
+        valid=jnp.ones(2, dtype=bool),
+        n_inst=1,
+    )
+    term = RadialVelocityTerm(data, jitters=jnp.array([0.0]))
+    sheets = SheetSum((term, term), "orbits", 0)
+    keys = jax.random.split(jax.random.key(0), 4096)
+    drawn = jax.vmap(lambda k: sheets.draw(k, system))(keys)
+    first, second = (np.diff(t.data.rv, axis=-1)[:, 0] for t in drawn.terms)
+    assert np.all(np.abs(first) > 1.0)
+    assert abs(float(np.mean(first > 0)) - 0.5) < 3 * np.sqrt(0.25 / 4096)
+    np.testing.assert_array_equal(np.sign(first), np.sign(second))
+    difference = np.asarray(drawn.terms[0].data.rv - drawn.terms[1].data.rv)
+    spread = float(np.std(difference)) / (np.sqrt(2.0) * 0.01)
+    assert abs(spread - 1.0) < 4 / np.sqrt(2 * (difference.size - 1))

@@ -166,15 +166,25 @@ class SheetSum(AbstractProposingTerm):
         )
 
     def draw(self, key, model) -> Self:
-        """Draw each held term's data at ``model``, on the sheet the model holds.
+        """Draw each held term's data from the density ``__call__`` scores.
+
+        The sum marginalizes the sheet, so the draw does too: one sheet is chosen with
+        probability one half (the model's own or its reflection), shared by every held
+        term, and each term then draws its data at that sheet's model.
 
         Args:
-            key: PRNG key; one subkey is used per held term.
+            key: PRNG key; one subkey picks the sheet and one is used per held term.
             model: The model PyTree at which the data are drawn.
 
         Returns:
             A copy of this sum whose held terms hold the drawn data.
         """
-        keys = jax.random.split(key, len(self.terms))
-        terms = tuple(t.draw(k, model) for t, k in zip(self.terms, keys, strict=True))
+        key_sheet, *keys = jax.random.split(key, len(self.terms) + 1)
+        flip = jax.random.bernoulli(key_sheet, 0.5)
+        chosen = jax.tree.map(
+            lambda a, b: jnp.where(flip, b, a) if eqx.is_array(a) else a,
+            model,
+            self.reflected(model),
+        )
+        terms = tuple(t.draw(k, chosen) for t, k in zip(self.terms, keys, strict=True))
         return eqx.tree_at(lambda s: s.terms, self, terms)

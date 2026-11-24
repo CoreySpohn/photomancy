@@ -215,6 +215,53 @@ next row as invalid padding, and replacing it with the same term where that row 
 adds the datum without changing the structure of the fit, so a batch of fits over many
 simulated worlds does not recompile.
 
+## A prior can be swapped
+
+`Posterior.with_priors` reweights the cloud to a different prior in the same way, with no
+term evaluated. A swap can narrow a prior, because the draws that remain still follow the
+new prior inside the old support, but it cannot widen one: a cloud has no draws where the
+old prior had no mass, so a widening needs a refit and comes back refused. Any swap whose
+containment cannot be shown is refused the same way. A leaf prior is compared by its
+support, and a mixture covers only its components with nonzero weight, not the gap
+between them. A block is compared law by law, and every other field must be unchanged: a
+sky-position block at another epoch is refused, and so is an orbit prior moved from a law
+on the semi-major axis to a law on the period, even an equivalent one, so express both
+priors in the same parameterization. A block that can decide containment itself may
+define `support_contains(new)`.
+
+The field `info.log_mass_ratio` is the log of the mean ratio of the new density to the old
+one under the old weights, read before the decision, refused or not. When the cloud is
+the old prior (a fit with no terms), it is the log of the mass of the new prior on the old
+support; on a posterior it is the evidence increment the swap would have applied.
+
+## Keeping a posterior on disk
+
+A posterior has no save method yet. Until persistence lands, write it with Equinox. The
+file holds the arrays only, so reading it needs a template `Posterior` with the same
+PyTree structure throughout: the same `Fit`, the same draw count and backend, and the
+same diagnostics in `info` and the same static metadata, such as `kind`. A posterior
+returned by `with_priors` or `append_term` carries a `ReweightInfo` where a fresh run
+carries its backend's info, so build its template by the same chain of calls. The file is
+specific to the library version that wrote it.
+
+```python continuation
+import tempfile
+from pathlib import Path
+
+import equinox as eqx
+
+with tempfile.TemporaryDirectory() as folder:
+    path = Path(folder) / "posterior.eqx"
+    eqx.tree_serialise_leaves(path, posterior)
+    like = run(fit, Importance(PriorProposal(), n_draws=4000), jax.random.key(1))
+    restored = eqx.tree_deserialise_leaves(path, like)
+
+assert all(
+    bool(jnp.array_equal(a, b))
+    for a, b in zip(jax.tree.leaves(restored), jax.tree.leaves(posterior), strict=True)
+)
+```
+
 ## A refused reweighting falls back to a refit
 
 The precise measurements above are a datum that reweighting cannot absorb: the cloud drawn
