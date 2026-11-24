@@ -290,17 +290,22 @@ def test_excluded_candidate_value_is_irrelevant(value):
 
 
 @pytest.mark.parametrize("kind", ["mawet", "template"])
-@pytest.mark.parametrize("explicit_valid", [False, True])
-def test_all_valid_matches_base_bitwise(kind, explicit_valid):
-    """Exact literals recorded from the pre-change implementation on CPU float64.
+def test_all_valid_mask_matches_no_mask_and_the_recorded_base(kind):
+    """An all-ones mask equals no mask bitwise; both match the base within 1e-12.
 
     The reference ring at radius 14 on a 33-pixel detector crosses the kernel
-    half-width from the edge. Bitwise equality, with no tolerance, preserves
-    the original off-image padding and arithmetic for None and all-ones masks.
+    half-width from the edge, so an implementation that erodes a fully valid
+    frame at the image edge drops references there (the first candidate's dof
+    falls from 32 to 17 in both arms).
+
+    Oracles: valid=None in the same run (exact algebra: an all-ones mask must
+    take the same arithmetic path, so equality is bitwise on any platform), and
+    statistics recorded from the pre-change implementation on an x86-64 Linux
+    CPU in float64. Tolerance basis for the recorded values: floating-point;
+    other CPU math libraries differ in the last few units in the last place
+    (about 1e-16 relative), so rtol is 1e-12. The dof are integers and exact.
     """
     science = _small_science()
-    if explicit_valid:
-        science = replace(science, valid=jnp.ones((33, 33)))
     positions = jnp.array([[16.0, 30.0], [9.25, 21.5]])
     recorded = {
         "mawet": (
@@ -312,12 +317,19 @@ def test_all_valid_matches_base_bitwise(kind, explicit_valid):
             ("0x1.48ca322481de2p-2", "0x1.a437b0b3cdc6dp-2"),
         ),
     }
-    result = _arm_for(kind).detect(science, positions)
+    arm = _arm_for(kind)
+    unmasked = arm.detect(science, positions)
+    masked = arm.detect(replace(science, valid=jnp.ones((33, 33))), positions)
+    for field in ("statistic", "fpf", "dof"):
+        assert np.array_equal(
+            np.asarray(getattr(masked, field)), np.asarray(getattr(unmasked, field))
+        ), field
     for field, literals in zip(("statistic", "fpf"), recorded[kind], strict=True):
         expected = np.array([float.fromhex(v) for v in literals])
-        assert np.array_equal(np.asarray(getattr(result, field)), expected), field
-    expected_dof = [float.fromhex(v) for v in ("0x1p+5", "0x1.2p+4")]
-    assert np.array_equal(np.asarray(result.dof), expected_dof)
+        np.testing.assert_allclose(
+            np.asarray(getattr(masked, field)), expected, rtol=1e-12, atol=0
+        )
+    np.testing.assert_array_equal(np.asarray(masked.dof), [32.0, 18.0])
 
 
 @pytest.mark.parametrize("kind", ["mawet", "template"])
