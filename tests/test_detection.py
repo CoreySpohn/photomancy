@@ -873,7 +873,7 @@ def test_measure_needs_signed_support_for_a_faint_source_and_sizes_itself():
     flat point).
     Fails if: a positive law reports a regular maximum at its edge, a signed law does
     not reach the maximum, the flat point is called regular, or ``measure`` does not
-    refuse beyond ``max_bytes`` (``MemoryLimit``) before optimizing.
+    refuse beyond ``max_bytes`` (``MemoryLimit``) before evaluating the model.
     """
     free_signed = {"amplitude": Normal(0.0, 10.0), "pa_deg": Uniform(-200.0, 200.0)}
     free_positive = {"amplitude": Uniform(0.0, 5.0), "pa_deg": Uniform(-200.0, 200.0)}
@@ -896,8 +896,72 @@ def test_measure_needs_signed_support_for_a_faint_source_and_sizes_itself():
     assert not bool(flat.regular)
     assert float(flat.min_eigenvalue) <= 0.0
 
+    del _FORWARD_CALLS[:]
+    counting = Fit(
+        _sky(0.0, 0.0), free_signed, (ForwardTerm(_CountingLine(), flat_data),)
+    )
     with pytest.raises(MemoryLimit):
-        measure(flat_fit, start, max_bytes=10)
+        measure(counting, start, max_bytes=10)
+    assert _FORWARD_CALLS == []  # refused before any evaluation of the model
+
+
+class _Square(eqx.Module):
+    """``model -> (a + 0.4 a**2, a * pa_deg / 360)``, nonlinear in ``a``."""
+
+    def __call__(self, model):
+        return jnp.stack(
+            [
+                model.amplitude + 0.4 * model.amplitude**2,
+                model.amplitude * model.pa_deg / 360.0,
+            ]
+        )
+
+
+class _SquareNoSplit(ForwardTerm):
+    """The same forward term without ``split``: ``detect`` renders at every step."""
+
+    def split(self, model):
+        return AbstractTerm.split(self, model)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_render_once_detect_holds_only_for_a_prediction_linear_in_the_amplitude():
+    """The render-once path is wrong for a nonlinear forward; the fallback is right.
+
+    The forward is ``(a + 0.4 a**2, a * pa / 360)`` observed with unit noise at
+    ``(1, 0)``; at ``pa = 0`` the likelihood is maximal at
+    ``a = (sqrt(2.6) - 1) / 0.8 = 0.766``, which the nested path (a
+    term without ``split``) finds. The render-once path takes the tangent at
+    ``a = 0``, whose slope is one, so it finds ``a = 1``.
+
+    Truth source: the closed-form root of ``a + 0.4 a**2 = 1``.
+    Tolerance basis: exact-algebra (atol 1e-6 for the nested path; the render-once
+    amplitude must miss by more than 0.1, which says only that the documented
+    linearity assumption is real).
+    Fails if: the fallback path is not taken for a term without ``split``, or the
+    render-once path is changed to follow nonlinear terms without this test being
+    revisited.
+    """
+    data = gaussian_loglike(jnp.array([1.0, 0.0]), 1.0)
+    free = {"amplitude": Uniform(-5.0, 5.0), "pa_deg": Uniform(-200.0, 200.0)}
+    trials = {"pa_deg": jnp.zeros(1)}
+    nested = Fit(_sky(0.0, 0.0), free, (_SquareNoSplit(_Square(), data),))
+    once = Fit(_sky(0.0, 0.0), free, (ForwardTerm(_Square(), data),))
+    found = detect(nested, trials, amplitude="amplitude", n_newton=30)
+    np.testing.assert_allclose(found.a_hat, (np.sqrt(2.6) - 1.0) / 0.8, atol=1e-6)
+    wrong = detect(once, trials, amplitude="amplitude", n_newton=30)
+    assert abs(float(wrong.a_hat[0]) - (np.sqrt(2.6) - 1.0) / 0.8) > 0.1
+
+
+_FORWARD_CALLS = []  # one entry per trace or call of ``_CountingLine``
+
+
+class _CountingLine(eqx.Module):
+    """``_Line`` that records each time it is evaluated or traced."""
+
+    def __call__(self, model):
+        _FORWARD_CALLS.append(1)
+        return jnp.stack([model.amplitude, model.amplitude * model.pa_deg / 360.0])
 
 
 class _Line(eqx.Module):

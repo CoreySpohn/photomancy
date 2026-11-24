@@ -104,7 +104,11 @@ leaves a selector names, with everything else held fixed. It is the same selecto
 {func}`~photomancy.infer.group_labels`.
 
 ```python continuation
+import jax
+
 from photomancy.detection import curvature_block
+
+jax.config.update("jax_enable_x64", True)
 
 
 class Scene(eqx.Module):

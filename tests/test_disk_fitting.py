@@ -171,7 +171,9 @@ def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
         assert abs(float(x["midplane_inc_deg"]) - 55.0) < 6.0
         assert abs(float(x["midplane_position_angle_deg"]) - 30.0) < 6.0
 
-    point = run(fit, MAP(n_steps=800, init=x0), jax.random.key(0))
+    # Unscaled: from this start the information-scaled run ends in the mirror
+    # inclination (125 degrees), a local mode 51 nats below the truth mode.
+    point = run(fit, MAP(n_steps=800, init=x0, scale=False), jax.random.key(0))
     check({path: leaf[0] for path, leaf in point.samples.items()})
 
     post = run(fit, Laplace(n_draws=256, n_steps=800, init=x0), jax.random.key(1))
