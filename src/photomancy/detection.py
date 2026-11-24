@@ -260,13 +260,45 @@ def _linear_in(a, base, tangent):
     )
 
 
+LINEARITY_RTOL = 1e-3
+"""Largest departure from linearity ``detect`` accepts, relative to the signal."""
+
+
+def _departure(actual, linear, signal):
+    """Whether ``actual`` is within the linearity tolerance of ``linear``.
+
+    The bound is ``LINEARITY_RTOL`` times the norm of the signal (the amplitude times
+    the unit render) plus 100 machine epsilons of the prediction's norm, the rounding
+    of a render that carries a bright base beside a faint signal. NaN elements (masked
+    pixels) do not count.
+    """
+    err = norm = floor = 0.0
+    for a, ell, sig in zip(actual, linear, signal, strict=True):
+        for pa, pl, ps in zip(
+            jax.tree.leaves(a), jax.tree.leaves(ell), jax.tree.leaves(sig), strict=True
+        ):
+            if not eqx.is_inexact_array(pa):
+                continue
+            d = jnp.where(jnp.isfinite(pa - pl), pa - pl, 0.0)
+            err = err + jnp.sum(d**2)
+            norm = norm + jnp.sum(jnp.where(jnp.isfinite(ps), ps, 0.0) ** 2)
+            floor = (
+                floor
+                + jnp.sum(jnp.where(jnp.isfinite(pa), pa, 0.0) ** 2)
+                * (100.0 * jnp.finfo(pa.dtype).eps) ** 2
+            )
+    return err <= LINEARITY_RTOL**2 * norm + floor
+
+
 def _profile_split(fit, x, amplitude, shape, n_newton):
     """Profile the amplitude from one render and its derivative.
 
     The model is rendered once, at ``a = 0`` with the tangent of the render along the
     amplitude, and every Newton step scores ``prediction + a * tangent`` pointwise, so
     the nested derivatives never reach the renderer. This is exact when the
-    prediction is linear in the amplitude.
+    prediction is linear in the amplitude, so one more render at the amplitude found
+    is compared with ``base + a_hat * tangent`` (:data:`LINEARITY_RTOL`). Returns the
+    amplitude, root and error of :func:`_summarize` and whether the check held.
     """
     holder = []
 
@@ -292,7 +324,15 @@ def _profile_split(fit, x, amplitude, shape, n_newton):
         )
         return jnp.asarray(total, jnp.float64)
 
-    return _summarize(*_profile(objective, n_newton, jnp.float64))
+    a_hat, z, sigma = _summarize(*_profile(objective, n_newton, jnp.float64))
+    model = fit.model_at({**x, amplitude: jnp.reshape(a_hat, shape)})
+    actual = tuple(term.split(model)[0] for term in fit.terms)
+    linear = tuple(_linear_in(a_hat, p, t) for p, t in zip(base, tangent, strict=True))
+    signal = tuple(
+        jax.tree.map(lambda t: a_hat * t if eqx.is_inexact_array(t) else t, t)
+        for t in tangent
+    )
+    return a_hat, z, sigma, _departure(actual, linear, signal)
 
 
 def _profile_render(fit, x, amplitude, shape, n_newton):
@@ -307,14 +347,17 @@ def _profile_render(fit, x, amplitude, shape, n_newton):
 
 @eqx.filter_jit
 def _detect(fit, trials, amplitude, n_newton, batch_size, once):
+    """The map and, per trial, whether the render-once path was linear enough."""
     shape = jnp.shape(resolve(fit.model, amplitude))
-    profile = _profile_split if once else _profile_render
 
     def at(x):
-        return profile(fit, x, amplitude, shape, n_newton)
+        if once:
+            return _profile_split(fit, x, amplitude, shape, n_newton)
+        return (*_profile_render(fit, x, amplitude, shape, n_newton), jnp.asarray(True))
 
-    a_hat, z, sigma = _mapped(at, trials, batch_size)
-    return DetectionMap(a_hat=a_hat, z=z, sigma=sigma, assumptions=fit.assumptions)
+    a_hat, z, sigma, linear = _mapped(at, trials, batch_size)
+    found = DetectionMap(a_hat=a_hat, z=z, sigma=sigma, assumptions=fit.assumptions)
+    return found, linear
 
 
 def detect(
@@ -337,6 +380,18 @@ def detect(
     part. When the model is linear in ``a`` and the likelihood is Gaussian with fixed
     variance, this is the classical whitened matched filter ``z = t'Wr / sqrt(t'Wt)``.
     Several terms (exposures) constrain one shared amplitude.
+
+    When every term offers :meth:`~photomancy.infer.terms.AbstractTerm.split`, each
+    trial renders the model once, at ``a = 0`` with its tangent along the amplitude,
+    and profiles ``prediction + a * tangent``; this needs the prediction to be linear
+    in the amplitude. The result is checked: one more render at the amplitude found
+    must agree with ``base + a_hat * tangent`` to within 1e-3 of the signal's norm
+    (plus 100 machine epsilons of the prediction's), else that trial is profiled
+    again through ``fit.log_likelihood`` by Newton steps, which holds for any
+    prediction at the cost of nested derivatives through the renderer (a second
+    compile, only when a trial fails). A term without ``split`` always takes the
+    Newton path, and so does a call inside a ``jax`` transformation, where the
+    check cannot be read on the host.
 
     Args:
         fit: A :class:`~photomancy.infer.fit.Fit` whose model holds the source. At
@@ -365,7 +420,30 @@ def detect(
     if jnp.size(resolve(fit.model, amplitude)) != 1:
         raise ValueError(f"the leaf at {amplitude!r} must have one element")
     _check_entries(trials, set(fit.free) - {amplitude})
-    return _detect(fit, trials, amplitude, n_newton, batch_size, _splits(fit))
+    found, linear = _detect(fit, trials, amplitude, n_newton, batch_size, _splits(fit))
+    if isinstance(linear, jax.core.Tracer):
+        # inside a transformation the check cannot choose a path on the host
+        return _detect(fit, trials, amplitude, n_newton, batch_size, False)[0]
+    bad = jnp.flatnonzero(~linear)
+    if bad.size:
+        redo, _ = _detect(
+            fit,
+            jax.tree.map(lambda a: a[bad], trials),
+            amplitude,
+            n_newton,
+            batch_size,
+            False,
+        )
+        found = eqx.tree_at(
+            lambda f: (f.a_hat, f.z, f.sigma),
+            found,
+            (
+                found.a_hat.at[bad].set(redo.a_hat),
+                found.z.at[bad].set(redo.z),
+                found.sigma.at[bad].set(redo.sigma),
+            ),
+        )
+    return found
 
 
 class LikelihoodEstimate(eqx.Module):

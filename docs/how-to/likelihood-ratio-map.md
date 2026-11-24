@@ -86,9 +86,18 @@ assert float(detection.z[best]) > 10.0
 for a Gaussian likelihood equals `a_hat / z`. Positions are processed with
 {func}`jax.lax.map`, `batch_size` at a time (the default of 1 holds one position's
 intermediates; `None` maps all at once, the fast choice on a GPU), so `batch_size` sets
-the memory use. The renderer runs once per call rather than once per position, which
-assumes the prediction is linear in the amplitude. A
-batched map agrees with the one-at-a-time map to rounding, not bit for bit.
+the memory use. A batched map agrees with the one-at-a-time map to rounding, not bit
+for bit.
+
+{func}`~photomancy.detection.detect` does the same over trial values of a `Fit`, using
+the fit's own terms. When every term offers `split`, it renders the model once per trial,
+at zero amplitude with its tangent along the amplitude, and profiles the amplitude
+without rendering again; that is exact only for a prediction linear in the amplitude. It
+therefore renders once more at the amplitude it found and compares that with the linear
+prediction (within 1e-3 of the signal's norm, plus 100 machine epsilons of the
+prediction's); a trial that fails is profiled by Newton steps through the fit's
+likelihood instead, which holds for any prediction and costs nested derivatives through
+the renderer. Its `batch_size` follows the rule above: `None` maps all trials at once.
 
 The significance holds for the likelihood you give it. A Huber likelihood gives a map
 that resists outliers, but its `z` is then a likelihood-ratio root rather than a matched
@@ -174,10 +183,12 @@ grid on two rolls, the 99 percent per-map maximum of `z` is 3.8 sigma (3.77, int
 3.59 to 3.84). That value holds only for that grid and null; a denser grid needs the
 threshold `isf(0.01 / N_eff)` for its own effective number of independent trials.
 
-`measure` is for tens of free scalars. The observed information over every free scalar
-costs about 20 s and 7 GB for ten parameters on a full-scene fit, and `measure` raises
-`MemoryLimit` before it optimizes when the closed-form estimate is above `max_bytes`.
-Free pixels do not belong in it.
+`measure` is for tens of free scalars. On a full-scene fit with positions free and four
+frames it took about 2400 s and 6 GB in one process; the memory is dominated by the
+host memory of compiling about five programs, each with under 0.9 GB of temporary
+space. `measure` raises `MemoryLimit` before it optimizes when the closed-form estimate
+of the information matrix is above `max_bytes`; that bounds the matrix only, not the
+compile or the optimization. Free pixels do not belong in it.
 
 ```python
 import equinox as eqx

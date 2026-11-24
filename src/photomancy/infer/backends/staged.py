@@ -45,6 +45,13 @@ __all__ = [
 ]
 
 UNLABELED = ""
+
+_GRAD_TOL = 1e-3
+"""Scaled gradient norm below which a stalled default :class:`MAP` stage has converged.
+
+In the information-normalized coordinates the Hessian is near the identity, so a
+gradient norm ``g`` means a Newton decrement near ``g**2 / 2`` nats (5e-7 nat here).
+"""
 """Label of a leaf that belongs to no group (never optimized)."""
 
 
@@ -162,20 +169,36 @@ class EarlyStopping(eqx.Module):
     ``check_every - 1`` steps past the step where the count was reached; use
     ``check_every=1`` for the exact step at the cost of a host read per step.
 
+    A loss stall is not convergence: a quasi-Newton run in badly scaled coordinates
+    can fail to lower the loss for several steps and then speed up. With ``grad_tol``
+    and ``grad_scale`` the stage stops only when the loss has stalled **and** the
+    gradient norm in the scaled coordinates, ``|grad * grad_scale|`` at the step read,
+    is below ``grad_tol``; a stalled stage whose gradient is still large runs on.
+    The gate needs a ``solver`` stage (the gradient is recorded by the solver step).
+
     Attributes:
         patience: Consecutive non-improving steps that end the stage.
         min_delta: Smallest decrease that counts as an improvement.
         check_every: Steps between host checks.
+        grad_tol: Largest scaled gradient norm of a stopped stage, or ``None`` for
+            the loss stall alone.
+        grad_scale: With ``grad_tol``, the per-leaf scale that makes the stage's
+            coordinates unit-scale, with the structure of the stage's free groups
+            (the scale a ``rescaled_transform`` solver divides by).
     """
 
     patience: int
     min_delta: float = 0.0
     check_every: int = 10
+    grad_tol: float | None = eqx.field(static=True, default=None)
+    grad_scale: Any = None
 
     def __check_init__(self):
-        """Validate the counts."""
+        """Validate the counts and the gradient gate."""
         if self.patience < 1 or self.check_every < 1:
             raise ValueError("patience and check_every must be at least 1")
+        if (self.grad_tol is None) != (self.grad_scale is None):
+            raise ValueError("grad_tol and grad_scale go together")
 
 
 class MAPStage(eqx.Module):
@@ -258,7 +281,9 @@ class StageTrace(eqx.Module):
         name: The stage name.
         start: Global index of the stage's first step.
         n_steps: Steps actually run (fewer than planned after an early stop).
-        stopped_early: Whether early stopping ended the stage.
+        stopped_early: Whether early stopping ended the stage. For the default
+            :class:`MAP` stage this means converged: the loss stalled and the scaled
+            gradient norm was below its tolerance.
         loss: Per-step objective (``-objective_scale * log_density`` before the step),
             a host array of length ``n_steps``.
         metrics: ``{name: host array of length n_steps}`` for each metric.
@@ -423,8 +448,8 @@ def map_fit(
     else:
         raise ValueError(f"callback_every must be >= 1, got {callback_every!r}")
     metrics = dict(metrics or {})
-    if "loss" in metrics:
-        raise ValueError("'loss' is reserved for the objective trace")
+    if "loss" in metrics or "grad_norm" in metrics:
+        raise ValueError("'loss' and 'grad_norm' are reserved for the stage traces")
     stages = tuple(stages)
     leaves, treedef = jax.tree.flatten(init)
     lab = jax.tree.leaves(labels)
@@ -463,7 +488,12 @@ def map_fit(
     )
     total = sum(stage.n_steps for stage in stages)
     dtype = jnp.zeros(()).dtype
-    bufs = {name: jnp.full((total,), jnp.nan, dtype) for name in ("loss", *metrics)}
+    gated = any(
+        s.early_stopping is not None and s.early_stopping.grad_scale is not None
+        for s in stages
+    )
+    names = ("loss", *metrics, *(("grad_norm",) if gated else ()))
+    bufs = {name: jnp.full((total,), jnp.nan, dtype) for name in names}
     want_aux = callback is not None
 
     def rebuild(arrays):
@@ -487,7 +517,7 @@ def map_fit(
 
         @eqx.filter_jit(donate="all-except-first")
         def step(static_args, arrays, states, bufs, count):
-            ld, scale = static_args
+            ld, scale, _ = static_args
             fit = group_slices(arrays, active)
 
             def objective(fit):
@@ -523,8 +553,14 @@ def map_fit(
                 pre = rebuild(arrays)
                 record.update({name: fn(pre, aux) for name, fn in metrics.items()})
             bufs = {
-                name: bufs[name].at[count].set(jnp.asarray(v, bufs[name].dtype))
-                for name, v in record.items()
+                name: (
+                    bufs[name]
+                    .at[count]
+                    .set(jnp.asarray(record[name], bufs[name].dtype))
+                    if name in record
+                    else bufs[name]
+                )
+                for name in bufs
             }
             return (
                 tuple(new_arrays),
@@ -545,7 +581,7 @@ def map_fit(
 
         @eqx.filter_jit(donate="all-except-first")
         def step(static_args, arrays, state, bufs, count):
-            ld, scale = static_args
+            ld, scale, grad_scale = static_args
 
             def objective(fit):
                 full = list(arrays)
@@ -571,12 +607,23 @@ def map_fit(
                 for k, v in zip(members[g], moved[g], strict=True):
                     new_arrays[k] = v
             record = {"loss": loss}
+            if grad_scale is not None:
+                scaled = jax.tree.map(lambda g, s: g * s, grads, grad_scale)
+                record["grad_norm"] = jnp.sqrt(
+                    sum(jnp.sum(x**2) for x in jax.tree.leaves(scaled))
+                )
             if metrics:
                 pre = rebuild(arrays)
                 record.update({name: fn(pre, aux) for name, fn in metrics.items()})
             bufs = {
-                name: bufs[name].at[count].set(jnp.asarray(v, bufs[name].dtype))
-                for name, v in record.items()
+                name: (
+                    bufs[name]
+                    .at[count]
+                    .set(jnp.asarray(record[name], bufs[name].dtype))
+                    if name in record
+                    else bufs[name]
+                )
+                for name in bufs
             }
             return (
                 tuple(new_arrays),
@@ -620,12 +667,13 @@ def map_fit(
             )
         else:
             step = get_step(table, tuple(stage.groups), stage.closed_form)
+        stopping = stage.early_stopping
         static_args = (
             density,
             jnp.asarray(stage.objective_scale, dtype),
+            None if stopping is None else stopping.grad_scale,
         )
         count = jnp.asarray(offset, jnp.int32)
-        stopping = stage.early_stopping
         best, bad, checked, stopped = np.inf, 0, 0, False
         n_run = 0
         for j in range(stage.n_steps):
@@ -655,14 +703,21 @@ def map_fit(
             if stopping is not None and (
                 n_run % stopping.check_every == 0 or n_run == stage.n_steps
             ):
-                fresh = np.asarray(bufs["loss"])[offset + checked : offset + n_run]
+                window = slice(offset + checked, offset + n_run)
+                fresh = np.asarray(bufs["loss"])[window]
+                if stopping.grad_scale is None:
+                    gradient = np.zeros_like(fresh)
+                else:
+                    gradient = np.asarray(bufs["grad_norm"])[window]
                 checked = n_run
-                for value in fresh:
+                for value, norm in zip(fresh, gradient, strict=True):
                     if value < best - stopping.min_delta:
                         best, bad = value, 0
                     else:
                         bad += 1
-                    if bad >= stopping.patience:
+                    if bad >= stopping.patience and (
+                        stopping.grad_tol is None or norm < stopping.grad_tol
+                    ):
                         stopped = True
                         break
                 if stopped:
@@ -776,15 +831,20 @@ class MAP(AbstractBackend):
     does not certify.
 
     With no ``stages`` the fit is one stage of at most ``n_steps`` L-BFGS iterations
-    over every parameter, stopped early once five consecutive steps fail to lower the
-    best objective by more than 1e-7 (:class:`EarlyStopping`, read every five steps;
-    the stage trace reports ``stopped_early``). It runs in coordinates scaled by the
-    information at the start (:func:`photomancy.infer._scale.information_scale` with
-    the prior included): the free parameters of an imaging fit span many orders of
-    magnitude, and unscaled
-    L-BFGS crawls along the stiff ones. The scale changes the path and the point the
-    run reaches in a given number of steps, not the density it maximizes. A fit with a
-    term that has no Fisher root runs unscaled, and so does one with ``scale=False``.
+    over every parameter. It runs in coordinates scaled by the information at the
+    start (:func:`photomancy.infer._scale.information_scale` with the prior
+    included): the free parameters of an imaging fit span many orders of magnitude,
+    and unscaled L-BFGS crawls along the stiff ones. The scale changes the path and
+    the point the run reaches in a given number of steps, not the density it
+    maximizes. On the scaled path the stage stops early only when it has converged:
+    five consecutive steps (read every five) fail to lower the best objective by more
+    than 1e-7 **and** the gradient norm in the scaled coordinates is below
+    1e-3 (a Newton decrement near 5e-7 nat); the stage trace reports
+    ``stopped_early=True`` for that and only that. A loss stall alone does not stop
+    it, because L-BFGS in badly scaled coordinates stalls and then speeds up. A fit
+    with a term that has no Fisher root runs unscaled, and so does one with
+    ``scale=False``; that path has no step-size-free convergence test, so it runs
+    all ``n_steps`` and never reports ``stopped_early``.
     Explicit ``stages`` are never rescaled: their transforms are written in the
     coordinates of ``fit.to_real`` (use :func:`rescaled_transform`
     to change them). Pass ``labels``, ``transforms``
@@ -805,8 +865,9 @@ class MAP(AbstractBackend):
     ``TypeError``.
 
     Attributes:
-        n_steps: The most L-BFGS iterations of the default stage; it stops earlier
-            once the objective has converged.
+        n_steps: The most L-BFGS iterations of the default stage. The scaled stage
+            stops earlier once it has converged (see above); the unscaled stage runs
+            all of them.
         labels: Group label PyTree from :func:`group_labels`, or ``None`` for one
             group ``"all"`` over every leaf.
         transforms: ``{group: optax.GradientTransformation}``, or ``None``.
@@ -857,18 +918,23 @@ class MAP(AbstractBackend):
                 if self.scale
                 else None
             )
+            stopping = None
             if scale is not None:
-                solver = rescaled_transform(
-                    solver, {"all": tuple(jax.tree.leaves(scale))}
+                table = {"all": tuple(jax.tree.leaves(scale))}
+                solver = rescaled_transform(solver, table)
+                stopping = EarlyStopping(
+                    patience=5,
+                    min_delta=1e-7,
+                    check_every=5,
+                    grad_tol=_GRAD_TOL,
+                    grad_scale=table,
                 )
             stages = (
                 MAPStage(
                     self.n_steps,
                     ("all",),
                     solver=solver,
-                    early_stopping=EarlyStopping(
-                        patience=5, min_delta=1e-7, check_every=5
-                    ),
+                    early_stopping=stopping,
                     name="lbfgs",
                 ),
             )

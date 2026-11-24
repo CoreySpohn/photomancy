@@ -523,7 +523,8 @@ def test_detect_on_poisson_counts_recovers_the_planet_and_renders_once():
     The amplitude is within four formal standard errors of the truth, and Newton has
     converged by four steps. The render-once path (a term that offers ``split``) gives
     the map the nested-derivative path gives (the same term without ``split``), and it
-    builds the scene once where the nested path builds it at every derivative.
+    builds the scene twice (the render with its tangent, and the render of the
+    linearity check) where the nested path builds it at every derivative.
 
     Truth source: the injected amplitude and position angle; for the parity, the
     nested-derivative path that ``detect`` takes for a term without ``split``,
@@ -552,8 +553,9 @@ def test_detect_on_poisson_counts_recovers_the_planet_and_renders_once():
     del _SCENE_BUILDS[:]
     other = detect(nested, trials, amplitude="amplitude")
     builds_nested = len(_SCENE_BUILDS)
-    # the host-side shape check of ``split`` builds the scene once, the trace once
-    assert builds_once == 2 and builds_nested >= 4, (builds_once, builds_nested)
+    # the host-side shape check of ``split`` builds the scene once, the trace twice
+    # (the render with its tangent, and the render of the linearity check)
+    assert builds_once == 3 and builds_nested >= 4, (builds_once, builds_nested)
     for name in ("a_hat", "z", "sigma"):
         np.testing.assert_allclose(
             getattr(once, name), getattr(other, name), rtol=1e-9, atol=1e-12
@@ -926,31 +928,42 @@ class _SquareNoSplit(ForwardTerm):
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_render_once_detect_holds_only_for_a_prediction_linear_in_the_amplitude():
-    """The render-once path is wrong for a nonlinear forward; the fallback is right.
+    """``detect`` checks the render-once path and answers a nonlinear forward.
 
     The forward is ``(a + 0.4 a**2, a * pa / 360)`` observed with unit noise at
     ``(1, 0)``; at ``pa = 0`` the likelihood is maximal at
-    ``a = (sqrt(2.6) - 1) / 0.8 = 0.766``, which the nested path (a
-    term without ``split``) finds. The render-once path takes the tangent at
-    ``a = 0``, whose slope is one, so it finds ``a = 1``.
+    ``a = (sqrt(2.6) - 1) / 0.8 = 0.766``. The render-once path alone takes the
+    tangent at ``a = 0``, whose slope is one, and finds ``a = 1``; the linearity check
+    (the render at ``a = 1`` is 1.4 against the linear 1.0) sends the trial to the
+    Newton path through the fit's likelihood, which finds the root. A linear forward
+    keeps the render-once answer, equal to the Newton path's to rounding.
 
     Truth source: the closed-form root of ``a + 0.4 a**2 = 1``.
-    Tolerance basis: exact-algebra (atol 1e-6 for the nested path; the render-once
-    amplitude must miss by more than 0.1, which says only that the documented
-    linearity assumption is real).
-    Fails if: the fallback path is not taken for a term without ``split``, or the
-    render-once path is changed to follow nonlinear terms without this test being
-    revisited.
+    Tolerance basis: exact-algebra (atol 1e-6 for the root, atol 1e-9 between the two
+    paths on the linear forward).
+    Fails if: the fallback is not taken for a term without ``split``, the linearity
+    check is removed (``a_hat`` then comes back as 1.0), or it rejects a linear
+    forward.
     """
     data = gaussian_loglike(jnp.array([1.0, 0.0]), 1.0)
     free = {"amplitude": Uniform(-5.0, 5.0), "pa_deg": Uniform(-200.0, 200.0)}
     trials = {"pa_deg": jnp.zeros(1)}
+    root = (np.sqrt(2.6) - 1.0) / 0.8
     nested = Fit(_sky(0.0, 0.0), free, (_SquareNoSplit(_Square(), data),))
     once = Fit(_sky(0.0, 0.0), free, (ForwardTerm(_Square(), data),))
     found = detect(nested, trials, amplitude="amplitude", n_newton=30)
-    np.testing.assert_allclose(found.a_hat, (np.sqrt(2.6) - 1.0) / 0.8, atol=1e-6)
-    wrong = detect(once, trials, amplitude="amplitude", n_newton=30)
-    assert abs(float(wrong.a_hat[0]) - (np.sqrt(2.6) - 1.0) / 0.8) > 0.1
+    np.testing.assert_allclose(found.a_hat, root, atol=1e-6)
+    checked = detect(once, trials, amplitude="amplitude", n_newton=30)
+    np.testing.assert_allclose(checked.a_hat, root, atol=1e-6)
+    np.testing.assert_allclose(checked.z, found.z, atol=1e-6)
+    linear_data = gaussian_loglike(jnp.array([2.0, 0.0]), 1.0)
+    line = Fit(_sky(0.0, 0.0), free, (ForwardTerm(_Line(), linear_data),))
+    line_nested = Fit(_sky(0.0, 0.0), free, (_SquareNoSplit(_Line(), linear_data),))
+    np.testing.assert_allclose(
+        detect(line, trials, amplitude="amplitude").a_hat,
+        detect(line_nested, trials, amplitude="amplitude").a_hat,
+        atol=1e-9,
+    )
 
 
 _FORWARD_CALLS = []  # one entry per trace or call of ``_CountingLine``

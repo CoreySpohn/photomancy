@@ -161,9 +161,12 @@ def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
 
     Truth: the generating disk. Tolerances are the recovery bounds of ``check`` (15
     percent in the semi-major axis, 0.4 AU, 6 degrees). The default MAP must stop
-    early on a loss trace that never rises (within 1e-6 of its first value, the
-    rounding of the line search), and its log density must equal that of the unscaled
-    run within 1e-3 nat: both reach the same optimum, the scale changes only the path.
+    early (converged: loss stalled and scaled gradient small) on a loss trace that
+    never rises by more than 1e-9 of its first value, a floating-point bound (the rise
+    measured here is 8e-17 of the first value in 30 steps), and the final iterate's
+    objective is no worse than the trace minimum within the same bound. Its log
+    density must equal that of the unscaled run within 1e-3 nat: both reach the same
+    optimum, the scale changes only the path.
     Fails if the default stage has no stopping rule: converged, it takes steps that
     raise the loss and can end in an alias of the optimum.
     """
@@ -184,10 +187,12 @@ def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
     point = run(fit, MAP(n_steps=800, init=x0), jax.random.key(0))
     trace = point.info.stages[0]
     assert trace.stopped_early and trace.n_steps < 800
-    assert np.all(np.diff(trace.loss) <= 1e-6 * abs(trace.loss[0]))
-    check({path: leaf[0] for path, leaf in point.samples.items()})
-    control = run(fit, MAP(n_steps=800, init=x0, scale=False), jax.random.key(0))
     ours = {path: leaf[0] for path, leaf in point.samples.items()}
+    final = -float(fit.real_log_prob(fit.to_real(ours)))
+    assert np.all(np.diff(trace.loss) <= 1e-9 * abs(trace.loss[0]))
+    assert final <= trace.loss.min() + 1e-9 * abs(trace.loss[0])
+    check(ours)
+    control = run(fit, MAP(n_steps=800, init=x0, scale=False), jax.random.key(0))
     theirs = {path: leaf[0] for path, leaf in control.samples.items()}
     assert abs(float(fit.log_density(ours)) - float(fit.log_density(theirs))) < 1e-3
 

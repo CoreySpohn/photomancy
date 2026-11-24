@@ -366,6 +366,8 @@ def test_closed_form_sees_the_pre_step_aux_and_runs_after_the_update():
 def test_early_stopping_ends_a_stage_at_the_expected_step():
     """Patience 3 on a one-step quadratic stops after step 5, or 6 with a 3-step check.
 
+    With a gradient gate the stall alone does not stop the stage (see the end).
+
     Truth source: ``sgd(1.0)`` on ``0.5 x^2`` reaches ``x = 0`` in one step, so the
     losses are ``0.5 x0^2, 0, 0, 0, 0 ...``: the best value is at step 1, steps 2, 3
     and 4 do not improve, and the third non-improving step is step 4 (5 steps run).
@@ -397,6 +399,28 @@ def test_early_stopping_ends_a_stage_at_the_expected_step():
     assert exact.stages[1].start == 5 and coarse.stages[1].start == 6
     assert len(exact.stages[0].loss) == 5
     np.testing.assert_array_equal(exact.stages[0].loss[1:], 0.0)
+
+    # The gradient gate: a stalled loss ends the stage only below the tolerance.
+    # ``sgd(0.5)`` halves ``x`` each step, so the pre-step gradient norm at step j is
+    # ``sqrt(80) 2^-j * scale``; ``min_delta`` of 1e9 makes the loss stall from the
+    # start (stop at step 4 without the gate). With tolerance 0.1 the gate opens at
+    # the first j with ``sqrt(80) 2^-j < 0.1`` (j = 7, so 8 steps run), and a scale
+    # of 10 moves it to j = 10 (11 steps).
+    def gated(scale, tol):
+        gate = {} if tol is None else {"grad_tol": tol, "grad_scale": {"x": (scale,)}}
+        stage = MAPStage(
+            50,
+            ("x",),
+            solver=optax.sgd(0.5),
+            early_stopping=EarlyStopping(3, min_delta=1e9, check_every=1, **gate),
+        )
+        return map_fit(ld, init, labels, {}, [stage]).stages[0]
+
+    ones = jnp.ones(2)
+    assert gated(ones, None).n_steps == 4
+    assert gated(ones, 0.1).n_steps == 8 and gated(ones, 0.1).stopped_early
+    assert gated(10 * ones, 0.1).n_steps == 11
+    assert not gated(ones, 1e-30).stopped_early
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")

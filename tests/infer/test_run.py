@@ -533,18 +533,24 @@ def _badly_scaled_fit(rootless=False):
     return fit, {"mu": jnp.asarray(truth * [0.5, 3.0, 5.0, 2.0, 0.1, 1.0])}, best
 
 
-@pytest.mark.medium(reason="three 40-step L-BFGS runs and the scale pass, 7 s cold")
-def test_map_scales_its_coordinates_by_the_information():
-    """The default stage runs in scaled coordinates and reaches the optimum sooner.
+@pytest.mark.medium(reason="five L-BFGS runs of at most 200 steps and the scale pass")
+def test_map_scales_its_coordinates_by_the_information(monkeypatch):
+    """The default stage runs in scaled coordinates, converges there and stops.
 
     Truth source: ``numpy.linalg.lstsq``, the exact maximizer of the Gaussian
-    likelihood (the prior is flat to 1e-16 of it); the gap is the log likelihood
-    below the optimum after 40 L-BFGS steps. Tolerance basis: floating-point (the
-    scaled run is within 1e-5 nat of the optimum and the unscaled run, the control, is
-    more than 1 nat below it, at least six orders of magnitude apart; a term with no
-    Fisher root runs unscaled, so its result equals ``scale=False`` bit for bit).
-    Fails if: the default stage is not rescaled, the scale is wrong by a Jacobian
-    or a square root, or a fit without roots is scaled.
+    likelihood (the prior is flat to 1e-16 of it); a gap is the log likelihood below
+    that optimum. Tolerance basis: floating-point. The scaled run stops at step 35
+    with ``stopped_early`` and a gap of 2e-14 nat (asserted under 1e-9 nat); the
+    unscaled default runs all 200 steps, never reports a stop, and reaches the same
+    optimum (gap 1.4e-14, under 1e-9). Cut at 40 steps the unscaled control is 3320
+    nat below the optimum (asserted above 1 nat) while its loss has stalled, which is
+    why a loss stall alone is not a stop; with the gradient tolerance set below any
+    reachable norm (1e-30) the scaled stage runs all 200 steps, which a stall-only
+    rule would not. A term with no Fisher root runs unscaled,
+    so its result equals ``scale=False`` bit for bit.
+    Fails if: the default stage is not rescaled, the scale is wrong by a Jacobian or
+    a square root, a fit without roots is scaled, the scaled stage stops on a loss
+    stall without the gradient gate, or the unscaled stage stops early.
     """
     fit, start, best = _badly_scaled_fit()
     top = float(fit.log_likelihood({"mu": jnp.asarray(best)}))
@@ -552,11 +558,20 @@ def test_map_scales_its_coordinates_by_the_information():
     def gap(backend, fit=fit):
         post = run(fit, backend, jax.random.key(0))
         best = jax.tree.map(lambda a: a[0], post.samples)
-        return top - float(fit.log_likelihood(best))
+        return top - float(fit.log_likelihood(best)), post.info.stages[0]
 
-    scaled = gap(MAP(n_steps=40, init=start))
-    unscaled = gap(MAP(n_steps=40, init=start, scale=False))
-    assert scaled < 1e-5 and unscaled > 1.0
+    scaled, trace = gap(MAP(n_steps=200, init=start))
+    assert abs(scaled) < 1e-9 and trace.stopped_early and trace.n_steps == 35
+    unscaled, trace = gap(MAP(n_steps=200, init=start, scale=False))
+    assert abs(unscaled) < 1e-9 and not trace.stopped_early and trace.n_steps == 200
+    cut, trace = gap(MAP(n_steps=40, init=start, scale=False))
+    assert cut > 1.0 and not trace.stopped_early
+    # the gate is the scaled gradient norm: below 1e-30 it is never met, so the
+    # scaled stage that stops at 35 steps on the loss stall runs all 200
+    monkeypatch.setattr("photomancy.infer.backends.staged._GRAD_TOL", 1e-30)
+    _, trace = gap(MAP(n_steps=200, init=start))
+    assert not trace.stopped_early and trace.n_steps == 200
+    monkeypatch.undo()
     rootless, start_r, _ = _badly_scaled_fit(rootless=True)
     a = run(rootless, MAP(n_steps=10, init=start_r), jax.random.key(0))
     b = run(rootless, MAP(n_steps=10, init=start_r, scale=False), jax.random.key(0))

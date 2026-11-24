@@ -118,10 +118,13 @@ free entries. The loss of each stage is in `posterior.info.stages`, one trace pe
 Without `init`, the fit starts from a draw of the prior, and `init` may also be one
 constrained draw or an earlier `Posterior`, whose highest-density draw is used. With no
 `stages`, the backend runs one stage of at most `n_steps` L-BFGS iterations over every
-free entry. It stops earlier once five consecutive steps fail to lower the best objective
-by more than 1e-7 (checked every five steps), and the stage trace reports `stopped_early`.
-Explicit `stages` run as written: stopping applies only to a stage that sets
-`early_stopping`.
+free entry. The default stage, which runs in scaled coordinates (see below), stops
+earlier only once it has converged: five consecutive steps (checked every five) fail to
+lower the best objective by more than 1e-7 and the gradient norm in the scaled
+coordinates is below 1e-3, and the stage trace then reports `stopped_early=True`. A loss
+stall alone does not stop it. The unscaled default stage (`scale=False`, or a fit whose
+terms have no Fisher root) runs all `n_steps` and never reports `stopped_early`. Explicit
+`stages` run as written: stopping applies only to a stage that sets `early_stopping`.
 
 ## Choices a stage can make
 
@@ -180,14 +183,14 @@ for the prediction, so it compiles a larger program than a fit without one.
 ## Scaling of the coordinates
 
 `MAP` scales its unconstrained coordinates by the information scale, `1 / sqrt(diag
-Fisher)` (with the prior's curvature added, and a floor so a flat direction does not
+Fisher)` (with the prior's curvature added, and a cap so a flat direction does not
 stretch the step), through {func}`~photomancy.infer.rescaled_transform`. A fit whose
 parameters differ by many orders of magnitude, such as a flux and a position, then takes
 the same L-BFGS steps in every coordinate. Pass `scale=False` to start from unscaled
-coordinates; a fit whose terms have no Fisher root falls back to them. Either way the
-default stage stops once the objective has converged, so `n_steps` is the most steps it
-takes. Converged, the line search can no longer find a descent direction and a run that
-kept stepping would leave the optimum.
+coordinates; a fit whose terms have no Fisher root falls back to them. The scaled stage
+stops once it has converged (the loss has stalled and the scaled gradient norm is below
+1e-3), so `n_steps` is the most steps it takes; the unscaled stage has no step-size-free
+convergence test and runs all `n_steps`.
 
 ## Give the solved coefficients a wide prior
 

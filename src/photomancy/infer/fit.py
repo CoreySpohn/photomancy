@@ -140,9 +140,11 @@ class AbstractTerm(eqx.Module):
         that is callable, holding the data and everything else the likelihood reads.
         It lets :func:`photomancy.detection.detect` render once at an amplitude of
         zero and its derivative, and then score ``prediction + a * tangent`` at any
-        ``a`` without rendering again. A term that does not offer it keeps the
-        default, which raises ``NotImplementedError``, and ``detect`` renders at
-        every Newton step for a fit that holds such a term.
+        ``a`` without rendering again; that is exact only for a prediction linear in
+        the amplitude, which ``detect`` checks with one more render and answers by
+        Newton steps through the term when it fails. A term that does not offer it
+        keeps the default, which raises ``NotImplementedError``, and ``detect`` renders
+        at every Newton step for a fit that holds such a term.
 
         Args:
             model: The model at one draw, every leaf an array.
