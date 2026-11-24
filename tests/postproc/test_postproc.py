@@ -390,8 +390,15 @@ def test_arm_resolution_comes_from_science(kind):
         )
 
 
-def test_reference_footprint_exclusion_matches_numpy_t():
-    """NumPy box support and Bessel t formula are the oracle; roundoff is <1e-10."""
+@pytest.mark.parametrize("where", ["near_center", "stencil_fringe"])
+def test_reference_footprint_exclusion_matches_numpy_t(where):
+    """NumPy box support and Bessel t formula are the oracle; roundoff is <1e-10.
+
+    The excluded pixel is either one column from the reference centre (caught
+    only by a footprint test, not by the raw centre pixel) or on the outer edge
+    of the reference's bilinear stencil (caught only when every interpolation
+    node's footprint is checked, not by the footprint at the nearest centre).
+    """
     from scipy.ndimage import map_coordinates as numpy_sample
     from scipy.signal import convolve2d
 
@@ -410,7 +417,10 @@ def test_reference_footprint_exclusion_matches_numpy_t():
     upper = np.floor(refs).astype(int) + half + 1  # bilinear's second node
     # One column from the first reference's nearest center, away from the
     # candidate and all other reference footprints on this radius-30 ring.
-    pixel = np.floor(refs[0] + 0.5).astype(int) + np.array([0, 1])
+    if where == "near_center":
+        pixel = np.floor(refs[0] + 0.5).astype(int) + np.array([0, 1])
+    else:
+        pixel = np.array([43, 84])
     touched = np.all((lower <= pixel) & (pixel <= upper), axis=1)
     centers = np.floor(refs + 0.5).astype(int)
     assert touched.sum() == 1
@@ -449,7 +459,7 @@ def test_mawet_arm_jit_with_uncached_kernel():
 
 
 def test_mawet_arm_jits_as_an_argument():
-    """Direct evaluation is the oracle; the arm itself may be a jit argument."""
+    """Direct evaluation is the oracle; same arithmetic, so equality is exact."""
     science = _small_science()
     positions = jnp.array([[16.0, 26.0]])
     arm = MawetArm(aperture_fwhm=1.5)
