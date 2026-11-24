@@ -37,6 +37,20 @@ mask scores such a pixel or a lit planet is outside the domain, and
 moves the field of view (the wavelength nodes, the primary, the detector); nothing is
 ever dropped inside ``__call__``.
 
+**Static light beyond a speckle field.** A speckle field ends where its data end and
+the drift beyond it is unknown, so by default the render zeroes those pixels and they
+are not ``supported``, although the static products cover them.
+``ImageTerm(..., static_beyond_speckle=True)`` is the analyst's assumption that there
+is no drift beyond the field: the term renders
+``coronagraphoto.expected(..., static_beyond_speckle=True)``, whose model there is the
+static scene (the static leakage plus the field's stored samples, zero-filled, under
+the field's own reconstruction), and it scores the pixels ``Rates.static_supported``
+marks. The option is a statement about one field and the static map beside it: inside
+a dark hole it understates the leakage by a factor of order one, and nothing here
+checks that the static map beyond the field is bright enough. A fit, a
+:class:`photomancy.detection.LikelihoodEstimate` and a
+:class:`photomancy.detection.DetectionMap` name it in their ``assumptions``.
+
 Count regime. The Poisson form needs integer counts, and a detector that is not
 ``photon_counting`` scores the moment-matched Gaussian, which is not exact at a few
 electrons per pixel with read noise.
@@ -130,13 +144,31 @@ def _check_image(image, instrument, exposure):
         )
 
 
-@eqx.filter_jit
-def _supported(scene, instrument, exposure):
-    """The ``(W, ny, nx)`` read support of the expected rates, all True when unset."""
-    rates = expected(scene, instrument, exposure)
-    if rates.supported is None:
-        return jnp.ones(rates.planet.shape, bool)
+def _scored_flag(rates, static_beyond_speckle):
+    """The ``(W, ny, nx)`` support a term scores, or ``None`` when the rates carry none.
+
+    ``Rates.supported`` by default; ``Rates.static_supported`` under the option, read
+    as ``supported`` when the record does not distinguish the two (``None``).
+    """
+    if static_beyond_speckle and rates.static_supported is not None:
+        return rates.static_supported
     return rates.supported
+
+
+@eqx.filter_jit
+def _flags(scene, instrument, exposure):
+    """The ``(W, ny, nx)`` support flags ``(supported, static_supported)``.
+
+    The flags of the default render, which the option does not change. Each is all
+    True when the rates carry no flag, and ``static_supported`` is ``supported`` when
+    the record does not distinguish the two.
+    """
+    rates = expected(scene, instrument, exposure)
+    strict = rates.supported
+    if strict is None:
+        strict = jnp.ones(rates.planet.shape, bool)
+    static = rates.static_supported
+    return strict, strict if static is None else static
 
 
 def _lit_planets_outside(scene, instrument, exposure):
@@ -196,9 +228,10 @@ class ImageTerm(AbstractTerm):
             Observed values at masked pixels are never read; :meth:`check` refuses a
             mask that scores a pixel the coronagraph data do not cover. ``None``
             scores the supported pixels: those the render marks
-            ``Rates.supported`` at the model being scored. The scored set then
-            follows the model, so a fit that frees a leaf moving the field of view
-            (:attr:`footprint_paths`) should give an explicit mask.
+            ``Rates.supported`` at the model being scored, or
+            ``Rates.static_supported`` when ``static_beyond_speckle`` is set. The
+            scored set then follows the model, so a fit that frees a leaf moving the
+            field of view (:attr:`footprint_paths`) should give an explicit mask.
         instrument: A held :class:`optixstuff.Instrument`, or ``None``.
         exposure: A held :class:`optixstuff.Exposure` with a ``plan``, or ``None``.
         scene_path: Model path of the :class:`skyscapes.Scene`; ``""`` is the model
@@ -207,6 +240,23 @@ class ImageTerm(AbstractTerm):
         exposure_path: Model path of the exposure, or ``None`` when it is held.
             Exactly one of ``instrument`` and ``instrument_path``, and exactly one of
             ``exposure`` and ``exposure_path``, is given.
+        static_beyond_speckle: The assumption that the speckle field does not drift
+            beyond its data. False (the default) treats a pixel the speckle field
+            does not cover as unknown: the model there is zero, ``check`` refuses a
+            mask that scores it, and a ``None`` mask leaves it out. True passes the
+            option to :func:`coronagraphoto.expected`, so the model, ``predict``,
+            ``residual``, ``fisher_root`` and ``draw`` there are the static scene: the
+            static leakage plus the field's stored samples, zero-filled, under the
+            field's own reconstruction, with no drift. ``supported_mask`` is then
+            ``Rates.static_supported``, a ``None`` mask scores it, and ``check``
+            refuses only pixels no static product covers. A frame drawn under the
+            option has no drift to recover beyond the field. The option changes no
+            value for a mask inside the field, but it exists to admit a wider mask,
+            and a wider mask scores a different data set: a log likelihood, an
+            information matrix or an evidence obtained with it is not comparable with
+            one from the default mask, and thresholds calibrated on one do not
+            transfer to the other. The term reports the option in
+            :attr:`assumptions`.
     """
 
     observed_e: jax.Array
@@ -216,6 +266,7 @@ class ImageTerm(AbstractTerm):
     scene_path: str = eqx.field(static=True, default="")
     instrument_path: str | None = eqx.field(static=True, default=None)
     exposure_path: str | None = eqx.field(static=True, default=None)
+    static_beyond_speckle: bool = eqx.field(static=True, default=False)
 
     def __init__(
         self,
@@ -226,6 +277,8 @@ class ImageTerm(AbstractTerm):
         scene_path: str = "",
         instrument_path: str | None = None,
         exposure_path: str | None = None,
+        *,
+        static_beyond_speckle: bool = False,
     ):
         """Store the frame, checking an ``Image`` against the held instrument.
 
@@ -239,8 +292,11 @@ class ImageTerm(AbstractTerm):
             scene_path: Model path of the scene.
             instrument_path: Model path of the instrument, or ``None``.
             exposure_path: Model path of the exposure, or ``None``.
+            static_beyond_speckle: Keep the static light where only the speckle
+                field lacks data (see the class docstring). A Python bool.
 
         Raises:
+            TypeError: When ``static_beyond_speckle`` is not a Python bool.
             ValueError: When an ``Image`` does not hold electrons per pixel, is not
                 on the held detector's grid, or lacks or contradicts the held
                 exposure's roll.
@@ -255,9 +311,15 @@ class ImageTerm(AbstractTerm):
         self.scene_path = scene_path
         self.instrument_path = instrument_path
         self.exposure_path = exposure_path
+        self.static_beyond_speckle = static_beyond_speckle
 
     def __check_init__(self):
         """Require one source each for instrument and exposure, and a frame array."""
+        if type(self.static_beyond_speckle) is not bool:
+            raise TypeError(
+                "static_beyond_speckle must be a Python bool, got "
+                f"{type(self.static_beyond_speckle).__name__}"
+            )
         if (self.instrument is None) == (self.instrument_path is None):
             raise ValueError("give exactly one of instrument and instrument_path")
         if (self.exposure is None) == (self.exposure_path is None):
@@ -266,6 +328,11 @@ class ImageTerm(AbstractTerm):
             raise ValueError("the exposure needs a FramePlan: build it with plan=")
         if self.observed_e.ndim < 3:
             raise ValueError("observed_e must have shape (*batch, W, ny, nx)")
+
+    @property
+    def assumptions(self) -> tuple[str, ...]:
+        """``("static_beyond_speckle",)`` when the option is set, else empty."""
+        return ("static_beyond_speckle",) if self.static_beyond_speckle else ()
 
     @property
     def reads(self) -> tuple[str, ...]:
@@ -287,15 +354,21 @@ class ImageTerm(AbstractTerm):
         """Return ``(detector, rates, plan)`` at ``model``."""
         instrument = self._instrument(model)
         exposure = self._exposure(model)
-        rates = expected(resolve(model, self.scene_path), instrument, exposure)
+        rates = expected(
+            resolve(model, self.scene_path),
+            instrument,
+            exposure,
+            static_beyond_speckle=self.static_beyond_speckle,
+        )
         return instrument.detector, rates, exposure.plan
 
     def _used(self, rates) -> jax.Array:
         """The scored pixels: the mask, else the render's support, else every pixel."""
         if self.mask is not None:
             return self.mask
-        if rates.supported is not None:
-            return rates.supported
+        flag = _scored_flag(rates, self.static_beyond_speckle)
+        if flag is not None:
+            return flag
         return jnp.ones(jnp.shape(rates.total()), bool)
 
     @property
@@ -314,8 +387,9 @@ class ImageTerm(AbstractTerm):
     def supported_mask(self, model) -> jax.Array:
         """Return the detector pixels the coronagraph data cover, shape ``(W, ny, nx)``.
 
-        It is ``coronagraphoto.expected(...).supported`` at ``model``, all True when
-        the rates carry no flag. AND it into ``mask`` (it broadcasts over leading frame
+        It is ``coronagraphoto.expected(...).supported`` at ``model``, or its
+        ``static_supported`` when ``static_beyond_speckle`` is set, all True when the
+        rates carry no flag. AND it into ``mask`` (it broadcasts over leading frame
         axes) to score only pixels the model can speak for; ``check`` passes then.
 
         Args:
@@ -326,35 +400,53 @@ class ImageTerm(AbstractTerm):
             Boolean array of shape ``(W, ny, nx)``, true where the coronagraph data
             cover the pixel.
         """
+        strict, static = self._flags(model)
+        return static if self.static_beyond_speckle else strict
+
+    def _flags(self, model):
         scene = resolve(model, self.scene_path)
-        return _supported(scene, self._instrument(model), self._exposure(model))
+        return _flags(scene, self._instrument(model), self._exposure(model))
 
     def check(self, model) -> None:
         """Raise when the term would score light the coronagraph data do not hold.
 
-        Call it where ``model`` is concrete (``Fit`` does, once, at setup).
+        Call it where ``model`` is concrete (``Fit`` does, once, at setup). Only a
+        given ``mask`` is checked against the support; a ``None`` mask scores only
+        supported pixels. The support is ``Rates.supported`` by default and
+        ``Rates.static_supported`` when ``static_beyond_speckle`` is set. The message
+        gives two counts of scored pixels: those no static product covers, and those
+        that lack only the speckle field (refused by default, scored under the
+        option).
 
         Args:
             model: The concrete model PyTree holding the scene, and the instrument
                 and exposure at their paths when they are not held by the term.
 
         Raises:
-            ValueError: Naming the count, when ``mask`` is true on a pixel that is not
-                ``supported_mask(model)`` (a ``None`` mask scores only those), or when
-                a lit planet of the scene is outside the coronagraph's source domain
-                at band centre (it would render zero while the data may show it).
+            ValueError: Naming the counts, when ``mask`` is true on a pixel that is
+                not ``supported_mask(model)``, or when a lit planet of the scene is
+                outside the coronagraph's source domain at band centre (it would
+                render zero while the data may show it).
         """
-        bad = 0
         if self.mask is not None:
-            supported = np.asarray(self.supported_mask(model))
+            strict, static = (np.asarray(flag) for flag in self._flags(model))
             scored = np.broadcast_to(np.asarray(self.mask), self.observed_e.shape)
-            bad = int((scored & ~supported).reshape(-1, *supported.shape).any(0).sum())
-        if bad:
-            raise ValueError(
-                f"the mask scores {bad} pixel(s) the coronagraph data do not cover "
-                "(zero rate, unsupported); AND ImageTerm.supported_mask(model) into "
-                "the mask or crop the detector"
-            )
+            scored = scored.reshape(-1, *strict.shape).any(0)
+            no_static = int((scored & ~static).sum())
+            speckle_only = int((scored & static & ~strict).sum())
+            if self.static_beyond_speckle:
+                bad, only = no_static, "scored as static light under the option"
+            else:
+                bad = no_static + speckle_only
+                only = "refused unless static_beyond_speckle=True"
+            if bad:
+                raise ValueError(
+                    f"the mask scores {bad} pixel(s) the coronagraph data do not "
+                    f"cover: {no_static} that no static product covers and "
+                    f"{speckle_only} that lack only the speckle field ({only}); AND "
+                    "ImageTerm.supported_mask(model) into the mask or crop the "
+                    "detector"
+                )
         planets = _lit_planets_outside(
             resolve(model, self.scene_path),
             self._instrument(model),

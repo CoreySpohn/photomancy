@@ -10,11 +10,19 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.model_paths import resolve
-from image_scene import make_detector, make_exposure, make_instrument, make_scene
-from optixstuff.grids import Measure, PixelGrid, SkyOrientation
+from image_scene import (
+    GaussianCoronagraph,
+    make_detector,
+    make_exposure,
+    make_instrument,
+    make_scene,
+)
+from optixstuff import AbstractSpeckleField
+from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from priorities import LogUniform
 from scipy import stats
 
+from photomancy import detection
 from photomancy.image import ImageModel, ImageTerm
 from photomancy.infer.fit import Fit
 
@@ -614,3 +622,184 @@ def test_a_free_leaf_that_moves_the_field_of_view_is_checked_at_both_ends():
         Fit(model, {path: Uniform(nodes * 0.9, nodes)}, (term,))
     with pytest.raises(ValueError, match="unbounded"):
         Fit(model, {path: Normal(nodes, jnp.ones_like(nodes))}, (term,))
+
+
+class _Patch(AbstractSpeckleField):
+    """A static speckle excess on a 12 cell grid of 0.3 lambda/D, read linearly.
+
+    The excess density is ten times the toy coronagraph's static floor (1e-9 per
+    square lambda/D), modulated so that no two cells are equal.
+    """
+
+    grid: PixelGrid = eqx.field(static=True)
+    data: jax.Array
+    epoch_d: float = 0.0
+
+    def __init__(self, n=12, step=0.3):
+        """Build the field on an ``n`` cell grid of ``step`` lambda/D."""
+        self.grid = PixelGrid.focal(n, step, GaussianCoronagraph().grid.frame)
+        x, y = self.grid.coordinates()
+        modulation = 1 + 0.5 * jnp.cos(0.8 * x + 0.2) * jnp.cos(0.6 * y - 0.1)
+        self.data = 1e-8 * step**2 * modulation
+
+    def spectral_breaks_nm(self):
+        """The excess is achromatic."""
+        return np.empty(0)
+
+    def realize(self, *, wavelength_nm, time_d=0.0):
+        """The same cell integrals at every node and time."""
+        return Image(
+            self.data, self.grid, (), Measure.integral(), "stellar_flux_fraction"
+        )
+
+
+def _speckle_setup(table_n, detector_n, field=True):
+    """The toy setup on a ``table_n`` cell table and a ``detector_n`` pixel detector.
+
+    The detector pixel is one table cell at 550 nm (0.3 lambda/D); the speckle field
+    is :class:`_Patch`, 12 cells of 0.3 lambda/D, read linearly.
+    """
+    small = make_detector("poisson")
+    detector = type(small)(
+        photon_counting=True,
+        pixel_scale_arcsec=small.pixel_scale_arcsec,
+        shape=(detector_n, detector_n),
+        qe=0.8,
+    )
+    instrument = eqx.tree_at(
+        lambda i: i.coronagraph,
+        make_instrument(detector),
+        GaussianCoronagraph(n=table_n),
+    )
+    if field:
+        instrument = eqx.tree_at(
+            lambda i: i.speckle, instrument, _Patch(), is_leaf=lambda v: v is None
+        )
+    scene = make_scene(contrast=1e-10, sky_pa_deg=40.0)
+    return ImageModel(scene, instrument), make_exposure(scene, instrument)
+
+
+def _beyond_field(model, exposure):
+    """Detector pixels wholly outside the field footprint grown by its read margin.
+
+    Geometry only, at the node where the footprint and the margin are largest: the
+    linear sampling margin of 0.5 cells, or ``(k - 1/2) g - 1/2`` cells (``k = 1``)
+    when a detector pixel of ``g >= 1`` cells deposits.
+    """
+    field, detector = model.instrument.speckle, model.instrument.detector
+    frame = field.grid.frame
+    pixel = float(detector.pixel_scale_arcsec)
+    reach = 0.0
+    for w in np.asarray(exposure.quadrature.nodes_nm).ravel():
+        cell = float(field.grid.step) * float(frame.lod_to_arcsec(w))
+        g = pixel / cell
+        margin = max(0.5, 0.5 * g - 0.5) if g >= 1 else 0.5
+        reach = max(reach, (field.grid.shape[0] / 2 + margin) * cell)
+    x, y = (np.asarray(c) for c in detector.grid.coordinates())
+    return (np.abs(x) - pixel / 2 >= reach) | (np.abs(y) - pixel / 2 >= reach)
+
+
+def _support_counts(model, exposure):
+    """``(no static product, only the speckle field)`` pixel counts of the render."""
+    rates = cp.expected(model.scene, model.instrument, exposure)
+    strict = np.asarray(rates.supported)
+    static = np.asarray(rates.static_supported)
+    return int((~static).sum()), int((static & ~strict).sum())
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.medium(reason="renders three instruments and one Newton step, 7 s cold")
+def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option():
+    """Fails if the option is ignored, admits unsupported pixels or is not recorded.
+
+    Fails for a term that ignores the option, an option that admits pixels without
+    static data, and a result that loses the record of the option.
+
+    Geometry: the toy coronagraph with a 48 cell table, which covers a 24 pixel
+    detector at every node of the 500-600 nm band, and a speckle field half the
+    detector's width (:class:`_Patch`); a second instrument puts the same field on
+    a 48 pixel detector with the 24 cell table, so the detector is also wider than
+    the static table. Every mask is all True unless stated.
+
+    Truth sources: the refusal counts are read from the two flags of
+    ``coronagraphoto.expected`` (``static_supported`` for pixels no static product
+    covers, ``static_supported & ~supported`` for pixels that lack only the
+    speckle field); the static model beyond the field is ``predict`` of the same
+    term on the instrument without a speckle field, on pixels wholly outside the
+    field footprint grown by the linear read margin; the default model there is
+    zero, the strict rule.
+
+    Tolerance basis: exact-algebra throughout (equality). Beyond the grown
+    footprint the field adds an exact zero to the same static arrays through the
+    same program; on a mask inside the field the two settings score the same
+    rates; the counts and the names are integers and strings.
+
+    Assertions: by default ``check`` and ``Fit`` raise and name both counts (0 and
+    the speckle-only count); with the option the first instrument passes and the
+    second still raises, naming its static count. ``predict`` is exactly 0.0
+    where the default render is unsupported, and the static model beyond the
+    field with the option. Guard: on the default term's own mask the log
+    likelihood is identical for the two settings. ``Fit.assumptions`` and the
+    ``LikelihoodEstimate`` of ``measure`` name the option when it is set and are
+    empty otherwise.
+    """
+    model, exposure = _speckle_setup(48, 24)
+    shape = (1, *model.instrument.detector.shape)
+    every = jnp.ones(shape, bool)
+    no_static, only = _support_counts(model, exposure)
+    assert no_static == 0 and 0 < only < every.size
+
+    def term(observed, mask, option):
+        return ImageTerm(
+            observed, mask, exposure=exposure, static_beyond_speckle=option, **_PATHS
+        )
+
+    kept = term(jnp.zeros(shape), every, True)
+    mean = np.asarray(kept.predict(model))
+    observed = jnp.asarray(np.random.default_rng(0).poisson(mean).astype(float))
+    strict, kept = term(observed, every, False), term(observed, every, True)
+    law = {_CONTRAST: LogUniform(1e-12, 1e-8)}
+    refused = rf"scores {only} pixel\(s\).*: 0 that no static .* and {only} that lack"
+    with pytest.raises(ValueError, match=refused):
+        strict.check(model)
+    with pytest.raises(ValueError, match=refused):
+        Fit(model, law, (strict,))
+    kept.check(model)
+    assert np.asarray(kept.supported_mask(model)).all()
+
+    supported = np.asarray(strict.supported_mask(model))
+    np.testing.assert_array_equal(np.asarray(strict.predict(model))[~supported], 0.0)
+    beyond = _beyond_field(model, exposure)
+    assert beyond.any()
+    bare, _ = _speckle_setup(48, 24, field=False)
+    static = np.asarray(term(observed, every, False).predict(bare))
+    np.testing.assert_array_equal(mean[..., beyond], static[..., beyond])
+    assert np.all(mean[~supported] > 0)
+
+    inside = jnp.asarray(supported)
+    a, b = term(observed, inside, False), term(observed, inside, True)
+    assert float(a(model)) == float(b(model))
+
+    fit = Fit(model, law, (kept,))
+    assert fit.assumptions == ("static_beyond_speckle",)
+    assert Fit(model, law, (a,)).assumptions == ()
+    start = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid}
+    estimate = detection.measure(fit, start, n_newton=1)
+    assert estimate.assumptions == ("static_beyond_speckle",)
+
+    wide, wide_exposure = _speckle_setup(24, 48)
+    no_static, only = _support_counts(wide, wide_exposure)
+    assert no_static > 0 and only > 0
+    frame = jnp.zeros((1, 48, 48))
+    for option, count in ((True, no_static), (False, no_static + only)):
+        loose = ImageTerm(
+            frame,
+            jnp.ones(frame.shape, bool),
+            exposure=wide_exposure,
+            static_beyond_speckle=option,
+            **_PATHS,
+        )
+        with pytest.raises(
+            ValueError, match=rf"scores {count} pixel\(s\).*: {no_static} that no"
+        ):
+            loose.check(wide)
