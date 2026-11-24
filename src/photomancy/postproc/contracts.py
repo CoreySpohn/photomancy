@@ -14,7 +14,9 @@ Conventions:
 """
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
+import numpy as np
 from hwoutils.epoch import Epoch
 from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
@@ -101,8 +103,44 @@ class FrameSet(eqx.Module):
         """Per-frame count rates, electrons per second, (n_frames, ny, nx)."""
         return self.frames / self.frame_time_s[:, None, None]
 
+    def single_orientation(self) -> jnp.ndarray:
+        """Check for a common telescope orientation modulo 360 degrees.
+
+        Each angle is first reduced to a signed remainder in [-180, 180] by
+        subtracting the nearest multiple of 360 degrees, which is exact in the
+        angles' dtype, so a full turn cannot absorb a small difference. The
+        offsets of the remainders from the first frame are wrapped the same
+        way, and the span (maximum minus minimum) of the wrapped offsets is
+        compared with a tolerance of 1e-6 degrees. Traced angles return a
+        boolean without raising, allowing callers to mask invalid results.
+
+        Returns:
+            Scalar bool indicating whether all frames share one orientation.
+
+        Raises:
+            ValueError: Concrete angles span more than 1e-6 degrees modulo
+                360; the message includes the angles and their spread.
+        """
+        angles = self.telescope_pa_deg
+        # Closed-over angles can be checked eagerly even inside a jitted arm.
+        with jax.ensure_compile_time_eval():
+            reduced = angles - 360.0 * jnp.round(angles / 360.0)
+            offsets = reduced - reduced[0]
+            offsets = offsets - 360.0 * jnp.round(offsets / 360.0)
+            spread = jnp.max(offsets) - jnp.min(offsets)
+            same = spread <= 1e-6
+        if not isinstance(angles, jax.core.Tracer) and not bool(same):
+            raise ValueError(
+                f"telescope_pa_deg angles {np.asarray(angles).tolist()} must share "
+                f"one orientation; spread {float(spread)} degrees"
+            )
+        return same
+
     def coadd(self) -> jnp.ndarray:
-        """Exposure-weighted coadd: total electrons / total time, (ny, nx) e-/s.
+        """Detector-frame sum: total electrons / total time, (ny, nx) e-/s.
+
+        Pixels are added at equal detector indices with no derotation. Frames
+        must share one orientation for a sky-fixed source to add coherently.
 
         Returns:
             Coadded count rate in electrons per second, shape (ny, nx).
@@ -126,7 +164,7 @@ class DetectionStats(eqx.Module):
             null distribution (NaN where the statistic is NaN).
         dof: (n,) effective degrees of freedom backing each statistic's null
             (t-tests: number of reference samples minus one).
-        fwhm_px: Scalar resolution element used, pixels.
+        fwhm_px: Scalar resolution element of the science frames, pixels.
         statistic_kind: Static label of the statistic/null pairing, e.g.
             "mawet_t".
     """

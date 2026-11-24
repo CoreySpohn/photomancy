@@ -44,6 +44,18 @@ science = FrameSet(
 positions = jnp.array([[32.0, 50.0], [32.0, 20.0]])  # (y, x), one on the source
 ```
 
+The frames must share one orientation (equal `telescope_pa_deg`, modulo 360
+within 1e-6 degrees). The arms coadd in detector coordinates without derotation
+or registration. Roll-diverse data are not yet combined by the arms: frames at
+different angles are refused.
+
+Both arms read the resolution element from `science.fwhm_px`. Their optional
+`aperture_fwhm=1.0` sets the aperture diameter as a multiple of that resolution
+element, including reference-aperture spacing. For example, `MawetArm(aperture_fwhm=2)`
+uses twice the diameter. `DetectionStats.fwhm_px` still reports the science
+resolution. Mawet kernel sizes require a concrete `science.fwhm_px`; close over
+it when calling that arm under JIT.
+
 ## Aperture photometry
 
 `MawetArm` compares the flux in the candidate aperture with the flux in
@@ -54,7 +66,7 @@ arm ignores any reference frames.
 ```python continuation
 from photomancy.postproc import MawetArm
 
-stats = MawetArm(fwhm_px=fwhm_px).detect(science, positions)
+stats = MawetArm().detect(science, positions)
 print(stats.statistic, stats.fpf, stats.statistic_kind)
 assert stats.fpf[0] < 1e-6 < stats.fpf[1]
 ```
@@ -79,7 +91,7 @@ yy, xx = np.mgrid[0:k, 0:k]
 stamp = np.exp(-((yy - k // 2) ** 2 + (xx - k // 2) ** 2) / (2 * sigma**2))
 provider = ArrayTemplateProvider(jnp.asarray(stamp / stamp.sum()))
 
-stats = MatchedFilterArm(provider, fwhm_px=fwhm_px).detect(science, positions)
+stats = MatchedFilterArm(provider).detect(science, positions)
 print(stats.statistic, stats.fpf, stats.statistic_kind)
 assert stats.fpf[0] < 1e-6 < stats.fpf[1]
 ```

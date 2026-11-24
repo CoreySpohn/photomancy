@@ -6,9 +6,33 @@ import jax.numpy as jnp
 from hwoutils.map_coordinates import map_coordinates
 
 from photomancy.postproc.core.detection.base import AbstractFilter
-from photomancy.postproc.core.detection.patches import extract_patch
+from photomancy.postproc.core.detection.patches import _patch_offsets, extract_patch
 from photomancy.postproc.core.photometry import flux_map
 from photomancy.postproc.templates.base import AbstractTemplateProvider
+
+
+def _stencil_validity(prepared_validity, coordinates, order):
+    """Require all interpolation nodes, treating constant padding as valid.
+
+    The stencil includes nodes whose interpolation weight is zero at integer
+    positions (floor + 1 for order 1, floor - 1 and floor + 2 for order 3), so
+    the exclusion halo can be one pixel wider on one side than the strict
+    support. All-valid inputs are unaffected.
+    """
+    # Each axis can contain one coordinate or a whole vector of patch samples.
+    nodes = coordinates.reshape(2, -1)
+    if not jnp.issubdtype(nodes.dtype, jnp.integer):
+        nodes = jax.lax.round(nodes) if order == 0 else jnp.floor(nodes)
+    nodes = nodes.astype(jnp.int32)
+    if order != 0:
+        offsets = jnp.arange(-1, 3) if order == 3 else jnp.arange(2)
+        nodes = (nodes[:, :, None] + offsets).reshape(2, -1)
+    y, x = nodes[0, :, None], nodes[1, None, :]
+    ny, nx = prepared_validity.shape
+    inside = (y >= 0) & (y < ny) & (x >= 0) & (x < nx)
+    return jnp.all(
+        ~inside | (prepared_validity[y.clip(0, ny - 1), x.clip(0, nx - 1)] > 0.5)
+    )
 
 
 def gaussian_kernel_1d(fwhm: float) -> jnp.ndarray:
@@ -40,7 +64,7 @@ def gaussian_filter_2d(image: jnp.ndarray, kernel_1d: jnp.ndarray) -> jnp.ndarra
         kernel_1d: 1D kernel from gaussian_kernel_1d.
 
     Returns:
-        Filtered image, same shape as input.
+        Filtered image, one pixel larger per axis for an even-length kernel.
     """
     pad_size = len(kernel_1d) // 2
 
@@ -81,6 +105,35 @@ class ApertureFilter(AbstractFilter):
         """
         return flux_map(image, self.kernel)
 
+    def prepare_validity(self, validity_map: jnp.ndarray) -> jnp.ndarray:
+        """Mark usable footprints.
+
+        Args:
+            validity_map: (ny, nx) image validity, usable above 0.5.
+
+        Returns:
+            Boolean validity of each footprint, with valid off-image padding.
+        """
+        excluded = ~(validity_map > 0.5)
+        counts = flux_map(
+            excluded.astype(jnp.int32), (self.kernel != 0).astype(jnp.int32)
+        )
+        return counts == 0
+
+    def evaluate_validity(
+        self, prepared_validity: jnp.ndarray, position_yx: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Check the full interpolation stencil of a footprint.
+
+        Args:
+            prepared_validity: Map from prepare_validity().
+            position_yx: (2,) evaluation position in pixels.
+
+        Returns:
+            Scalar bool marking a fully usable measurement.
+        """
+        return _stencil_validity(prepared_validity, position_yx, self.order)
+
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
         """Sample the flux map at one position.
 
@@ -112,9 +165,53 @@ class GaussianFilter(AbstractFilter):
             image: 2D science image.
 
         Returns:
-            Gaussian-filtered image, same shape as the image.
+            Filtered image, one pixel larger per axis for an even-length kernel.
         """
         return gaussian_filter_2d(image, self.kernel_1d)
+
+    def detector_shape(self, prepared: jnp.ndarray) -> tuple[int, int]:
+        """Remove the extra response row and column of an even-length kernel.
+
+        Args:
+            prepared: Filtered image from prepare().
+
+        Returns:
+            (ny, nx) of the detector image.
+        """
+        extra = int(len(self.kernel_1d) % 2 == 0)
+        ny, nx = prepared.shape
+        return ny - extra, nx - extra
+
+    def prepare_validity(self, validity_map: jnp.ndarray) -> jnp.ndarray:
+        """Mark usable footprints.
+
+        Args:
+            validity_map: (ny, nx) image validity, usable above 0.5.
+
+        Returns:
+            Boolean footprint validity, reflecting the mask at the image edges.
+        """
+        size = len(self.kernel_1d)
+        excluded = ~(validity_map > 0.5)
+        padded = jnp.pad(excluded, size // 2, mode="reflect")
+        counts = jax.lax.reduce_window(
+            padded.astype(jnp.int32), 0, jax.lax.add, (size, size), (1, 1), "VALID"
+        )
+        return counts == 0
+
+    def evaluate_validity(
+        self, prepared_validity: jnp.ndarray, position_yx: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Check the full interpolation stencil of a footprint.
+
+        Args:
+            prepared_validity: Map from prepare_validity().
+            position_yx: (2,) evaluation position in pixels.
+
+        Returns:
+            Scalar bool marking a fully usable measurement.
+        """
+        return _stencil_validity(prepared_validity, position_yx, self.order)
 
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
         """Sample the filtered image at one position.
@@ -140,7 +237,8 @@ class MapFilter(AbstractFilter):
 
     Non-finite map pixels are replaced by zero in prepare() so they cannot
     poison the reference statistics; mark the same pixels as unusable in the
-    estimator's validity_map so the samplers drop them.
+    estimator's validity_map to exclude every measurement whose interpolation
+    stencil touches them.
 
     Attributes:
         order: Interpolation order used to sample the map (0 nearest, 1 bilinear).
@@ -167,6 +265,31 @@ class MapFilter(AbstractFilter):
             The map with non-finite pixels replaced by zero.
         """
         return jnp.where(jnp.isfinite(image), image, 0.0)
+
+    def prepare_validity(self, validity_map: jnp.ndarray) -> jnp.ndarray:
+        """Mark usable footprints.
+
+        Args:
+            validity_map: (ny, nx) image validity, usable above 0.5.
+
+        Returns:
+            Boolean validity of individual image pixels.
+        """
+        return validity_map > 0.5
+
+    def evaluate_validity(
+        self, prepared_validity: jnp.ndarray, position_yx: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Check the full interpolation stencil of a footprint.
+
+        Args:
+            prepared_validity: Map from prepare_validity().
+            position_yx: (2,) evaluation position in pixels.
+
+        Returns:
+            Scalar bool marking a fully usable measurement.
+        """
+        return _stencil_validity(prepared_validity, position_yx, self.order)
 
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
         """Sample the statistic map at one position.
@@ -265,6 +388,35 @@ class PSFTemplateFilter(AbstractFilter):
             The image unchanged.
         """
         return image
+
+    def prepare_validity(self, validity_map: jnp.ndarray) -> jnp.ndarray:
+        """Mark usable footprints.
+
+        Args:
+            validity_map: (ny, nx) image validity, usable above 0.5.
+
+        Returns:
+            Boolean validity of individual image pixels.
+        """
+        return validity_map > 0.5
+
+    def evaluate_validity(
+        self, prepared_validity: jnp.ndarray, position_yx: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Check the full interpolation stencil of a footprint.
+
+        Args:
+            prepared_validity: Map from prepare_validity().
+            position_yx: (2,) evaluation position in pixels.
+
+        Returns:
+            Scalar bool marking a fully usable measurement.
+        """
+        axes = position_yx[:, None] + _patch_offsets(self.provider.stamp_size)
+        # The variance's bilinear stencil contains the nearest image node;
+        # a cubic image stencil already contains both bilinear nodes.
+        order = max(self.order, 1) if self.noise_variance is not None else self.order
+        return _stencil_validity(prepared_validity, axes, order)
 
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
         """Best-fit template amplitude at one position.

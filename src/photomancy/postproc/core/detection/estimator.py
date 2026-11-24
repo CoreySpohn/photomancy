@@ -34,7 +34,7 @@ class DetectionEstimator(eqx.Module):
     the decomposition is purely a source-level concern. The estimator
     resolves defaults (all-valid map, geometric star center), vmaps the
     per-candidate computation, and NaNs statistic and FPF where the sampler
-    reports the geometry invalid.
+    reports the geometry invalid or the candidate footprint is excluded.
 
     Attributes:
         filter: Signal-extraction step that measures the response at a position.
@@ -131,6 +131,8 @@ class DetectionEstimator(eqx.Module):
             image: 2D science image.
             positions_yx: (n, 2) candidate positions, (y, x) pixels.
             validity_map: Optional (ny, nx) mask (1 = usable, 0 = excluded).
+                Measurements touching excluded pixels anywhere in their footprint
+                or interpolation stencil are excluded.
             center_yx: Optional (2,) star center; geometric center when None.
 
         Returns:
@@ -138,9 +140,13 @@ class DetectionEstimator(eqx.Module):
             test, fwhm_px from the sampler).
         """
         ny, nx = image.shape
-        filtered = self.filter.prepare(image)
         if validity_map is None:
             validity_map = jnp.ones((ny, nx))
+        valid = validity_map > 0.5
+        filtered = self.filter.prepare(
+            jnp.where(valid, image, jnp.zeros((), image.dtype))
+        )
+        prepared_validity = self.filter.prepare_validity(valid)
         if center_yx is None:
             center = jnp.array(get_center(image.shape))
         else:
@@ -151,11 +157,12 @@ class DetectionEstimator(eqx.Module):
             filt = self.filter.bind(position_yx)
             signal = filt.evaluate(filtered, position_yx)
             samples, mask, geom_ok = self.sampler(
-                filtered, position_yx, filt, validity_map, center
+                filtered, position_yx, filt, prepared_validity, center
             )
             statistic, fpf, dof = self.test(signal, samples, mask)
-            statistic = jnp.where(geom_ok, statistic, jnp.nan)
-            fpf = jnp.where(geom_ok, fpf, jnp.nan)
+            cand_ok = filt.evaluate_validity(prepared_validity, position_yx)
+            statistic = jnp.where(geom_ok & cand_ok, statistic, jnp.nan)
+            fpf = jnp.where(geom_ok & cand_ok, fpf, jnp.nan)
             return statistic, fpf, dof
 
         statistic, fpf, dof = jax.vmap(_single)(positions_yx)
@@ -179,6 +186,8 @@ class DetectionEstimator(eqx.Module):
         Args:
             image: 2D science image.
             validity_map: Optional (ny, nx) mask (1 = usable, 0 = excluded).
+                Measurements touching excluded pixels anywhere in their footprint
+                or interpolation stencil are excluded.
             center_yx: Optional (2,) star center; geometric center when None.
 
         Returns:

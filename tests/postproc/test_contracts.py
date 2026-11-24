@@ -211,3 +211,82 @@ def test_band_and_epoch_are_host_metadata_with_precise_offsets():
     assert fs.band == Band(495.0, 605.0)
     assert fs.epoch is epoch
     assert float(jax.jit(lambda f: f.time_d[0])(fs)) == 1 / 65536
+
+
+def test_frameset_single_orientation():
+    """Wrapped differences define equality; the contract tolerance is 1e-6 deg."""
+    assert bool(make_frameset(n_frames=1).single_orientation())
+    for angles in ([10.0, 370.0], [359.9999999, 0.0]):
+        science = make_frameset(n_frames=2, telescope_pa_deg=jnp.asarray(angles))
+        assert bool(science.single_orientation())
+    with pytest.raises(ValueError, match=r"0.*0.001.*spread.*degrees"):
+        make_frameset(
+            n_frames=2, telescope_pa_deg=jnp.array([0.0, 1e-3])
+        ).single_orientation()
+
+
+@pytest.mark.parametrize(
+    "angles",
+    [
+        [0.0, 0.9e-6, -0.9e-6],
+        [0.9e-6, 0.0, -0.9e-6],
+        [-0.9e-6, 0.9e-6, 0.0],
+        [360.0, 0.9e-6, -0.9e-6],
+        [0.9e-6, 360.0, -0.9e-6],
+        [-0.9e-6, 0.9e-6, 360.0],
+    ],
+)
+def test_single_orientation_compares_the_span_in_any_frame_order(angles):
+    """Exact algebra: the span is 1.8e-6 deg whichever frame comes first.
+
+    A frame at 360 deg is the same orientation as one at 0 deg in any position.
+
+    Each offset from the first frame is below 1e-6 deg in some orders, so a
+    test of offsets alone accepts these angles; the span does not.
+    """
+    science = make_frameset(n_frames=3, telescope_pa_deg=jnp.asarray(angles))
+    with pytest.raises(ValueError, match="spread"):
+        science.single_orientation()
+    inside = make_frameset(
+        n_frames=3, telescope_pa_deg=jnp.asarray([0.0, 0.5e-6, -0.4e-6])
+    )
+    assert bool(inside.single_orientation())
+
+
+def test_single_orientation_keeps_small_float32_differences():
+    """Floating-point: float32 keeps an offset of 2e-6 deg near 0 above 1e-6.
+
+    float32 stores 2e-6 as 1.99999999e-6. A wrap that adds 180 deg before the
+    modulo rounds that offset to zero in float32 (its spacing near 180 is
+    1.5e-5 deg), and so does an offset taken from a frame at 360 deg before
+    reducing it (spacing 3.1e-5 deg near 360); reducing each angle to a
+    signed remainder first keeps it. The concrete check raises, and under jit
+    and vmap the traced check is False, in either frame order.
+    """
+    science = make_frameset(n_frames=2)
+    angles = jnp.array([0.0, 2e-6], dtype=jnp.float32)
+    assert float(angles[1] - angles[0]) > 1e-6
+    narrow = eqx.tree_at(lambda s: s.telescope_pa_deg, science, angles)
+    with pytest.raises(ValueError, match="spread"):
+        narrow.single_orientation()
+
+    def check(pa):
+        return eqx.tree_at(
+            lambda s: s.telescope_pa_deg, science, pa
+        ).single_orientation()
+
+    assert not bool(eqx.filter_jit(check)(angles))
+    batch = jnp.stack([angles, jnp.zeros(2, jnp.float32), angles[::-1]])
+    assert jax.vmap(check)(batch).tolist() == [False, True, False]
+    across = jnp.array([359.99998, 0.0], dtype=jnp.float32)
+    assert not bool(eqx.filter_jit(check)(across))
+    wrapped = jnp.array([10.0, 370.0], dtype=jnp.float32)
+    assert bool(eqx.filter_jit(check)(wrapped))
+    turn = jnp.array([360.0, 2e-6], dtype=jnp.float32)
+    for order in (turn, turn[::-1]):
+        with pytest.raises(ValueError, match="spread"):
+            eqx.tree_at(
+                lambda s: s.telescope_pa_deg, science, order
+            ).single_orientation()
+        assert not bool(eqx.filter_jit(check)(order))
+    assert jax.vmap(check)(jnp.stack([turn, turn[::-1]])).tolist() == [False, False]

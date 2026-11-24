@@ -541,8 +541,50 @@ def test_real_round_trip_and_density():
     ],
 )
 def test_leaf_laws_are_normalized(law):
-    """Every leaf entry of the fits above passes the priorities distribution check."""
-    check_distribution(law, jax.random.key(1), n_draws=20_000)
+    """Every leaf entry of the fits above passes the priorities distribution check.
+
+    A truncated law's unit round trip is checked against its own floating-point
+    bound instead of the generic relative tolerance (see
+    ``_cut_round_trip_excess``); every other check is the generic one.
+    """
+    truncated = isinstance(law, TruncatedDistribution)
+    check_distribution(
+        law,
+        jax.random.key(1),
+        n_draws=20_000,
+        unit_rtol=np.inf if truncated else 1e-11,
+    )
+    if truncated:
+        assert float(jnp.max(_cut_round_trip_excess(law))) <= 0.0
+
+
+def _cut_round_trip_excess(law, ulps=4.0, cut_ulps=32.0):
+    """Error of ``cdf(icdf(u))`` beyond its floating-point bound, on the tail grid.
+
+    Tolerance basis: floating-point. The grid and the ``ulps`` allowance for the
+    representation of ``u`` and of the value are those of
+    ``priorities.testing.icdf_round_trip``. A lower cut adds a term that the
+    generic check divides by ``u`` and so cannot absorb: the quantile evaluates
+    the base inverse at ``F(low) + u * mass`` and the distribution function
+    subtracts ``F(low)`` again, so the round trip carries the rounding of that sum
+    and the base ``ndtr``/``ndtri`` errors near the cut, each a few units in the
+    last place of ``F(low)``, divided by ``mass``. Relative to a ``u`` of 1e-13
+    that is 1e-5 for the cut at 2 of ``Normal(10, 3)``, and its size changes with
+    the platform's math library (on an x86-64 Linux CPU the error exceeds the
+    generic floor by 1.4 and 3.0 units of ``eps * F(low) / mass`` for the two
+    laws here). ``cut_ulps`` allows 32 such units. A quantile whose cut is off by
+    1e-9 relative still exceeds this bound by 8e-12 or more.
+    """
+    eps = jnp.finfo(jnp.zeros(()).dtype).eps
+    lower = jnp.logspace(-30.0, jnp.log10(0.5), 61)
+    upper = 1 - jnp.logspace(jnp.log10(1e4 * eps), jnp.log10(0.5), 25)
+    unit = jnp.concatenate([lower, upper])
+    value = law.icdf(unit)
+    below = law.base_dist.cdf(law.low)
+    mass = 1.0 - below if law.high is None else law.base_dist.cdf(law.high) - below
+    floor = ulps * eps * (unit + jnp.abs(value) * jnp.exp(law.log_prob(value)))
+    bound = floor + cut_ulps * eps * below / mass
+    return jnp.abs(law.cdf(value) - unit) - bound
 
 
 @pytest.mark.medium(reason="mixed fit batch compile, 6 s cold")

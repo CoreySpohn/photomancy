@@ -68,7 +68,9 @@ assert float(stats.fpf[0]) < 1e-6
 ```
 
 Non-finite map pixels become zero inside `MapFilter`; also mark them in the
-`validity_map` argument of the estimator so the sampler leaves them out.
+`validity_map` argument of the estimator. A candidate or reference measurement
+is excluded whenever its filter footprint or interpolation stencil touches an
+excluded pixel; a reference center alone does not determine validity.
 
 ## Count false alarms
 

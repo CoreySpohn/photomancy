@@ -155,3 +155,54 @@ class TestAnnulusSampler:
             filtered, pos, filt, jnp.ones((n, n)).at[:50, :].set(0.0), center
         )
         assert int(jnp.sum(mask_half)) < int(jnp.sum(mask_full))
+
+
+def test_annulus_uses_propagated_gaussian_validity():
+    """NumPy reflected box erosion defines the mask; pixel membership is exact."""
+    from photomancy.postproc import DetectionEstimator
+
+    image = jax.random.normal(jax.random.PRNGKey(18), (33, 33))
+    valid = np.ones((33, 33))
+    valid[16, 5] = 0.0
+    estimator = DetectionEstimator.matched_filter(2.5, fast=True)
+    width = len(estimator.filter.kernel_1d)
+    padded = np.pad(valid > 0.5, width // 2, mode="reflect")
+    expected = np.lib.stride_tricks.sliding_window_view(padded, (width, width)).all(
+        axis=(-2, -1)
+    )
+    prepared_validity = estimator.filter.prepare_validity(jnp.asarray(valid))
+    filtered = estimator.filter.prepare(jnp.where(jnp.asarray(valid) > 0.5, image, 0.0))
+    position = jnp.array([16.0, 27.0])
+    center = jnp.array([16.0, 16.0])
+    samples, mask, _ = estimator.sampler(
+        filtered, position, estimator.filter, prepared_validity, center
+    )
+    _, all_mask, _ = estimator.sampler(
+        filtered, position, estimator.filter, jnp.ones_like(valid), center
+    )
+    np.testing.assert_array_equal(mask, np.asarray(all_mask) & expected.ravel())
+    assert mask.sum() < all_mask.sum()
+    signal = estimator.filter.evaluate(filtered, position)
+    statistic, fpf, _ = estimator.test(signal, samples, mask)
+    actual = estimator(image, position[None], jnp.asarray(valid), center)
+    np.testing.assert_allclose(actual.statistic[0], statistic, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(actual.fpf[0], fpf, rtol=1e-12, atol=1e-12)
+
+
+def test_gaussian_references_use_detector_bounds():
+    """Nearest reference centres must lie on the 33-pixel detector, exactly."""
+    image = jnp.ones((33, 33))
+    filt = GaussianFilter(jnp.ones(4) / 4, order=1)
+    position = jnp.array([16.0, 33.0])
+    center = jnp.array([16.0, 16.0])
+    sampler = ApertureSampler(fwhm=5.0, max_apertures=32)
+    _, mask, _ = sampler(
+        filt.prepare(image), position, filt, filt.prepare_validity(image), center
+    )
+    step = 2 * np.arcsin(5 / 34)
+    angles = -(np.arange(32) + 1.5) * step
+    refs = 16 + 17 * np.stack([np.sin(angles), np.cos(angles)], axis=1)
+    nearest = np.sign(refs) * np.floor(np.abs(refs) + 0.5)
+    active = np.arange(32) < int(2 * np.pi / step) - 2
+    expected = active & ((0 <= nearest) & (nearest < 33)).all(axis=1)
+    np.testing.assert_array_equal(mask, expected)

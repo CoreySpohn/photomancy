@@ -11,6 +11,7 @@ the vocabulary and must stay import-clean of any downstream package.
 import abc
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 from photomancy.postproc.contracts import DetectionStats, FrameSet
@@ -27,8 +28,8 @@ class AbstractDetectionArm(eqx.Module):
     """Abstract post-processing arm: FrameSet -> DetectionStats.
 
     Implementations are Equinox modules (PyTrees), constructed per
-    configuration (e.g. per band, with a concrete resolution element), so a
-    single instance JIT-compiles cleanly inside larger pipelines.
+    configuration without a resolution element; the resolution element comes
+    from the FrameSet. A single instance can be reused across observations.
     """
 
     @abc.abstractmethod
@@ -64,42 +65,77 @@ class MawetArm(AbstractDetectionArm):
     comes from the science image itself.
     FrameSet.grid supplies the star center for reference-aperture geometry.
 
+    Frames must share one orientation. Frames at different roll are not yet
+    combined; the arms do not register or derotate frames.
+
     Attributes:
-        estimator: Composed aperture-photometry t-test estimator (filter, sampler
-            and test) that the arm applies to the coadded frame.
+        soft: Whether aperture edges are soft.
+        sharpness: Sigmoid sharpness for soft edges.
+        fast: Whether interpolation is bilinear instead of cubic.
+        max_apertures: Static reference-aperture buffer size.
+        exclusion_buffer: Reference gap in angular-step units.
+        aperture_fwhm: Aperture diameter in multiples of science.fwhm_px.
     """
 
-    estimator: DetectionEstimator
+    soft: bool = eqx.field(static=True)
+    sharpness: float = eqx.field(static=True)
+    fast: bool = eqx.field(static=True)
+    max_apertures: int = eqx.field(static=True)
+    exclusion_buffer: float
+    aperture_fwhm: float = eqx.field(static=True)
 
     def __init__(
         self,
-        fwhm_px: float,
+        *,
         soft: bool = True,
         sharpness: float = 10.0,
         fast: bool = False,
         max_apertures: int = 200,
         exclusion_buffer: float = 0.5,
+        aperture_fwhm: float = 1.0,
     ):
-        """Build the arm with a concrete resolution element.
+        """Configure aperture photometry independently of the science resolution.
+
+        Every option is keyword-only.
 
         Args:
-            fwhm_px: Resolution element (lambda/D) in pixels; must match the
-                FrameSets this arm is applied to.
             soft: Use differentiable soft aperture edges.
             sharpness: Sigmoid sharpness for soft apertures.
             fast: Bilinear (True) vs cubic (False) sub-pixel sampling.
             max_apertures: Static reference-aperture buffer size.
             exclusion_buffer: Gap between test and first reference aperture,
                 in angular-step units.
+            aperture_fwhm: Aperture diameter as a multiple of science.fwhm_px.
         """
-        self.estimator = DetectionEstimator.mawet(
-            fwhm=fwhm_px,
-            soft=soft,
-            sharpness=sharpness,
-            fast=fast,
-            max_apertures=max_apertures,
-            exclusion_buffer=exclusion_buffer,
-        )
+        self.soft = soft
+        self.sharpness = sharpness
+        self.fast = fast
+        self.max_apertures = max_apertures
+        self.exclusion_buffer = exclusion_buffer
+        self.aperture_fwhm = aperture_fwhm
+
+    def estimator(self, science: FrameSet) -> DetectionEstimator:
+        """Compose the aperture estimator for these science frames.
+
+        Kernel shape requires reading science.fwhm_px as a concrete host float.
+        Under jit it must be concrete (closed over, not a traced argument).
+
+        Args:
+            science: Frames supplying the resolution element in pixels.
+
+        Returns:
+            Aperture filter, reference sampler, and two-sample t-test.
+        """
+        # Keep the cached kernel concrete even on the first call inside jit.
+        with jax.ensure_compile_time_eval():
+            return DetectionEstimator.mawet(
+                fwhm=self.aperture_fwhm * float(science.fwhm_px),
+                soft=self.soft,
+                sharpness=self.sharpness,
+                fast=self.fast,
+                max_apertures=self.max_apertures,
+                exclusion_buffer=self.exclusion_buffer,
+            )
 
     def detect(
         self,
@@ -110,6 +146,10 @@ class MawetArm(AbstractDetectionArm):
     ) -> DetectionStats:
         """Compute the Mawet t-statistic and FPF on the science coadd.
 
+        The aperture kernel size depends on science.fwhm_px, which is read as a
+        concrete host float; under jit, close over the FrameSet (or at least its
+        fwhm_px) rather than passing it as a traced argument.
+
         Args:
             science: Science frames plus metadata; the arm uses their coadd.
             positions_yx: (n, 2) candidate positions, (y, x) pixels.
@@ -119,8 +159,9 @@ class MawetArm(AbstractDetectionArm):
             DetectionStats for the n candidates, with statistic_kind "mawet_t".
         """
         del references  # Mawet self-references; see class docstring.
+        orientation_ok = science.single_orientation()
         image = science.coadd()
-        stats = self.estimator(
+        stats = self.estimator(science)(
             image,
             positions_yx,
             science.valid,
@@ -128,10 +169,10 @@ class MawetArm(AbstractDetectionArm):
         )
         return DetectionStats(
             positions_yx=stats.positions_yx,
-            statistic=stats.statistic,
-            fpf=stats.fpf,
+            statistic=jnp.where(orientation_ok, stats.statistic, jnp.nan),
+            fpf=jnp.where(orientation_ok, stats.fpf, jnp.nan),
             dof=stats.dof,
-            fwhm_px=stats.fwhm_px,
+            fwhm_px=science.fwhm_px,
             statistic_kind="mawet_t",
         )
 
@@ -152,10 +193,12 @@ class MatchedFilterArm(AbstractDetectionArm):
     itself. FrameSet.grid supplies the reference-aperture center; the
     provider must use the same science grid.
 
+    Frames must share one orientation. Frames at different roll are not yet
+    combined; the arms do not register or derotate frames.
+
     Attributes:
         provider: Template source whose stamp size sets the fit window.
-        fwhm_px: Resolution element (lambda/D) in pixels, used for the
-            reference-aperture geometry.
+        aperture_fwhm: Reference-aperture diameter in multiples of science.fwhm_px.
         exclusion_buffer: Gap between the candidate and the first reference
             aperture, in angular-step units.
         order: Interpolation order for patch extraction.
@@ -165,7 +208,7 @@ class MatchedFilterArm(AbstractDetectionArm):
     """
 
     provider: AbstractTemplateProvider
-    fwhm_px: float
+    aperture_fwhm: float
     exclusion_buffer: float
     order: int = eqx.field(static=True)
     max_apertures: int = eqx.field(static=True)
@@ -174,31 +217,63 @@ class MatchedFilterArm(AbstractDetectionArm):
     def __init__(
         self,
         provider: AbstractTemplateProvider,
-        fwhm_px: float,
+        *,
         order: int = 3,
         max_apertures: int = 200,
         exclusion_buffer: float = 0.5,
         whiten: bool = True,
+        aperture_fwhm: float = 1.0,
     ):
         """Build the arm around a template provider.
 
+        Every option after the provider is keyword-only.
+
         Args:
             provider: Template source (its stamp size sets the fit window).
-            fwhm_px: Resolution element (lambda/D) in pixels, for the
-                reference-aperture geometry.
             order: Interpolation order for patch extraction.
             max_apertures: Static reference-aperture buffer size.
             exclusion_buffer: Gap between test and first reference aperture,
                 in angular-step units.
             whiten: Use FrameSet.noise_variance (when present) to
                 inverse-variance weight the template fit.
+            aperture_fwhm: Reference-aperture diameter as a multiple of science.fwhm_px.
         """
         self.provider = provider
-        self.fwhm_px = fwhm_px
+        self.aperture_fwhm = aperture_fwhm
         self.order = order
         self.max_apertures = max_apertures
         self.exclusion_buffer = exclusion_buffer
         self.whiten = whiten
+
+    def estimator(self, science: FrameSet) -> DetectionEstimator:
+        """Compose the template estimator for these science frames.
+
+        Args:
+            science: Frames supplying resolution and optional noise variance.
+
+        Returns:
+            Template filter, reference sampler, and two-sample t-test. The
+            reference width can be traced under jit.
+        """
+        variance = None
+        if self.whiten and science.noise_variance is not None:
+            total_time = jnp.sum(science.frame_time_s)
+            variance = jnp.sum(science.noise_variance, axis=0) / total_time**2
+            if science.valid is not None:
+                # Excluded pixels never enter a kept measurement; a neutral
+                # value keeps a non-finite variance out of masked samples.
+                variance = jnp.where(science.valid > 0.5, variance, 1.0)
+        return DetectionEstimator(
+            filter=PSFTemplateFilter(
+                provider=self.provider, order=self.order, noise_variance=variance
+            ),
+            sampler=ApertureSampler(
+                fwhm=self.aperture_fwhm * science.fwhm_px,
+                max_apertures=self.max_apertures,
+                exclusion_buffer=self.exclusion_buffer,
+            ),
+            test=TwoSampleTTest(),
+        )
 
     def detect(
         self,
@@ -219,23 +294,9 @@ class MatchedFilterArm(AbstractDetectionArm):
             DetectionStats for the n candidates, with statistic_kind "psf_template_t".
         """
         del references  # Self-referencing arm; see class docstring.
+        orientation_ok = science.single_orientation()
         image = science.coadd()
-        variance = None
-        if self.whiten and science.noise_variance is not None:
-            total_time = jnp.sum(science.frame_time_s)
-            variance = jnp.sum(science.noise_variance, axis=0) / total_time**2
-        composed = DetectionEstimator(
-            filter=PSFTemplateFilter(
-                provider=self.provider, order=self.order, noise_variance=variance
-            ),
-            sampler=ApertureSampler(
-                fwhm=self.fwhm_px,
-                max_apertures=self.max_apertures,
-                exclusion_buffer=self.exclusion_buffer,
-            ),
-            test=TwoSampleTTest(),
-        )
-        stats = composed(
+        stats = self.estimator(science)(
             image,
             positions_yx,
             science.valid,
@@ -243,9 +304,9 @@ class MatchedFilterArm(AbstractDetectionArm):
         )
         return DetectionStats(
             positions_yx=stats.positions_yx,
-            statistic=stats.statistic,
-            fpf=stats.fpf,
+            statistic=jnp.where(orientation_ok, stats.statistic, jnp.nan),
+            fpf=jnp.where(orientation_ok, stats.fpf, jnp.nan),
             dof=stats.dof,
-            fwhm_px=stats.fwhm_px,
+            fwhm_px=science.fwhm_px,
             statistic_kind="psf_template_t",
         )

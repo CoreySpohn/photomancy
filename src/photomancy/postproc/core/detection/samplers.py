@@ -3,7 +3,6 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.map_coordinates import map_coordinates
 
 from photomancy.postproc.core.detection.base import AbstractFilter, AbstractSampler
 from photomancy.postproc.core.geometry import (
@@ -17,8 +16,8 @@ class ApertureSampler(AbstractSampler):
 
     Evaluates the filter at up to max_apertures positions on the candidate's
     circle, spaced by the aperture diameter with an exclusion buffer on both
-    sides of the candidate. The validity map is sampled nearest-neighbor with
-    off-chip positions invalid, exactly matching the fused v1.1.1 core.
+    sides of the candidate. Each reference needs an on-detector nearest pixel
+    and a usable filter footprint.
 
     Attributes:
         fwhm: Aperture diameter (resolution element) in pixels.
@@ -63,7 +62,8 @@ class ApertureSampler(AbstractSampler):
             filtered: Output of filt.prepare() for the current image.
             position_yx: (2,) candidate position (y, x) in pixels.
             filt: Filter evaluated at each reference aperture.
-            validity_map: (ny, nx) map, 1 = usable pixel, 0 = excluded.
+            validity_map: Propagated (ny, nx) footprint validity from
+                filt.prepare_validity(), usable above 0.5.
             center_yx: (2,) star center (y, x) in pixels.
 
         Returns:
@@ -89,15 +89,16 @@ class ApertureSampler(AbstractSampler):
             exclusion_buffer=self.exclusion_buffer,
         )
 
-        ref_validity = map_coordinates(
-            validity_map,
-            jnp.stack([ref_y, ref_x]),
-            order=0,
-            cval=0.0,
-        )
-        mask = idx_mask & (ref_validity > 0.5)
-
         positions = jnp.stack([ref_y, ref_x], axis=1)
+        nearest = jax.lax.round(positions)
+        on_detector = jnp.all(
+            (nearest >= 0) & (nearest < jnp.array(filt.detector_shape(filtered))),
+            axis=1,
+        )
+        usable = jax.vmap(lambda pos: filt.evaluate_validity(validity_map, pos))(
+            positions
+        )
+        mask = idx_mask & on_detector & usable
         samples = jax.vmap(lambda pos: filt.evaluate(filtered, pos))(positions)
 
         geom_ok = r_pix >= self.fwhm
@@ -166,7 +167,8 @@ class AnnulusSampler(AbstractSampler):
             filtered: Prepared image whose pixels are the noise samples.
             position_yx: (2,) candidate position (y, x) in pixels.
             filt: Unused; the samples are the prepared image's own pixels.
-            validity_map: (ny, nx) map, 1 = usable pixel, 0 = excluded.
+            validity_map: Propagated (ny, nx) footprint validity from
+                filt.prepare_validity(), usable above 0.5.
             center_yx: (2,) star center (y, x) in pixels.
 
         Returns:
