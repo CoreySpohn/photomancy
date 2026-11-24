@@ -121,10 +121,12 @@ class FrameSet(eqx.Module):
                 360; the message includes the angles and their spread.
         """
         angles = self.telescope_pa_deg
-        offsets = angles - angles[0]
-        offsets = offsets - 360.0 * jnp.round(offsets / 360.0)
-        spread = jnp.max(offsets) - jnp.min(offsets)
-        same = spread <= 1e-6
+        # Closed-over angles can be checked eagerly even inside a jitted arm.
+        with jax.ensure_compile_time_eval():
+            offsets = angles - angles[0]
+            offsets = offsets - 360.0 * jnp.round(offsets / 360.0)
+            spread = jnp.max(offsets) - jnp.min(offsets)
+            same = spread <= 1e-6
         if not isinstance(angles, jax.core.Tracer) and not bool(same):
             raise ValueError(
                 f"telescope_pa_deg angles {np.asarray(angles).tolist()} must share "
