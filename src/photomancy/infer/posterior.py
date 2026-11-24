@@ -33,6 +33,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock
+from hwoutils.leaves import canonical
 from hwoutils.model_paths import assign
 from jax.flatten_util import ravel_pytree
 from priorities import Mixture, MultivariateNormal
@@ -199,7 +200,7 @@ def _support_swap(old_fit, new_fit, moved):
             def to_new(v, old_block=old_block, new_block=new_block, unravel=unravel):
                 mapped = model
                 for path, value in old_block.forward(unravel(v), model).items():
-                    mapped = assign(mapped, path, value)
+                    mapped = assign(mapped, path, canonical(value))
                 return ravel_pytree(new_block.inverse(mapped))[0]
 
             logdet = logdet + jnp.linalg.slogdet(jax.jacfwd(to_new)(flat))[1]

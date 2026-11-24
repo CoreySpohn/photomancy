@@ -626,18 +626,24 @@ def test_laplace_stops_on_a_stall_only_when_the_gradient_gate_is_met(monkeypatch
     """
     fit, start, best = _badly_scaled_fit()
     top = float(fit.log_likelihood({"mu": jnp.asarray(best)}))
-    monkeypatch.setattr("photomancy.infer.backends.laplace.STOP_MIN_DELTA", 1e30)
 
     def gap():
         post = run(fit, Laplace(n_draws=8, n_steps=40, init=start), jax.random.key(0))
         mode = jax.tree.map(lambda a: a[0], post.info.modes)
         return top - float(fit.log_likelihood(mode))
 
-    assert abs(gap()) < 1e-9
-    jax.clear_caches()
-    monkeypatch.setattr("photomancy.infer.backends.laplace._GRAD_TOL", 1e30)
-    jax.clear_caches()
-    assert gap() > 1.0
+    # the constants are read when the optimizer is traced, so every patched run
+    # starts from cleared caches, and the patched traces are cleared on the way out
+    try:
+        jax.clear_caches()
+        monkeypatch.setattr("photomancy.infer.backends.laplace.STOP_MIN_DELTA", 1e30)
+        assert abs(gap()) < 1e-9
+        jax.clear_caches()
+        monkeypatch.setattr("photomancy.infer.backends.laplace._GRAD_TOL", 1e30)
+        assert gap() > 1.0
+    finally:
+        monkeypatch.undo()
+        jax.clear_caches()
 
 
 def test_nested_sampling_recovers_the_evidence():

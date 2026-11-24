@@ -545,7 +545,8 @@ def _fisher_information(fit, x, include_prior, batch_size, forward, n_root):
 
 
 def _is_python_int_or_bool(x) -> bool:
-    return type(x) in (int, bool)
+    # int subclasses (bool, IntEnum) included: under filter_jit they are static
+    return isinstance(x, int)
 
 
 def _is_third_party_module(x) -> bool:

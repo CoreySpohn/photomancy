@@ -6,6 +6,7 @@ the same orbit through an ``OrbitBlock`` on a real ``Scene``, so the two densiti
 up to named changes of coordinates (the offset is zero to rounding).
 """
 
+import enum
 import json
 from pathlib import Path
 
@@ -1111,11 +1112,17 @@ def test_fit_converts_numpy_python_and_weak_leaves_to_strong_arrays():
     assert isinstance(model.curve.value, np.float64) and model.curve.rate == 4.0
 
 
+class _Mode(enum.IntEnum):
+    A = 0
+    B = 1
+
+
 class _Counted(eqx.Module):
     value: jax.Array
     n: int
     flag: bool
     rate: float
+    mode: _Mode = _Mode.B
 
 
 def test_fit_keeps_python_int_and_bool_scalars_as_compile_time_constants():
@@ -1132,6 +1139,7 @@ def test_fit_keeps_python_int_and_bool_scalars_as_compile_time_constants():
     fit = Fit(model, {"value": Normal(1.0, 0.1)})
     assert type(fit.model.n) is int and fit.model.n == 3
     assert type(fit.model.flag) is bool and fit.model.flag is True
+    assert fit.model.mode is _Mode.B
     rate = fit.model.rate
     assert isinstance(rate, jax.Array) and rate.dtype == jnp.float64
     assert not rate.weak_type
@@ -1139,7 +1147,8 @@ def test_fit_keeps_python_int_and_bool_scalars_as_compile_time_constants():
     @eqx.filter_jit
     def backend(m):
         out = jnp.zeros(m.n) + m.value + m.rate
-        return out if m.flag else -out
+        out = out if m.flag else -out
+        return out if m.mode == _Mode.B else 2.0 * out
 
     assert backend(fit.model).shape == (3,)
     for name in ("n", "flag"):
@@ -1238,6 +1247,40 @@ def test_values_written_by_a_block_enter_the_model_as_strong_float_arrays():
     for leaf in (at.a, at.c):
         assert isinstance(leaf, jax.Array) and leaf.dtype == jnp.float64
         assert not leaf.weak_type
+
+
+class _InverseProbeBlock(_FloatWritingBlock):
+    """A block with a different map that records what ``inverse`` sees."""
+
+    seen = None
+
+    def inverse(self, model):
+        self.seen.append((model.a.dtype, model.a.weak_type))
+        return {"u": model.a}
+
+    def same_map(self, other):
+        return False
+
+
+def test_a_support_swap_maps_block_writes_through_the_conversion():
+    """The prior swap of a posterior re-expresses a draw through converted writes.
+
+    Truth source: definitional (``hwoutils.leaves.canonical``), as for the fit's own
+    write paths: the old block writes a float32 value, and the new block's ``inverse``
+    inside the swap's Jacobian must see it as a strong float64. Fails if the swap
+    assigns the block's values unconverted (the log Jacobian then runs at float32
+    precision).
+    """
+    from photomancy.infer.posterior import _support_swap
+
+    seen = []
+    probe = _InverseProbeBlock()
+    object.__setattr__(probe, "seen", seen)
+    model = _Written(jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(0.0))
+    old = Fit(model, {"a": _FloatWritingBlock()})
+    new = Fit(model, {"a": probe})
+    _support_swap(old, new, ("a",))({"a": {"u": jnp.asarray(0.3)}})
+    assert seen and all(row == (jnp.float64, False) for row in seen), seen
 
 
 def test_fit_refuses_what_the_conversion_missed(monkeypatch):
