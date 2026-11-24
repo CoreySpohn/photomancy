@@ -721,10 +721,13 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     a 48 pixel detector with the 24 cell table, so the detector is also wider than
     the static table. Every mask is all True unless stated.
 
-    Truth sources: the refusal counts are read from the two flags of
-    ``coronagraphoto.expected`` (``static_supported`` for pixels no static product
-    covers, ``static_supported & ~supported`` for pixels that lack only the
-    speckle field); the static model beyond the field is ``predict`` of the same
+    Truth sources: the refusal counts are read from coronagraphoto's own two flags
+    on ``coronagraphoto.expected`` (``static_supported`` for pixels no static
+    product covers, ``static_supported & ~supported`` for pixels that lack only the
+    speckle field), so this test verifies photomancy's routing of the flags; the
+    flags themselves are verified from first principles (the field's coverage and
+    the render with no field) by coronagraphoto's test of the two flags. The static
+    model beyond the field is ``predict`` of the same
     term on the instrument without a speckle field, on pixels wholly outside the
     field footprint grown by the linear read margin; the default model there is
     zero, the strict rule.
@@ -741,7 +744,12 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     field with the option. Guard: on the default term's own mask the log
     likelihood is identical for the two settings. ``Fit.assumptions`` and the
     ``LikelihoodEstimate`` of ``measure`` name the option when it is set and are
-    empty otherwise.
+    empty otherwise. With ``mask=None`` the option scores exactly the
+    ``static_supported`` set, the speckle-only pixels included: the value equals
+    the all-True mask's and the residual is finite on every speckle-only pixel,
+    where the default ``mask=None`` term leaves it NaN. The option accepts a NumPy
+    or 0-d JAX boolean and stores a Python bool; an int or a boolean array is
+    refused.
     """
     model, exposure = _speckle_setup(48, 24)
     shape = (1, *model.instrument.detector.shape)
@@ -753,6 +761,13 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
         return ImageTerm(
             observed, mask, exposure=exposure, static_beyond_speckle=option, **_PATHS
         )
+
+    for flag in (np.bool_(True), jnp.asarray(True)):
+        stored = term(jnp.zeros(shape), every, flag).static_beyond_speckle
+        assert type(stored) is bool and stored
+    for flag in (1, jnp.ones(2, bool)):
+        with pytest.raises(TypeError, match="must be a boolean"):
+            term(jnp.zeros(shape), every, flag)
 
     kept = term(jnp.zeros(shape), every, True)
     mean = np.asarray(kept.predict(model))
@@ -775,6 +790,12 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     static = np.asarray(term(observed, every, False).predict(bare))
     np.testing.assert_array_equal(mean[..., beyond], static[..., beyond])
     assert np.all(mean[~supported] > 0)
+
+    speckle_only = ~supported
+    loose, tight = term(observed, None, True), term(observed, None, False)
+    assert float(loose(model)) == float(kept(model))
+    assert np.isfinite(np.asarray(loose.residual(model))[speckle_only]).all()
+    assert np.isnan(np.asarray(tight.residual(model))[speckle_only]).all()
 
     inside = jnp.asarray(supported)
     a, b = term(observed, inside, False), term(observed, inside, True)

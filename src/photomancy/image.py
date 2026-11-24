@@ -144,6 +144,25 @@ def _check_image(image, instrument, exposure):
         )
 
 
+def _python_bool(value, name):
+    """``value`` as a Python bool: a bool, a NumPy bool or a concrete 0-d JAX bool.
+
+    Raises:
+        TypeError: For anything else (an int, a string, an array of booleans, a
+            traced value).
+    """
+    if isinstance(value, bool | np.bool_):
+        return bool(value)
+    if (
+        isinstance(value, jax.Array)
+        and not isinstance(value, jax.core.Tracer)
+        and value.shape == ()
+        and value.dtype == jnp.bool_
+    ):
+        return bool(value)
+    raise TypeError(f"{name} must be a boolean, got {type(value).__name__}")
+
+
 def _scored_flag(rates, static_beyond_speckle):
     """The ``(W, ny, nx)`` support a term scores, or ``None`` when the rates carry none.
 
@@ -293,10 +312,11 @@ class ImageTerm(AbstractTerm):
             instrument_path: Model path of the instrument, or ``None``.
             exposure_path: Model path of the exposure, or ``None``.
             static_beyond_speckle: Keep the static light where only the speckle
-                field lacks data (see the class docstring). A Python bool.
+                field lacks data (see the class docstring). A Python, NumPy or
+                concrete 0-d JAX boolean, stored as a Python bool.
 
         Raises:
-            TypeError: When ``static_beyond_speckle`` is not a Python bool.
+            TypeError: When ``static_beyond_speckle`` is not a boolean.
             ValueError: When an ``Image`` does not hold electrons per pixel, is not
                 on the held detector's grid, or lacks or contradicts the held
                 exposure's roll.
@@ -311,7 +331,9 @@ class ImageTerm(AbstractTerm):
         self.scene_path = scene_path
         self.instrument_path = instrument_path
         self.exposure_path = exposure_path
-        self.static_beyond_speckle = static_beyond_speckle
+        self.static_beyond_speckle = _python_bool(
+            static_beyond_speckle, "static_beyond_speckle"
+        )
 
     def __check_init__(self):
         """Require one source each for instrument and exposure, and a frame array."""
