@@ -1,5 +1,8 @@
 """Regression coverage for RV units, masks, priors, and orbital dynamics."""
 
+import dataclasses
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -49,7 +52,7 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
         rv_err=jnp.full(times.shape, 0.2),
         inst_ids=jnp.zeros(times.shape, dtype=int),
         valid=jnp.ones(times.shape, dtype=bool),
-        n_inst=1,
+        instruments=("a",),
     )
     term = RadialVelocityTerm(rv, jitters=jnp.array([0.01]))
 
@@ -256,7 +259,7 @@ def test_rv_term_uses_total_mass():
         rv_err=jnp.full(4, 0.5),
         inst_ids=jnp.zeros(4, dtype=int),
         valid=jnp.ones(4, dtype=bool),
-        n_inst=1,
+        instruments=("a",),
     )
     term = RadialVelocityTerm(data, jitters=jnp.array([0.01]))
     value, prediction = both(term, _circular_system(periods, masses, cos_i))
@@ -373,3 +376,116 @@ def test_minimum_mass_rv_matches_inclined_true_mass():
         17.0,
     )
     np.testing.assert_allclose(minimum, true_rv, rtol=(2.0 / 3.0) * mass / Msun2kg)
+
+
+class _Ramp(eqx.Module):
+    """A star whose velocity is ``slope`` m/s after the epoch day, zero at it."""
+
+    slope: jax.Array
+
+    def star_radial_velocity(self, time_d):
+        return self.slope * (time_d > 0)
+
+
+def _rv_row_term(times, rvs, ids, instruments, jitters=None, max_n=None):
+    n = len(times)
+    return RadialVelocityTerm(
+        RadialVelocityData.pad(
+            time_d=times,
+            rv=rvs,
+            rv_err=[1.0] * n,
+            inst_ids=ids,
+            instruments=instruments,
+            max_n=max_n or n,
+        ),
+        jitters=None if jitters is None else jnp.asarray(jitters),
+    )
+
+
+def test_rv_offset_is_one_latent_per_instrument_and_merged_terms_score_the_union():
+    """Two terms of one instrument are refused; their merge scores the joint rows.
+
+    Truth: hand marginal of two unit-error rows observed at (0, 10) m/s whose
+    prediction changes by 0 or 10 m/s: ``-0.5 * 50 - 0.5 log 2 - 0.5 log 2 pi + 0.5
+    log 2`` is -25.918939 and, with a zero residual contrast, -0.918939 (1e-9). A
+    single row alone integrates to 0, which is why a split pair scores 0 at both.
+    Fails if: ``marginalizes`` is empty (the split pair is accepted and scores 0), or
+    the merge drops the offset sharing.
+    """
+    from photomancy.infer import Fit
+
+    first = _rv_row_term([0.0], [0.0], [0], ("a",))
+    second = _rv_row_term([100.0], [10.0], [0], ("a",))
+    assert first.marginalizes == ("rv_offset::a",)
+    with pytest.raises(ValueError, match="rv_offset::a"):
+        Fit(_Ramp(jnp.asarray(0.0)), {}, (first, second))
+    merged = first.merged(second)
+    together = _rv_row_term([0.0, 100.0], [0.0, 10.0], [0, 0], ("a",))
+    for slope, expected in ((0.0, -25.918939), (10.0, -0.918939)):
+        model = _Ramp(jnp.asarray(slope))
+        assert float(first(model) + second(model)) == 0.0
+        np.testing.assert_allclose(float(merged(model)), expected, atol=1e-6)
+        np.testing.assert_allclose(merged(model), together(model), rtol=1e-12)
+    assert Fit(_Ramp(jnp.asarray(0.0)), {}, (merged,)).terms == (merged,)
+
+
+def test_rv_merge_joins_instruments_by_name_and_remaps_ids():
+    """Terms of ``("a",)`` and ``("b", "a")`` merge to ``("a", "b")`` without mixing.
+
+    Truth: the term built directly from all rows with the ids written by hand
+    (1e-12). Capacity of the first term (8) is kept; unequal fixed jitters of a shared
+    name, other system paths and a foreign type are refused.
+    Fails if: the other term's ``inst_ids`` are not remapped.
+    """
+    first = _rv_row_term([0.0, 100.0], [0.5, 2.0], [0, 0], ("a",), [0.3], max_n=8)
+    other = _rv_row_term(
+        [50.0, 100.0, 0.0], [4.0, 1.0, -2.0], [1, 0, 1], ("b", "a"), [0.7, 0.3]
+    )
+    merged = first.merged(other)
+    assert merged.data.instruments == ("a", "b")
+    assert merged.data.valid.shape == (8,) and int(merged.data.valid.sum()) == 5
+    direct = RadialVelocityTerm(
+        RadialVelocityData.pad(
+            time_d=[0.0, 100.0, 50.0, 100.0, 0.0],
+            rv=[0.5, 2.0, 4.0, 1.0, -2.0],
+            rv_err=[1.0] * 5,
+            inst_ids=[0, 0, 0, 1, 0],
+            instruments=("a", "b"),
+            max_n=8,
+        ),
+        jitters=jnp.array([0.3, 0.7]),
+    )
+    model = _Ramp(jnp.asarray(3.0))
+    np.testing.assert_allclose(merged(model), direct(model), rtol=1e-12)
+    clashing = _rv_row_term([0.0], [0.0], [0], ("a",), [0.4])
+    with pytest.raises(ValueError, match="fixed jitter"):
+        first.merged(clashing)
+    with pytest.raises(ValueError, match="system paths"):
+        first.merged(dataclasses.replace(first, system_path="other"))
+    with pytest.raises(TypeError):
+        first.merged(object())
+
+
+def test_rv_data_refuses_ids_outside_the_instruments_but_not_padded_rows():
+    """``n_inst = 1`` with ids ``[0, 1]`` raises; a padded row may hold -1.
+
+    Fails if: the range check is removed (the second row would be silently clamped
+    onto a wrong instrument by the segment sums).
+    """
+    rows = {"time_d": jnp.zeros(2), "rv": jnp.zeros(2), "rv_err": jnp.ones(2)}
+    with pytest.raises(ValueError, match="inst_ids"):
+        RadialVelocityData(
+            **rows,
+            inst_ids=jnp.array([0, 1]),
+            valid=jnp.ones(2, bool),
+            instruments=("a",),
+        )
+    padded = RadialVelocityData(
+        **rows,
+        inst_ids=jnp.array([0, -1]),
+        valid=jnp.array([True, False]),
+        instruments=("a",),
+    )
+    assert padded.n_inst == 1
+    with pytest.raises(ValueError, match="unique"):
+        RadialVelocityData.zeros(2, ("a", "a"))

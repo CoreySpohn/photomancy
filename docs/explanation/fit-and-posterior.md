@@ -215,6 +215,18 @@ next row as invalid padding, and replacing it with the same term where that row 
 adds the datum without changing the structure of the fit, so a batch of fits over many
 simulated worlds does not recompile.
 
+## One offset per instrument
+
+A radial-velocity instrument has a constant offset that the likelihood integrates out
+analytically, so the offset is one latent for the whole fit. `RadialVelocityData` names
+its instruments, and `RadialVelocityTerm` lists one latent per instrument in
+`marginalizes`, as `rv_offset:<system_path>:<instrument>`. Two terms that integrate the
+same offset would be a product of two integrals, so `Fit` refuses them. New epochs of an
+instrument already in the fit therefore go through `update`, which merges the new rows
+into the held term (`RadialVelocityTerm.merged`) and reweights the cloud once for the
+whole set. A second calibration of the same spectrograph, with its own offset, takes a
+name of its own, and `update` then appends it as a separate term.
+
 ## A refused reweighting falls back to a refit
 
 The precise measurements above are a datum that reweighting cannot absorb: the cloud drawn

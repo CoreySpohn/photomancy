@@ -1,15 +1,13 @@
 """Predictive panels: RV curves, dMag tracks, and the detectability plane.
 
 These functions own the domain knowledge the hand-rolled versions kept
-fumbling: forward models return AU/day and observations use m/s
-(``plot_rv`` converts the curves); ``dMag`` axes read fainter
-downward (``plot_dmag`` inverts once, idempotently); and the padded data
-containers carry ``valid`` prefix masks and ``-inf`` pads that must
-never reach a drawn artist.
+fumbling: ``plot_rv`` takes curves and observations in m/s;
+``dMag`` axes read fainter downward (``plot_dmag`` inverts once,
+idempotently); and the padded data containers carry ``valid`` masks and
+``-inf`` pads that must never reach a drawn artist.
 """
 
 import numpy as np
-from hwoutils.constants import AU2m, d2s
 
 from photomancy.viz._require import eyepiece
 
@@ -33,30 +31,25 @@ def _track_color(ep):
     return ep.style.SourceStyles(["track"])["track"]["color"]
 
 
-def _valid_slice(data):
-    """Length of the valid prefix of a padded data container."""
-    return int(np.asarray(data.valid).sum())
-
-
 def plot_rv(
     t_d,
-    rv_AU_per_d,
+    rv_m_per_s,
     *,
     data=None,
     ax=None,
     line_kw=None,
 ):
-    """Radial-velocity curves in m/s, from the library's native AU/day.
+    """Radial-velocity curves and observations, all in m/s.
 
-    Orbit velocities are AU/day; this panel converts curves to m/s.
-    ``RadialVelocityData`` observations and uncertainties are already in m/s.
+    Curves are plotted as given (``RadialVelocityTerm.predict`` returns m/s), with no
+    unit conversion; ``RadialVelocityData`` observations and uncertainties are m/s too.
 
     Args:
         t_d: Times in days, shape ``(T,)``.
-        rv_AU_per_d: Predicted curves in AU/day, ``(T,)`` or ``(K, T)`` --
+        rv_m_per_s: Predicted curves in m/s, ``(T,)`` or ``(K, T)`` --
             a fan of posterior-predictive draws enters as the batch.
-        data: Optional ``RadialVelocityData``; its valid prefix is drawn as errorbars,
-            already in m/s.
+        data: Optional ``RadialVelocityData``; the rows its ``valid`` mask selects are
+            drawn as errorbars, in m/s.
         ax: Axes to draw into. None creates a new figure.
         line_kw: Extra kwargs for each curve's ``ax.plot``, applied last.
 
@@ -66,7 +59,7 @@ def plot_rv(
     """
     ep = eyepiece()
     t = np.asarray(t_d, float).reshape(-1)
-    curves = _curves(rv_AU_per_d) * (AU2m / d2s)
+    curves = _curves(rv_m_per_s)
 
     if ax is None:
         ax = _new_axes()
@@ -78,11 +71,11 @@ def plot_rv(
     artists = {"lines": lines}
 
     if data is not None:
-        n = _valid_slice(data)
+        keep = np.asarray(data.valid, bool)
         errbar = ax.errorbar(
-            np.asarray(data.time_d)[:n],
-            np.asarray(data.rv)[:n],
-            yerr=np.asarray(data.rv_err)[:n],
+            np.asarray(data.time_d)[keep],
+            np.asarray(data.rv)[keep],
+            yerr=np.asarray(data.rv_err)[keep],
             fmt="o",
             color=ep.style.neutral(1.0),
             markersize=4,

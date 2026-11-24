@@ -25,6 +25,7 @@ from photomancy.infer import (
     update,
 )
 from photomancy.infer.backends.grid import midpoint_rule
+from photomancy.measurements import RadialVelocityData, RadialVelocityTerm
 
 jax.config.update("jax_enable_x64", True)
 
@@ -379,3 +380,135 @@ def test_eig_batch_size_gives_the_same_estimate():
             np.testing.assert_allclose(x.eig, y.eig, rtol=1e-12)
             np.testing.assert_allclose(x.bias_scale, y.bias_scale, rtol=1e-12)
             np.testing.assert_allclose(x.n_eff, y.n_eff, rtol=1e-12)
+
+
+class _Line(eqx.Module):
+    """A star whose velocity is ``slope * t / 100`` m/s."""
+
+    slope: jax.Array
+
+    def star_radial_velocity(self, time_d):
+        return self.slope * time_d / 100.0
+
+
+class _Anchor(AbstractTerm):
+    """Gaussian of width 0.5 on the slope, so the cloud has a proper posterior."""
+
+    reads = ()
+
+    def __call__(self, model):
+        return -0.5 * (model.slope / 0.5) ** 2
+
+    def draw(self, key, model):
+        return self
+
+
+def _rv(times, rvs, instrument="a"):
+    return RadialVelocityTerm(
+        RadialVelocityData.pad(
+            time_d=times,
+            rv=rvs,
+            rv_err=[1.0] * len(times),
+            inst_ids=[0] * len(times),
+            instruments=(instrument,),
+            max_n=4,
+        )
+    )
+
+
+RV_GATE = {"min_n_eff": 1, "max_khat": jnp.inf}
+
+
+@pytest.fixture(scope="module")
+def rv_cloud():
+    """A 4000-draw cloud of the slope of ``_Line`` held by one anchoring term."""
+    fit = Fit(_Line(jnp.asarray(0.0)), {"slope": Uniform(-3.0, 3.0)}, (_Anchor(),))
+    return run(fit, Laplace(n_draws=4000), jax.random.key(0))
+
+
+def _rv_update(posterior, term):
+    return update(posterior, term, Laplace(n_draws=4000), jax.random.key(1), **RV_GATE)
+
+
+def test_update_merges_epochs_of_one_instrument_into_one_term(rv_cloud):
+    """Four single-epoch updates equal one update with the four-row term.
+
+    Truth: the term built from all four rows, appended once to the same cloud (1e-9
+    on the log weights). One-row terms carry no information (the offset absorbs a
+    single velocity), so appending each epoch would leave the weights unchanged.
+    Fails if: ``update`` appends a second term for a latent a held term already sums.
+    """
+    times = [100.0, 200.0, 300.0, 400.0]
+    rvs = [0.3, 1.1, -0.4, 0.9]
+    posterior = rv_cloud
+    for time, rv in zip(times, rvs, strict=True):
+        posterior = _rv_update(posterior, _rv([time], [rv]))
+    once = _rv_update(rv_cloud, _rv(times, rvs))
+    assert len(posterior.fit.terms) == 2
+    held = posterior.fit.terms[1]
+    assert int(held.data.valid.sum()) == 4
+    np.testing.assert_allclose(held.data.rv, rvs, rtol=0, atol=0)
+    np.testing.assert_allclose(posterior.log_weights, once.log_weights, atol=1e-9)
+    assert float(jnp.max(jnp.abs(once.log_weights - rv_cloud.log_weights))) > 1e-3
+
+
+def test_update_appends_a_differently_named_instrument(rv_cloud):
+    """A second instrument shares no latent: two RV terms, scores add (1e-12).
+
+    Truth: one term holding both instruments marginalizes each offset separately, so
+    its score is the sum of the two single-instrument scores.
+    Fails if: ``update`` merges by term type instead of by shared latent.
+    """
+    first = _rv([100.0, 200.0], [0.3, 1.1], "a")
+    second = _rv([300.0, 400.0], [-0.4, 0.9], "b")
+    two = _rv_update(_rv_update(rv_cloud, first), second)
+    rvs = two.fit.terms[1:]
+    assert len(rvs) == 2 and not set(rvs[0].marginalizes) & set(rvs[1].marginalizes)
+    combined = RadialVelocityTerm(
+        RadialVelocityData.pad(
+            time_d=[100.0, 200.0, 300.0, 400.0],
+            rv=[0.3, 1.1, -0.4, 0.9],
+            rv_err=[1.0] * 4,
+            inst_ids=[0, 0, 1, 1],
+            instruments=("a", "b"),
+            max_n=4,
+        )
+    )
+    model = _Line(jnp.asarray(0.7))
+    np.testing.assert_allclose(
+        rvs[0](model) + rvs[1](model), combined(model), rtol=1e-12
+    )
+
+
+class _Summing(_Anchor):
+    """A term that names a latent it sums over but has no merge."""
+
+    marginalizes = ("shared",)
+
+
+def test_update_refuses_ambiguous_and_unmergeable_shared_latents(rv_cloud):
+    """A term meeting two held terms raises naming the latents; no ``merged`` raises.
+
+    Fails if: ``update`` appends (the ``Fit`` check would refuse later, with a worse
+    message) or merges into the first hit.
+    """
+    posterior = _rv_update(rv_cloud, _rv([100.0], [0.3], "a"))
+    posterior = _rv_update(posterior, _rv([200.0], [0.1], "b"))
+    both_terms = RadialVelocityTerm(
+        RadialVelocityData.pad(
+            time_d=[300.0, 400.0],
+            rv=[0.0, 0.1],
+            rv_err=[1.0, 1.0],
+            inst_ids=[0, 1],
+            instruments=("a", "b"),
+            max_n=4,
+        )
+    )
+    with pytest.raises(ValueError, match=r"rv_offset::a.*rv_offset::b"):
+        _rv_update(posterior, both_terms)
+
+    cloud = run(
+        rv_cloud.fit.append_term(_Summing()), Laplace(n_draws=4000), jax.random.key(0)
+    )
+    with pytest.raises(NotImplementedError, match="_Summing"):
+        _rv_update(cloud, _Summing())

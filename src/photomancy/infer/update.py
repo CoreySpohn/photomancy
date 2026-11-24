@@ -77,9 +77,19 @@ def update(
     A backend that cannot be mapped (``MAP``, ``NestedSampling``) cannot be used under
     ``filter_vmap``. Takes one slice.
 
+    With ``index=None`` the new term is first compared with the held ones by the
+    latents they sum over (:attr:`AbstractTerm.marginalizes`). A new term that shares
+    none is appended. One that shares latents with exactly one held term (a later
+    epoch of an instrument already in the fit) is merged into it with
+    :meth:`AbstractTerm.merged` and the held term is replaced, because two terms
+    cannot sum over one latent. Merging reads the data on the host, so the new term
+    must be concrete.
+
     Args:
         posterior: A :class:`~photomancy.infer.posterior.Posterior` of one slice.
-        term: The new term, or the replacement when ``index`` is given.
+        term: The new term, or the replacement when ``index`` is given. With
+            ``index=None``, a term that shares a marginalized latent with one held term
+            is merged into it.
         backend: The backend that refits the new fit on a refusal.
         key: PRNG key for the refit.
         min_n_eff: As in :meth:`Posterior.with_priors`: an absolute Kish count that
@@ -100,9 +110,29 @@ def update(
         ``info`` is an :class:`~photomancy.infer.posterior.UpdateInfo`.
 
     Raises:
-        ValueError: On the host, as :meth:`Posterior.append_term`, or for a refit whose
-            layout differs from the cloud's.
+        ValueError: On the host, as :meth:`Posterior.append_term`, when the new term
+            shares marginalized latents with more than one held term (named in the
+            message), or for a refit whose layout differs from the cloud's.
+        NotImplementedError: When the term to merge into has no ``merged``.
     """
+    if index is None:
+        latents = set(term.marginalizes)
+        hits = [
+            i
+            for i, held in enumerate(posterior.fit.terms)
+            if latents & set(held.marginalizes)
+        ]
+        if len(hits) > 1:
+            shared = sorted(
+                latents & {m for i in hits for m in posterior.fit.terms[i].marginalizes}
+            )
+            raise ValueError(
+                f"the new term shares the latents {shared} with terms {hits}; "
+                "update cannot merge it into more than one"
+            )
+        if hits:
+            index = hits[0]
+            term = posterior.fit.terms[index].merged(term)
     if index is None:
         moved = posterior.append_term(
             term, min_n_eff=min_n_eff, max_khat=max_khat, batch_size=batch_size

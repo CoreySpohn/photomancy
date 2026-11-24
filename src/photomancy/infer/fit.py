@@ -138,6 +138,24 @@ class AbstractTerm(eqx.Module):
         """
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
 
+    def merged(self, other) -> Self:
+        """Return the term scoring the union of both terms' data under shared latents.
+
+        ``photomancy.infer.update`` calls it, on the host, when a new term names a
+        latent (:attr:`marginalizes`) that a held term of the same type already sums
+        over: the two cannot stay separate terms, so the held one is replaced by this
+        merge. The default raises; a term type adds it when it gains a shared latent.
+
+        Args:
+            other: The term to join, holding more data of the same latents.
+
+        Returns:
+            A term whose log likelihood equals the one term built from all the data.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot be merged with another term"
+        )
+
     def split(self, model) -> tuple:
         """Return the prediction at ``model`` and the function that scores it.
 

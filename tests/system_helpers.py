@@ -142,7 +142,7 @@ def _new_term(kind, max_n=4):
                 rv=[2.0, -4.0, 8.0, 1.0],
                 rv_err=[1.5] * 4,
                 inst_ids=[0, 1, 0, 1],
-                n_inst=3,
+                instruments=("a", "b", "c"),
                 max_n=max_n,
             ),
             jitters=jnp.array([0.5, 0.8, 1.0]),
