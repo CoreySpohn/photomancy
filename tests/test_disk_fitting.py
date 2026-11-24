@@ -108,6 +108,19 @@ def make_system():
     return build
 
 
+def test_the_disk_has_no_orientation_leaf_to_free(make_system):
+    """Fails if a disk grows an orientation leaf a fit can free but a read never uses.
+
+    The scene's midplane leaves are the only orientation; ``Fit`` refuses an entry
+    at ``disk.inclination_deg`` or ``disk.position_angle_deg`` and names the path.
+    Construction only, so there is nothing to compile.
+    """
+    system = make_system()
+    for leaf in ("inclination_deg", "position_angle_deg"):
+        with pytest.raises(ValueError, match=f"unknown model path 'disk.{leaf}'"):
+            Fit(system, {f"disk.{leaf}": Normal(jnp.asarray(50.0), 5.0)})
+
+
 # Medium: The disk image and its six-parameter gradient exceed the unit compile budget.
 @pytest.mark.medium
 def test_disk_fit_is_finite_and_differentiable(make_system):
