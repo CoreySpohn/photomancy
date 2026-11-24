@@ -33,6 +33,9 @@ class SheetSum(AbstractProposingTerm):
     see the sheet (relative astrometry) stay outside it. For an orbit law that is
     symmetric under the reflection the sum is exact.
 
+    ``check`` and ``footprint_paths`` are those of the held terms, so a ``Fit`` tests a
+    held ``ImageTerm`` against its support as it would the bare term.
+
     The leaf record is that of the one held term that proposes a leaf, on both sheets:
     its components on the model, then those on the reflected model.
 
@@ -80,6 +83,23 @@ class SheetSum(AbstractProposingTerm):
     def assumptions(self) -> tuple[str, ...]:
         """The sorted union of the held terms' assumptions."""
         return tuple(sorted({a for t in self.terms for a in t.assumptions}))
+
+    @property
+    def footprint_paths(self) -> tuple[str, ...]:
+        """The union of the held terms' footprint paths, in first-seen order."""
+        return tuple(dict.fromkeys(p for t in self.terms for p in t.footprint_paths))
+
+    def check(self, model) -> None:
+        """Run every held term's check on ``model``.
+
+        The two sheets share one sky track, so the support a term reads is the same on
+        both and one check covers the sum.
+
+        Args:
+            model: The model to test, with concrete values.
+        """
+        for term in self.terms:
+            term.check(model)
 
     @property
     def leaf_path(self) -> str | None:

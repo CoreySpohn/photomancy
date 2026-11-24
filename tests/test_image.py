@@ -25,6 +25,7 @@ from scipy import stats
 from photomancy import detection
 from photomancy.image import ImageModel, ImageTerm
 from photomancy.infer.fit import Fit
+from photomancy.orbit.sheets import SheetSum
 
 _PATHS = {"scene_path": "scene", "instrument_path": "instrument"}
 
@@ -461,11 +462,12 @@ def _wide(kind="poisson", n=48):
 def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
     """Fails if a fit scores pixels the coronagraph tables do not cover.
 
-    Basis: exact. On a detector twice the tables, an all-True mask scores zero-rate
-    pixels: ``check`` and ``Fit`` raise and name the count (the pixels outside
-    ``supported_mask``). With ``mask & supported_mask`` the fit builds, and its
-    log density equals that of the same data on a detector cropped to the supported
-    square (an all-True mask there) to 1e-10 in the sum of Poisson masses.
+    Basis: exact. A ``SheetSum`` holding the term is refused the same way and reports
+    the term's ``footprint_paths``. On a detector twice the tables, an all-True mask
+    scores zero-rate pixels: ``check`` and ``Fit`` raise and name the count (the
+    pixels outside ``supported_mask``). With ``mask & supported_mask`` the fit builds,
+    and its log density equals that of the same data on a detector cropped to the
+    supported square (an all-True mask there) to 1e-10 in the sum of Poisson masses.
     """
     model, exposure = _wide()
     rng = np.random.default_rng(0)
@@ -479,6 +481,14 @@ def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
     law = {_CONTRAST: LogUniform(1e-12, 1e-8)}
     with pytest.raises(ValueError, match=rf"scores {n_bad} pixel"):
         Fit(model, law, (full,))
+    # Held in a SheetSum the term is refused exactly as it is bare, and the sum reports
+    # the footprint the term does.
+    held = SheetSum((full,), orbit_path="orbits")
+    with pytest.raises(ValueError, match=rf"scores {n_bad} pixel"):
+        held.check(model)
+    with pytest.raises(ValueError, match=rf"scores {n_bad} pixel"):
+        Fit(model, law, (held,))
+    assert held.footprint_paths == full.footprint_paths != ()
 
     scored = _term(model, exposure, observed, jnp.asarray(supported))
     scored.check(model)
