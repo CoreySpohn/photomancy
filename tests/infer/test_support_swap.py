@@ -72,27 +72,35 @@ def _check_target(post):
 
 
 @pytest.mark.medium(reason="compiles the re-expression and its Jacobian, 8 s cold")
-def test_widening_the_size_law_matches_the_walled_mass():
-    """LogUniform(0.8, 3) to LogUniform(0.5, 6): the evidence is the new mass.
+def test_widening_is_refused_and_the_walled_mass_is_read_from_the_info():
+    """LogUniform(0.8, 3) to LogUniform(0.5, 6) is refused; the mass is 0.5319.
 
-    Truth source: with no term the cloud is the old prior, so the new evidence is the
-    new law's mass on the old support, ln(3 / 0.8) / ln(6 / 0.5) = 0.5319 (the walled
-    block's mean ratio).
-    Tolerance basis: 3 reported standard errors of the log evidence, floored at 1e-9
-    (the ratio is constant for log-uniform laws, so the error is near zero).
-    Fails if: the Jacobian of the re-expression is dropped or doubled, or a draw is
-    left in the old coordinates.
+    Truth source: with no term the cloud is the old prior, so the new law's mass on
+    the old support is ln(3 / 0.8) / ln(6 / 0.5) = 0.5319 (the walled block's mean
+    ratio), read from ``info.log_mass_ratio``; the narrowing swap back is accepted and
+    a draw outside the narrower support has weight zero.
+    Tolerance basis: exact-algebra, 1e-9 in the log (the ratio is the same constant at
+    every draw for log-uniform laws, so the Monte Carlo error is zero).
+    Fails if: the support test is missing (the evidence of the swap is reported as the
+    new fit's), ``log_mass_ratio`` is NaN on refusal, the Jacobian of the
+    re-expression is dropped or doubled, or a draw is left in the old coordinates.
     """
     cloud = _cloud(_fit(0.8, 3.0))
     out = cloud.with_priors({KEY: _block(_law(0.5, 6.0))}, **GATE)
+    assert bool(out.info.refused) and not bool(out.info.support_covered)
+    assert np.all(np.isnan(out.log_weights)) and np.isnan(out.log_evidence)
     truth = np.log(np.log(3.0 / 0.8) / np.log(6.0 / 0.5))
-    se = float(out.log_evidence_se)
-    assert se < 0.02
-    assert abs(float(out.log_evidence) - truth) < max(3 * se, 1e-9)
-    assert np.all(np.isfinite(out.log_weights))
-    _check_target(out)
-    a = jax.vmap(lambda x: out.fit.model_at(x).dynamics.orbits.a_AU[0])(out.samples)
-    assert float(a.min()) >= 0.8 - 1e-9 and float(a.max()) <= 3.0 + 1e-9
+    np.testing.assert_allclose(out.info.log_mass_ratio, truth, atol=1e-9)
+    wide = _cloud(_fit(0.5, 6.0))
+    back = wide.with_priors({KEY: _block(_law(0.8, 3.0))}, **GATE)
+    assert bool(back.info.support_covered) and not bool(back.info.refused)
+    a_old = jax.vmap(lambda x: wide.fit.model_at(x).dynamics.orbits.a_AU[0])(
+        wide.samples
+    )
+    outside = np.asarray((a_old < 0.8) | (a_old > 3.0))
+    assert outside.any() and not outside.all()
+    assert np.all(np.isneginf(np.asarray(back.log_weights)[outside]))
+    assert np.all(np.isfinite(np.asarray(back.log_weights)[~outside]))
 
 
 @pytest.mark.medium(reason="compiles the re-expression twice, 8 s cold")
@@ -191,9 +199,14 @@ def test_the_gate_still_refuses_a_swap_that_leaves_few_draws():
 def test_a_swap_over_two_worlds_equals_the_loop():
     """``filter_vmap`` over stacked worlds equals the per-world loop.
 
+    World 0 is widened by the swap and refused, world 1 is narrowed and kept.
     Tolerance basis: rtol 1e-9 (the same arithmetic, batched).
+    Fails if: one uncovered world raises on the host or refuses its neighbor.
     """
-    clouds = [_cloud(_fit(0.8, 3.0), n=2000, seed=s) for s in (1, 2)]
+    clouds = [
+        _cloud(_fit(low, high), n=2000, seed=seed)
+        for seed, (low, high) in ((1, (0.8, 3.0)), (2, (0.3, 8.0)))
+    ]
     new = _block(_law(0.5, 6.0))
 
     def swap(c):
@@ -201,6 +214,8 @@ def test_a_swap_over_two_worlds_equals_the_loop():
 
     stack = jax.tree.map(lambda *a: jnp.stack(a), *clouds)
     batched = eqx.filter_vmap(swap)(stack)
+    np.testing.assert_array_equal(batched.info.refused, [True, False])
+    np.testing.assert_array_equal(batched.info.support_covered, [False, True])
     for i, cloud in enumerate(clouds):
         one = swap(cloud)
         np.testing.assert_allclose(

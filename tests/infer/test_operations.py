@@ -333,6 +333,61 @@ def test_the_gate_accepts_bounded_near_plateau_weights():
     assert np.all(np.isfinite(out.log_weights))
 
 
+def _bare_grid(high, n=64):
+    """A midpoint grid on ``Uniform(0, high)`` for the bare radius prior (no terms)."""
+    fit = Fit(_scene(), {KEY: Uniform(0.0, high)})
+    return run(fit, Grid({KEY: midpoint_rule(0.0, high, n)}), jax.random.key(0))
+
+
+def test_a_prior_swap_refuses_a_wider_support_and_reports_the_mass():
+    """A widened prior is refused by NaN; the mass on the old support is still read.
+
+    Truth source: a 64-point midpoint grid on ``Uniform(0, 1)`` holds no draw above 1,
+    so ``Uniform(0, 2)`` has mass 0.5 on it (the ratio of the two densities is 0.5 at
+    every node). The reverse swap from a grid on ``(0, 2)`` to ``Uniform(0, 1)`` is a
+    narrowing: the 32 nodes below 1 stay, the others get weight zero, the mean is 0.5.
+    Tolerance basis: exact-algebra for the mass (1e-12 in the log); the ratio is the
+    constant 0.5 at every node, and 0.5 is the mean of 32 symmetric midpoints.
+    Fails if: the support test is missing (the swap reports the new fit's evidence
+    ``log 0.5`` as if it were the evidence of ``Uniform(0, 2)``), the refusal hides
+    ``log_mass_ratio``, or a narrowing is refused.
+    """
+    none = {"min_n_eff": None, "max_khat": None}
+    wide = _bare_grid(1.0).with_priors({KEY: Uniform(0.0, 2.0)}, **none)
+    assert bool(wide.info.refused) and not bool(wide.info.support_covered)
+    assert np.all(np.isnan(wide.log_weights))
+    assert np.isnan(wide.log_evidence) and np.isnan(wide.log_evidence_se)
+    np.testing.assert_allclose(wide.info.log_mass_ratio, math.log(0.5), atol=1e-12)
+    narrow = _bare_grid(2.0).with_priors({KEY: Uniform(0.0, 1.0)}, **none)
+    assert bool(narrow.info.support_covered) and not bool(narrow.info.refused)
+    assert int(jnp.sum(jnp.isfinite(narrow.log_weights))) == 32
+    np.testing.assert_allclose(_moments(narrow)[0], 0.5, atol=1e-12)
+    np.testing.assert_allclose(narrow.log_evidence, 0.0, atol=1e-12)
+
+
+def test_resample_of_a_grid_is_a_random_cloud():
+    """A resampled grid is ``monte_carlo``, with the grid's evidence carried bitwise.
+
+    Truth source: ``kind`` describes the draws; a random subsample of a grid is random,
+    so the Monte Carlo gate applies to any later reweighting.
+    Fails if: ``kind`` is carried over (a later reweighting then runs ungated on random
+    draws), or the evidence changes.
+    """
+    grid = _bare_grid(1.0, n=8)
+    one = grid.resample(jax.random.key(1), 1)
+    assert one.kind == "monte_carlo"
+    assert (
+        np.asarray(one.log_evidence).tobytes()
+        == np.asarray(grid.log_evidence).tobytes()
+    )
+    assert (
+        np.asarray(one.log_evidence_se).tobytes()
+        == np.asarray(grid.log_evidence_se).tobytes()
+    )
+    with pytest.raises(ValueError, match="required"):
+        one.with_priors({KEY: Uniform(0.0, 1.0)}, min_n_eff=None, max_khat=None)
+
+
 def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):
     """Missing thresholds raise on the host; a NaN term value refuses its slice."""
     with pytest.raises(ValueError, match="required"):
@@ -502,6 +557,49 @@ def test_forecast_obeys_the_law_of_total_variance(cloud):
 
 
 # ----- information gain ----------------------------------------------------------
+
+
+def test_a_dead_draw_is_evaluated_at_a_live_one():
+    """``forecast`` and the contrastive gain ignore a dead draw's NaN coordinates.
+
+    Truth source: weights ``(1, 0)`` on draws ``(1, NaN)`` give a forecast mean of 1,
+    noise variance 1 and spread 0; 63 identical live draws and one dead NaN row give a
+    contrastive gain of exactly zero (the observation says nothing about a known
+    theta).
+    Tolerance basis: floating-point, 1e-12.
+    Fails if: the models are built at the stored coordinates (0 times NaN is NaN in the
+    weighted sums).
+    """
+    fit = Fit(_Toy(jnp.zeros(())), {"theta": Normal(0.0, 1.0)})
+
+    def cloud_of(theta, log_weights):
+        return Posterior(
+            samples={"theta": jnp.asarray(theta, jnp.float64)},
+            log_weights=jnp.asarray(log_weights, jnp.float64),
+            log_target=jnp.zeros(len(theta), jnp.float64),
+            log_evidence=jnp.asarray(0.0, jnp.float64),
+            log_evidence_se=jnp.asarray(0.0, jnp.float64),
+            fit=fit,
+            info=None,
+            kind="monte_carlo",
+        )
+
+    two = cloud_of([1.0, jnp.nan], [0.0, -jnp.inf])
+    out = two.forecast(lambda m: (m.theta, jnp.asarray(1.0)))
+    np.testing.assert_allclose(
+        [out.mean, out.noise_variance, out.spread_variance, out.variance],
+        [1.0, 1.0, 0.0, 1.0],
+        atol=1e-12,
+    )
+    theta = jnp.concatenate([jnp.ones(63), jnp.full(1, jnp.nan)])
+    log_w = jnp.concatenate([jnp.full(63, -math.log(63.0)), jnp.full(1, -jnp.inf)])
+    est = eig_contrastive(
+        cloud_of(theta, log_w),
+        _Channel(jnp.zeros(()), 0.7),
+        jax.random.key(0),
+        n_outer=32,
+    )
+    np.testing.assert_allclose(est.eig, 0.0, atol=1e-12)
 
 
 class _Toy(eqx.Module):

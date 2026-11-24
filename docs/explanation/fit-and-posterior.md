@@ -215,6 +215,40 @@ next row as invalid padding, and replacing it with the same term where that row 
 adds the datum without changing the structure of the fit, so a batch of fits over many
 simulated worlds does not recompile.
 
+## A prior can be swapped
+
+`Posterior.with_priors` reweights the cloud to a different prior in the same way, with no
+term evaluated. A swap can narrow a prior, because the draws that remain still follow the
+new prior inside the old support, but it cannot widen one: a cloud has no draws where the
+old prior had no mass, so a widening needs a refit and comes back refused. In
+`info.log_mass_ratio` the log of the mass of the new prior on the old support is always
+available, refused or not.
+
+## Keeping a posterior on disk
+
+A posterior has no save method yet. Until persistence lands, write it with Equinox. The
+file holds the arrays only, so reading it needs a template `Posterior` of the same
+structure: one built from the same `Fit`, with the same draw count and backend. The file is
+specific to the library version that wrote it.
+
+```python continuation
+import tempfile
+from pathlib import Path
+
+import equinox as eqx
+
+with tempfile.TemporaryDirectory() as folder:
+    path = Path(folder) / "posterior.eqx"
+    eqx.tree_serialise_leaves(path, posterior)
+    like = run(fit, Importance(PriorProposal(), n_draws=4000), jax.random.key(1))
+    restored = eqx.tree_deserialise_leaves(path, like)
+
+assert all(
+    bool(jnp.array_equal(a, b))
+    for a, b in zip(jax.tree.leaves(restored), jax.tree.leaves(posterior), strict=True)
+)
+```
+
 ## A refused reweighting falls back to a refit
 
 The precise measurements above are a datum that reweighting cannot absorb: the cloud drawn

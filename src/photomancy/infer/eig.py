@@ -27,6 +27,7 @@ from jax.scipy.stats import norm
 
 from photomancy.infer.diagnostics import kish_ess
 from photomancy.infer.particles import categorical_indices, take_draws
+from photomancy.infer.posterior import _live_draws
 
 __all__ = [
     "EIGEstimate",
@@ -658,8 +659,9 @@ def eig_contrastive(posterior, term, key, *, n_outer, batch_size=None):
     key_x, key_y = jax.random.split(key)
     idx = categorical_indices(key_x, log_weights, (n_outer,))
     outer = take_draws(posterior.samples, idx)
+    stored = _live_draws(posterior.samples, log_weights)
     if batch_size is None:
-        models = jax.vmap(fit.model_at)(posterior.samples)
+        models = jax.vmap(fit.model_at)(stored)
 
         def score(drawn):
             return jax.vmap(drawn)(models)
@@ -669,7 +671,7 @@ def eig_contrastive(posterior, term, key, *, n_outer, batch_size=None):
         def score(drawn):
             return jax.lax.map(
                 lambda x: drawn(fit.model_at(x)),
-                posterior.samples,
+                stored,
                 batch_size=batch_size,
             )
 

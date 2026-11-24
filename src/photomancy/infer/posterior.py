@@ -26,6 +26,7 @@ every operation is mapped over it the same way. Shape checks read only the trail
 axes of ``log_weights`` and the batch prefix they define.
 """
 
+import dataclasses
 import math
 
 import equinox as eqx
@@ -36,7 +37,7 @@ from hwoutils.blocks import AbstractBlock
 from hwoutils.leaves import canonical
 from hwoutils.model_paths import assign
 from jax.flatten_util import ravel_pytree
-from priorities import Mixture, MultivariateNormal
+from priorities import AbstractDistribution, Mixture, MultivariateNormal
 
 from photomancy.infer.diagnostics import kish_ess, mc_se, pareto_khat, weighted_mean
 from photomancy.infer.evidence import importance_evidence
@@ -95,13 +96,24 @@ class ReweightInfo(eqx.Module):
     Attributes:
         n_eff: Kish effective sample size of the combined weights.
         khat: Pareto k-hat of the combined weights.
-        refused: The gate's decision: true when the slice was refused (its weights
-            and evidence are NaN). After ``update``, true means the refit ran.
+        refused: The decision: true when the slice was refused (its weights and
+            evidence are NaN), by the gate or because the new support is not
+            covered. After ``update``, true means the refit ran.
+        support_covered: False when a prior swap put mass where the old cloud has no
+            draws (the new support is not inside the old one); the slice is then
+            refused. True for every term change.
+        log_mass_ratio: Log of the weighted mean of the reweighting ratio under the
+            old weights, computed whether or not the slice is refused. For a prior
+            swap it is the log mass of the new prior on the old support (the log
+            evidence increment of the swap before the decision); for a term change it
+            is the log evidence increment.
     """
 
     n_eff: jax.Array
     khat: jax.Array
     refused: jax.Array
+    support_covered: jax.Array
+    log_mass_ratio: jax.Array
 
 
 class UpdateInfo(eqx.Module):
@@ -125,11 +137,12 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
 
     Returns the new normalized log weights (all NaN on refusal), the log evidence
     increment and the standard error of that increment (both NaN on refusal), and the
-    :class:`ReweightInfo` of the gate. The
-    increment is the self-normalized mean of the ratio under the old weights, so its
-    error is the delta-method error of that mean; it is zero for a ratio of one. A draw
-    with zero old weight (dead, with NaN coordinates after a support swap) cannot
-    refuse the slice: the gate counts NaN and ``+inf`` at live draws only.
+    :class:`ReweightInfo` of the gate, whose ``log_mass_ratio`` is the increment
+    before the decision. The increment is the self-normalized mean of the ratio under
+    the old weights, so its error is the delta-method error of that mean; it is zero for
+    a ratio of one. A draw with zero old weight (dead, with NaN coordinates after a
+    support swap) cannot refuse the slice: the gate counts NaN and ``+inf`` at live
+    draws only.
     """
     lw = jnp.asarray(log_weights, jnp.float64)
     ratio = jnp.asarray(log_ratio, jnp.float64)
@@ -154,7 +167,7 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
         jnp.where(refuse, nan, new),
         jnp.where(refuse, nan, log_z_new - log_z_old),
         jnp.where(refuse, nan, increment_se),
-        ReweightInfo(n_eff, khat, refuse),
+        ReweightInfo(n_eff, khat, refuse, jnp.asarray(True), log_z_new - log_z_old),
     )
 
 
@@ -173,6 +186,41 @@ def _live_draws(samples, log_weights):
         return jnp.where(mask, a, a[first])
 
     return jax.tree.map(pick, samples)
+
+
+def _edges(entry):
+    """Support edges of a free entry as ``{name: (low, high)}``.
+
+    A leaf law reports its own support. A block reports the edges of every law it
+    holds (an orbit law's :meth:`edges`, a scalar law's support), named by field.
+    """
+    if not isinstance(entry, AbstractBlock):
+        return {"": entry.support()}
+    out = {}
+    for field in dataclasses.fields(entry):
+        value = getattr(entry, field.name)
+        if callable(getattr(value, "edges", None)):
+            out.update({f"{field.name}.{k}": b for k, b in value.edges().items()})
+        elif isinstance(value, AbstractDistribution):
+            out[field.name] = value.support()
+    return out
+
+
+def _support_covered(old, new):
+    """Whether the support of ``new`` lies inside that of ``old`` (a traced boolean).
+
+    Edges are compared as a hull, entry by entry. An element the old law leaves
+    unbounded constrains nothing; one the new law leaves unbounded where the old law
+    bounds it is not covered, and neither is a NaN edge.
+    """
+    old_edges, new_edges = _edges(old), _edges(new)
+    covered = jnp.asarray(True)
+    for name, (low, high) in old_edges.items():
+        if name not in new_edges:
+            return jnp.asarray(False)
+        new_low, new_high = new_edges[name]
+        covered = covered & jnp.all(new_low >= low) & jnp.all(new_high <= high)
+    return covered
 
 
 def _support_swap(old_fit, new_fit, moved):
@@ -256,8 +304,9 @@ class Posterior(eqx.Module):
         info: The backend's diagnostics module (chain index, divergence flags, thin
             factor, ladder, stage traces), or ``None``. Chain structure lives here and
             never in ``samples``.
-        kind: ``"monte_carlo"`` (a random estimator) or ``"quadrature"`` (a
-            positive-weight rule whose error is judged by refinement).
+        kind: Describes the draws: ``"monte_carlo"`` (random draws, so a random
+            estimator) or ``"quadrature"`` (a positive-weight rule whose error is
+            judged by refinement). A resampled grid is ``"monte_carlo"``.
     """
 
     samples: dict
@@ -352,8 +401,11 @@ class Posterior(eqx.Module):
 
         Fixed size (``n`` defaults to the current size), one random offset per slice.
         The draws are mutually dependent and chain structure is dropped, so ``info``
-        becomes ``None``; ``log_target`` is indexed, the evidence and the fit are kept.
-        A slice with no support keeps NaN weights.
+        becomes ``None``; ``log_target`` is indexed, the evidence, its standard error
+        and the fit are kept. The result is ``kind="monte_carlo"`` whatever the input
+        kind: a random subsample of a grid is a random cloud, so a later reweighting
+        needs the Monte Carlo gate arguments. A slice with no support keeps NaN
+        weights.
 
         Args:
             key: PRNG key.
@@ -377,7 +429,7 @@ class Posterior(eqx.Module):
             log_evidence_se=self.log_evidence_se,
             fit=self.fit,
             info=None,
-            kind=self.kind,
+            kind="monte_carlo",
         )
 
     # ----- reweighting -----------------------------------------------------------
@@ -413,11 +465,13 @@ class Posterior(eqx.Module):
         *,
         samples=None,
         log_target_ratio=None,
+        support_covered=None,
     ):
         """Reweight by ``log_ratio``, gated.
 
         ``samples`` and ``log_target_ratio`` default to the stored draws and
-        ``log_ratio``; they differ after a change of support.
+        ``log_ratio``; they differ after a change of support. A false
+        ``support_covered`` (default true) refuses the slice.
         """
         self._check_gate(min_n_eff, max_khat)
         quadrature = self.kind == "quadrature"
@@ -426,11 +480,26 @@ class Posterior(eqx.Module):
         new_lw, increment, increment_se, info = _reweight_slice(
             self.log_weights, log_ratio, lo, hi
         )
+        if support_covered is not None:
+            covered = jnp.asarray(support_covered)
+            nan = jnp.asarray(jnp.nan, jnp.float64)
+            new_lw = jnp.where(covered, new_lw, nan)
+            increment = jnp.where(covered, increment, nan)
+            increment_se = jnp.where(covered, increment_se, nan)
+            info = ReweightInfo(
+                info.n_eff,
+                info.khat,
+                info.refused | ~covered,
+                covered,
+                info.log_mass_ratio,
+            )
         if quadrature:
             refused = jnp.any(jnp.isnan(new_lw))
             increment_se = jnp.where(refused, jnp.nan, 0.0)
             nan = jnp.asarray(jnp.nan, jnp.float64)
-            info = ReweightInfo(nan, nan, refused)
+            info = ReweightInfo(
+                nan, nan, refused, info.support_covered, info.log_mass_ratio
+            )
         target_ratio = log_ratio if log_target_ratio is None else log_target_ratio
         return Posterior(
             samples=self.samples if samples is None else samples,
@@ -488,9 +557,16 @@ class Posterior(eqx.Module):
         support has weight ``-inf`` (and ``-inf`` ``log_target``; its stored
         coordinates are not finite). The evidence gains ``log sum w ratio``, which is
         the new prior's mass on the cloud's support when the old cloud is the prior.
-        A change of chart, rows, system or block type is refused by name. The
-        Jacobian is taken with the other entries of the draw held, which is exact
-        because the orbit itself does not move.
+        The swap can narrow a prior but not widen one: a cloud has no draws where the
+        old prior had no mass, so for each replaced entry (leaf laws by their support,
+        blocks by the edges of their laws) the new support must lie inside the old one.
+        A slice where it does not is refused like a gate failure (NaN weights,
+        evidence and standard error; ``info.refused`` true, ``info.support_covered``
+        false), also for a ``quadrature`` posterior. The mass of the new prior on the
+        old support is ``exp(info.log_mass_ratio)``, read there whether or not the
+        slice is refused; a widening needs a refit. A change of chart, rows, system or
+        block type is refused by name. The Jacobian is taken with the other entries of
+        the draw held, which is exact because the orbit itself does not move.
 
         Where the gate does not apply: k-hat is not valid on nested-sampling clouds
         (pass ``max_khat=jnp.inf`` and gate on ``min_n_eff``) and a ``quadrature``
@@ -525,13 +601,18 @@ class Posterior(eqx.Module):
             if isinstance(entry, AbstractBlock)
             and not self.fit.free[key].same_map(entry)
         )
+        covered = jnp.asarray(True)
+        for key, entry in priors.items():
+            covered = covered & _support_covered(self.fit.free[key], entry)
         live = _live_draws(self.samples, self.log_weights)
         dead = jnp.isneginf(self.log_weights)
         if not moved:
             old = self.fit.log_prior(live, batch_size=batch_size)
             new = new_fit.log_prior(live, batch_size=batch_size)
             ratio = jnp.where(jnp.isneginf(old) | dead, -jnp.inf, new - old)
-            return self._reweighted(new_fit, ratio, min_n_eff, max_khat)
+            return self._reweighted(
+                new_fit, ratio, min_n_eff, max_khat, support_covered=covered
+            )
         one = _support_swap(self.fit, new_fit, moved)
         x_new, ratio, target_ratio = self.fit._over_batch(one, live, batch_size)
         ratio = jnp.where(dead, -jnp.inf, ratio)
@@ -550,6 +631,7 @@ class Posterior(eqx.Module):
             max_khat,
             samples=x_new,
             log_target_ratio=target_ratio,
+            support_covered=covered,
         )
 
     def _term_ratio(self, term, old, batch_size):
@@ -679,6 +761,9 @@ class Posterior(eqx.Module):
         ``m`` resampled draws is inflated by about ``1 + N_eff / m`` relative to the
         weighted cloud.
 
+        A dead draw (zero weight, possibly NaN coordinates after a support swap) is
+        evaluated at a live draw instead and keeps zero weight.
+
         Args:
             fn: ``model -> (mean, variance)``.
             batch_size: Draws evaluated at once (``jax.lax.map`` chunk), default all
@@ -690,14 +775,15 @@ class Posterior(eqx.Module):
         """
         self._require_slice("forecast")
         fit = self.fit
+        samples = _live_draws(self.samples, self.log_weights)
 
         def one(x):
             return fn(fit.model_at(x))
 
         if batch_size is None:
-            means, variances = jax.vmap(one)(self.samples)
+            means, variances = jax.vmap(one)(samples)
         else:
-            means, variances = jax.lax.map(one, self.samples, batch_size=batch_size)
+            means, variances = jax.lax.map(one, samples, batch_size=batch_size)
         w = jnp.exp(jnp.asarray(self.log_weights, jnp.float64))
 
         def average(a):
