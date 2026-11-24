@@ -13,6 +13,7 @@ from hwoutils.model_paths import resolve
 from orbix.system import System
 
 from photomancy.infer.fit import AbstractTerm
+from photomancy.measurements._observables import _concrete
 from photomancy.measurements._padding import _pad_1d, _valid_mask
 
 __all__ = ["RadialVelocityData", "RadialVelocityTerm", "loglike_rv_marginalized"]
@@ -43,9 +44,17 @@ class RadialVelocityData(eqx.Module):
     instruments: tuple[str, ...] = eqx.field(static=True)
 
     def __check_init__(self):
-        """Require unique names and, on concrete values, in-range ids on valid rows."""
-        if len(set(self.instruments)) != len(self.instruments):
-            raise ValueError(f"instrument names must be unique: {self.instruments}")
+        """Require unique string names and, when concrete, in-range valid-row ids."""
+        names = self.instruments
+        if (
+            not isinstance(names, tuple)
+            or not names
+            or not all(isinstance(n, str) for n in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError(
+                f"instruments must be a nonempty tuple of unique strings: {names!r}"
+            )
         leaves = (self.inst_ids, self.valid)
         if not any(isinstance(x, jax.core.Tracer) for x in leaves):
             ids = np.asarray(self.inst_ids)[np.asarray(self.valid)]
@@ -150,7 +159,11 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
     # Segment sums collapse the matrix algebra to O(N)
     A = jax.ops.segment_sum(w, inst_ids, num_segments=n_inst)
     B = jax.ops.segment_sum(w * r, inst_ids, num_segments=n_inst)
-    C = jax.ops.segment_sum(w * r**2, inst_ids, num_segments=n_inst)
+    # The weighted spread about each instrument's weighted mean, formed after
+    # centring so a large common offset does not cancel two nearly equal sums.
+    centre = B / jnp.where(A > 0, A, 1.0)
+    spread = jnp.where(mask, r - centre[inst_ids], 0.0)
+    C_centred = jax.ops.segment_sum(w * spread**2, inst_ids, num_segments=n_inst)
 
     counts = jax.ops.segment_sum(mask.astype(float), inst_ids, num_segments=n_inst)
 
@@ -159,7 +172,7 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
     J = jnp.sum(A > 0)
     A_safe = jnp.where(A > 0, A, 1.0)
     return -0.5 * (
-        jnp.sum(C - B**2 / A_safe)
+        jnp.sum(C_centred)
         + jnp.sum(jnp.log(A_safe))
         + jnp.sum(jnp.where(mask, jnp.log(var), 0.0))
         + (N_valid - J) * jnp.log(2.0 * jnp.pi)
@@ -231,11 +244,17 @@ class RadialVelocityTerm(AbstractTerm):
 
         Raises:
             TypeError: When ``other`` is not a ``RadialVelocityTerm``.
-            ValueError: When the system path differs; when one term has a
+            ValueError: When a term is traced (both must be concrete); when the system
+                path differs; when one term has a
                 ``jitter_path`` and the other a different one or fixed jitters (a
                 ``jitter_path`` also needs identical instruments, since its leaf has
                 one entry per instrument); or when a shared name has two fixed jitters.
         """
+        if not _concrete(self, other):
+            raise ValueError(
+                "merged reads the rows on the host, so both terms must be concrete; "
+                "inside jit, replace the held term yourself with update(..., index=i)"
+            )
         if not isinstance(other, RadialVelocityTerm):
             raise TypeError(
                 f"RadialVelocityTerm.merged needs a RadialVelocityTerm, got "

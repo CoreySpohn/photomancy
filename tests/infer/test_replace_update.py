@@ -448,7 +448,9 @@ def test_update_merges_epochs_of_one_instrument_into_one_term(rv_cloud):
     held = posterior.fit.terms[1]
     assert int(held.data.valid.sum()) == 4
     np.testing.assert_allclose(held.data.rv, rvs, rtol=0, atol=0)
-    np.testing.assert_allclose(posterior.log_weights, once.log_weights, atol=1e-9)
+    np.testing.assert_allclose(
+        posterior.log_weights, once.log_weights, rtol=0, atol=1e-9
+    )
     assert float(jnp.max(jnp.abs(once.log_weights - rv_cloud.log_weights))) > 1e-3
 
 

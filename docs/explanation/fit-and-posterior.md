@@ -227,6 +227,61 @@ into the held term (`RadialVelocityTerm.merged`) and reweights the cloud once fo
 whole set. A second calibration of the same spectrograph, with its own offset, takes a
 name of its own, and `update` then appends it as a separate term.
 
+```python
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+from priorities import Uniform
+
+from photomancy.infer import AbstractTerm, Fit, Laplace, run, update
+from photomancy.measurements import RadialVelocityData, RadialVelocityTerm
+
+jax.config.update("jax_enable_x64", True)
+
+
+class Star(eqx.Module):
+    slope: jax.Array
+
+    def star_radial_velocity(self, time_d):
+        return self.slope * time_d / 100.0
+
+
+class Prior(AbstractTerm):
+    reads = ()
+
+    def __call__(self, model):
+        return -0.5 * (model.slope / 0.5) ** 2
+
+    def draw(self, key, model):
+        return self
+
+
+def epoch(time_d, rv, instrument="spectrograph"):
+    data = RadialVelocityData.pad(
+        time_d=[time_d],
+        rv=[rv],
+        rv_err=[1.0],
+        inst_ids=[0],
+        instruments=(instrument,),
+        max_n=4,
+    )
+    return RadialVelocityTerm(data)
+
+
+fit = Fit(Star(jnp.asarray(0.0)), {"slope": Uniform(-3.0, 3.0)}, (Prior(),))
+posterior = run(fit, Laplace(n_draws=2000), jax.random.key(0))
+gate = {"min_n_eff": 1, "max_khat": jnp.inf}
+for time_d, rv in [(100.0, 0.3), (200.0, 1.1), (300.0, -0.4)]:
+    posterior = update(
+        posterior, epoch(time_d, rv), Laplace(n_draws=2000), jax.random.key(1), **gate
+    )
+print(len(posterior.fit.terms), int(posterior.fit.terms[1].data.valid.sum()))
+assert len(posterior.fit.terms) == 2
+```
+
+One term, three rows: each epoch alone carries no information, because its offset absorbs
+a single velocity, and the merge is what lets the three constrain the slope together.
+
 ## A refused reweighting falls back to a refit
 
 The precise measurements above are a datum that reweighting cannot absorb: the cloud drawn

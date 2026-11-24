@@ -19,7 +19,12 @@ from optixstuff.spectral import Quadrature, Resolution, Transmission
 from orbix.system import System
 
 from photomancy.infer.fit import AbstractTerm
-from photomancy.measurements._observables import _band_contrasts, _check_planets
+from photomancy.measurements._observables import (
+    _band_contrasts,
+    _band_table,
+    _check_indices,
+    _check_planets,
+)
 from photomancy.measurements._padding import (
     MAX_CC_PTS,
     _pad_1d,
@@ -635,7 +640,7 @@ class PhotometryTerm(AbstractTerm):
             )
 
     def check(self, model) -> None:
-        """Require every valid row's planet to index a planet of the system.
+        """Require every valid row's planet and band to index the system and quadrature.
 
         Args:
             model: The model holding the system at ``system_path``, with concrete
@@ -643,13 +648,29 @@ class PhotometryTerm(AbstractTerm):
 
         Raises:
             ValueError: For a valid row whose planet is negative or at least the
-                number of planets.
+                number of planets, or whose ``band_id`` is negative or at least the
+                number of bands.
         """
+        system = resolve(model, self.system_path)
         _check_planets(
-            resolve(model, self.system_path),
+            system,
             self.data.planet,
             self.data.valid,
             "PhotometryTerm",
+            lambda: _band_table(
+                system,
+                self.quadrature,
+                self.transmissions,
+                jnp.zeros(1),
+                self.resolution,
+            ).shape[1],
+        )
+        _check_indices(
+            self.data.band_id,
+            self.data.valid,
+            len(self.quadrature.bands),
+            "PhotometryTerm",
+            "band",
         )
 
     def _score(self, model):

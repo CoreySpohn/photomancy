@@ -837,3 +837,65 @@ def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check():
         (jnp.full(4, 5), jnp.zeros(4, bool)),
     )
     RelativeAstrometryTerm(padded).check(system)
+
+
+def test_selector_checks_skip_traced_inputs_and_a_band_only_model_is_accepted():
+    """Traced selectors skip ``check``; a model with only ``band_contrasts`` fits.
+
+    Truth: under ``jit`` the indices are unknown, so no check can run and none may
+    raise; a model that implements only the documented ``band_contrasts`` has its
+    planet count from the planet axis of that result (one planet here).
+    Fails if: ``check`` converts a tracer to NumPy, or the count is read from
+    ``positions`` (absent on this model).
+    """
+    system = _system()
+    astrometry = _data()
+    photometry = _new_term("photometry")
+
+    def run(planet, valid):
+        row = eqx.tree_at(lambda d: (d.planet, d.valid), astrometry, (planet, valid))
+        RelativeAstrometryTerm(row).check(system)
+        data = eqx.tree_at(
+            lambda d: (d.planet, d.valid), photometry.data, (planet, valid)
+        )
+        eqx.tree_at(lambda t: t.data, photometry, data).check(system)
+        return jnp.zeros(())
+
+    jax.jit(run)(jnp.full(4, 7), jnp.ones(4, bool))
+
+    class BandOnly(eqx.Module):
+        scale: jax.Array
+
+        def band_contrasts(self, quadrature, time_d, *, resolution, transmission):
+            return self.scale * jnp.ones((len(quadrature.bands), 1, time_d.size))
+
+    model = BandOnly(jnp.asarray(1e-10))
+    photometry.check(model)
+    Fit(model, {}, (photometry,))
+    bad = eqx.tree_at(lambda d: d.planet, photometry.data, jnp.ones(4, int))
+    with pytest.raises(ValueError, match="planet"):
+        eqx.tree_at(lambda t: t.data, photometry, bad).check(model)
+
+
+def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check():
+    """Band -1 or 1 with one band raises; band 0 and padded rows pass.
+
+    Truth: one band, so valid indices are ``[0, 1)``; JAX would clamp -1 and 1 to
+    band 0 and score the wrong filter.
+    Fails if: ``band_id`` is not range checked.
+    """
+    system = _system()
+    term = _new_term("photometry")
+    for band in (1, -1):
+        data = eqx.tree_at(lambda d: d.band_id, term.data, jnp.full(4, band))
+        bad = eqx.tree_at(lambda t: t.data, term, data)
+        with pytest.raises(ValueError, match="band"):
+            bad.check(system)
+        with pytest.raises(ValueError, match="band"):
+            Fit(system, {}, (bad,))
+    padded = eqx.tree_at(
+        lambda d: (d.band_id, d.valid),
+        term.data,
+        (jnp.full(4, 9), jnp.zeros(4, bool)),
+    )
+    eqx.tree_at(lambda t: t.data, term, padded).check(system)

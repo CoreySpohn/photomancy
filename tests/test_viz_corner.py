@@ -137,7 +137,9 @@ def test_plot_corner_overlay_names_and_ranges():
 def test_classical_elements_refuses_a_planet_outside_the_orbit_rows():
     """Planet 1 of a one-row orbit block raises instead of clamping to row 0.
 
-    Fails if: the extractor indexes with JAX gather semantics and returns row 0.
+    A traced ``planet`` is not range checked and does not raise.
+    Fails if: the extractor indexes with JAX gather semantics and returns row 0, or
+    branches in Python on a traced ``planet``.
     """
     from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
     from priorities import LogUniform
@@ -173,3 +175,9 @@ def test_classical_elements_refuses_a_planet_outside_the_orbit_rows():
         classical_elements(
             posterior, jax.random.key(1), 4, orbit_path="dynamics.orbits", planet=1
         )
+    traced = jax.jit(
+        lambda p: classical_elements(
+            posterior, jax.random.key(1), 4, orbit_path="dynamics.orbits", planet=p
+        )
+    )(0)
+    assert traced["period_d"].shape == (4,)

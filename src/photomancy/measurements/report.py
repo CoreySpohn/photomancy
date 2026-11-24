@@ -25,7 +25,9 @@ from optixstuff.spectral import Quadrature, Resolution, Transmission
 from photomancy.infer.fit import AbstractProposingTerm, LeafProposal
 from photomancy.measurements._observables import (
     _band_contrasts,
+    _check_planets,
     _relative_positions,
+    _sky_positions,
 )
 from photomancy.measurements.astrometry import AstrometryData
 
@@ -511,6 +513,26 @@ class ReportTerm(AbstractProposingTerm):
         Empty for a predictor that holds no build.
         """
         return getattr(self.predictor, "reads", ())
+
+    def check(self, model) -> None:
+        """Require a precomputed predictor's planet to index a planet of the model.
+
+        Args:
+            model: The model holding the system read by the predictor, with concrete
+                values.
+
+        Raises:
+            ValueError: When the predictor's ``planet`` is at least the number of
+                planets.
+        """
+        if isinstance(self.predictor, PrecomputedReportPredictor):
+            _check_planets(
+                model,
+                jnp.asarray([self.predictor.planet]),
+                jnp.ones(1, bool),
+                "ReportTerm",
+                lambda: _sky_positions(model, jnp.zeros(1)).shape[1],
+            )
 
     def __check_init__(self):
         """Require row diffraction scales for an exact predictor."""

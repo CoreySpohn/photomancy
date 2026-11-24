@@ -340,3 +340,29 @@ def test_report_term_matches_the_stored_golden(fit, name):
     # a peak only where every detection is above the threshold
     peaks = np.isfinite(np.asarray(log_pi))
     assert np.any(peaks) if name in ("fixture", "positions") else not np.any(peaks)
+
+
+def test_report_planet_and_sheet_sum_planet_outside_the_model_are_refused():
+    """Planet 1 or -1 of a one-planet model raises for the report and the sheet sum.
+
+    Truth: the scene has one planet and one orbit row, so valid indices are
+    ``[0, 1)``; without the check planet 1 scores planet 1's clamped position and
+    ``SheetSum`` reflects nothing.
+    Fails if: ``ReportTerm.check`` or ``SheetSum.check`` does not range the planet.
+    """
+    model = scene()
+    good = report_term(leaf=None)
+    good.check(model)
+    sheet_sum(good).check(model)
+    bad = eqx.tree_at(
+        lambda t: t.predictor, good, PrecomputedReportPredictor(table(), 1)
+    )
+    with pytest.raises(ValueError, match="planet"):
+        bad.check(model)
+    with pytest.raises(ValueError, match="planet"):
+        Fit(model, {}, (bad,))
+    for planet in (1, -1):
+        with pytest.raises(ValueError, match="SheetSum planet"):
+            SheetSum((good,), ORBITS, planet).check(model)
+        with pytest.raises(ValueError, match="SheetSum planet"):
+            Fit(model, {}, (SheetSum((good,), ORBITS, planet),))

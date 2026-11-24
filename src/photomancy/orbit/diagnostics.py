@@ -34,7 +34,7 @@ def classical_elements(posterior, key, n, *, orbit_path, planet=0):
     def one(x):
         orbits = resolve(posterior.fit.model_at(x), orbit_path)
         count = jax.tree.leaves(orbits)[0].shape[0]
-        if not 0 <= planet < count:
+        if not isinstance(planet, jax.core.Tracer) and not 0 <= planet < count:
             raise ValueError(
                 f"planet {planet} is outside the {count} orbit row(s) at "
                 f"{orbit_path!r}; indices lie in [0, {count})"

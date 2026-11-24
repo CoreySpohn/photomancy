@@ -28,6 +28,7 @@ from photomancy.infer.fit import (
 from photomancy.measurements._observables import (
     _check_planets,
     _relative_positions,
+    _sky_positions,
     _stellar_reflex,
 )
 from photomancy.measurements._padding import _pad_1d, _valid_mask
@@ -339,11 +340,13 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
             ValueError: For a valid row whose planet is negative or at least the
                 number of planets.
         """
+        system = resolve(model, self.system_path)
         _check_planets(
-            resolve(model, self.system_path),
+            system,
             self.data.planet,
             self.data.valid,
             "RelativeAstrometryTerm",
+            lambda: _sky_positions(system, jnp.zeros(1)).shape[1],
         )
 
     def _score(self, model):

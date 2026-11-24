@@ -97,7 +97,16 @@ class SheetSum(AbstractProposingTerm):
 
         Args:
             model: The model to test, with concrete values.
+
+        Raises:
+            ValueError: When ``planet`` is outside the orbit rows at ``orbit_path``.
         """
+        count = jax.tree.leaves(resolve(model, self.orbit_path))[0].shape[0]
+        if not 0 <= self.planet < count:
+            raise ValueError(
+                f"SheetSum planet {self.planet} is outside the {count} orbit row(s) "
+                f"at {self.orbit_path!r}; indices lie in [0, {count})"
+            )
         for term in self.terms:
             term.check(model)
 

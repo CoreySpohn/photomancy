@@ -4,6 +4,7 @@ The regression class here is the padded data containers: pad rows must
 never reach a drawn artist, and ``plot_rv`` draws m/s as given.
 """
 
+import equinox as eqx
 import jax.numpy as jnp
 import matplotlib
 import matplotlib.pyplot as plt
@@ -50,7 +51,7 @@ def test_plot_rv_term_prediction_is_drawn_unconverted_and_valid_rows_by_mask():
     Truth: the term's own ``predict`` is m/s, so the line sits at the input value;
     with ``valid = [True, False, True]`` the drawn rows are 0 and 2, not a prefix.
     """
-    from photomancy.measurements import RadialVelocityData
+    from photomancy.measurements import RadialVelocityData, RadialVelocityTerm
     from photomancy.viz import plot_rv
 
     data = RadialVelocityData(
@@ -61,8 +62,16 @@ def test_plot_rv_term_prediction_is_drawn_unconverted_and_valid_rows_by_mask():
         valid=jnp.array([True, False, True]),
         instruments=("a",),
     )
-    result = plot_rv(np.array([0.0, 1.0, 2.0]), np.ones(3), data=data)
-    np.testing.assert_allclose(result.artists["lines"][0].get_ydata(), 1.0)
+
+    class Unit(eqx.Module):
+        """A star at 1 m/s at every epoch."""
+
+        def star_radial_velocity(self, time_d):
+            return jnp.ones_like(time_d)
+
+    prediction = RadialVelocityTerm(data).predict(Unit())
+    result = plot_rv(np.array([0.0, 1.0, 2.0]), prediction, data=data)
+    np.testing.assert_allclose(result.artists["lines"][0].get_ydata(), [1.0, 0.0, 1.0])
     observed = result.ax.lines[1]
     np.testing.assert_allclose(observed.get_xdata(), [0.0, 2.0])
     np.testing.assert_allclose(observed.get_ydata(), [10.0, 30.0])

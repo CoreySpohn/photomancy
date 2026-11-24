@@ -421,10 +421,13 @@ def test_rv_offset_is_one_latent_per_instrument_and_merged_terms_score_the_union
         Fit(_Ramp(jnp.asarray(0.0)), {}, (first, second))
     merged = first.merged(second)
     together = _rv_row_term([0.0, 100.0], [0.0, 10.0], [0, 0], ("a",))
-    for slope, expected in ((0.0, -25.918939), (10.0, -0.918939)):
+    half_log_2pi = 0.5 * np.log(2.0 * np.pi)
+    # -0.5 * (spread + log A + sum log var + (N - J) log 2 pi - log N) with N = 2,
+    # J = 1, A = 2, unit variances: the spread is 50 or 0.
+    for slope, expected in ((0.0, -25.0 - half_log_2pi), (10.0, -half_log_2pi)):
         model = _Ramp(jnp.asarray(slope))
         assert float(first(model) + second(model)) == 0.0
-        np.testing.assert_allclose(float(merged(model)), expected, atol=1e-6)
+        np.testing.assert_allclose(float(merged(model)), expected, rtol=0, atol=1e-9)
         np.testing.assert_allclose(merged(model), together(model), rtol=1e-12)
     assert Fit(_Ramp(jnp.asarray(0.0)), {}, (merged,)).terms == (merged,)
 
@@ -489,3 +492,54 @@ def test_rv_data_refuses_ids_outside_the_instruments_but_not_padded_rows():
     assert padded.n_inst == 1
     with pytest.raises(ValueError, match="unique"):
         RadialVelocityData.zeros(2, ("a", "a"))
+    for bad in ((1, "1"), (), ["a"]):
+        with pytest.raises(ValueError, match="nonempty tuple of unique strings"):
+            RadialVelocityData(
+                **rows,
+                inst_ids=jnp.zeros(2, int),
+                valid=jnp.zeros(2, bool),
+                instruments=bad,
+            )
+    with pytest.raises(ValueError, match="nonempty tuple"):
+        RadialVelocityData.zeros(2, ())
+
+
+def test_rv_merge_of_traced_terms_names_the_host_requirement():
+    """Merging inside ``jit`` raises a ValueError that says both terms must be concrete.
+
+    Fails if: the raw tracer conversion error of ``np.asarray`` surfaces instead.
+    """
+    first = _rv_row_term([0.0], [0.0], [0], ("a",))
+    second = _rv_row_term([100.0], [10.0], [0], ("a",))
+    with pytest.raises(ValueError, match="both terms must be concrete"):
+        jax.jit(lambda term: first.merged(term))(second)
+
+
+def test_rv_score_is_unchanged_by_a_large_common_offset():
+    """Two velocities 0.002 m/s apart score the same with 1e5 m/s added to both.
+
+    Truth: the hand marginal. With N = 2, J = 1, w = 1 / 0.002^2 each, the weighted
+    spread about the mean is ``w * 2 * (0.001)^2 = 0.5``, A = 2 w, so the score is
+    ``-0.5 * (0.5 + log A + 2 log 0.002^2 + log 2 pi - log 2)`` (1e-7 absolute, above
+    the 1e-11 rounding of the shifted inputs). The
+    uncentred sums ``C - B^2 / A`` lose it: the shifted score was 5.2957 against 5.0457.
+    Fails if: the squared residuals are summed before centring within the instrument.
+    """
+    from photomancy.measurements import loglike_rv_marginalized
+
+    sigma = 0.002
+    w = 1.0 / sigma**2
+    expected = -0.5 * (
+        0.5 + np.log(2 * w) + 2 * np.log(sigma**2) + np.log(2 * np.pi) - np.log(2.0)
+    )
+    for shift in (0.0, 1.0e5):
+        value = loglike_rv_marginalized(
+            jnp.array([shift, shift + 0.002]),
+            jnp.zeros(2),
+            jnp.full(2, sigma),
+            jnp.zeros(2, dtype=int),
+            1,
+            jnp.zeros(1),
+            jnp.ones(2, dtype=bool),
+        )
+        np.testing.assert_allclose(float(value), expected, rtol=0, atol=1e-7)
