@@ -195,9 +195,10 @@ convergence test and runs all `n_steps`. `Laplace` finds each mode with the same
 and the same stopping rule.
 
 `Fit` converts the leaves of the model it is given with `hwoutils.leaves.canonical`: NumPy
-arrays, NumPy scalars, Python floats and weakly typed arrays become JAX arrays in the active
-precision. Python `int` and `bool` fields (an `IntEnum` included) are left as they are: under
-`jit` they are compile-time constants, so a model may use one for an array size or a branch.
+arrays, NumPy scalars, Python floats and complex numbers, and weakly typed arrays become JAX
+arrays in the active precision. Python `int` and `bool` fields (an `IntEnum` included) are left as
+they are: under `eqx.filter_jit` they are compile-time constants, so a model may use one for an
+array size or a branch.
 `fit.model` is the converted tree, so read the base values from it rather than from the object
 you passed in.
 
