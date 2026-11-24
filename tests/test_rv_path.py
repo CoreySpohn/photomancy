@@ -387,9 +387,13 @@ def test_sheet_sum_draw_samples_the_density_it_scores():
     identifies the sheet.
     Tolerance basis: monte-carlo. 4096 draws, a binomial fraction within
     ``3 sqrt(0.25 / 4096)`` = 0.0234 of one half (a 0.3 percent false-rejection
-    rate); the second child must agree with the first in every draw, exactly.
-    Fails if: every draw keeps the model's own sheet (all changes positive), or each
-    child flips its own sheet (the children then disagree in about half the draws).
+    rate); the second child must agree with the first in every draw, exactly. The
+    children's noise is independent: their difference has standard deviation
+    ``sqrt(2) * 0.01`` m/s, to a relative ``4 / sqrt(2 * 8191)`` = 0.031 (four sigma
+    of a sample standard deviation from 8192 differences).
+    Fails if: every draw keeps the model's own sheet (all changes positive), each
+    child flips its own sheet (the children then disagree in about half the draws), or
+    the children share one noise key (their difference is then zero).
     """
     mass = 300.0 * Mearth2kg
     mu = G * (Msun2kg + mass)
@@ -421,3 +425,6 @@ def test_sheet_sum_draw_samples_the_density_it_scores():
     assert np.all(np.abs(first) > 1.0)
     assert abs(float(np.mean(first > 0)) - 0.5) < 3 * np.sqrt(0.25 / 4096)
     np.testing.assert_array_equal(np.sign(first), np.sign(second))
+    difference = np.asarray(drawn.terms[0].data.rv - drawn.terms[1].data.rv)
+    spread = float(np.std(difference)) / (np.sqrt(2.0) * 0.01)
+    assert abs(spread - 1.0) < 4 / np.sqrt(2 * (difference.size - 1))
