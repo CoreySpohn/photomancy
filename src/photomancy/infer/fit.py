@@ -53,7 +53,13 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock, block_order, check_ties, check_writers
 from hwoutils.constants import two_pi
-from hwoutils.leaves import as_float_leaf, canonical, is_param, require_tree
+from hwoutils.leaves import (
+    FOREIGN_PACKAGES,
+    as_float_leaf,
+    canonical,
+    is_param,
+    require_tree,
+)
 from hwoutils.memory import DEFAULT_MAX_BYTES, MemoryLimit, largest_batch
 from hwoutils.model_paths import assign, paths_overlap, resolve
 from jax.flatten_util import ravel_pytree
@@ -538,12 +544,30 @@ def _fisher_information(fit, x, include_prior, batch_size, forward, n_root):
     return 0.5 * (info + info.T)
 
 
+def _is_python_int_or_bool(x) -> bool:
+    return type(x) in (int, bool)
+
+
+def _is_third_party_module(x) -> bool:
+    """A Module the conversion leaves whole (rebuilding it would copy it)."""
+    if not isinstance(x, eqx.Module) or isinstance(x, eqx.Partial):
+        return False
+    name = type(x).__module__
+    return any(name == f or name.startswith(f + ".") for f in FOREIGN_PACKAGES)
+
+
+def _split_python_scalars(model):
+    """Split a model into its Python ``int`` and ``bool`` leaves and the rest."""
+    return eqx.partition(model, _is_python_int_or_bool, is_leaf=_is_third_party_module)
+
+
 class Fit(eqx.Module):
     """A normalized log density over the free entries of a model.
 
     Attributes:
-        model: The base model as converted by :func:`hwoutils.leaves.canonical`, every
-            leaf a JAX array. A held path keeps its value here.
+        model: The base model as converted by :func:`hwoutils.leaves.canonical`: every
+            float and array leaf is a JAX array; Python ``int`` and ``bool`` scalars
+            are kept as they are. A held path keeps its value here.
         free: Path to leaf law (a ``priorities`` distribution over the whole leaf) or
             to a block (keyed by the path it owns). Keys are static.
         terms: Data terms, each a normalized log likelihood.
@@ -565,10 +589,13 @@ class Fit(eqx.Module):
 
         Args:
             model: The base model. Its leaves are converted with
-                :func:`hwoutils.leaves.canonical` (Python numbers, NumPy arrays and
-                weakly typed arrays become JAX arrays in the active precision; static
-                fields and third-party Modules are left alone), so ``fit.model`` is the
-                converted tree, not the object passed in.
+                :func:`hwoutils.leaves.canonical` (Python floats and complex numbers,
+                NumPy arrays and weakly typed arrays become JAX arrays in the active
+                precision; static fields and third-party Modules are left alone).
+                Python ``int`` and ``bool`` scalars are kept: under ``eqx.filter_jit``
+                they are compile-time constants, which a model may use as a shape or
+                in a Python ``if``, and an array would break that. ``fit.model`` is
+                the converted tree, not the object passed in.
             free: The free entries by path.
             terms: The data terms.
             _walls: Walls to keep for use under a transformation, as
@@ -576,7 +603,8 @@ class Fit(eqx.Module):
                 edits pass the walls of the entries they keep, and
                 ``dataclasses.replace`` passes the stored value.
         """
-        self.model = canonical(model)
+        kept, rest = _split_python_scalars(model)
+        self.model = eqx.combine(kept, canonical(rest))
         self.free = free
         self.terms = terms
         self._walls = _block_walls(free) if _walls is None else _walls
@@ -595,7 +623,8 @@ class Fit(eqx.Module):
                 (``AbstractTerm.marginalizes``), named in the message.
             TypeError: Also when the converted model still holds a leaf that is not a
                 JAX array of the active precision (:func:`hwoutils.leaves.require_tree`,
-                a postcondition of the conversion in ``__init__``).
+                a postcondition of the conversion in ``__init__``; kept Python ``int``
+                and ``bool`` scalars are exempt).
         """
         if not jax.config.jax_enable_x64:
             raise RuntimeError(
@@ -614,7 +643,7 @@ class Fit(eqx.Module):
                     f"free[{path!r}] is a {type(entry).__name__}; "
                     "expected a priorities distribution or a block"
                 )
-        require_tree(self.model)
+        require_tree(_split_python_scalars(self.model)[1])
         for key, block in blocks.items():
             for path in (*block.reads, *block.writes):
                 self._require_path(path, f"block {key!r}")
@@ -814,7 +843,7 @@ class Fit(eqx.Module):
             block = blocks[key]
             total = total + block.log_prob(x[key], model)
             for path, value in block.forward(x[key], model).items():
-                model = assign(model, path, value)
+                model = assign(model, path, canonical(value))
         return model, total
 
     def model_at(self, x: dict) -> eqx.Module:
@@ -1235,7 +1264,7 @@ class Fit(eqx.Module):
             block = blocks[bkey]
             x[bkey] = block.sample(subkeys[bkey], model)
             for path, value in block.forward(x[bkey], model).items():
-                model = assign(model, path, value)
+                model = assign(model, path, canonical(value))
         return x
 
     def sample_prior(self, key, sample_shape: tuple[int, ...] = ()) -> dict:
@@ -1307,7 +1336,7 @@ class Fit(eqx.Module):
         for key in self.block_order:
             x[key] = blocks[key].from_unit(u[key], model)
             for path, value in blocks[key].forward(x[key], model).items():
-                model = assign(model, path, value)
+                model = assign(model, path, canonical(value))
         return {key: x[key] for key in self.free}
 
     # ----- edits -----------------------------------------------------------------

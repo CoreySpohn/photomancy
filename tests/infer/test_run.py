@@ -610,6 +610,36 @@ def test_laplace_finds_the_mode_with_the_default_map_stage():
     )
 
 
+@pytest.mark.medium(reason="a Laplace run of 40 steps with a loss that never gains")
+def test_laplace_stops_on_a_stall_only_when_the_gradient_gate_is_met(monkeypatch):
+    """The Laplace optimizer ends a loss stall only once the scaled gradient is small.
+
+    Truth source: ``numpy.linalg.lstsq``, the exact maximizer of the Gaussian
+    likelihood (as in the scaling test); the gap is the log likelihood below that
+    optimum. With the minimum gain set so large that the loss never counts as
+    improving, a stall is declared at the first check; the gate then decides. Gated,
+    the 40 steps run and the gap is under 1e-9 nat; a stall-only stop leaves the
+    iterate thousands of nat below the optimum (asserted above 1 nat for the control
+    with the gate threshold raised to 1e30, which passes at once). Tolerance basis:
+    floating-point.
+    Fails if the gradient gate is dropped from the Laplace stopping rule.
+    """
+    fit, start, best = _badly_scaled_fit()
+    top = float(fit.log_likelihood({"mu": jnp.asarray(best)}))
+    monkeypatch.setattr("photomancy.infer.backends.laplace.STOP_MIN_DELTA", 1e30)
+
+    def gap():
+        post = run(fit, Laplace(n_draws=8, n_steps=40, init=start), jax.random.key(0))
+        mode = jax.tree.map(lambda a: a[0], post.info.modes)
+        return top - float(fit.log_likelihood(mode))
+
+    assert abs(gap()) < 1e-9
+    jax.clear_caches()
+    monkeypatch.setattr("photomancy.infer.backends.laplace._GRAD_TOL", 1e30)
+    jax.clear_caches()
+    assert gap() > 1.0
+
+
 def test_nested_sampling_recovers_the_evidence():
     """Jaxns gives the exact evidence within its standard deviation.
 

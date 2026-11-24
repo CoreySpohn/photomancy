@@ -14,6 +14,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.blocks import AbstractBlock
 from hwoutils.constants import GM_SUN_AU3_PER_D2, Mearth2kg, Msun2kg, Rearth2AU
 from hwoutils.model_paths import resolve
 from optixstuff.spectral import Band, Quadrature, Transmission
@@ -1108,6 +1109,135 @@ def test_fit_converts_numpy_python_and_weak_leaves_to_strong_arrays():
         assert isinstance(leaf, jax.Array) and not leaf.weak_type
         assert leaf.dtype == jnp.float64 and float(leaf) == want
     assert isinstance(model.curve.value, np.float64) and model.curve.rate == 4.0
+
+
+class _Counted(eqx.Module):
+    value: jax.Array
+    n: int
+    flag: bool
+    rate: float
+
+
+def test_fit_keeps_python_int_and_bool_scalars_as_compile_time_constants():
+    """A Python ``int`` or ``bool`` field survives ``Fit`` and drives a jitted model.
+
+    Truth source: Equinox convention (under ``eqx.filter_jit`` a non-array leaf is a
+    compile-time constant, so ``jnp.zeros(model.n)`` and ``if model.flag`` trace; an
+    array would raise a concretization error), and ``hwoutils.leaves.canonical`` for
+    the float field. Fails if ``n`` or ``flag`` leaves ``Fit`` as an array, the Python
+    float is not a strong float64 array, the jitted ``jnp.zeros(model.n)`` raises,
+    or freeing ``n`` or ``flag`` is accepted.
+    """
+    model = _Counted(jnp.asarray(1.0), 3, True, 2.0)
+    fit = Fit(model, {"value": Normal(1.0, 0.1)})
+    assert type(fit.model.n) is int and fit.model.n == 3
+    assert type(fit.model.flag) is bool and fit.model.flag is True
+    rate = fit.model.rate
+    assert isinstance(rate, jax.Array) and rate.dtype == jnp.float64
+    assert not rate.weak_type
+
+    @eqx.filter_jit
+    def backend(m):
+        out = jnp.zeros(m.n) + m.value + m.rate
+        return out if m.flag else -out
+
+    assert backend(fit.model).shape == (3,)
+    for name in ("n", "flag"):
+        with pytest.raises(ValueError, match=rf"{name}.*static field"):
+            Fit(model, {name: Normal(1.0, 0.1)})
+
+
+class _FloatWritingBlock(AbstractBlock):
+    """Owns ``a`` and writes a float32 strong value and a weak Python float."""
+
+    owns = "a"
+    reads = ()
+    writes = ("a", "c")
+    coordinate_names = ("u",)
+    unit_size = 1
+
+    def forward(self, x, model):
+        return {"a": jnp.asarray(x["u"], jnp.float32), "c": 2.5}
+
+    def inverse(self, model):
+        return {"u": model.a}
+
+    def log_prob(self, x, model):
+        return -0.5 * x["u"] ** 2
+
+    def sample(self, key, model):
+        return {"u": jax.random.normal(key)}
+
+    def from_unit(self, c, model):
+        return {"u": c[0] - 0.5}
+
+    def same_layout(self, other):
+        return isinstance(other, _FloatWritingBlock)
+
+    def same_map(self, other):
+        return self.same_layout(other)
+
+
+class _DtypeProbeBlock(_FloatWritingBlock):
+    """Owns ``b``, reads the written paths and records their dtypes when called."""
+
+    owns = "b"
+    reads = ("a", "c")
+    writes = ("b",)
+    seen = None
+
+    def _record(self, model):
+        self.seen.append(
+            tuple((leaf.dtype, leaf.weak_type) for leaf in (model.a, model.c))
+        )
+
+    def forward(self, x, model):
+        return {"b": x["u"]}
+
+    def log_prob(self, x, model):
+        self._record(model)
+        return -0.5 * x["u"] ** 2
+
+    def sample(self, key, model):
+        self._record(model)
+        return {"u": jax.random.normal(key)}
+
+    def from_unit(self, c, model):
+        self._record(model)
+        return {"u": c[0] - 0.5}
+
+
+class _Written(eqx.Module):
+    a: jax.Array
+    b: jax.Array
+    c: jax.Array
+
+
+def test_values_written_by_a_block_enter_the_model_as_strong_float_arrays():
+    """A float32 or Python-float value from a block is stored as a strong float64.
+
+    Truth source: definitional (``hwoutils.leaves.canonical``: floats become strong
+    arrays of the active dtype). The first block writes a float32 array and a Python
+    float; the second block records the dtype and weak type of both as it sees them in
+    ``log_density``, ``sample_prior`` and ``from_unit``, and ``model_at`` returns the
+    model. Fails if any of the four paths holds a float32 or weak leaf, or a Python
+    float, in the running model.
+    """
+    seen = []
+    probe = _DtypeProbeBlock()
+    object.__setattr__(probe, "seen", seen)
+    model = _Written(jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(0.0))
+    fit = Fit(model, {"a": _FloatWritingBlock(), "b": probe})
+    x = {"a": {"u": jnp.asarray(0.25)}, "b": {"u": jnp.asarray(0.5)}}
+    fit.log_density(x)
+    fit.sample_prior(jax.random.key(0))
+    fit.from_unit({"a": jnp.asarray([0.6]), "b": jnp.asarray([0.7])})
+    assert len(seen) == 3
+    assert all(row == ((jnp.float64, False),) * 2 for row in seen), seen
+    at = fit.model_at(x)
+    for leaf in (at.a, at.c):
+        assert isinstance(leaf, jax.Array) and leaf.dtype == jnp.float64
+        assert not leaf.weak_type
 
 
 def test_fit_refuses_what_the_conversion_missed(monkeypatch):
