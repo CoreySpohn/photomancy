@@ -45,14 +45,16 @@ __all__ = [
 ]
 
 UNLABELED = ""
+"""Label of a leaf that belongs to no group (never optimized)."""
 
 _GRAD_TOL = 1e-3
 """Scaled gradient norm below which a stalled default :class:`MAP` stage has converged.
 
-In the information-normalized coordinates the Hessian is near the identity, so a
-gradient norm ``g`` means a Newton decrement near ``g**2 / 2`` nats (5e-7 nat here).
+In the information-normalized coordinates a gradient norm ``g`` bounds the Newton
+decrement by ``g**2 / (2 lambda_min)`` nats, with ``lambda_min`` the smallest eigenvalue
+of the scaled Hessian: about 5e-7 nat when the scaling is good (``lambda_min`` near
+one), and larger where the information misses the curvature.
 """
-"""Label of a leaf that belongs to no group (never optimized)."""
 
 
 def group_labels(tree, groups):

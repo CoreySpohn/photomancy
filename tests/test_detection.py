@@ -919,6 +919,14 @@ class _Square(eqx.Module):
         )
 
 
+class _Root(eqx.Module):
+    """``model -> (a sqrt(1 + a), 0)``: not finite below ``a = -1``."""
+
+    def __call__(self, model):
+        a = model.amplitude
+        return jnp.stack([a * jnp.sqrt(1.0 + a), 0.0 * a])
+
+
 class _SquareNoSplit(ForwardTerm):
     """The same forward term without ``split``: ``detect`` renders at every step."""
 
@@ -936,14 +944,19 @@ def test_render_once_detect_holds_only_for_a_prediction_linear_in_the_amplitude(
     tangent at ``a = 0``, whose slope is one, and finds ``a = 1``; the linearity check
     (the render at ``a = 1`` is 1.4 against the linear 1.0) sends the trial to the
     Newton path through the fit's likelihood, which finds the root. A linear forward
-    keeps the render-once answer, equal to the Newton path's to rounding.
+    keeps the render-once answer, equal to the Newton path's to rounding. The same
+    holds under ``filter_jit``, where every trial takes the Newton path. A render that
+    is not finite at the amplitude found (``a sqrt(1 + a)`` against data -2 gives
+    ``a = -2`` from the tangent) is a departure, not a masked pixel: Newton finds the
+    likelihood's maximum at the forward's minimum, ``a = -2/3``.
 
-    Truth source: the closed-form root of ``a + 0.4 a**2 = 1``.
-    Tolerance basis: exact-algebra (atol 1e-6 for the root, atol 1e-9 between the two
+    Truth source: the closed-form root of ``a + 0.4 a**2 = 1``; the stationary point
+    of ``a sqrt(1 + a)``, ``a = -2/3``.
+    Tolerance basis: exact-algebra (atol 1e-6 for the roots, atol 1e-9 between the two
     paths on the linear forward).
     Fails if: the fallback is not taken for a term without ``split``, the linearity
-    check is removed (``a_hat`` then comes back as 1.0), or it rejects a linear
-    forward.
+    check is removed (``a_hat`` then comes back as 1.0), it is skipped under a
+    transformation, a non-finite render passes it, or it rejects a linear forward.
     """
     data = gaussian_loglike(jnp.array([1.0, 0.0]), 1.0)
     free = {"amplitude": Uniform(-5.0, 5.0), "pa_deg": Uniform(-200.0, 200.0)}
@@ -956,6 +969,17 @@ def test_render_once_detect_holds_only_for_a_prediction_linear_in_the_amplitude(
     checked = detect(once, trials, amplitude="amplitude", n_newton=30)
     np.testing.assert_allclose(checked.a_hat, root, atol=1e-6)
     np.testing.assert_allclose(checked.z, found.z, atol=1e-6)
+    jitted = eqx.filter_jit(
+        lambda f, t: detect(f, t, amplitude="amplitude", n_newton=30)
+    )(once, trials)
+    np.testing.assert_allclose(jitted.a_hat, root, atol=1e-6)
+    low = Fit(
+        _sky(0.0, 0.0),
+        free,
+        (ForwardTerm(_Root(), gaussian_loglike(jnp.array([-2.0, 0.0]), 1.0)),),
+    )
+    edge = detect(low, trials, amplitude="amplitude", n_newton=30)
+    np.testing.assert_allclose(edge.a_hat, -2.0 / 3.0, atol=1e-6)
     linear_data = gaussian_loglike(jnp.array([2.0, 0.0]), 1.0)
     line = Fit(_sky(0.0, 0.0), free, (ForwardTerm(_Line(), linear_data),))
     line_nested = Fit(_sky(0.0, 0.0), free, (_SquareNoSplit(_Line(), linear_data),))

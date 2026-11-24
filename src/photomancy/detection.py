@@ -269,8 +269,9 @@ def _departure(actual, linear, signal):
 
     The bound is ``LINEARITY_RTOL`` times the norm of the signal (the amplitude times
     the unit render) plus 100 machine epsilons of the prediction's norm, the rounding
-    of a render that carries a bright base beside a faint signal. NaN elements (masked
-    pixels) do not count.
+    of a render that carries a bright base beside a faint signal. Elements where the
+    linear prediction is not finite (masked pixels) do not count; a non-finite render
+    where the linear prediction is finite is a departure.
     """
     err = norm = floor = 0.0
     for a, ell, sig in zip(actual, linear, signal, strict=True):
@@ -279,7 +280,7 @@ def _departure(actual, linear, signal):
         ):
             if not eqx.is_inexact_array(pa):
                 continue
-            d = jnp.where(jnp.isfinite(pa - pl), pa - pl, 0.0)
+            d = jnp.where(jnp.isfinite(pl), pa - pl, 0.0)
             err = err + jnp.sum(d**2)
             norm = norm + jnp.sum(jnp.where(jnp.isfinite(ps), ps, 0.0) ** 2)
             floor = (
@@ -386,10 +387,12 @@ def detect(
     and profiles ``prediction + a * tangent``; this needs the prediction to be linear
     in the amplitude. The result is checked: one more render at the amplitude found
     must agree with ``base + a_hat * tangent`` to within 1e-3 of the signal's norm
-    (plus 100 machine epsilons of the prediction's), else that trial is profiled
-    again through ``fit.log_likelihood`` by Newton steps, which holds for any
-    prediction at the cost of nested derivatives through the renderer (a second
-    compile, only when a trial fails). A term without ``split`` always takes the
+    (plus 100 machine epsilons of the prediction's; a non-finite render where the
+    linear prediction is finite fails), else the trials are profiled again through
+    ``fit.log_likelihood`` by Newton steps, which holds for any prediction at the cost
+    of nested derivatives through the renderer, and the failing trials take that
+    answer (one more compile and a Newton pass over every trial, only when a trial
+    fails). A term without ``split`` always takes the
     Newton path, and so does a call inside a ``jax`` transformation, where the
     check cannot be read on the host.
 
@@ -424,23 +427,20 @@ def detect(
     if isinstance(linear, jax.core.Tracer):
         # inside a transformation the check cannot choose a path on the host
         return _detect(fit, trials, amplitude, n_newton, batch_size, False)[0]
-    bad = jnp.flatnonzero(~linear)
-    if bad.size:
-        redo, _ = _detect(
-            fit,
-            jax.tree.map(lambda a: a[bad], trials),
-            amplitude,
-            n_newton,
-            batch_size,
-            False,
-        )
+    if not bool(jnp.all(linear)):
+        # every trial goes through Newton, so the program has one shape whatever the
+        # number of failing trials; only the failing ones are taken from it
+        redo, _ = _detect(fit, trials, amplitude, n_newton, batch_size, False)
         found = eqx.tree_at(
             lambda f: (f.a_hat, f.z, f.sigma),
             found,
-            (
-                found.a_hat.at[bad].set(redo.a_hat),
-                found.z.at[bad].set(redo.z),
-                found.sigma.at[bad].set(redo.sigma),
+            tuple(
+                jnp.where(linear, kept, new)
+                for kept, new in (
+                    (found.a_hat, redo.a_hat),
+                    (found.z, redo.z),
+                    (found.sigma, redo.sigma),
+                )
             ),
         )
     return found
