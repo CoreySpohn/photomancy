@@ -285,10 +285,14 @@ class StageTrace(eqx.Module):
         n_steps: Steps actually run (fewer than planned after an early stop).
         stopped_early: Whether early stopping ended the stage. For the default
             :class:`MAP` stage this means converged: the loss stalled and the scaled
-            gradient norm was below its tolerance.
+            gradient norm was below its tolerance. Never true when ``failed``.
         loss: Per-step objective (``-objective_scale * log_density`` before the step),
             a host array of length ``n_steps``.
         metrics: ``{name: host array of length n_steps}`` for each metric.
+        failed: Whether the stage met a non-finite loss. A stage with early stopping
+            ends at the check that reads it (at most ``check_every`` steps after it);
+            a stage without reads its trace once at the end. The parameters returned
+            are the last iterate, which can be non-finite then.
     """
 
     name: str = eqx.field(static=True)
@@ -297,6 +301,7 @@ class StageTrace(eqx.Module):
     stopped_early: bool = eqx.field(static=True)
     loss: np.ndarray
     metrics: dict
+    failed: bool = eqx.field(static=True, default=False)
 
 
 class StepRecord(eqx.Module):
@@ -435,7 +440,9 @@ def map_fit(
             copy of the parameters every step.
 
     Returns:
-        A :class:`MAPResult`.
+        A :class:`MAPResult`. The parameters are the last iterate, not the best one.
+        A stage that meets a non-finite loss ends with ``StageTrace.failed`` true and
+        ``stopped_early`` false, whatever else its rule said.
     """
     if freeze not in _POLICIES:
         raise ValueError(f"freeze must be one of {_POLICIES}, got {freeze!r}")
@@ -676,7 +683,7 @@ def map_fit(
             None if stopping is None else stopping.grad_scale,
         )
         count = jnp.asarray(offset, jnp.int32)
-        best, bad, checked, stopped = np.inf, 0, 0, False
+        best, bad, checked, stopped, failed = np.inf, 0, 0, False, False
         n_run = 0
         for j in range(stage.n_steps):
             gi = offset + j
@@ -713,6 +720,9 @@ def map_fit(
                     gradient = np.asarray(bufs["grad_norm"])[window]
                 checked = n_run
                 for value, norm in zip(fresh, gradient, strict=True):
+                    if not np.isfinite(value):
+                        failed = True
+                        break
                     if value < best - stopping.min_delta:
                         best, bad = value, 0
                     else:
@@ -722,9 +732,13 @@ def map_fit(
                     ):
                         stopped = True
                         break
-                if stopped:
+                if stopped or failed:
                     break
-        records.append((stage.name, offset, n_run, stopped))
+        if not failed and stopping is None and n_run:
+            failed = not np.all(
+                np.isfinite(np.asarray(bufs["loss"])[offset : offset + n_run])
+            )
+        records.append((stage.name, offset, n_run, stopped, failed))
         offset += n_run
 
     host = {name: np.asarray(buf) for name, buf in bufs.items()}
@@ -736,8 +750,9 @@ def map_fit(
             stopped_early=stopped,
             loss=host["loss"][start : start + n],
             metrics={m: host[m][start : start + n] for m in metrics},
+            failed=failed,
         )
-        for name, start, n, stopped in records
+        for name, start, n, stopped, failed in records
     )
     return MAPResult(params=rebuild(dyn), stages=traces, opt_states=states)
 

@@ -363,6 +363,13 @@ def test_closed_form_sees_the_pre_step_aux_and_runs_after_the_update():
     assert not np.array_equal(full.params.x, short.params.x)
 
 
+class _SqrtLoss(eqx.Module):
+    """``-sum sqrt(x)``: minimizing it walks ``x`` out of the domain, into NaN."""
+
+    def __call__(self, p):
+        return -jnp.sum(jnp.sqrt(p.x))
+
+
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_early_stopping_ends_a_stage_at_the_expected_step():
     """Patience 3 on a one-step quadratic stops after step 5, or 6 with a 3-step check.
@@ -375,7 +382,9 @@ def test_early_stopping_ends_a_stage_at_the_expected_step():
     Checking every 3 steps reads steps 0-2, then 3-5, and stops at the check (6 run).
     Tolerance basis: exact-algebra (integer step counts).
     Fails if: patience counts from the wrong step, the check overshoots by more than
-    ``check_every - 1``, or the next stage does not start at the step the stage ended.
+    ``check_every - 1``, the next stage does not start at the step the stage ended, or
+    a non-finite loss (the end of the test) is counted as a stall instead of ending the
+    stage with ``failed``.
     """
     init, ld = _q_init(), _PreStepAux(jnp.zeros(2))
     labels = group_labels(init, _Q_GROUPS)
@@ -422,6 +431,27 @@ def test_early_stopping_ends_a_stage_at_the_expected_step():
     assert gated(ones, 0.1).n_steps == 8 and gated(ones, 0.1).stopped_early
     assert gated(10 * ones, 0.1).n_steps == 11
     assert not gated(ones, 1e-30).stopped_early
+
+    # A non-finite loss is a failure, not a stall. ``sgd(1.0)`` on ``sum sqrt(x)`` from
+    # ``x = 1`` steps down by ``0.5 / sqrt(x)`` until ``x`` leaves the domain, and the
+    # loss is NaN from then on; the stall rule would read the NaN as five non-improving
+    # steps and report a stop. The stage ends at the check that reads the NaN, with
+    # ``failed`` true and ``stopped_early`` false, with or without early stopping.
+    root = _Q(x=jnp.ones(2), y=jnp.zeros(2))
+    root_ld = _SqrtLoss()
+
+    def broken(stopping):
+        stage = MAPStage(50, ("x",), early_stopping=stopping)
+        return map_fit(root_ld, root, labels, tx_one, [stage]).stages[0]
+
+    tx_one = {"x": optax.sgd(1.0)}
+    checked = broken(EarlyStopping(3, check_every=1))
+    assert checked.failed and not checked.stopped_early and checked.n_steps < 50
+    assert not np.isfinite(checked.loss[-1])
+    assert np.all(np.isfinite(checked.loss[:-1]))
+    unchecked = broken(None)
+    assert unchecked.failed and not unchecked.stopped_early and unchecked.n_steps == 50
+    assert not gated(ones, 0.1).failed
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")

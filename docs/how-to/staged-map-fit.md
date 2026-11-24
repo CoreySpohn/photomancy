@@ -125,6 +125,8 @@ coordinates is below 1e-3, and the stage trace then reports `stopped_early=True`
 stall alone does not stop it. The unscaled default stage (`scale=False`, or a fit whose
 terms have no Fisher root) runs all `n_steps` and never reports `stopped_early`. Explicit
 `stages` run as written: stopping applies only to a stage that sets `early_stopping`.
+A non-finite loss is a failure, not a stall: the stage ends with `failed=True` on its trace and
+`stopped_early=False`, and the parameters returned are the last iterate, which can be non-finite.
 
 ## Choices a stage can make
 

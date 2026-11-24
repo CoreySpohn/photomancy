@@ -18,6 +18,7 @@ from priorities import Normal, Uniform
 from scipy import stats
 from skyscapes.physical_model import GridPhysicalModel
 
+import photomancy.detection as detection
 from photomancy.detection import (
     _correlation_inverse,
     curvature_block,
@@ -706,8 +707,16 @@ def test_measure_covariance_matches_the_curvature_block_and_the_fisher_matrix():
     )
     np.testing.assert_allclose(est.cov, np.linalg.inv(block), rtol=1e-8)
     np.testing.assert_allclose(est.sigma, np.sqrt(np.diag(est.cov)))
-    assert bool(est.regular)
-    np.testing.assert_allclose(est.min_eigenvalue, np.linalg.eigvalsh(block)[0])
+    assert bool(est.regular) and bool(est.converged) and bool(est.finite)
+    assert bool(est.positive_definite) and int(est.n_steps) > 0
+    root = np.sqrt(np.diag(np.asarray(block)))
+    np.testing.assert_allclose(
+        est.min_eigenvalue,
+        np.linalg.eigvalsh(np.asarray(block) / np.outer(root, root))[0],
+    )
+    np.testing.assert_allclose(
+        est.log_likelihood, float(fit.log_likelihood(est.value)), rtol=1e-12
+    )
     np.testing.assert_allclose(np.diag(est.corr), 1.0, rtol=1e-12)
 
     h = 0.01
@@ -774,9 +783,11 @@ def test_correlation_form_inverse_recovers_a_known_covariance_at_condition_1e12(
     ``span``, so the matrix has condition number near ``span**2`` and its covariance is
     exactly ``D K^-1 D``. It is positive definite by construction.
 
-    Truth source: ``K^-1`` from NumPy on the well conditioned ``K``.
-    Tolerance basis: floating-point (rtol 1e-10 in the scaled covariance and the
-    correlation matrix).
+    Truth source: ``K^-1`` from NumPy on the well conditioned ``K``; the smallest
+    eigenvalue of ``K`` in correlation form, which is the one the flag reports (it does
+    not depend on ``span``).
+    Tolerance basis: floating-point (rtol 1e-10 in the scaled covariance, the
+    correlation matrix and the eigenvalue).
     Fails if: the diagonal scaling is dropped or applied once instead of twice, the
     correlation matrix is not normalized, or a positive definite graded matrix is
     reported as not regular.
@@ -787,6 +798,7 @@ def test_correlation_form_inverse_recovers_a_known_covariance_at_condition_1e12(
     assert np.linalg.cond(info) > 0.5 * span**2
     cov, corr, regular, min_eig = _correlation_inverse(jnp.asarray(info))
     want = np.linalg.inv(k)
+    diag = np.sqrt(np.diag(k))
     np.testing.assert_allclose(
         np.asarray(cov) / np.outer(scale, scale), want, rtol=1e-10
     )
@@ -795,7 +807,9 @@ def test_correlation_form_inverse_recovers_a_known_covariance_at_condition_1e12(
     np.testing.assert_allclose(
         corr, want / np.sqrt(np.outer(np.diag(want), np.diag(want))), rtol=1e-10
     )
-    assert abs(float(min_eig)) < 1e-6
+    np.testing.assert_allclose(
+        min_eig, np.linalg.eigvalsh(k / np.outer(diag, diag))[0], rtol=1e-10
+    )
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -803,7 +817,8 @@ def test_regular_is_false_at_a_saddle_and_true_at_a_maximum():
     """The flag is the sign of the information's eigenvalues, with finite output.
 
     Truth source: the eigenvalues of ``diag(2, -3)`` (a saddle of the log density, so
-    information of mixed sign) and of ``diag(2, 3)``.
+    information of mixed sign) and of ``diag(2, 3)``, in correlation form (the
+    diagonal scaled out, so ``diag(1, -1)`` and the identity).
     Tolerance basis: exact-algebra (the covariance is ``diag(1/2, -1/3)`` to
     rounding; the smallest eigenvalue is exact).
     Fails if: a saddle reports a covariance without the flag, or the inversion turns
@@ -811,11 +826,11 @@ def test_regular_is_false_at_a_saddle_and_true_at_a_maximum():
     """
     cov, _, regular, min_eig = _correlation_inverse(jnp.diag(jnp.array([2.0, -3.0])))
     assert not bool(regular)
-    assert float(min_eig) == -3.0
+    assert float(min_eig) == pytest.approx(-1.0, rel=1e-12)  # diag(1, -1)
     np.testing.assert_allclose(cov, np.diag([0.5, -1.0 / 3.0]), rtol=1e-12)
     assert np.all(np.isfinite(cov))
     cov, _, regular, min_eig = _correlation_inverse(jnp.diag(jnp.array([2.0, 3.0])))
-    assert bool(regular) and float(min_eig) == 2.0
+    assert bool(regular) and float(min_eig) == pytest.approx(1.0, rel=1e-12)
 
 
 class _Identity(eqx.Module):
@@ -857,6 +872,112 @@ def test_measure_flags_a_saddle_and_stays_there():
     np.testing.assert_allclose(est.cov, np.diag([1.0, -1.0]), rtol=1e-12)
     assert np.isnan(float(est.sigma[1])) and float(est.sigma[0]) == pytest.approx(1.0)
     assert est.assumptions == ()
+
+
+class _PseudoHuber(eqx.Module):
+    """``log L = -sqrt(1 + p**2)``: positive curvature, a far Newton step too long."""
+
+    def __call__(self, predicted):
+        return -jnp.sum(jnp.sqrt(1.0 + predicted**2))
+
+
+class _Bump(eqx.Module):
+    """``log L = exp(-p**2 / 2) - 1``: negative curvature beyond ``|p| = 1``."""
+
+    def __call__(self, predicted):
+        return jnp.sum(jnp.exp(-0.5 * predicted**2) - 1.0)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_the_newton_polish_accepts_a_step_only_where_the_likelihood_rises():
+    """A full Newton step that overshoots is backtracked; an indefinite point stays.
+
+    Truth source: the model. For ``log L = -sqrt(1 + p**2)`` at ``p = 2`` the Hessian of
+    the negative is ``(1 + p**2)**-1.5 > 0``, and the full Newton step goes to
+    ``p = -8``, where the log likelihood is -8.06 against -2.24 at the start. Halving
+    twice gives ``p = -0.5`` (log L -1.118), which raises it, so the polish moves there
+    and then toward the peak at 0. For ``log L = exp(-p**2 / 2) - 1`` at ``p = 2`` the
+    Hessian of the negative is ``(1 - p**2) exp(-p**2 / 2) < 0`` (indefinite), so the
+    polish does not move and reports no step, where a proposal built on the identity
+    would take the gradient step.
+    Tolerance basis: exact-algebra (the log likelihood must rise at every accepted
+    step; the point must be unchanged when refused).
+    Fails if a proposal is accepted without the likelihood check (the first case ends at
+    -8.06, below its start), if the backtracking is dropped (the first case then never
+    moves), or if an indefinite Hessian is followed.
+    """
+    far = Fit(
+        _P(jnp.zeros(())),
+        {"p": Normal(0.0, 10.0)},
+        (ForwardTerm(_Identity(), _PseudoHuber()),),
+    )
+    start = far.to_real({"p": jnp.asarray(2.0)})
+    ones = jax.tree.map(jnp.ones_like, start)
+    for n in (1, 4):
+        moved, count = detection._newton(far, start, ones, n, 1)
+        x, _ = far.from_real(moved)
+        assert int(count) >= 1
+        assert float(far.log_likelihood(x)) > -np.sqrt(5.0) + 0.5
+    x, _ = far.from_real(detection._newton(far, start, ones, 1, 1)[0])
+    assert float(x["p"]) == pytest.approx(-0.5, abs=1e-12)
+    assert float(far.log_likelihood(x)) == pytest.approx(-np.sqrt(1.25), rel=1e-12)
+
+    saddle = Fit(
+        _P(jnp.zeros(())),
+        {"p": Normal(0.0, 10.0)},
+        (ForwardTerm(_Identity(), _Bump()),),
+    )
+    start = saddle.to_real({"p": jnp.asarray(2.0)})
+    moved, count = detection._newton(
+        saddle, start, jax.tree.map(jnp.ones_like, start), 4, 1
+    )
+    assert int(count) == 0
+    np.testing.assert_array_equal(moved["p"], start["p"])
+
+
+class _TwoBumps(eqx.Module):
+    """Log of a 70/30 mixture of unit-height-free bumps at -2 and +2, width 0.5."""
+
+    def __call__(self, predicted):
+        bump = lambda c: jnp.exp(-0.5 * ((predicted - c) / 0.5) ** 2)  # noqa: E731
+        return jnp.log(0.7 * bump(-2.0) + 0.3 * bump(2.0))
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_measure_is_not_converged_when_the_last_iterate_is_below_the_best_reached(
+    monkeypatch,
+):
+    """A last iterate on a lower peak than the trace reached is not converged.
+
+    Truth source: the model. ``log(0.7 N(p; -2) + 0.3 N(p; 2))`` has two peaks whose
+    heights differ by ``ln(7/3) = 0.85`` nat. The run from ``p = -1.9`` reaches the high
+    one and is converged. A spy then replaces the optimizer's result by ``p = 2``, the
+    lower peak, standing for a last line-search step that rose: the gradient there is
+    zero and the information positive, so only the comparison with the trace's best
+    (and with the start's) can say the run did not end where it was.
+    Tolerance basis: exact-algebra (flags; the gap is 0.85 against the 1e-7 stall
+    tolerance).
+    Fails if ``converged`` looks only at the gradient and the decrement.
+    """
+    term = ForwardTerm(_Identity(), _TwoBumps())
+    fit = Fit(_P(jnp.zeros(())), {"p": Normal(0.0, 10.0)}, (term,))
+    start = {"p": jnp.asarray(-1.9)}
+    good = measure(fit, start)
+    assert bool(good.converged) and bool(good.regular)
+    assert float(good.value["p"]) == pytest.approx(-2.0, abs=1e-6)
+
+    real = detection.map_fit
+
+    def moved(*args, **kwargs):
+        out = real(*args, **kwargs)
+        flat = jax.tree.map(lambda a: jnp.full_like(a, 2.0), out.params)
+        return eqx.tree_at(lambda r: r.params, out, flat)
+
+    monkeypatch.setattr(detection, "map_fit", moved)
+    bad = measure(fit, start)
+    assert float(bad.value["p"]) == pytest.approx(2.0, abs=1e-6)
+    assert float(bad.newton_decrement) < 1e-6 and bool(bad.positive_definite)
+    assert bool(bad.finite) and not bool(bad.converged) and not bool(bad.regular)
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
