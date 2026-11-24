@@ -106,28 +106,30 @@ class FrameSet(eqx.Module):
     def single_orientation(self) -> jnp.ndarray:
         """Check for a common telescope orientation modulo 360 degrees.
 
-        Differences from the first frame are wrapped to [-180, 180) and
-        compared with a tolerance of 1e-6 degrees. Traced angles return a
-        boolean without raising, allowing callers to mask invalid results.
+        Each angle's offset from the first frame is wrapped to the nearest
+        multiple of 360 degrees by subtracting it, which leaves an offset
+        smaller than 180 degrees exactly as computed in the angles' dtype, and
+        the span (maximum minus minimum) of the wrapped offsets is compared
+        with a tolerance of 1e-6 degrees. Traced angles return a boolean
+        without raising, allowing callers to mask invalid results.
 
         Returns:
             Scalar bool indicating whether all frames share one orientation.
 
         Raises:
-            ValueError: Concrete angles differ by more than 1e-6 degrees;
-                the message includes the angles and their wrapped spread.
+            ValueError: Concrete angles span more than 1e-6 degrees modulo
+                360; the message includes the angles and their spread.
         """
         angles = self.telescope_pa_deg
-        differences = (angles - angles[0] + 180.0) % 360.0 - 180.0
-        same = jnp.all(jnp.abs(differences) <= 1e-6)
-        if not isinstance(angles, jax.core.Tracer):
-            host_angles = np.asarray(angles)
-            host_diff = (host_angles - host_angles[0] + 180.0) % 360.0 - 180.0
-            if not np.all(np.abs(host_diff) <= 1e-6):
-                raise ValueError(
-                    f"telescope_pa_deg angles {host_angles.tolist()} must share "
-                    f"one orientation; spread {np.ptp(host_diff)} degrees"
-                )
+        offsets = angles - angles[0]
+        offsets = offsets - 360.0 * jnp.round(offsets / 360.0)
+        spread = jnp.max(offsets) - jnp.min(offsets)
+        same = spread <= 1e-6
+        if not isinstance(angles, jax.core.Tracer) and not bool(same):
+            raise ValueError(
+                f"telescope_pa_deg angles {np.asarray(angles).tolist()} must share "
+                f"one orientation; spread {float(spread)} degrees"
+            )
         return same
 
     def coadd(self) -> jnp.ndarray:
