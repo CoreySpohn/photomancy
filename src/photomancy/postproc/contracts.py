@@ -106,12 +106,13 @@ class FrameSet(eqx.Module):
     def single_orientation(self) -> jnp.ndarray:
         """Check for a common telescope orientation modulo 360 degrees.
 
-        Each angle's offset from the first frame is wrapped to the nearest
-        multiple of 360 degrees by subtracting it, which leaves an offset
-        smaller than 180 degrees exactly as computed in the angles' dtype, and
-        the span (maximum minus minimum) of the wrapped offsets is compared
-        with a tolerance of 1e-6 degrees. Traced angles return a boolean
-        without raising, allowing callers to mask invalid results.
+        Each angle is first reduced to a signed remainder in [-180, 180] by
+        subtracting the nearest multiple of 360 degrees, which is exact in the
+        angles' dtype, so a full turn cannot absorb a small difference. The
+        offsets of the remainders from the first frame are wrapped the same
+        way, and the span (maximum minus minimum) of the wrapped offsets is
+        compared with a tolerance of 1e-6 degrees. Traced angles return a
+        boolean without raising, allowing callers to mask invalid results.
 
         Returns:
             Scalar bool indicating whether all frames share one orientation.
@@ -123,7 +124,8 @@ class FrameSet(eqx.Module):
         angles = self.telescope_pa_deg
         # Closed-over angles can be checked eagerly even inside a jitted arm.
         with jax.ensure_compile_time_eval():
-            offsets = angles - angles[0]
+            reduced = angles - 360.0 * jnp.round(angles / 360.0)
+            offsets = reduced - reduced[0]
             offsets = offsets - 360.0 * jnp.round(offsets / 360.0)
             spread = jnp.max(offsets) - jnp.min(offsets)
             same = spread <= 1e-6

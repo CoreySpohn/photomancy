@@ -227,10 +227,19 @@ def test_frameset_single_orientation():
 
 @pytest.mark.parametrize(
     "angles",
-    [[0.0, 0.9e-6, -0.9e-6], [0.9e-6, 0.0, -0.9e-6], [-0.9e-6, 0.9e-6, 0.0]],
+    [
+        [0.0, 0.9e-6, -0.9e-6],
+        [0.9e-6, 0.0, -0.9e-6],
+        [-0.9e-6, 0.9e-6, 0.0],
+        [360.0, 0.9e-6, -0.9e-6],
+        [0.9e-6, 360.0, -0.9e-6],
+        [-0.9e-6, 0.9e-6, 360.0],
+    ],
 )
 def test_single_orientation_compares_the_span_in_any_frame_order(angles):
     """Exact algebra: the span is 1.8e-6 deg whichever frame comes first.
+
+    A frame at 360 deg is the same orientation as one at 0 deg in any position.
 
     Each offset from the first frame is below 1e-6 deg in some orders, so a
     test of offsets alone accepts these angles; the span does not.
@@ -245,11 +254,14 @@ def test_single_orientation_compares_the_span_in_any_frame_order(angles):
 
 
 def test_single_orientation_keeps_small_float32_differences():
-    """Floating-point: 2e-6 deg is exactly representable near 0 in float32.
+    """Floating-point: float32 keeps an offset of 2e-6 deg near 0 above 1e-6.
 
-    A wrap that adds 180 deg before the modulo rounds that offset to zero in
-    float32 (its spacing near 180 is 1.5e-5 deg); a signed wrap keeps it. The
-    concrete check raises, and under jit and vmap the traced check is False.
+    float32 stores 2e-6 as 1.99999999e-6. A wrap that adds 180 deg before the
+    modulo rounds that offset to zero in float32 (its spacing near 180 is
+    1.5e-5 deg), and so does an offset taken from a frame at 360 deg before
+    reducing it (spacing 3.1e-5 deg near 360); reducing each angle to a
+    signed remainder first keeps it. The concrete check raises, and under jit
+    and vmap the traced check is False, in either frame order.
     """
     science = make_frameset(n_frames=2)
     angles = jnp.array([0.0, 2e-6], dtype=jnp.float32)
@@ -270,3 +282,11 @@ def test_single_orientation_keeps_small_float32_differences():
     assert not bool(eqx.filter_jit(check)(across))
     wrapped = jnp.array([10.0, 370.0], dtype=jnp.float32)
     assert bool(eqx.filter_jit(check)(wrapped))
+    turn = jnp.array([360.0, 2e-6], dtype=jnp.float32)
+    for order in (turn, turn[::-1]):
+        with pytest.raises(ValueError, match="spread"):
+            eqx.tree_at(
+                lambda s: s.telescope_pa_deg, science, order
+            ).single_orientation()
+        assert not bool(eqx.filter_jit(check)(order))
+    assert jax.vmap(check)(jnp.stack([turn, turn[::-1]])).tolist() == [False, False]
