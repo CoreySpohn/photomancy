@@ -775,10 +775,13 @@ class MAP(AbstractBackend):
     by a wall elsewhere, and an optimum at a wall is a boundary optimum that ``MAP``
     does not certify.
 
-    With no ``stages`` the fit is one stage of ``n_steps`` L-BFGS iterations over every
-    parameter, run in coordinates scaled by the information at the start
-    (:func:`photomancy.infer._scale.information_scale` with the prior included): the
-    free parameters of an imaging fit span many orders of magnitude, and unscaled
+    With no ``stages`` the fit is one stage of at most ``n_steps`` L-BFGS iterations
+    over every parameter, stopped early once five consecutive steps fail to lower the
+    best objective by more than 1e-7 (:class:`EarlyStopping`, read every five steps;
+    the stage trace reports ``stopped_early``). It runs in coordinates scaled by the
+    information at the start (:func:`photomancy.infer._scale.information_scale` with
+    the prior included): the free parameters of an imaging fit span many orders of
+    magnitude, and unscaled
     L-BFGS crawls along the stiff ones. The scale changes the path and the point the
     run reaches in a given number of steps, not the density it maximizes. A fit with a
     term that has no Fisher root runs unscaled, and so does one with ``scale=False``.
@@ -802,7 +805,8 @@ class MAP(AbstractBackend):
     ``TypeError``.
 
     Attributes:
-        n_steps: L-BFGS iterations of the default stage.
+        n_steps: The most L-BFGS iterations of the default stage; it stops earlier
+            once the objective has converged.
         labels: Group label PyTree from :func:`group_labels`, or ``None`` for one
             group ``"all"`` over every leaf.
         transforms: ``{group: optax.GradientTransformation}``, or ``None``.
@@ -857,7 +861,17 @@ class MAP(AbstractBackend):
                 solver = rescaled_transform(
                     solver, {"all": tuple(jax.tree.leaves(scale))}
                 )
-            stages = (MAPStage(self.n_steps, ("all",), solver=solver, name="lbfgs"),)
+            stages = (
+                MAPStage(
+                    self.n_steps,
+                    ("all",),
+                    solver=solver,
+                    early_stopping=EarlyStopping(
+                        patience=5, min_delta=1e-7, check_every=5
+                    ),
+                    name="lbfgs",
+                ),
+            )
         stages = tuple(_real_stage(stage, fit) for stage in stages)
         result = map_fit(
             _RealLogProb(fit),

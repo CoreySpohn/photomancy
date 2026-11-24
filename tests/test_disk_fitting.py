@@ -157,7 +157,16 @@ def test_fit_density_matches_the_legacy_density_up_to_the_gaussian_constant(
 
 @pytest.mark.slow
 def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
-    """MAP and Laplace recover the truth disk shape and orientation from noise."""
+    """MAP and Laplace recover the truth disk shape and orientation from noise.
+
+    Truth: the generating disk. Tolerances are the recovery bounds of ``check`` (15
+    percent in the semi-major axis, 0.4 AU, 6 degrees). The default MAP must stop
+    early on a loss trace that never rises (within 1e-6 of its first value, the
+    rounding of the line search), and its log density must equal that of the unscaled
+    run within 1e-3 nat: both reach the same optimum, the scale changes only the path.
+    Fails if the default stage has no stopping rule: converged, it takes steps that
+    raise the loss and can end in an alias of the optimum.
+    """
     truth = make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
     forward = radiance_forward(WL, TIME, grid=GRID)
     data, sigma = _data(truth, forward)
@@ -171,14 +180,47 @@ def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
         assert abs(float(x["midplane_inc_deg"]) - 55.0) < 6.0
         assert abs(float(x["midplane_position_angle_deg"]) - 30.0) < 6.0
 
-    # Unscaled: from this start the information-scaled run ends in the mirror
-    # inclination (125 degrees), a local mode 51 nats below the truth mode.
-    point = run(fit, MAP(n_steps=800, init=x0, scale=False), jax.random.key(0))
+    # Default MAP: scaled, and stopped once the objective stops improving.
+    point = run(fit, MAP(n_steps=800, init=x0), jax.random.key(0))
+    trace = point.info.stages[0]
+    assert trace.stopped_early and trace.n_steps < 800
+    assert np.all(np.diff(trace.loss) <= 1e-6 * abs(trace.loss[0]))
     check({path: leaf[0] for path, leaf in point.samples.items()})
+    control = run(fit, MAP(n_steps=800, init=x0, scale=False), jax.random.key(0))
+    ours = {path: leaf[0] for path, leaf in point.samples.items()}
+    theirs = {path: leaf[0] for path, leaf in control.samples.items()}
+    assert abs(float(fit.log_density(ours)) - float(fit.log_density(theirs))) < 1e-3
 
     post = run(fit, Laplace(n_draws=256, n_steps=800, init=x0), jax.random.key(1))
     assert int(post.info.n_modes_kept) == 1
     check({p: weighted_mean(post.log_weights, v) for p, v in post.samples.items()})
+
+
+# Medium: the disk render at four points.
+@pytest.mark.medium
+def test_disk_aliases_have_equal_likelihood(make_system):
+    """The relabelings of one disk give the same image and the same log likelihood.
+
+    Truth source: the symmetry of the model, not a stored number. The image of
+    (i, PA) equals that of (180 - i, PA + 180) and (i + 180, PA), and exchanging the
+    two slopes with both signs flipped is the same radial profile; the four points
+    (55, 30), (125, 210), (235, 30) and slopes (-5, 5) are one disk. Tolerance basis:
+    floating-point, rtol 1e-12 on the log likelihood (the images agree to about
+    3e-15, float64). The log prior differs between them by 11 to 51 nat, which is
+    why a fit can end in an alias.
+    Fails if a forward stops being invariant under one of the relabelings.
+    """
+    forward = radiance_forward(WL, TIME, grid=GRID)
+    data, sigma = _data(make_system(), forward)
+    fit = _fit(make_system(), data, sigma, forward)
+    points = [
+        make_system(),
+        make_system(incl=125.0, pa=210.0),
+        make_system(incl=235.0),
+        make_system(alpha_in=-5.0, alpha_out=5.0),
+    ]
+    values = [float(fit.log_likelihood(_x(p))) for p in points]
+    np.testing.assert_allclose(values, values[0], rtol=1e-12)
 
 
 class _Scaled(eqx.Module):

@@ -117,7 +117,11 @@ assert jnp.allclose(posterior.samples["shape"][0], jnp.array([4.0, 6.0]), atol=1
 free entries. The loss of each stage is in `posterior.info.stages`, one trace per stage.
 Without `init`, the fit starts from a draw of the prior, and `init` may also be one
 constrained draw or an earlier `Posterior`, whose highest-density draw is used. With no
-`stages`, the backend runs one stage of `n_steps` L-BFGS iterations over every free entry.
+`stages`, the backend runs one stage of at most `n_steps` L-BFGS iterations over every
+free entry. It stops earlier once five consecutive steps fail to lower the best objective
+by more than 1e-7 (checked every five steps), and the stage trace reports `stopped_early`.
+Explicit `stages` run as written: stopping applies only to a stage that sets
+`early_stopping`.
 
 ## Choices a stage can make
 
@@ -180,7 +184,10 @@ Fisher)` (with the prior's curvature added, and a floor so a flat direction does
 stretch the step), through {func}`~photomancy.infer.rescaled_transform`. A fit whose
 parameters differ by many orders of magnitude, such as a flux and a position, then takes
 the same L-BFGS steps in every coordinate. Pass `scale=False` to start from unscaled
-coordinates; a fit whose terms have no Fisher root falls back to them.
+coordinates; a fit whose terms have no Fisher root falls back to them. Either way the
+default stage stops once the objective has converged, so `n_steps` is the most steps it
+takes. Converged, the line search can no longer find a descent direction and a run that
+kept stepping would leave the optimum.
 
 ## Give the solved coefficients a wide prior
 
