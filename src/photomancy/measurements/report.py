@@ -11,7 +11,7 @@ counts are data, so the joint density of a detection factorizes into the counts,
 
 import math
 from abc import abstractmethod
-from typing import Self
+from typing import ClassVar, Self
 
 import equinox as eqx
 import jax
@@ -25,7 +25,6 @@ from optixstuff.spectral import Quadrature, Resolution, Transmission
 from photomancy.infer.fit import AbstractProposingTerm, LeafProposal
 from photomancy.measurements._observables import (
     _band_contrasts,
-    _check_reads,
     _relative_positions,
 )
 from photomancy.measurements.astrometry import AstrometryData
@@ -305,8 +304,8 @@ class CountRateTable(eqx.Module):
     responses, and the resolution of the system's tabulated spectra on it,
     ``Resolution.build(quadrature, *system.spectral_tables())``, as for
     PhotometryTerm; the contrast then integrates a tabulated star or planet
-    exactly over each band. ``reads`` names the knot leaves that build saw,
-    ``system.knot_leaves()``, so a fit refuses to free one.
+    exactly over each band. The resolution depends on the system's static knot
+    grids only, so the table declares no reads.
     Diffraction scales have shape (n_modes,). ``epoch`` is the static origin of
     the report times; a predictor raises if the model's epoch differs.
 
@@ -322,8 +321,8 @@ class CountRateTable(eqx.Module):
         epoch: Origin of the report times.
         resolution: Host-built reduction of the system's tabulated spectra onto
             ``quadrature``; empty for a system with no table.
-        reads: Model paths of the knot leaves ``resolution`` was built on;
-            required when ``resolution`` holds rules.
+        reads: Model paths a held build cached. Empty: the resolution depends on
+            the system's static knot grids only.
     """
 
     separation_arcsec: jax.Array = eqx.field(converter=_float64)
@@ -333,11 +332,10 @@ class CountRateTable(eqx.Module):
     transmissions: tuple[Transmission, ...]
     epoch: Epoch = eqx.field(static=True)
     resolution: Resolution = eqx.field(default_factory=Resolution)
-    reads: tuple[str, ...] = eqx.field(static=True, default=())
+    reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
-        """Require compatible mode-bank dimensions, and reads for a resolution."""
-        _check_reads("CountRateTable", self.resolution, self.reads)
+        """Require compatible mode-bank dimensions."""
         if (
             self.separation_arcsec.ndim != 2
             or self.counts_per_contrast_s.shape != self.separation_arcsec.shape
@@ -358,20 +356,18 @@ class PrecomputedReportPredictor(AbstractReportPredictor):
     Attributes:
         table: The count-rate table to interpolate.
         planet: Zero-based index of the planet the rows report.
+        reads: Model paths a held build cached. Empty: the table's resolution
+            depends on the system's static knot grids only.
     """
 
     table: CountRateTable
     planet: int = eqx.field(static=True)
+    reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
         """Require a static nonnegative planet index."""
         if not isinstance(self.planet, int) or self.planet < 0:
             raise ValueError("planet must be a nonnegative static integer")
-
-    @property
-    def reads(self) -> tuple[str, ...]:
-        """Model paths of the knot leaves the table's resolution was built on."""
-        return self.table.reads
 
     def __call__(self, model, rows: ReportData) -> ReportPrediction:
         """Predict linear-interpolated counts and sky positions for all rows.

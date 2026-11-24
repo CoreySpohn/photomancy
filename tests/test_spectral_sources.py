@@ -23,7 +23,7 @@ from hwoutils.epoch import Epoch
 from jax.test_util import check_grads
 from numpy.polynomial.legendre import leggauss
 from optixstuff.spectral import Band, Quadrature, Resolution, Transmission
-from priorities import LogUniform, Normal
+from priorities import Normal
 from skyscapes.physical_model import TimeSeriesPhysicalModel
 from skyscapes.scene import Planet, Scene, Star
 
@@ -275,7 +275,6 @@ def test_the_report_predictor_integrates_a_tabulated_star():
         (curve,),
         scene.epoch,
         resolution=resolution,
-        reads=scene.knot_leaves(),
     )
     rows = ReportData.planned(
         jnp.zeros(1), jnp.array([5.0]), jnp.array([1.0]), jnp.array([0])
@@ -284,7 +283,7 @@ def test_the_report_predictor_integrates_a_tabulated_star():
     counts = float(predictor(scene, rows).counts[0])
     np.testing.assert_allclose(counts, _truth(scene) * 2.0 * 5.0, rtol=1e-10)
     term = ReportTerm(ReportRule(threshold=4.5, kappa=1.3, corr=0.4), rows, predictor)
-    assert term.reads == scene.knot_leaves() != ()
+    assert term.reads == () and table.resolution.rules
     bare = eqx.tree_at(lambda t: t.resolution, table, Resolution())
     with pytest.raises(LookupError):
         PrecomputedReportPredictor(bare, 0)(scene, rows)
@@ -294,34 +293,52 @@ class _Holder(eqx.Module):
     system: Scene
 
 
-def test_a_fit_refuses_to_free_a_knot_leaf_a_photometric_term_was_built_on():
-    """Fails if the photometric term declares no reads, or the wrong ones.
+def test_terms_holding_a_resolution_declare_no_reads():
+    """Fails if a term with a held resolution needs, or accepts, a knot declaration.
 
-    Truth, named by hand: the star's and the tabulated planet's knot grids,
-    under the system's model path. Freeing the planet's knot grid must then be
-    refused by ``Fit`` naming the term; a free planet radius is not a read and
-    is accepted. A term or a count-rate table built directly on a resolution
-    that holds rules, without reads, is refused at construction (otherwise
-    ``Fit`` could free the knots under the operators); with an empty
-    resolution, a scene with no table, no reads are needed.
+    A photometric term and a count-rate table are built directly on a
+    resolution that holds rules, with no ``reads``: both construct and declare
+    ``()``, and the term the target data builds declares the same. Passing
+    ``reads=`` is a ``TypeError`` for both (the argument is gone). Truth: the
+    construction contract itself, so there is no tolerance.
     """
     scene = _scene()
     (term,) = _target().terms("system", system=scene, transmissions={"F": _filter()})
-    assert term.reads == (
-        "system.star._wavelengths_nm",
-        "system.planets[0].physical_model.wavelengths_nm",
-    )
-    knots = "system.planets[0].physical_model.wavelengths_nm"
-    with pytest.raises(ValueError, match=r"meets PhotometryTerm\.reads"):
-        Fit(_Holder(scene), {knots: Normal(jnp.asarray(PLANET_NM), 1.0)}, (term,))
-    Fit(_Holder(scene), {"system.planets[0].Rp_Rearth": LogUniform(0.5, 4.0)}, (term,))
-
+    assert term.resolution.rules
+    assert term.reads == ()
     parts = (term.data, term.quadrature, term.transmissions, "system")
-    with pytest.raises(ValueError, match="declares no reads"):
-        PhotometryTerm(*parts, resolution=term.resolution)
-    PhotometryTerm(*parts, resolution=Resolution())
+    held = PhotometryTerm(*parts, resolution=term.resolution)
+    assert held.reads == () and held.resolution.rules
     grid = (jnp.array([[0.0, 10.0]]), jnp.array([[2.0, 2.0]]), jnp.array([0.03]))
     table = (*grid, term.quadrature, term.transmissions, scene.epoch)
-    with pytest.raises(ValueError, match="declares no reads"):
-        CountRateTable(*table, resolution=term.resolution)
-    CountRateTable(*table)
+    counts = CountRateTable(*table, resolution=term.resolution)
+    assert counts.resolution.rules and counts.reads == ()
+    with pytest.raises(TypeError):
+        PhotometryTerm(*parts, resolution=term.resolution, reads=())
+    with pytest.raises(TypeError):
+        CountRateTable(*table, resolution=term.resolution, reads=())
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_a_fit_frees_the_star_flux_table_under_a_held_resolution():
+    """Fails if a fit refuses the star's flux table, or its prediction goes stale.
+
+    ``Fit`` frees the flux table of the star (a leaf, since the knots are
+    static) with a photometric term whose resolution was built before the move.
+    The fit is accepted, and the prediction of the model with the moved table
+    equals that of a term rebuilt on the moved scene. Truth: the rebuilt term.
+    Tolerance basis: the operator is linear in the values, so the two differ by
+    float64 rounding of a sum of a few hundred cells; rtol 1e-12 (the move
+    changes the prediction by far more, which the test also requires).
+    """
+    scene = _scene()
+    (term,) = _target().terms("system", system=scene, transmissions={"F": _filter()})
+    flux = scene.star._flux_density_phot
+    path = "system.star._flux_density_phot"
+    Fit(_Holder(scene), {path: Normal(flux, 1.0)}, (term,))
+    ripple = 1.0 + 0.3 * jnp.sin(jnp.arange(flux.shape[0]) / 37.0)[:, None]
+    moved = eqx.tree_at(lambda s: s.star._flux_density_phot, scene, flux * ripple)
+    held = float(term.predict(_Holder(moved))[0])
+    rebuilt = float(_term(moved).predict(moved)[0])
+    assert abs(held / float(term.predict(_Holder(scene))[0]) - 1.0) > 1e-4
+    np.testing.assert_allclose(held, rebuilt, rtol=1e-12)
