@@ -329,7 +329,11 @@ def test_a_fit_frees_the_star_flux_table_under_a_held_resolution():
     equals that of a term rebuilt on the moved scene. Truth: the rebuilt term.
     Tolerance basis: the operator is linear in the values, so the two differ by
     float64 rounding of a sum of a few hundred cells; rtol 1e-12 (the move
-    changes the prediction by far more, which the test also requires).
+    changes the prediction by far more, which the test also requires). The
+    held prediction is also compared with the independent ``_truth`` of the
+    moved scene (eight-point Gauss on every cell between the knots), at rtol 1e-10:
+    both are float64 sums of the same piecewise-linear integrand over a few
+    hundred cells, so they differ by accumulated rounding, about 1e-14.
     """
     scene = _scene()
     (term,) = _target().terms("system", system=scene, transmissions={"F": _filter()})
@@ -342,3 +346,4 @@ def test_a_fit_frees_the_star_flux_table_under_a_held_resolution():
     rebuilt = float(_term(moved).predict(moved)[0])
     assert abs(held / float(term.predict(_Holder(scene))[0]) - 1.0) > 1e-4
     np.testing.assert_allclose(held, rebuilt, rtol=1e-12)
+    np.testing.assert_allclose(held, _truth(moved), rtol=1e-10)
