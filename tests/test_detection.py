@@ -805,6 +805,47 @@ def test_measure_flags_a_saddle_and_stays_there():
     np.testing.assert_allclose(est.value["p"], start["p"], rtol=1e-12)
     np.testing.assert_allclose(est.cov, np.diag([1.0, -1.0]), rtol=1e-12)
     assert np.isnan(float(est.sigma[1])) and float(est.sigma[0]) == pytest.approx(1.0)
+    assert est.assumptions == ()
+
+
+class _Line(eqx.Module):
+    """``model -> (amplitude, amplitude * pa_deg / 360)``."""
+
+    def __call__(self, model):
+        return jnp.stack([model.amplitude, model.amplitude * model.pa_deg / 360.0])
+
+
+class _Assuming(ForwardTerm):
+    """A forward term that names the assumptions it is built with."""
+
+    named: tuple[str, ...] = eqx.field(static=True, default=())
+
+    @property
+    def assumptions(self):
+        return self.named
+
+
+def test_the_detection_results_copy_the_fit_assumptions():
+    """Fails if ``detect`` or ``measure`` loses the record of the fit's assumptions.
+
+    Truth source: the names the terms declare; ``Fit.assumptions`` is their sorted
+    union (a name two terms share appears once). Tolerance basis: exact (tuples of
+    strings). A cheap Gaussian forward term stands in for an image term, since the
+    record is generic over term types.
+    """
+    data = gaussian_loglike(jnp.array([1.0, 0.5]), 1.0)
+    terms = (
+        _Assuming(_Line(), data, ("no_drift", "flat_field")),
+        _Assuming(_Line(), data, ("no_drift",)),
+    )
+    free = {"amplitude": Uniform(-5.0, 5.0), "pa_deg": Uniform(0.0, 360.0)}
+    fit = Fit(_sky(0.0, 0.0), free, terms)
+    assert fit.assumptions == ("flat_field", "no_drift")
+    trials = {"pa_deg": jnp.array([90.0, 180.0])}
+    assert detect(fit, trials, amplitude="amplitude").assumptions == fit.assumptions
+    start = {"amplitude": jnp.asarray(1.0), "pa_deg": jnp.asarray(180.0)}
+    assert measure(fit, start, n_newton=1).assumptions == fit.assumptions
+    assert Fit(_sky(0.0, 0.0), free, (ForwardTerm(_Line(), data),)).assumptions == ()
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")

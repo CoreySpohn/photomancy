@@ -65,11 +65,15 @@ class DetectionMap(eqx.Module):
             ``sign(a_hat) * sqrt(2 [max_a logL(a) - logL(0)])``.
         sigma: Formal standard error of ``a_hat``, ``1 / sqrt(curvature)``. It is
             infinite where the template is zero.
+        assumptions: The fit's ``Fit.assumptions`` for a map from :func:`detect`;
+            empty from :func:`likelihood_ratio_map`, which holds no fit. A map is
+            comparable with another only under the same assumptions.
     """
 
     a_hat: jax.Array
     z: jax.Array
     sigma: jax.Array
+    assumptions: tuple[str, ...] = eqx.field(static=True, default=())
 
 
 def _check_curvature(likelihood) -> None:
@@ -241,7 +245,7 @@ def _detect(fit, trials, amplitude, n_newton, batch_size):
         return _summarize(*_profile(objective, n_newton, jnp.float64))
 
     a_hat, z, sigma = jax.lax.map(at, trials, batch_size=batch_size)
-    return DetectionMap(a_hat=a_hat, z=z, sigma=sigma)
+    return DetectionMap(a_hat=a_hat, z=z, sigma=sigma, assumptions=fit.assumptions)
 
 
 def detect(
@@ -279,7 +283,8 @@ def detect(
             ``None`` for one at a time.
 
     Returns:
-        A :class:`DetectionMap` with leaves of shape ``(n_trials,)``.
+        A :class:`DetectionMap` with leaves of shape ``(n_trials,)`` and the fit's
+        ``assumptions``.
 
     Raises:
         ValueError: If ``amplitude`` is not a free leaf law of one element, or the
@@ -315,6 +320,9 @@ class LikelihoodEstimate(eqx.Module):
             saddle, on a ridge or off the peak (an undetected source).
         min_eigenvalue: The smallest eigenvalue of the observed information, in the
             units of the stored coordinates (negative when ``regular`` is false).
+        assumptions: The fit's ``Fit.assumptions``, copied because the estimate does
+            not hold the fit. An estimate is comparable with another only under the
+            same assumptions.
     """
 
     value: dict
@@ -322,6 +330,7 @@ class LikelihoodEstimate(eqx.Module):
     corr: jax.Array
     regular: jax.Array
     min_eigenvalue: jax.Array
+    assumptions: tuple[str, ...] = eqx.field(static=True, default=())
 
     @property
     def sigma(self) -> jax.Array:
@@ -441,7 +450,12 @@ def measure(
         fit, start, n_newton, batch_size, max_bytes
     )
     return LikelihoodEstimate(
-        value=value, cov=cov, corr=corr, regular=regular, min_eigenvalue=min_eig
+        value=value,
+        cov=cov,
+        corr=corr,
+        regular=regular,
+        min_eigenvalue=min_eig,
+        assumptions=fit.assumptions,
     )
 
 

@@ -85,6 +85,11 @@ class AbstractTerm(eqx.Module):
     ``marginalizes``. Two terms that each sum over one latent would be a product of two
     sums, not the sum of the product, so ``Fit`` refuses them.
 
+    A term whose likelihood rests on a modeling assumption the data cannot check
+    (``ImageTerm(static_beyond_speckle=True)``, no speckle drift beyond the field)
+    names it in :attr:`assumptions`; ``Fit.assumptions`` collects them, and the
+    detection results copy them.
+
     Attributes:
         reads: Model paths a held build cached. ``Fit`` refuses a free path or block
             write that meets one, because the likelihood would no longer see the change.
@@ -154,6 +159,14 @@ class AbstractTerm(eqx.Module):
 
         ``Fit`` runs :meth:`check` at both ends of the prior of a free leaf under one
         of these paths. Empty by default.
+        """
+        return ()
+
+    @property
+    def assumptions(self) -> tuple[str, ...]:
+        """Names of the modeling assumptions the term's likelihood makes; empty here.
+
+        Static Python strings, never traced, so they survive a transformation.
         """
         return ()
 
@@ -692,6 +705,15 @@ class Fit(eqx.Module):
     def block_order(self) -> tuple[str, ...]:
         """Block keys in the order they are applied."""
         return block_order(self.blocks)
+
+    @property
+    def assumptions(self) -> tuple[str, ...]:
+        """The sorted union of the terms' :attr:`AbstractTerm.assumptions`.
+
+        A likelihood, an information matrix or an evidence is comparable with another
+        only when the two fits make the same assumptions.
+        """
+        return tuple(sorted({name for term in self.terms for name in term.assumptions}))
 
     def _batch_ndim(self, x):
         """Number of leading batch axes of an entry dict (all entries agree)."""
