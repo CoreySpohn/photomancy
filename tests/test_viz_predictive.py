@@ -1,16 +1,15 @@
 """Contract tests for photomancy.viz predictive panels.
 
 The regression class here is the padded data containers: pad rows must
-never reach a drawn artist, and the AU/day -> m/s conversion is checked
-numerically.
+never reach a drawn artist, and ``plot_rv`` draws m/s as given.
 """
 
+import equinox as eqx
 import jax.numpy as jnp
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-from hwoutils.constants import AU2m, d2s
 
 matplotlib.use("Agg")
 
@@ -22,28 +21,62 @@ def _close_figures():
     plt.close("all")
 
 
-def test_plot_rv_converts_au_per_day_to_m_per_s():
-    """Curves convert to m/s; pad rows are never drawn."""
+def test_plot_rv_draws_m_per_s_as_given():
+    """Curves and observations are drawn in m/s unconverted; pad rows are not drawn."""
     from photomancy.measurements import RadialVelocityData
     from photomancy.viz import plot_rv
 
     t = np.linspace(0.0, 300.0, 50)
-    rv = 1.0e-6 * np.sin(2.0 * np.pi * t / 150.0)
+    rv = np.sin(2.0 * np.pi * t / 150.0)
     data = RadialVelocityData.pad(
         max_n=8,
         time_d=jnp.array([10.0, 90.0, 200.0]),
-        rv=jnp.array([1.0e-6, -0.5e-6, 0.2e-6]) * (AU2m / d2s),
-        rv_err=jnp.array([1.0e-7, 1.0e-7, 1.0e-7]) * (AU2m / d2s),
+        rv=jnp.array([1.0, -0.5, 0.2]),
+        rv_err=jnp.array([0.1, 0.1, 0.1]),
         inst_ids=jnp.zeros(3, dtype=int),
-        n_inst=1,
+        instruments=("a",),
     )
     result = plot_rv(t, rv, data=data)
     drawn = result.artists["lines"][0].get_ydata()
-    np.testing.assert_allclose(drawn, rv * AU2m / d2s, rtol=1e-12)
+    np.testing.assert_allclose(drawn, rv, rtol=1e-12)
     assert result.ax.get_ylabel() == "radial velocity [m/s]"
 
     errbar_line = [line for line in result.ax.lines if len(line.get_xdata()) == 3]
     assert errbar_line, "exactly the 3 valid epochs are drawn, no pad rows"
+
+
+def test_plot_rv_term_prediction_is_drawn_unconverted_and_valid_rows_by_mask():
+    """A 1 m/s prediction is drawn at 1 m/s; observations come from ``valid``.
+
+    Truth: the term's own ``predict`` is m/s, so the line sits at the input value;
+    with ``valid = [True, False, True]`` the drawn rows are 0 and 2, not a prefix.
+    """
+    from photomancy.measurements import RadialVelocityData, RadialVelocityTerm
+    from photomancy.viz import plot_rv
+
+    data = RadialVelocityData(
+        time_d=jnp.array([0.0, 1.0, 2.0]),
+        rv=jnp.array([10.0, 20.0, 30.0]),
+        rv_err=jnp.array([1.0, 2.0, 3.0]),
+        inst_ids=jnp.zeros(3, dtype=int),
+        valid=jnp.array([True, False, True]),
+        instruments=("a",),
+    )
+
+    class Unit(eqx.Module):
+        """A star at 1 m/s at every epoch."""
+
+        def star_radial_velocity(self, time_d):
+            return jnp.ones_like(time_d)
+
+    prediction = RadialVelocityTerm(data).predict(Unit())
+    result = plot_rv(np.array([0.0, 1.0, 2.0]), prediction, data=data)
+    np.testing.assert_allclose(result.artists["lines"][0].get_ydata(), [1.0, 0.0, 1.0])
+    observed = result.ax.lines[1]
+    np.testing.assert_allclose(observed.get_xdata(), [0.0, 2.0])
+    np.testing.assert_allclose(observed.get_ydata(), [10.0, 30.0])
+    segments = result.artists["collection"].get_segments()
+    np.testing.assert_allclose([s[:, 1] for s in segments], [[9.0, 11.0], [27.0, 33.0]])
 
 
 def test_plot_rv_fan_alpha():
@@ -157,7 +190,7 @@ def test_plot_rv_preserves_observed_m_per_s():
         rv=jnp.array([8.0, -3.0]),
         rv_err=jnp.array([0.5, 0.7]),
         inst_ids=jnp.zeros(2, dtype=int),
-        n_inst=1,
+        instruments=("a",),
     )
     result = plot_rv(np.array([0.0, 30.0]), np.zeros(2), data=data)
     np.testing.assert_allclose(result.ax.lines[1].get_ydata(), [8.0, -3.0])

@@ -8,26 +8,32 @@ from typing import ClassVar, Self
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from hwoutils.model_paths import resolve
 from orbix.system import System
 
 from photomancy.infer.fit import AbstractTerm
+from photomancy.measurements._observables import _concrete
 from photomancy.measurements._padding import _pad_1d, _valid_mask
 
 __all__ = ["RadialVelocityData", "RadialVelocityTerm", "loglike_rv_marginalized"]
 
 
 class RadialVelocityData(eqx.Module):
-    """Radial velocity observations from one or more instruments.
+    """Radial velocity observations from one or more named instruments.
+
+    An instrument is one calibration: its constant offset is a single latent across
+    the whole fit. Two sets of rows that share a name share the offset; a separate
+    calibration of the same spectrograph takes a name of its own.
 
     Attributes:
         time_d: Observation epochs (days). Shape ``(N,)``.
         rv: Measured radial velocities (m/s). Shape ``(N,)``.
         rv_err: RV measurement uncertainties (m/s). Shape ``(N,)``.
-        inst_ids: Integer instrument index per observation, ``0..n_inst-1``.
-            Shape ``(N,)``.
+        inst_ids: Integer index into ``instruments`` per observation. Shape ``(N,)``.
+            Every valid row lies in ``[0, n_inst)``; padded rows keep their sentinel.
         valid: Boolean validity mask. Shape ``(N,)``.
-        n_inst: Number of distinct instruments (static, for ``segment_sum``).
+        instruments: Unique instrument names (static); ``n_inst`` is its length.
     """
 
     time_d: jnp.ndarray
@@ -35,18 +41,44 @@ class RadialVelocityData(eqx.Module):
     rv_err: jnp.ndarray
     inst_ids: jnp.ndarray
     valid: jnp.ndarray
-    n_inst: int = eqx.field(static=True)
+    instruments: tuple[str, ...] = eqx.field(static=True)
+
+    def __check_init__(self):
+        """Require unique string names and, when concrete, in-range valid-row ids."""
+        names = self.instruments
+        if (
+            not isinstance(names, tuple)
+            or not names
+            or not all(isinstance(n, str) for n in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ValueError(
+                f"instruments must be a nonempty tuple of unique strings: {names!r}"
+            )
+        leaves = (self.inst_ids, self.valid)
+        if not any(isinstance(x, jax.core.Tracer) for x in leaves):
+            ids = np.asarray(self.inst_ids)[np.asarray(self.valid)]
+            if np.any((ids < 0) | (ids >= self.n_inst)):
+                raise ValueError(
+                    f"inst_ids of valid rows must lie in [0, {self.n_inst}) for "
+                    f"instruments {self.instruments}; got {np.unique(ids).tolist()}"
+                )
+
+    @property
+    def n_inst(self) -> int:
+        """Number of instruments, the length of ``instruments``."""
+        return len(self.instruments)
 
     @classmethod
-    def pad(cls, *, time_d, rv, rv_err, inst_ids, n_inst, max_n):
+    def pad(cls, *, time_d, rv, rv_err, inst_ids, instruments, max_n):
         """Create a padded RadialVelocityData with ``valid`` mask.
 
         Args:
             time_d: Observation epochs (days). Shape ``(N,)``.
             rv: Measured radial velocities (m/s). Shape ``(N,)``.
             rv_err: Velocity uncertainties (m/s). Shape ``(N,)``. Padded rows hold 1.0.
-            inst_ids: Instrument index per row, ``0..n_inst-1``. Shape ``(N,)``.
-            n_inst: Number of distinct instruments.
+            inst_ids: Index into ``instruments`` per row. Shape ``(N,)``.
+            instruments: Unique instrument names.
             max_n: Row capacity of the result.
 
         Returns:
@@ -60,16 +92,16 @@ class RadialVelocityData(eqx.Module):
             rv_err=_pad_1d(rv_err, max_n, fill=1.0),
             inst_ids=_pad_1d(inst_ids, max_n).astype(int),
             valid=_valid_mask(n, max_n),
-            n_inst=n_inst,
+            instruments=tuple(instruments),
         )
 
     @classmethod
-    def zeros(cls, max_n, n_inst=1):
+    def zeros(cls, max_n, instruments):
         """Create an all-invalid placeholder (for model tracing).
 
         Args:
             max_n: Row capacity of the placeholder.
-            n_inst: Number of instruments.
+            instruments: Unique instrument names.
 
         Returns:
             Data of shape ``(max_n,)`` with every row invalid and unit errors.
@@ -80,7 +112,7 @@ class RadialVelocityData(eqx.Module):
             rv_err=jnp.ones(max_n),
             inst_ids=jnp.zeros(max_n, dtype=int),
             valid=jnp.zeros(max_n, dtype=bool),
-            n_inst=n_inst,
+            instruments=tuple(instruments),
         )
 
 
@@ -106,7 +138,7 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
         rv_err: RV measurement uncertainties (m/s). Shape ``(N,)``.
         inst_ids: Integer instrument index per obs, ``0..n_inst-1``.
             Shape ``(N,)``.
-        n_inst: Number of distinct instruments. Integer.
+        n_inst: Number of instruments. Integer.
         jitters: Per-instrument jitter terms (m/s). Shape ``(n_inst,)``.
         valid: Boolean validity mask. Shape ``(N,)``.
 
@@ -125,9 +157,20 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
     r = jnp.where(mask, rv_obs, 0.0) - jnp.where(mask, rv_model, 0.0)
 
     # Segment sums collapse the matrix algebra to O(N)
+    # The weighted spread about each instrument's weighted mean. Residuals are first
+    # anchored to the instrument's first valid row, so a large common offset never
+    # enters the sums and a one-row instrument contributes exactly zero.
+    rows = jnp.arange(r.size)
+    first = jax.ops.segment_min(
+        jnp.where(mask, rows, r.size), inst_ids, num_segments=n_inst
+    )
+    anchor = jnp.where(first < r.size, r[jnp.minimum(first, r.size - 1)], 0.0)
+    shifted = jnp.where(mask, r - anchor[inst_ids], 0.0)
     A = jax.ops.segment_sum(w, inst_ids, num_segments=n_inst)
-    B = jax.ops.segment_sum(w * r, inst_ids, num_segments=n_inst)
-    C = jax.ops.segment_sum(w * r**2, inst_ids, num_segments=n_inst)
+    B = jax.ops.segment_sum(w * shifted, inst_ids, num_segments=n_inst)
+    centre = B / jnp.where(A > 0, A, 1.0)
+    spread = jnp.where(mask, shifted - centre[inst_ids], 0.0)
+    C_centred = jax.ops.segment_sum(w * spread**2, inst_ids, num_segments=n_inst)
 
     counts = jax.ops.segment_sum(mask.astype(float), inst_ids, num_segments=n_inst)
 
@@ -136,7 +179,7 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
     J = jnp.sum(A > 0)
     A_safe = jnp.where(A > 0, A, 1.0)
     return -0.5 * (
-        jnp.sum(C - B**2 / A_safe)
+        jnp.sum(C_centred)
         + jnp.sum(jnp.log(A_safe))
         + jnp.sum(jnp.where(mask, jnp.log(var), 0.0))
         + (N_valid - J) * jnp.log(2.0 * jnp.pi)
@@ -153,6 +196,12 @@ class RadialVelocityTerm(AbstractTerm):
     ``jitters``, a model leaf read at ``jitter_path`` (so a fit can free it), or zeros
     when neither is given. Predictions have shape ``(T,)`` with invalid rows zeroed.
     Data ``time_d`` is in days from the system's epoch.
+
+    The offset of an instrument is one latent across the whole fit: the term names it
+    in ``marginalizes`` as ``"rv_offset:<system_path>:<instrument>"``, so ``Fit``
+    refuses a second term that integrates the same offset. Rows of an instrument that
+    arrive later join the term through :meth:`merged` (``photomancy.infer.update``
+    does it); a separate calibration of the same spectrograph takes its own name.
 
     Attributes:
         data: Radial velocity observations.
@@ -177,6 +226,102 @@ class RadialVelocityTerm(AbstractTerm):
         if self.jitters is not None and jnp.shape(self.jitters) != (self.data.n_inst,):
             raise ValueError("jitters must have shape (data.n_inst,)")
 
+    @property
+    def marginalizes(self) -> tuple[str, ...]:
+        """One latent per instrument: ``"rv_offset:<system_path>:<instrument>"``."""
+        return tuple(
+            f"rv_offset:{self.system_path}:{name}" for name in self.data.instruments
+        )
+
+    def merged(self, other) -> Self:
+        """Return the term scoring the rows of both under one offset per instrument.
+
+        The instruments of ``other`` join by name: a name already held shares its
+        offset, a new one is appended after the held names. Valid rows of ``self``
+        come first, then those of ``other`` with ``inst_ids`` remapped. The row
+        capacity of ``self`` is kept when the rows fit and grows to their count
+        otherwise. Runs on the host, on concrete data.
+
+        Args:
+            other: A ``RadialVelocityTerm`` of the same ``system_path`` and jitter
+                source.
+
+        Returns:
+            The merged term. Its score equals the one term built from all rows.
+
+        Raises:
+            TypeError: When ``other`` is not a ``RadialVelocityTerm``.
+            ValueError: When a term is traced (both must be concrete); when the system
+                path differs; when one term has a
+                ``jitter_path`` and the other a different one or fixed jitters (a
+                ``jitter_path`` also needs identical instruments, since its leaf has
+                one entry per instrument); or when a shared name has two fixed jitters.
+        """
+        if not _concrete(self, other):
+            raise ValueError(
+                "merged reads the rows on the host, so both terms must be concrete; "
+                "inside jit, replace the held term yourself with update(..., index=i)"
+            )
+        if not isinstance(other, RadialVelocityTerm):
+            raise TypeError(
+                f"RadialVelocityTerm.merged needs a RadialVelocityTerm, got "
+                f"{type(other).__name__}"
+            )
+        if self.system_path != other.system_path:
+            raise ValueError(
+                f"cannot merge RV terms of system paths {self.system_path!r} and "
+                f"{other.system_path!r}"
+            )
+        if self.jitter_path != other.jitter_path or (
+            (self.jitters is None) != (other.jitters is None)
+        ):
+            raise ValueError("cannot merge RV terms with different jitter sources")
+        mine, theirs = self.data.instruments, other.data.instruments
+        if self.jitter_path is not None and mine != theirs:
+            raise ValueError(
+                "RV terms read at one jitter_path need identical instruments, got "
+                f"{mine} and {theirs}"
+            )
+        instruments = mine + tuple(n for n in theirs if n not in mine)
+        jitters = None
+        if self.jitters is not None:
+            fixed = dict(zip(mine, np.asarray(self.jitters).tolist(), strict=True))
+            for name, value in zip(
+                theirs, np.asarray(other.jitters).tolist(), strict=True
+            ):
+                if fixed.setdefault(name, value) != value:
+                    raise ValueError(
+                        f"instrument {name!r} has fixed jitter {fixed[name]} in one "
+                        f"term and {value} in the other"
+                    )
+            jitters = jnp.asarray([fixed[n] for n in instruments])
+        remap = np.array([instruments.index(n) for n in theirs], dtype=int)
+        a, b = self.data, other.data
+        keep_a, keep_b = np.asarray(a.valid), np.asarray(b.valid)
+        rows = {
+            "time_d": np.concatenate(
+                [np.asarray(a.time_d)[keep_a], np.asarray(b.time_d)[keep_b]]
+            ),
+            "rv": np.concatenate([np.asarray(a.rv)[keep_a], np.asarray(b.rv)[keep_b]]),
+            "rv_err": np.concatenate(
+                [np.asarray(a.rv_err)[keep_a], np.asarray(b.rv_err)[keep_b]]
+            ),
+            "inst_ids": np.concatenate(
+                [np.asarray(a.inst_ids)[keep_a], remap[np.asarray(b.inst_ids)[keep_b]]]
+            ),
+        }
+        data = RadialVelocityData.pad(
+            instruments=instruments,
+            max_n=max(a.valid.shape[0], rows["rv"].shape[0]),
+            **{k: jnp.asarray(v) for k, v in rows.items()},
+        )
+        return type(self)(
+            data=data,
+            system_path=self.system_path,
+            jitters=jitters,
+            jitter_path=self.jitter_path,
+        )
+
     def _jitters(self, model):
         if self.jitter_path is not None:
             jitters = resolve(model, self.jitter_path)
@@ -196,7 +341,7 @@ class RadialVelocityTerm(AbstractTerm):
             rv_err=jnp.where(valid, self.data.rv_err, 1.0),
             inst_ids=jnp.where(valid, self.data.inst_ids, 0),
             valid=valid,
-            n_inst=self.data.n_inst,
+            instruments=self.data.instruments,
         )
         system = resolve(model, self.system_path)
         if isinstance(system, System):

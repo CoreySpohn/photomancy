@@ -1,6 +1,8 @@
 """Observables read from a system or scene, shared by terms and reports."""
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from orbix.system import System
 
 
@@ -12,6 +14,59 @@ def _sky_positions(system, time_d):
             ephemeris.offset_arcsec(jnp.arange(1, system.orbits.a_AU.size + 1))
         )
     return system.positions(time_d=time_d)
+
+
+def _concrete(*values):
+    """True when no value is a tracer, so a host range check can read it."""
+    return not any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(values))
+
+
+def _planet_count(system, forward=None):
+    """Number of planets of a system or scene, read on the host, or ``None``.
+
+    A bare ``System`` and an object with ``n_planets`` answer directly; any other model
+    gives the count from the planet axis of ``forward()``, the term's own forward
+    result. A traced ``n_planets`` is unknown on the host and gives ``None``.
+    """
+    if isinstance(system, System):
+        return int(system.orbits.a_AU.size)
+    if hasattr(system, "n_planets"):
+        count = system.n_planets
+        return None if isinstance(count, jax.core.Tracer) else int(count)
+    return int(forward())
+
+
+def _check_indices(selected, valid, count, name, what):
+    """Raise when a valid row's index lies outside ``[0, count)``.
+
+    Negative indices are refused, not wrapped. Padded rows are not read. The check runs
+    on concrete values only, compared on the host: under a trace the indices are
+    unknown and nothing is tested.
+    """
+    if count is not None and _concrete(selected, valid):
+        chosen = np.asarray(selected)[np.asarray(valid, bool)]
+        if np.any((chosen < 0) | (chosen >= count)):
+            raise ValueError(
+                f"{name}: a valid row selects {what} {np.unique(chosen).tolist()} "
+                f"but there are {count}; indices lie in [0, {count})"
+            )
+
+
+def _check_planets(system, planet, valid, name, forward=None, time_d=None):
+    """Raise when a valid row selects a planet outside ``[0, n_planets)``.
+
+    ``forward(time_d)`` gives the planet axis of the term's own prediction; it is
+    called at the valid rows' epochs ``time_d``, and not at all when no valid row
+    selects a planet.
+    """
+    if not _concrete(planet, valid, time_d):
+        return
+    live = np.asarray(valid, bool)
+    if not live.any():
+        return
+    epochs = None if time_d is None else jnp.asarray(np.asarray(time_d)[live])
+    count = _planet_count(system, None if forward is None else lambda: forward(epochs))
+    _check_indices(planet, valid, count, name, "planet")
 
 
 def _relative_positions(system, time_d, planet):
@@ -26,17 +81,22 @@ def _stellar_reflex(system, time_d):
     return system.star_reflex(time_d=time_d)
 
 
-def _band_contrasts(
-    system, quadrature, transmissions, time_d, band_id, planet, resolution
-):
-    """Select each row's filter, planet and epoch from a single scene evaluation."""
+def _band_table(system, quadrature, transmissions, time_d, resolution):
+    """Band contrasts ``(W, K, T)`` of a system, one filter response per band."""
 
     def response(nodes_nm):
         return jnp.stack(
             [curve(row) for curve, row in zip(transmissions, nodes_nm, strict=True)]
         )
 
-    bands = system.band_contrasts(
+    return system.band_contrasts(
         quadrature, time_d, resolution=resolution, transmission=response
     )
+
+
+def _band_contrasts(
+    system, quadrature, transmissions, time_d, band_id, planet, resolution
+):
+    """Select each row's filter, planet and epoch from a single scene evaluation."""
+    bands = _band_table(system, quadrature, transmissions, time_d, resolution)
     return bands[band_id, planet, jnp.arange(time_d.size)]

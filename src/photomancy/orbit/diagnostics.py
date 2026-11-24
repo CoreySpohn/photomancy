@@ -19,7 +19,10 @@ def classical_elements(posterior, key, n, *, orbit_path, planet=0):
         n: Number of samples.
         orbit_path: Model path of the batched orbits, for example
             ``"dynamics.orbits"``.
-        planet: Planet index of those orbits.
+        planet: Planet index of those orbits, in ``[0, n_planets)``.
+
+    Raises:
+        ValueError: When ``planet`` is outside the orbit rows.
 
     Returns:
         Dict ``{name: (n,)}`` with ``period_d``, ``a_AU``, ``e``, ``cos_i``,
@@ -30,6 +33,14 @@ def classical_elements(posterior, key, n, *, orbit_path, planet=0):
 
     def one(x):
         orbits = resolve(posterior.fit.model_at(x), orbit_path)
+        count = jax.tree.leaves(orbits)[0].shape[0]
+        if not isinstance(planet, jax.core.Tracer):
+            host = int(planet)
+            if not 0 <= host < count:
+                raise ValueError(
+                    f"planet {host} is outside the {count} orbit row(s) at "
+                    f"{orbit_path!r}; indices lie in [0, {count})"
+                )
         orbit = jax.tree.map(lambda leaf: leaf[planet], orbits)
         classical = orbit.to_classical()
         return {

@@ -665,7 +665,7 @@ def test_rv_marginal_integrates_to_one_over_the_contrast():
         rv=[0.0, 0.0, 0.0],
         rv_err=[1.5, 2.5, 1.0],
         inst_ids=[0, 0, 1],
-        n_inst=2,
+        instruments=("a", "b"),
     )
     jitters = jnp.array([0.7, 0.3])
     model = jnp.where(data.valid, 3.0, 0.0)
@@ -808,3 +808,142 @@ def test_term_sampling_laws(kind):
     z = np.asarray(z)
     assert np.all(np.abs(z.mean(axis=0)) < 4 / np.sqrt(2000))
     assert np.all(np.abs(z.var(axis=0, ddof=1) - 1) < 4 * np.sqrt(2 / 1999))
+
+
+def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check():
+    """Planet 1 or -1 on a one-planet system raises in ``check`` for both selectors.
+
+    Truth: the system has one planet, so valid selectors are ``[0, 1)``; negative
+    values do not wrap. A padded row with planet 5 is not read.
+    Fails if: the selector is clamped (JAX gather) and the row silently scores planet 0.
+    """
+    system = _system()
+    astrometry = _data()
+    photometry = _new_term("photometry")
+    for planet in (1, -1):
+        row = eqx.tree_at(lambda d: d.planet, astrometry, jnp.full(4, planet))
+        with pytest.raises(ValueError, match="planet"):
+            RelativeAstrometryTerm(row).check(system)
+        with pytest.raises(ValueError, match="planet"):
+            Fit(system, {}, (RelativeAstrometryTerm(row),))
+        data = eqx.tree_at(lambda d: d.planet, photometry.data, jnp.full(4, planet))
+        with pytest.raises(ValueError, match="planet"):
+            eqx.tree_at(lambda t: t.data, photometry, data).check(system)
+    RelativeAstrometryTerm(astrometry).check(system)
+    photometry.check(system)
+    padded = eqx.tree_at(
+        lambda d: (d.planet, d.valid),
+        astrometry,
+        (jnp.full(4, 5), jnp.zeros(4, bool)),
+    )
+    RelativeAstrometryTerm(padded).check(system)
+
+
+def test_selector_checks_skip_traced_inputs_and_a_band_only_model_is_accepted():
+    """Traced selectors skip ``check``; a model with only ``band_contrasts`` fits.
+
+    Truth: under ``jit`` the indices are unknown, so no check can run and none may
+    raise; a model that implements only the documented ``band_contrasts`` has its
+    planet count from the planet axis of that result (one planet here).
+    Fails if: ``check`` converts a tracer to NumPy, or the count is read from
+    ``positions`` (absent on this model).
+    """
+    system = _system()
+    astrometry = _data()
+    photometry = _new_term("photometry")
+
+    def run(planet, valid):
+        row = eqx.tree_at(lambda d: (d.planet, d.valid), astrometry, (planet, valid))
+        RelativeAstrometryTerm(row).check(system)
+        data = eqx.tree_at(
+            lambda d: (d.planet, d.valid), photometry.data, (planet, valid)
+        )
+        eqx.tree_at(lambda t: t.data, photometry, data).check(system)
+        return jnp.zeros(())
+
+    jax.jit(run)(jnp.full(4, 7), jnp.ones(4, bool))
+
+    class BandOnly(eqx.Module):
+        scale: jax.Array
+
+        def band_contrasts(self, quadrature, time_d, *, resolution, transmission):
+            return self.scale * jnp.ones((len(quadrature.bands), 1, time_d.size))
+
+    model = BandOnly(jnp.asarray(1e-10))
+    photometry.check(model)
+    Fit(model, {}, (photometry,))
+    bad = eqx.tree_at(lambda d: d.planet, photometry.data, jnp.ones(4, int))
+    with pytest.raises(ValueError, match="planet"):
+        eqx.tree_at(lambda t: t.data, photometry, bad).check(model)
+
+
+def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check():
+    """Band -1 or 1 with one band raises; band 0 and padded rows pass.
+
+    Truth: one band, so valid indices are ``[0, 1)``; JAX would clamp -1 and 1 to
+    band 0 and score the wrong filter.
+    Fails if: ``band_id`` is not range checked.
+    """
+    system = _system()
+    term = _new_term("photometry")
+    for band in (1, -1):
+        data = eqx.tree_at(lambda d: d.band_id, term.data, jnp.full(4, band))
+        bad = eqx.tree_at(lambda t: t.data, term, data)
+        with pytest.raises(ValueError, match="band"):
+            bad.check(system)
+        with pytest.raises(ValueError, match="band"):
+            Fit(system, {}, (bad,))
+    padded = eqx.tree_at(
+        lambda d: (d.band_id, d.valid),
+        term.data,
+        (jnp.full(4, 9), jnp.zeros(4, bool)),
+    )
+    eqx.tree_at(lambda t: t.data, term, padded).check(system)
+
+
+def test_a_traced_planet_count_and_a_late_epoch_model_pass_check():
+    """A traced ``n_planets`` skips the check; a model covering only later days fits.
+
+    Truth: under ``jit`` the count is unknown, so nothing can be tested and nothing may
+    raise. A band-only model that has no prediction before day 1 still predicts every
+    valid row, whose epochs are all after day 1, so the planet count is read there, not
+    at a synthetic day zero; with no valid row the model is not called at all.
+    Fails if: ``int()`` is taken of a traced count, or the forward call is made at
+    day zero or with no valid selector.
+    """
+    system = _system()
+    astrometry = _data()
+    photometry = _new_term("photometry")
+
+    class Counted(eqx.Module):
+        n_planets: jax.Array
+
+        def positions(self, *, time_d):
+            return jnp.zeros((2, 1, time_d.size))
+
+    def run(n):
+        RelativeAstrometryTerm(astrometry).check(Counted(n))
+        photometry.check(Counted(n))
+        return n
+
+    jax.jit(run)(jnp.asarray(1))
+
+    class Late(eqx.Module):
+        scale: jax.Array
+
+        def band_contrasts(self, quadrature, time_d, *, resolution, transmission):
+            if np.any(np.asarray(time_d) < 1.0):
+                raise ValueError("no prediction before day 1")
+            return self.scale * jnp.ones((len(quadrature.bands), 1, time_d.size))
+
+    late = eqx.tree_at(
+        lambda d: (d.time_d, d.valid),
+        photometry.data,
+        (jnp.array([5.0, 6.0, 7.0, 8.0]), jnp.ones(4, bool)),
+    )
+    term = eqx.tree_at(lambda t: t.data, photometry, late)
+    term.check(Late(jnp.asarray(1e-10)))
+    Fit(Late(jnp.asarray(1e-10)), {}, (term,))
+    unused = eqx.tree_at(lambda d: d.valid, late, jnp.zeros(4, bool))
+    eqx.tree_at(lambda t: t.data, term, unused).check(Late(jnp.asarray(1e-10)))
+    assert system is not None

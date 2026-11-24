@@ -161,7 +161,7 @@ class TestDataContainers:
             rv_err=jnp.array([0.1, 0.1, 0.1]),
             inst_ids=jnp.array([0, 0, 1]),
             valid=jnp.ones(3, dtype=bool),
-            n_inst=2,
+            instruments=("a", "b"),
         )
         assert data.time_d.shape == (3,)
         assert data.n_inst == 2

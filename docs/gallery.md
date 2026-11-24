@@ -181,11 +181,11 @@ result = viz.plot_corner_overlay(
 
 ## plot_rv
 
-Radial-velocity curves, converted from the AU/day of orbit velocities to the
-m/s a reader expects. A `(T,)` array draws one curve and a `(K, T)` array draws
-a fan of posterior-predictive draws, which is how a posterior is usually shown
-against its data. Passing a `RadialVelocityData`, which holds its velocities in
-m/s, adds its valid prefix as errorbars.
+Radial-velocity curves in m/s, the unit `RadialVelocityTerm.predict` returns;
+the panel draws them as given. A `(T,)` array draws one curve and a `(K, T)`
+array draws a fan of posterior-predictive draws, which is how a posterior is
+usually shown against its data. Passing a `RadialVelocityData`, which holds its
+velocities in m/s, adds its valid rows as errorbars.
 
 ```{code-cell} ipython3
 t_d = jnp.linspace(0.0, TRUTH["period_d"], 300)
@@ -214,9 +214,9 @@ def stellar_rv_au_per_d(orbit, mass_kg, times):
     return -(mass_kg / (Msun2kg + mass_kg)) * velocity[..., 2]
 
 
-rv_fan = jax.vmap(lambda orbit, mass: stellar_rv_au_per_d(orbit, mass, t_d))(
-    orbits_of(draws), draws["Mp"]
-)
+rv_fan = AU_PER_D_TO_M_PER_S * jax.vmap(
+    lambda orbit, mass: stellar_rv_au_per_d(orbit, mass, t_d)
+)(orbits_of(draws), draws["Mp"])
 
 # Five epochs of the truth, with noise, entered the way real data would be.
 rng = np.random.default_rng(4)
@@ -233,7 +233,7 @@ rv_data = RadialVelocityData.pad(
     rv=jnp.asarray(rv_obs_m_s),
     rv_err=jnp.full(t_obs.size, rv_err_m_s),
     inst_ids=jnp.zeros(t_obs.size, dtype=int),
-    n_inst=1,
+    instruments=("a",),
     max_n=256,
 )
 

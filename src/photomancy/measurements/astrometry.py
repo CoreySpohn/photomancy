@@ -26,7 +26,9 @@ from photomancy.infer.fit import (
     LinearGaussian,
 )
 from photomancy.measurements._observables import (
+    _check_planets,
     _relative_positions,
+    _sky_positions,
     _stellar_reflex,
 )
 from photomancy.measurements._padding import _pad_1d, _valid_mask
@@ -326,6 +328,27 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
     data: AstrometryData
     system_path: str = eqx.field(static=True, default="")
     reads: ClassVar[tuple[str, ...]] = ()
+
+    def check(self, model) -> None:
+        """Require every valid row's planet to index a planet of the system.
+
+        Args:
+            model: The model holding the system at ``system_path``, with concrete
+                values.
+
+        Raises:
+            ValueError: For a valid row whose planet is negative or at least the
+                number of planets.
+        """
+        system = resolve(model, self.system_path)
+        _check_planets(
+            system,
+            self.data.planet,
+            self.data.valid,
+            "RelativeAstrometryTerm",
+            lambda t: _sky_positions(system, t).shape[1],
+            self.data.time_d,
+        )
 
     def _score(self, model):
         valid = self.data.valid

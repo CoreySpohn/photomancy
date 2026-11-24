@@ -1163,7 +1163,16 @@ def test_the_detection_results_copy_the_fit_assumptions():
     assert Fit(_sky(0.0, 0.0), free, (ForwardTerm(_Line(), data),)).assumptions == ()
     sheets = SheetSum(terms, orbit_path="orbits")
     assert sheets.assumptions == ("flat_field", "no_drift")
-    assert Fit(_sky(0.0, 0.0), free, (sheets,)).assumptions == sheets.assumptions
+
+    class _Stack(eqx.Module):
+        quat: jax.Array
+
+    class _SkyWithOrbit(_Sky):
+        orbits: _Stack
+
+    sky = _sky(0.0, 0.0)
+    held = _SkyWithOrbit(sky.amplitude, sky.pa_deg, _Stack(jnp.zeros((1, 4))))
+    assert Fit(held, free, (sheets,)).assumptions == sheets.assumptions
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")

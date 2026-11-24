@@ -16,6 +16,7 @@ from typing import ClassVar, Self
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from hwoutils.epoch import Epoch
 from hwoutils.model_paths import resolve
 from jax.scipy.special import log_ndtr
@@ -25,7 +26,9 @@ from optixstuff.spectral import Quadrature, Resolution, Transmission
 from photomancy.infer.fit import AbstractProposingTerm, LeafProposal
 from photomancy.measurements._observables import (
     _band_contrasts,
+    _check_planets,
     _relative_positions,
+    _sky_positions,
 )
 from photomancy.measurements.astrometry import AstrometryData
 
@@ -511,6 +514,28 @@ class ReportTerm(AbstractProposingTerm):
         Empty for a predictor that holds no build.
         """
         return getattr(self.predictor, "reads", ())
+
+    def check(self, model) -> None:
+        """Require a precomputed predictor's planet to index a planet of the model.
+
+        Args:
+            model: The model holding the system read by the predictor, with concrete
+                values.
+
+        Raises:
+            ValueError: When the predictor's ``planet`` is at least the number of
+                planets.
+        """
+        if isinstance(self.predictor, PrecomputedReportPredictor):
+            rows = self.data
+            _check_planets(
+                model,
+                np.full(rows.time_d.shape, self.predictor.planet),
+                rows.valid,
+                "ReportTerm",
+                lambda t: _sky_positions(model, t).shape[1],
+                rows.time_d,
+            )
 
     def __check_init__(self):
         """Require row diffraction scales for an exact predictor."""

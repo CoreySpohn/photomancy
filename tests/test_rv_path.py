@@ -1,5 +1,8 @@
 """Regression coverage for RV units, masks, priors, and orbital dynamics."""
 
+import dataclasses
+
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -50,7 +53,7 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
         rv_err=jnp.full(times.shape, 0.2),
         inst_ids=jnp.zeros(times.shape, dtype=int),
         valid=jnp.ones(times.shape, dtype=bool),
-        n_inst=1,
+        instruments=("a",),
     )
     term = RadialVelocityTerm(rv, jitters=jnp.array([0.01]))
 
@@ -257,7 +260,7 @@ def test_rv_term_uses_total_mass():
         rv_err=jnp.full(4, 0.5),
         inst_ids=jnp.zeros(4, dtype=int),
         valid=jnp.ones(4, dtype=bool),
-        n_inst=1,
+        instruments=("a",),
     )
     term = RadialVelocityTerm(data, jitters=jnp.array([0.01]))
     value, prediction = both(term, _circular_system(periods, masses, cos_i))
@@ -415,7 +418,7 @@ def test_sheet_sum_draw_samples_the_density_it_scores():
         rv_err=jnp.full(2, 0.01),
         inst_ids=jnp.zeros(2, dtype=int),
         valid=jnp.ones(2, dtype=bool),
-        n_inst=1,
+        instruments=("rv",),
     )
     term = RadialVelocityTerm(data, jitters=jnp.array([0.0]))
     sheets = SheetSum((term, term), "orbits", 0)
@@ -428,3 +431,200 @@ def test_sheet_sum_draw_samples_the_density_it_scores():
     difference = np.asarray(drawn.terms[0].data.rv - drawn.terms[1].data.rv)
     spread = float(np.std(difference)) / (np.sqrt(2.0) * 0.01)
     assert abs(spread - 1.0) < 4 / np.sqrt(2 * (difference.size - 1))
+
+
+class _Ramp(eqx.Module):
+    """A star whose velocity is ``slope`` m/s after the epoch day, zero at it."""
+
+    slope: jax.Array
+
+    def star_radial_velocity(self, time_d):
+        return self.slope * (time_d > 0)
+
+
+def _rv_row_term(times, rvs, ids, instruments, jitters=None, max_n=None):
+    n = len(times)
+    return RadialVelocityTerm(
+        RadialVelocityData.pad(
+            time_d=times,
+            rv=rvs,
+            rv_err=[1.0] * n,
+            inst_ids=ids,
+            instruments=instruments,
+            max_n=max_n or n,
+        ),
+        jitters=None if jitters is None else jnp.asarray(jitters),
+    )
+
+
+def test_rv_offset_is_one_latent_per_instrument_and_merged_terms_score_the_union():
+    """Two terms of one instrument are refused; their merge scores the joint rows.
+
+    Truth: hand marginal of two unit-error rows observed at (0, 10) m/s whose
+    prediction changes by 0 or 10 m/s: ``-0.5 * 50 - 0.5 log 2 - 0.5 log 2 pi + 0.5
+    log 2`` is -25.918939 and, with a zero residual contrast, -0.918939 (1e-9). A
+    single row alone integrates to 0, which is why a split pair scores 0 at both.
+    Fails if: ``marginalizes`` is empty (the split pair is accepted and scores 0), or
+    the merge drops the offset sharing.
+    """
+    from photomancy.infer import Fit
+
+    first = _rv_row_term([0.0], [0.0], [0], ("a",))
+    second = _rv_row_term([100.0], [10.0], [0], ("a",))
+    assert first.marginalizes == ("rv_offset::a",)
+    with pytest.raises(ValueError, match="rv_offset::a"):
+        Fit(_Ramp(jnp.asarray(0.0)), {}, (first, second))
+    merged = first.merged(second)
+    together = _rv_row_term([0.0, 100.0], [0.0, 10.0], [0, 0], ("a",))
+    half_log_2pi = 0.5 * np.log(2.0 * np.pi)
+    # -0.5 * (spread + log A + sum log var + (N - J) log 2 pi - log N) with N = 2,
+    # J = 1, A = 2, unit variances: the spread is 50 or 0.
+    for slope, expected in ((0.0, -25.0 - half_log_2pi), (10.0, -half_log_2pi)):
+        model = _Ramp(jnp.asarray(slope))
+        assert float(first(model) + second(model)) == 0.0
+        np.testing.assert_allclose(float(merged(model)), expected, rtol=0, atol=1e-9)
+        np.testing.assert_allclose(merged(model), together(model), rtol=1e-12)
+    assert Fit(_Ramp(jnp.asarray(0.0)), {}, (merged,)).terms == (merged,)
+
+
+def test_rv_merge_joins_instruments_by_name_and_remaps_ids():
+    """Terms of ``("a",)`` and ``("b", "a")`` merge to ``("a", "b")`` without mixing.
+
+    Truth: the term built directly from all rows with the ids written by hand
+    (1e-12). Capacity of the first term (8) is kept; unequal fixed jitters of a shared
+    name, other system paths and a foreign type are refused.
+    Fails if: the other term's ``inst_ids`` are not remapped.
+    """
+    first = _rv_row_term([0.0, 100.0], [0.5, 2.0], [0, 0], ("a",), [0.3], max_n=8)
+    other = _rv_row_term(
+        [50.0, 100.0, 0.0], [4.0, 1.0, -2.0], [1, 0, 1], ("b", "a"), [0.7, 0.3]
+    )
+    merged = first.merged(other)
+    assert merged.data.instruments == ("a", "b")
+    assert merged.data.valid.shape == (8,) and int(merged.data.valid.sum()) == 5
+    direct = RadialVelocityTerm(
+        RadialVelocityData.pad(
+            time_d=[0.0, 100.0, 50.0, 100.0, 0.0],
+            rv=[0.5, 2.0, 4.0, 1.0, -2.0],
+            rv_err=[1.0] * 5,
+            inst_ids=[0, 0, 0, 1, 0],
+            instruments=("a", "b"),
+            max_n=8,
+        ),
+        jitters=jnp.array([0.3, 0.7]),
+    )
+    model = _Ramp(jnp.asarray(3.0))
+    np.testing.assert_allclose(merged(model), direct(model), rtol=1e-12)
+    clashing = _rv_row_term([0.0], [0.0], [0], ("a",), [0.4])
+    with pytest.raises(ValueError, match="fixed jitter"):
+        first.merged(clashing)
+    with pytest.raises(ValueError, match="system paths"):
+        first.merged(dataclasses.replace(first, system_path="other"))
+    with pytest.raises(TypeError):
+        first.merged(object())
+
+
+def test_rv_data_refuses_ids_outside_the_instruments_but_not_padded_rows():
+    """``n_inst = 1`` with ids ``[0, 1]`` raises; a padded row may hold -1.
+
+    Fails if: the range check is removed (the second row would be silently clamped
+    onto a wrong instrument by the segment sums).
+    """
+    rows = {"time_d": jnp.zeros(2), "rv": jnp.zeros(2), "rv_err": jnp.ones(2)}
+    with pytest.raises(ValueError, match="inst_ids"):
+        RadialVelocityData(
+            **rows,
+            inst_ids=jnp.array([0, 1]),
+            valid=jnp.ones(2, bool),
+            instruments=("a",),
+        )
+    padded = RadialVelocityData(
+        **rows,
+        inst_ids=jnp.array([0, -1]),
+        valid=jnp.array([True, False]),
+        instruments=("a",),
+    )
+    assert padded.n_inst == 1
+    with pytest.raises(ValueError, match="unique"):
+        RadialVelocityData.zeros(2, ("a", "a"))
+    for bad in ((1, "1"), (), ["a"]):
+        with pytest.raises(ValueError, match="nonempty tuple of unique strings"):
+            RadialVelocityData(
+                **rows,
+                inst_ids=jnp.zeros(2, int),
+                valid=jnp.zeros(2, bool),
+                instruments=bad,
+            )
+    with pytest.raises(ValueError, match="nonempty tuple"):
+        RadialVelocityData.zeros(2, ())
+
+
+def test_rv_merge_of_traced_terms_names_the_host_requirement():
+    """Merging inside ``jit`` raises a ValueError that says both terms must be concrete.
+
+    Fails if: the raw tracer conversion error of ``np.asarray`` surfaces instead.
+    """
+    first = _rv_row_term([0.0], [0.0], [0], ("a",))
+    second = _rv_row_term([100.0], [10.0], [0], ("a",))
+    with pytest.raises(ValueError, match="both terms must be concrete"):
+        jax.jit(lambda term: first.merged(term))(second)
+
+
+def test_rv_score_is_unchanged_by_a_large_common_offset():
+    """Two velocities 0.002 m/s apart score the same with 1e5 m/s added to both.
+
+    Truth: the hand marginal. With N = 2, J = 1, w = 1 / 0.002^2 each, the weighted
+    spread about the mean is ``w * 2 * (0.001)^2 = 0.5``, A = 2 w, so the score is
+    ``-0.5 * (0.5 + log A + 2 log 0.002^2 + log 2 pi - log 2)`` (1e-7 absolute, above
+    the 1e-11 rounding of the shifted inputs). The
+    uncentred sums ``C - B^2 / A`` lose it: the shifted score was 5.2957 against 5.0457.
+    Fails if: the squared residuals are summed before centring within the instrument.
+    """
+    from photomancy.measurements import loglike_rv_marginalized
+
+    sigma = 0.002
+    w = 1.0 / sigma**2
+    expected = -0.5 * (
+        0.5 + np.log(2 * w) + 2 * np.log(sigma**2) + np.log(2 * np.pi) - np.log(2.0)
+    )
+    for shift in (0.0, 1.0e5):
+        value = loglike_rv_marginalized(
+            jnp.array([shift, shift + 0.002]),
+            jnp.zeros(2),
+            jnp.full(2, sigma),
+            jnp.zeros(2, dtype=int),
+            1,
+            jnp.zeros(1),
+            jnp.ones(2, dtype=bool),
+        )
+        np.testing.assert_allclose(float(value), expected, rtol=0, atol=1e-7)
+
+
+def test_a_single_row_instrument_scores_zero_whatever_its_offset():
+    """One row of 90000 m/s with a tiny error contributes exactly nothing.
+
+    Truth: an instrument with one valid row has no residual contrast, so with its
+    offset marginalized the score is ``-0.5 * (log A + log var - log 1) = 0`` for any
+    value or error. The centred sums gave -3.4 for this float64 row.
+    Fails if: the residual is not anchored to a row of the instrument before the sums.
+    """
+    from photomancy.measurements import loglike_rv_marginalized
+
+    for dtype, err, atol in (
+        (jnp.float64, 5.5979819791232904e-12, 1e-12),
+        (jnp.float32, 1e-3, 1e-4),
+    ):
+        args = (
+            jnp.array([9.0e4], dtype),
+            jnp.zeros(1, dtype),
+            jnp.array([err], dtype),
+            jnp.zeros(1, dtype=int),
+            1,
+            jnp.zeros(1, dtype),
+            jnp.ones(1, dtype=bool),
+        )
+        for call in (
+            loglike_rv_marginalized,
+            jax.jit(loglike_rv_marginalized, static_argnums=4),
+        ):
+            np.testing.assert_allclose(float(call(*args)), 0.0, rtol=0, atol=atol)
