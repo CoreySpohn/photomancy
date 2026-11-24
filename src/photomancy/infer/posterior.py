@@ -26,7 +26,6 @@ every operation is mapped over it the same way. Shape checks read only the trail
 axes of ``log_weights`` and the batch prefix they define.
 """
 
-import dataclasses
 import math
 
 import equinox as eqx
@@ -99,14 +98,16 @@ class ReweightInfo(eqx.Module):
         refused: The decision: true when the slice was refused (its weights and
             evidence are NaN), by the gate or because the new support is not
             covered. After ``update``, true means the refit ran.
-        support_covered: False when a prior swap put mass where the old cloud has no
-            draws (the new support is not inside the old one); the slice is then
-            refused. True for every term change.
-        log_mass_ratio: Log of the weighted mean of the reweighting ratio under the
-            old weights, computed whether or not the slice is refused. For a prior
-            swap it is the log mass of the new prior on the old support (the log
-            evidence increment of the swap before the decision); for a term change it
-            is the log evidence increment.
+        support_covered: False when a prior swap could not be shown to keep the new
+            support inside the old one (the rule is in
+            :meth:`Posterior.with_priors`); the slice is then refused. True for every
+            term change.
+        log_mass_ratio: Log of the mean, under the old weights, of the per-draw
+            density ratio (new over old), taken before the gate decides, so it is
+            read whether or not the slice is refused. It is the log evidence
+            increment the reweighting would apply. For a prior swap on a cloud that
+            is the old prior (a fit with no terms) it is also the log mass of the new
+            prior on the old support; on a posterior cloud it is not a prior mass.
     """
 
     n_eff: jax.Array
@@ -188,39 +189,115 @@ def _live_draws(samples, log_weights):
     return jax.tree.map(pick, samples)
 
 
-def _edges(entry):
-    """Support edges of a free entry as ``{name: (low, high)}``.
+def _is_law(x):
+    return isinstance(x, AbstractDistribution)
 
-    A leaf law reports its own support. A block reports the edges of every law it
-    holds (an orbit law's :meth:`edges`, a scalar law's support), named by field.
+
+def _pieces(law):
+    """Support of a law as a union of closed intervals, ``(low, high)``.
+
+    Each array has the law's support shape plus a trailing axis of pieces. A
+    ``Mixture`` contributes the pieces of every component with nonzero weight (a weight
+    is zero only where its normalized log weight is ``-inf``, decided per slice when
+    traced); a dropped piece is the empty interval ``(+inf, -inf)``. Any other law is
+    one piece, its ``support()``. The edges are NaN where the law's own ``support()``
+    is NaN (parameters outside their domain).
     """
-    if not isinstance(entry, AbstractBlock):
-        return {"": entry.support()}
-    out = {}
-    for field in dataclasses.fields(entry):
-        value = getattr(entry, field.name)
-        if callable(getattr(value, "edges", None)):
-            out.update({f"{field.name}.{k}": b for k, b in value.edges().items()})
-        elif isinstance(value, AbstractDistribution):
-            out[field.name] = value.support()
-    return out
+    if not isinstance(law, Mixture):
+        low, high = law.support()
+        return low[..., None], high[..., None]
+    low, high = _pieces(law.component_distribution)
+    log_w = jax.nn.log_softmax(law.mixing_logits, -1)
+    log_w = log_w[..., None] if law.event_dim else log_w
+    active = ~jnp.isneginf(log_w[..., None])
+    low = jnp.where(active, low, jnp.inf)
+    high = jnp.where(active, high, -jnp.inf)
+    axis = low.ndim - 2 - law.event_dim
+    low, high = (jnp.moveaxis(a, axis, -2) for a in (low, high))
+    low, high = (a.reshape(*a.shape[:-2], -1) for a in (low, high))
+    hull_low, hull_high = law.support()
+    invalid = (jnp.isnan(hull_low) | jnp.isnan(hull_high))[..., None]
+    return jnp.where(invalid, jnp.nan, low), jnp.where(invalid, jnp.nan, high)
+
+
+def _union_contains(old, new):
+    """Whether the union of the ``new`` pieces lies inside that of the ``old`` ones.
+
+    ``old`` and ``new`` are ``(low, high)`` pairs from :func:`_pieces`. The old pieces
+    are merged into connected components (sorted by lower edge; a piece that starts at
+    or below the running upper edge joins the component), and every non-empty new
+    piece must lie inside one component. An unbounded old side constrains nothing; an
+    unbounded new side where the old one is bounded is not inside; a NaN edge is never
+    inside. Returns a traced boolean, one per slice.
+    """
+    old_low, old_high = old
+    new_low, new_high = new
+    order = jnp.argsort(old_low, axis=-1)
+    low = jnp.take_along_axis(old_low, order, -1)
+    high = jnp.take_along_axis(old_high, order, -1)
+    reach = jax.lax.cummax(high, axis=high.ndim - 1)
+    before = jnp.concatenate(
+        [jnp.full_like(reach[..., :1], -jnp.inf), reach[..., :-1]], -1
+    )
+    component = jnp.cumsum(low > before, -1)
+    same = component[..., :, None] == component[..., None, :]
+    comp_low = jnp.min(jnp.where(same, low[..., None, :], jnp.inf), -1)
+    comp_high = jnp.max(jnp.where(same, high[..., None, :], -jnp.inf), -1)
+    inside = (comp_low[..., None, :] <= new_low[..., :, None]) & (
+        new_high[..., :, None] <= comp_high[..., None, :]
+    )
+    empty = new_low > new_high
+    held = jnp.all(jnp.any(inside, -1) | empty, -1)
+    nan = jnp.any(jnp.isnan(old_low) | jnp.isnan(old_high), -1)
+    nan = nan | jnp.any(jnp.isnan(new_low) | jnp.isnan(new_high), -1)
+    return jnp.all(held & ~nan)
+
+
+_LAW = object()
+
+
+def _block_covered(old, new):
+    """Whether the support of block ``new`` lies inside that of block ``old``.
+
+    A block that defines ``support_contains(new)`` decides for itself. Otherwise every
+    law the block holds (each ``priorities`` distribution in its fields, at any depth,
+    an orbit law's scalar laws included) is compared by support, paired by position,
+    and everything else (the tree structure, every other leaf and every static field)
+    must be equal (``eqx.tree_equal``): a block that builds a law from numeric fields,
+    or whose map reads another field such as a time, cannot show containment, so any
+    change there refuses.
+    """
+    contains = getattr(old, "support_contains", None)
+    if contains is not None:
+        return jnp.all(jnp.asarray(contains(new)))
+
+    def rest(block):
+        return jax.tree.map(lambda x: _LAW if _is_law(x) else x, block, is_leaf=_is_law)
+
+    same = eqx.tree_equal(rest(old), rest(new))
+    if same is False:
+        return jnp.asarray(False)
+    covered = jnp.asarray(same)
+    pairs = zip(
+        (x for x in jax.tree.leaves(old, is_leaf=_is_law) if _is_law(x)),
+        (x for x in jax.tree.leaves(new, is_leaf=_is_law) if _is_law(x)),
+        strict=True,
+    )
+    for old_law, new_law in pairs:
+        covered = covered & _union_contains(_pieces(old_law), _pieces(new_law))
+    return covered
 
 
 def _support_covered(old, new):
-    """Whether the support of ``new`` lies inside that of ``old`` (a traced boolean).
+    """Whether the support of entry ``new`` lies inside that of ``old`` (traced).
 
-    Edges are compared as a hull, entry by entry. An element the old law leaves
-    unbounded constrains nothing; one the new law leaves unbounded where the old law
-    bounds it is not covered, and neither is a NaN edge.
+    A leaf law is compared as a union of intervals per element (:func:`_pieces`), so a
+    mixture's gap between components is not support; a block by
+    :func:`_block_covered`. Containment that cannot be shown is false.
     """
-    old_edges, new_edges = _edges(old), _edges(new)
-    covered = jnp.asarray(True)
-    for name, (low, high) in old_edges.items():
-        if name not in new_edges:
-            return jnp.asarray(False)
-        new_low, new_high = new_edges[name]
-        covered = covered & jnp.all(new_low >= low) & jnp.all(new_high <= high)
-    return covered
+    if isinstance(old, AbstractBlock):
+        return _block_covered(old, new)
+    return _union_contains(_pieces(old), _pieces(new))
 
 
 def _support_swap(old_fit, new_fit, moved):
@@ -558,15 +635,30 @@ class Posterior(eqx.Module):
         coordinates are not finite). The evidence gains ``log sum w ratio``, which is
         the new prior's mass on the cloud's support when the old cloud is the prior.
         The swap can narrow a prior but not widen one: a cloud has no draws where the
-        old prior had no mass, so for each replaced entry (leaf laws by their support,
-        blocks by the edges of their laws) the new support must lie inside the old one.
-        A slice where it does not is refused like a gate failure (NaN weights,
-        evidence and standard error; ``info.refused`` true, ``info.support_covered``
-        false), also for a ``quadrature`` posterior. The mass of the new prior on the
-        old support is ``exp(info.log_mass_ratio)``, read there whether or not the
-        slice is refused; a widening needs a refit. A change of chart, rows, system or
-        block type is refused by name. The Jacobian is taken with the other entries of
-        the draw held, which is exact because the orbit itself does not move.
+        old prior had no mass, so for each replaced entry the new support must lie
+        inside the old one, and a slice where that cannot be shown is refused. A leaf
+        law is compared by its support as a union of intervals: a ``Mixture`` covers
+        the union of its components with nonzero weight, not their hull, so a gap
+        between components is not support. A block is compared field by field: each
+        law it holds (each ``priorities`` distribution at any depth, the scalar laws
+        of an orbit law included) by support as above, and everything else (its
+        structure, every other leaf and every static field) must be equal
+        (``eqx.tree_equal``). So a block that builds its law from numeric fields
+        refuses any change of them, another epoch of a sky-position block refuses,
+        and so does a change of parameterization (a size law on ``a_AU`` replaced by
+        one on ``period_d``, even an equivalent one): express both priors in the same
+        parameterization. A block that can decide containment itself may define
+        ``support_contains(self, new)``, returning a boolean or a boolean array (true
+        where the support of ``new`` lies inside its own); it replaces the field
+        comparison (the orbix blocks define none). A refused slice is refused
+        like a gate failure (NaN weights, evidence and standard error;
+        ``info.refused`` true, ``info.support_covered`` false), also for a
+        ``quadrature`` posterior, and a widening needs a refit.
+        ``info.log_mass_ratio`` is read whether or not the slice is refused; for a
+        cloud that is the old prior, its exponential is the mass of the new prior on
+        the old support. A change of chart, rows, system or block type is refused by
+        name. The Jacobian is taken with the other entries of the draw held, which is
+        exact because the orbit itself does not move.
 
         Where the gate does not apply: k-hat is not valid on nested-sampling clouds
         (pass ``max_khat=jnp.inf`` and gate on ``min_n_eff``) and a ``quadrature``
@@ -602,8 +694,8 @@ class Posterior(eqx.Module):
             and not self.fit.free[key].same_map(entry)
         )
         covered = jnp.asarray(True)
-        for key, entry in priors.items():
-            covered = covered & _support_covered(self.fit.free[key], entry)
+        for key in priors:
+            covered = covered & _support_covered(self.fit.free[key], new_fit.free[key])
         live = _live_draws(self.samples, self.log_weights)
         dead = jnp.isneginf(self.log_weights)
         if not moved:

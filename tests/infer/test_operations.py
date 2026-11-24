@@ -13,7 +13,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from priorities import Normal, Uniform
+from hwoutils.blocks import AbstractBlock
+from priorities import Mixture, Normal, Uniform
 from test_fit import _scene
 from test_run import HIGH, KEY, WIDTH, _Gauss, _leaf_fit
 
@@ -357,23 +358,31 @@ def test_a_prior_swap_refuses_a_wider_support_and_reports_the_mass():
     assert bool(wide.info.refused) and not bool(wide.info.support_covered)
     assert np.all(np.isnan(wide.log_weights))
     assert np.isnan(wide.log_evidence) and np.isnan(wide.log_evidence_se)
-    np.testing.assert_allclose(wide.info.log_mass_ratio, math.log(0.5), atol=1e-12)
+    np.testing.assert_allclose(
+        wide.info.log_mass_ratio, math.log(0.5), rtol=0, atol=1e-12
+    )
     narrow = _bare_grid(2.0).with_priors({KEY: Uniform(0.0, 1.0)}, **none)
     assert bool(narrow.info.support_covered) and not bool(narrow.info.refused)
     assert int(jnp.sum(jnp.isfinite(narrow.log_weights))) == 32
-    np.testing.assert_allclose(_moments(narrow)[0], 0.5, atol=1e-12)
-    np.testing.assert_allclose(narrow.log_evidence, 0.0, atol=1e-12)
+    np.testing.assert_allclose(_moments(narrow)[0], 0.5, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(narrow.log_evidence, 0.0, rtol=0, atol=1e-12)
 
 
 def test_resample_of_a_grid_is_a_random_cloud():
     """A resampled grid is ``monte_carlo``, with the grid's evidence carried bitwise.
 
     Truth source: ``kind`` describes the draws; a random subsample of a grid is random,
-    so the Monte Carlo gate applies to any later reweighting.
+    so the Monte Carlo gate applies to any later reweighting. The grid's evidence and
+    error are set to distinct finite values so that a carried value cannot be confused
+    with a reset one (zero, NaN).
     Fails if: ``kind`` is carried over (a later reweighting then runs ungated on random
-    draws), or the evidence changes.
+    draws), or the evidence or its error changes.
     """
-    grid = _bare_grid(1.0, n=8)
+    grid = eqx.tree_at(
+        lambda p: (p.log_evidence, p.log_evidence_se),
+        _bare_grid(1.0, n=8),
+        (jnp.asarray(-1.25, jnp.float64), jnp.asarray(0.0625, jnp.float64)),
+    )
     one = grid.resample(jax.random.key(1), 1)
     assert one.kind == "monte_carlo"
     assert (
@@ -386,6 +395,162 @@ def test_resample_of_a_grid_is_a_random_cloud():
     )
     with pytest.raises(ValueError, match="required"):
         one.with_priors({KEY: Uniform(0.0, 1.0)}, min_n_eff=None, max_khat=None)
+
+
+def _point_cloud(entry, theta):
+    """Equal-weight ``quadrature`` cloud at the draws ``theta`` of the toy fit.
+
+    ``entry`` is the free entry of ``theta``, a leaf law or a block.
+    """
+    fit = Fit(_Toy(jnp.zeros(())), {"theta": entry})
+    theta = jnp.asarray(theta, jnp.float64)
+    samples = {"theta": {"theta": theta} if isinstance(entry, _Box) else theta}
+    return Posterior(
+        samples=samples,
+        log_weights=jnp.full(len(theta), -math.log(len(theta))),
+        log_target=fit.log_density(samples),
+        log_evidence=jnp.asarray(0.0, jnp.float64),
+        log_evidence_se=jnp.asarray(0.0, jnp.float64),
+        fit=fit,
+        info=None,
+        kind="quadrature",
+    )
+
+
+def _stack(*posteriors):
+    return jax.tree.map(lambda *a: jnp.stack(a), *posteriors)
+
+
+NO_GATE = {"min_n_eff": None, "max_khat": None}
+
+
+@pytest.mark.medium(reason="four mixture swaps and one vmapped, 9 s cold")
+def test_a_mixture_prior_covers_only_its_weighted_components():
+    """A mixture's support is the union of its components with nonzero weight.
+
+    Truth source: definitional. A 50/50 mixture of ``Uniform(0, 1)`` and
+    ``Uniform(2, 3)`` has no mass in ``(1, 2)``, so ``Uniform(0, 3)`` widens it (its
+    mean density ratio over draws in both pieces is ``(1/3) / (1/2) = 2/3``), while a
+    mixture of ``Uniform(0, 1)`` and ``Uniform(2, 2.5)`` narrows it (ratios 1, 1, 2, 0
+    at the four draws, mean 1). A component of zero weight (log weight ``-inf``) is no
+    support: as the old law it hides a widening, as the new law it adds nothing. A
+    weight traced under ``filter_vmap`` is decided per slice.
+    Tolerance basis: exact-algebra, 1e-12 in the log.
+    Fails if: the support is the hull of the components (the gap is counted as
+    covered), a zero-weight component counts as support, or a traced weight refuses
+    or accepts every slice alike.
+    """
+    pieces = Uniform(jnp.array([0.0, 2.0]), jnp.array([1.0, 3.0]))
+    gap = _point_cloud(Mixture(jnp.zeros(2), pieces), [0.25, 0.75, 2.25, 2.75])
+    wide = gap.with_priors({"theta": Uniform(0.0, 3.0)}, **NO_GATE)
+    assert bool(wide.info.refused) and not bool(wide.info.support_covered)
+    assert np.all(np.isnan(wide.log_weights)) and np.isnan(wide.log_evidence)
+    np.testing.assert_allclose(
+        wide.info.log_mass_ratio, math.log(2.0 / 3.0), rtol=0, atol=1e-12
+    )
+    inner = Uniform(jnp.array([0.0, 2.0]), jnp.array([1.0, 2.5]))
+    kept = gap.with_priors({"theta": Mixture(jnp.zeros(2), inner)}, **NO_GATE)
+    assert bool(kept.info.support_covered) and not bool(kept.info.refused)
+    np.testing.assert_allclose(kept.log_evidence, 0.0, rtol=0, atol=1e-12)
+    far = Uniform(jnp.array([0.0, 5.0]), jnp.array([1.0, 6.0]))
+    dead_far = Mixture(jnp.array([0.0, -jnp.inf]), far)
+    assert bool(gap.with_priors({"theta": dead_far}, **NO_GATE).info.support_covered)
+    halves = Uniform(jnp.array([0.0, 1.0]), jnp.array([1.0, 2.0]))
+    clouds = [
+        _point_cloud(Mixture(jnp.array([0.0, w]), halves), [0.25, 0.75])
+        for w in (0.0, -jnp.inf)
+    ]
+    batched = eqx.filter_vmap(
+        lambda c: c.with_priors({"theta": Uniform(0.0, 2.0)}, **NO_GATE)
+    )(_stack(*clouds))
+    np.testing.assert_array_equal(batched.info.support_covered, [True, False])
+    np.testing.assert_array_equal(batched.info.refused, [False, True])
+
+
+class _Box(AbstractBlock):
+    """Owns ``theta`` with density ``Uniform(0, high)``, built in ``log_prob``.
+
+    The block holds a number, not a law, so its support is invisible to a walk over
+    its laws.
+    """
+
+    high: jax.Array
+    owns = "theta"
+    reads = ()
+    writes = ("theta",)
+    coordinate_names = ("theta",)
+
+    @property
+    def walls(self):
+        return ("theta",)
+
+    def forward(self, x, model):
+        return {"theta": x["theta"]}
+
+    def inverse(self, model):
+        return {"theta": model.theta}
+
+    def log_prob(self, x, model):
+        return Uniform(0.0, self.high).log_prob(x["theta"])
+
+    def sample(self, key, model):
+        return {"theta": Uniform(0.0, self.high).sample(key)}
+
+    def same_layout(self, other):
+        return isinstance(other, _Box)
+
+    def same_map(self, other):
+        return self.same_layout(other)
+
+
+class _OwnBox(_Box):
+    """A ``_Box`` that decides containment itself through ``support_contains``."""
+
+    def support_contains(self, new):
+        return new.high <= self.high
+
+
+def test_a_block_refuses_a_change_it_cannot_show_is_contained():
+    """A block's fields other than its laws must be equal, unless it opts out.
+
+    Truth source: definitional. ``_Box`` builds ``Uniform(0, high)`` from a number, so
+    raising ``high`` from 1 to 2 widens the prior (the mean ratio at draws in
+    ``[0, 1]`` is 0.5); without a law to compare, no change of ``high`` can be shown
+    contained, and the narrowing back is refused too (a safe refusal). An equal block
+    is accepted. A block with ``support_contains`` decides itself: its narrowing is
+    accepted and its widening refused. Under ``filter_vmap`` the equality of a traced
+    field is decided per slice.
+    Tolerance basis: exact-algebra, 1e-12 in the log.
+    Fails if: the non-law fields are not compared (the widening is accepted with
+    evidence ``log 0.5``), ``support_contains`` is ignored, or a traced field refuses
+    or accepts every slice alike.
+    """
+    one, two = jnp.asarray(1.0), jnp.asarray(2.0)
+    cloud = _point_cloud(_Box(one), [0.25, 0.75])
+    wide = cloud.with_priors({"theta": _Box(two)}, **NO_GATE)
+    assert bool(wide.info.refused) and not bool(wide.info.support_covered)
+    assert np.isnan(wide.log_evidence)
+    np.testing.assert_allclose(
+        wide.info.log_mass_ratio, math.log(0.5), rtol=0, atol=1e-12
+    )
+    same = cloud.with_priors({"theta": _Box(one)}, **NO_GATE)
+    assert bool(same.info.support_covered) and not bool(same.info.refused)
+    back = _point_cloud(_Box(two), [0.25, 0.75]).with_priors(
+        {"theta": _Box(one)}, **NO_GATE
+    )
+    assert not bool(back.info.support_covered)
+    own = _point_cloud(_OwnBox(two), [0.25, 0.75])
+    narrowed = own.with_priors({"theta": _OwnBox(one)}, **NO_GATE)
+    assert bool(narrowed.info.support_covered) and not bool(narrowed.info.refused)
+    own_wide = _point_cloud(_OwnBox(one), [0.25, 0.75]).with_priors(
+        {"theta": _OwnBox(two)}, **NO_GATE
+    )
+    assert not bool(own_wide.info.support_covered)
+    stack = _stack(cloud, _point_cloud(_Box(two), [0.25, 0.75]))
+    batched = eqx.filter_vmap(lambda c: c.with_priors({"theta": _Box(two)}, **NO_GATE))(
+        stack
+    )
+    np.testing.assert_array_equal(batched.info.support_covered, [False, True])
 
 
 def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):

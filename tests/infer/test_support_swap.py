@@ -10,7 +10,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from orbix.system import EccentricityVectorChart, OrbitLaw
+from hwoutils.constants import two_pi
+from orbix.equations.orbit import mean_motion
+from orbix.system import EccentricityVectorChart, OrbitLaw, SkyPositionBlock
+from orbix.system.core import enclosed_mu
 from priorities import Beta, LogUniform, Uniform
 from test_fit import _block, _scene
 
@@ -90,7 +93,7 @@ def test_widening_is_refused_and_the_walled_mass_is_read_from_the_info():
     assert bool(out.info.refused) and not bool(out.info.support_covered)
     assert np.all(np.isnan(out.log_weights)) and np.isnan(out.log_evidence)
     truth = np.log(np.log(3.0 / 0.8) / np.log(6.0 / 0.5))
-    np.testing.assert_allclose(out.info.log_mass_ratio, truth, atol=1e-9)
+    np.testing.assert_allclose(out.info.log_mass_ratio, truth, rtol=0, atol=1e-9)
     wide = _cloud(_fit(0.5, 6.0))
     back = wide.with_priors({KEY: _block(_law(0.8, 3.0))}, **GATE)
     assert bool(back.info.support_covered) and not bool(back.info.refused)
@@ -143,6 +146,40 @@ def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
         np.asarray(out.fit.log_density(out.samples))[kept],
         rtol=1e-10,
     )
+
+
+@pytest.mark.medium(reason="three re-expressions, two block types, 12 s cold")
+def test_a_block_change_outside_its_laws_is_refused():
+    """A changed epoch or a changed parameterization cannot be shown contained.
+
+    Truth source: definitional. A sky-position block's map reads ``time_d``, so the
+    same east and north laws at another epoch put mass on orbits the old cloud never
+    held (the review found 27 of 64 new draws outside the old block's inverse
+    domain); an orbit law on ``a_AU`` replaced by one on ``period_d`` changes the
+    law's structure, so its laws cannot be paired, even where the two describe the
+    same orbits (a safe refusal). A narrowed sky law at the same epoch is accepted.
+    Fails if: a block's non-law fields and structure are not compared (the epoch
+    change is accepted with a finite evidence, or the size laws of the two
+    parameterizations are compared across units).
+    """
+    east, north = Uniform(0.125, 0.175), Uniform(-0.01, 0.01)
+    sky = _cloud(
+        Fit(_scene(), {KEY: SkyPositionBlock(east, north, 0.0, (0,), "dynamics")}), n=64
+    )
+    later = sky.with_priors(
+        {KEY: SkyPositionBlock(east, north, 8.0, (0,), "dynamics")}, **GATE
+    )
+    assert bool(later.info.refused) and not bool(later.info.support_covered)
+    assert np.isnan(later.log_evidence)
+    narrow = SkyPositionBlock(Uniform(0.13, 0.17), north, 0.0, (0,), "dynamics")
+    kept = sky.with_priors({KEY: narrow}, **GATE)
+    assert bool(kept.info.support_covered) and not bool(kept.info.refused)
+    scene = _scene()
+    mu = enclosed_mu(scene.dynamics.star.mass_Msun, scene.dynamics.planets.mass_Msun)[0]
+    low, high = (two_pi / mean_motion(a, mu) for a in (0.8, 3.0))
+    period = _block(OrbitLaw(Uniform(0.0, 0.8), period_d=LogUniform(low, high)))
+    out = _cloud(_fit(0.5, 6.0), n=32).with_priors({KEY: period}, **GATE)
+    assert bool(out.info.refused) and not bool(out.info.support_covered)
 
 
 def test_a_chart_change_is_refused_by_name():
