@@ -6,21 +6,12 @@ import jax.numpy as jnp
 from hwoutils.map_coordinates import map_coordinates
 
 from photomancy.postproc.core.detection.base import AbstractFilter
-from photomancy.postproc.core.detection.patches import extract_patch
+from photomancy.postproc.core.detection.patches import _patch_offsets, extract_patch
 from photomancy.postproc.core.photometry import flux_map
 from photomancy.postproc.templates.base import AbstractTemplateProvider
 
 
-def _box_validity(validity_map, shape, reflect=False):
-    """Erode binary validity by a box using exact integer exclusion counts."""
-    excluded = (~(validity_map > 0.5)).astype(jnp.int32)
-    padding = tuple((size // 2, (size - 1) // 2) for size in shape)
-    padded = jnp.pad(excluded, padding, mode="reflect" if reflect else "constant")
-    counts = jax.lax.reduce_window(padded, 0, jax.lax.add, shape, (1, 1), "VALID")
-    return counts == 0
-
-
-def _stencil_validity(prepared_validity, position_yx, order):
+def _stencil_validity(prepared_validity, coordinates, order):
     """Require all interpolation nodes, treating constant padding as valid.
 
     The stencil includes nodes whose interpolation weight is zero at integer
@@ -28,13 +19,15 @@ def _stencil_validity(prepared_validity, position_yx, order):
     the exclusion halo can be one pixel wider on one side than the strict
     support. All-valid inputs are unaffected.
     """
-    if order == 0:
-        # Match map_coordinates' half-away-from-zero nearest-neighbor rule.
-        indices = jax.lax.round(position_yx).astype(jnp.int32)[:, None]
-    else:
+    # Each axis can contain one coordinate or a whole vector of patch samples.
+    nodes = coordinates.reshape(2, -1)
+    if not jnp.issubdtype(nodes.dtype, jnp.integer):
+        nodes = jax.lax.round(nodes) if order == 0 else jnp.floor(nodes)
+    nodes = nodes.astype(jnp.int32)
+    if order != 0:
         offsets = jnp.arange(-1, 3) if order == 3 else jnp.arange(2)
-        indices = jnp.floor(position_yx).astype(jnp.int32)[:, None] + offsets
-    y, x = indices[0, :, None], indices[1, None, :]
+        nodes = (nodes[:, :, None] + offsets).reshape(2, -1)
+    y, x = nodes[0, :, None], nodes[1, None, :]
     ny, nx = prepared_validity.shape
     inside = (y >= 0) & (y < ny) & (x >= 0) & (x < nx)
     return jnp.all(
@@ -71,7 +64,7 @@ def gaussian_filter_2d(image: jnp.ndarray, kernel_1d: jnp.ndarray) -> jnp.ndarra
         kernel_1d: 1D kernel from gaussian_kernel_1d.
 
     Returns:
-        Filtered image, same shape as input.
+        Filtered image, one pixel larger per axis for an even-length kernel.
     """
     pad_size = len(kernel_1d) // 2
 
@@ -121,7 +114,11 @@ class ApertureFilter(AbstractFilter):
         Returns:
             Boolean validity of each footprint, with valid off-image padding.
         """
-        return _box_validity(validity_map, self.kernel.shape)
+        excluded = ~(validity_map > 0.5)
+        counts = flux_map(
+            excluded.astype(jnp.int32), (self.kernel != 0).astype(jnp.int32)
+        )
+        return counts == 0
 
     def evaluate_validity(
         self, prepared_validity: jnp.ndarray, position_yx: jnp.ndarray
@@ -168,9 +165,15 @@ class GaussianFilter(AbstractFilter):
             image: 2D science image.
 
         Returns:
-            Gaussian-filtered image, same shape as the image.
+            Filtered image, one pixel larger per axis for an even-length kernel.
         """
         return gaussian_filter_2d(image, self.kernel_1d)
+
+    def detector_shape(self, prepared: jnp.ndarray) -> tuple[int, int]:
+        """Remove the extra response row and column of an even-length kernel."""
+        extra = int(len(self.kernel_1d) % 2 == 0)
+        ny, nx = prepared.shape
+        return ny - extra, nx - extra
 
     def prepare_validity(self, validity_map: jnp.ndarray) -> jnp.ndarray:
         """Mark usable footprints.
@@ -181,7 +184,13 @@ class GaussianFilter(AbstractFilter):
         Returns:
             Boolean footprint validity, reflecting the mask at the image edges.
         """
-        return _box_validity(validity_map, (len(self.kernel_1d),) * 2, reflect=True)
+        size = len(self.kernel_1d)
+        excluded = ~(validity_map > 0.5)
+        padded = jnp.pad(excluded, size // 2, mode="reflect")
+        counts = jax.lax.reduce_window(
+            padded.astype(jnp.int32), 0, jax.lax.add, (size, size), (1, 1), "VALID"
+        )
+        return counts == 0
 
     def evaluate_validity(
         self, prepared_validity: jnp.ndarray, position_yx: jnp.ndarray
@@ -257,7 +266,7 @@ class MapFilter(AbstractFilter):
             validity_map: (ny, nx) image validity, usable above 0.5.
 
         Returns:
-            Boolean validity of each footprint, with valid off-image padding.
+            Boolean validity of individual image pixels.
         """
         return validity_map > 0.5
 
@@ -380,9 +389,9 @@ class PSFTemplateFilter(AbstractFilter):
             validity_map: (ny, nx) image validity, usable above 0.5.
 
         Returns:
-            Boolean validity of each footprint, with valid off-image padding.
+            Boolean validity of individual image pixels.
         """
-        return _box_validity(validity_map, (self.provider.stamp_size,) * 2)
+        return validity_map > 0.5
 
     def evaluate_validity(
         self, prepared_validity: jnp.ndarray, position_yx: jnp.ndarray
@@ -396,14 +405,11 @@ class PSFTemplateFilter(AbstractFilter):
         Returns:
             Scalar bool marking a fully usable measurement.
         """
-        # The noise-variance patch is read bilinearly, so it needs at least
-        # the order-1 stencil even when the image patch uses nearest neighbor.
-        order = 1 if self.noise_variance is not None and self.order == 0 else self.order
-        return _stencil_validity(
-            prepared_validity,
-            position_yx + (0.5 if self.provider.stamp_size % 2 == 0 else 0.0),
-            order,
-        )
+        axes = position_yx[:, None] + _patch_offsets(self.provider.stamp_size)
+        # The variance's bilinear stencil contains the nearest image node;
+        # a cubic image stencil already contains both bilinear nodes.
+        order = max(self.order, 1) if self.noise_variance is not None else self.order
+        return _stencil_validity(prepared_validity, axes, order)
 
     def evaluate(self, filtered: jnp.ndarray, position_yx: jnp.ndarray) -> jnp.ndarray:
         """Best-fit template amplitude at one position.

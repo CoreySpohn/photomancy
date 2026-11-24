@@ -15,7 +15,20 @@ import jax.numpy as jnp
 
 
 class AbstractFilter(eqx.Module):
-    """Signal-extraction step: per-image precompute plus point evaluation."""
+    """Signal extraction with per-image preparation and point evaluation.
+
+    Subclasses must implement both abstract validity methods. prepare_validity()
+    returns a boolean map on the same grid as prepare(), marking which prepared
+    pixels use only usable image data. evaluate_validity() returns True only
+    when every in-image pixel in the evaluation footprint at that position is
+    usable, including interpolation nodes. Constant padding is valid, and
+    reflected padding inherits the validity of the reflected image pixel.
+
+    The estimator prepares validity once and gates the candidate statistic and
+    FPF with evaluate_validity(). Aperture samplers apply the same check to
+    each reference, while annulus samplers select prepared pixels directly
+    using the prepared validity map.
+    """
 
     @abc.abstractmethod
     def prepare(self, image: jnp.ndarray) -> jnp.ndarray:
@@ -65,6 +78,13 @@ class AbstractFilter(eqx.Module):
         Returns:
             Scalar bool, True if every in-image stencil pixel is usable.
         """
+
+    def detector_shape(self, prepared: jnp.ndarray) -> tuple[int, int]:
+        """Return the detector dimensions for reference-centre bounds checks.
+
+        Override this if preparation changes the image dimensions.
+        """
+        return prepared.shape
 
     def bind(self, position_yx: jnp.ndarray) -> "AbstractFilter":
         """Specialize this filter to a candidate position.

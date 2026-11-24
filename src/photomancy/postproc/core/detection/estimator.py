@@ -143,7 +143,9 @@ class DetectionEstimator(eqx.Module):
         if validity_map is None:
             validity_map = jnp.ones((ny, nx))
         valid = validity_map > 0.5
-        filtered = self.filter.prepare(jnp.where(valid, image, 0.0))
+        filtered = self.filter.prepare(
+            jnp.where(valid, image, jnp.zeros((), image.dtype))
+        )
         prepared_validity = self.filter.prepare_validity(valid)
         if center_yx is None:
             center = jnp.array(get_center(image.shape))

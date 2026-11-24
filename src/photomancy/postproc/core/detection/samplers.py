@@ -3,7 +3,6 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from hwoutils.map_coordinates import map_coordinates
 
 from photomancy.postproc.core.detection.base import AbstractFilter, AbstractSampler
 from photomancy.postproc.core.geometry import (
@@ -17,8 +16,8 @@ class ApertureSampler(AbstractSampler):
 
     Evaluates the filter at up to max_apertures positions on the candidate's
     circle, spaced by the aperture diameter with an exclusion buffer on both
-    sides of the candidate. The validity map is sampled nearest-neighbor with
-    off-chip positions invalid. Every interpolation node must also be valid.
+    sides of the candidate. Each reference needs an on-detector nearest pixel
+    and a usable filter footprint.
 
     Attributes:
         fwhm: Aperture diameter (resolution element) in pixels.
@@ -90,18 +89,16 @@ class ApertureSampler(AbstractSampler):
             exclusion_buffer=self.exclusion_buffer,
         )
 
-        ref_validity = map_coordinates(
-            validity_map,
-            jnp.stack([ref_y, ref_x]),
-            order=0,
-            cval=0.0,
-        )
-        mask = idx_mask & (ref_validity > 0.5)
-
         positions = jnp.stack([ref_y, ref_x], axis=1)
-        mask = mask & jax.vmap(lambda pos: filt.evaluate_validity(validity_map, pos))(
+        nearest = jax.lax.round(positions)
+        on_detector = jnp.all(
+            (nearest >= 0) & (nearest < jnp.array(filt.detector_shape(filtered))),
+            axis=1,
+        )
+        usable = jax.vmap(lambda pos: filt.evaluate_validity(validity_map, pos))(
             positions
         )
+        mask = idx_mask & on_detector & usable
         samples = jax.vmap(lambda pos: filt.evaluate(filtered, pos))(positions)
 
         geom_ok = r_pix >= self.fwhm

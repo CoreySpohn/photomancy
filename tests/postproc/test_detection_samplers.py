@@ -187,3 +187,22 @@ def test_annulus_uses_propagated_gaussian_validity():
     actual = estimator(image, position[None], jnp.asarray(valid), center)
     np.testing.assert_allclose(actual.statistic[0], statistic, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(actual.fpf[0], fpf, rtol=1e-12, atol=1e-12)
+
+
+def test_gaussian_references_use_detector_bounds():
+    """Nearest reference centres must lie on the 33-pixel detector, exactly."""
+    image = jnp.ones((33, 33))
+    filt = GaussianFilter(jnp.ones(4) / 4, order=1)
+    position = jnp.array([16.0, 33.0])
+    center = jnp.array([16.0, 16.0])
+    sampler = ApertureSampler(fwhm=5.0, max_apertures=32)
+    _, mask, _ = sampler(
+        filt.prepare(image), position, filt, filt.prepare_validity(image), center
+    )
+    step = 2 * np.arcsin(5 / 34)
+    angles = -(np.arange(32) + 1.5) * step
+    refs = 16 + 17 * np.stack([np.sin(angles), np.cos(angles)], axis=1)
+    nearest = np.sign(refs) * np.floor(np.abs(refs) + 0.5)
+    active = np.arange(32) < int(2 * np.pi / step) - 2
+    expected = active & ((0 <= nearest) & (nearest < 33)).all(axis=1)
+    np.testing.assert_array_equal(mask, expected)

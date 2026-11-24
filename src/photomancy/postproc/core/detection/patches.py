@@ -4,6 +4,11 @@ import jax.numpy as jnp
 from hwoutils.map_coordinates import map_coordinates
 
 
+def _patch_offsets(size):
+    """Return the pixel offsets from the centre along either patch axis."""
+    return jnp.arange(size) - (size - 1) / 2.0
+
+
 def extract_patch(
     image: jnp.ndarray,
     center_yx: jnp.ndarray,
@@ -30,7 +35,7 @@ def extract_patch(
     Returns:
         (size, size) patch.
     """
-    offsets = jnp.arange(size) - (size - 1) / 2.0
+    offsets = _patch_offsets(size)
     dy, dx = jnp.meshgrid(offsets, offsets, indexing="ij")
     coords = jnp.stack([center_yx[0] + dy, center_yx[1] + dx])
     return map_coordinates(image, coords, order=order, cval=cval)

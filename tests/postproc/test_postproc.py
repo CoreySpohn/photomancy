@@ -465,3 +465,25 @@ def test_mawet_arm_jits_as_an_argument():
     arm = MawetArm(aperture_fwhm=1.5)
     jitted = jax.jit(lambda a: a.detect(science, positions).statistic)(arm)
     np.testing.assert_array_equal(jitted, arm.detect(science, positions).statistic)
+
+
+@pytest.mark.parametrize("kind", ["mawet", "template"])
+def test_excluded_pixel_next_to_valid_candidate(kind):
+    """A zero-filled image is the oracle for bitwise t, FPF and dof with infinity."""
+    science = _small_science()
+    # The hard aperture has a zero-weight corner here. The template's cubic
+    # stencil ends one row before its excluded pixel.
+    pixel = (14, 24) if kind == "mawet" else (12, 26)
+    science = replace(science, valid=jnp.ones((33, 33)).at[pixel].set(0))
+    positions = jnp.array([[16.0, 26.0]])
+    arm = MawetArm(soft=False, fast=True) if kind == "mawet" else _arm_for(kind)
+    results = [
+        arm.detect(
+            replace(science, frames=science.frames.at[:, *pixel].set(value)), positions
+        )
+        for value in (0.0, np.inf)
+    ]
+    for field in ("statistic", "fpf", "dof"):
+        expected, actual = (np.asarray(getattr(r, field)) for r in results)
+        assert np.isfinite(expected).all()
+        np.testing.assert_array_equal(actual, expected)
