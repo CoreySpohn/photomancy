@@ -78,7 +78,7 @@ def test_arm_matches_manual_composition_bitwise():
     fs = make_frameset(jr.PRNGKey(100))
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterArm(provider=provider)
     result = arm.detect(fs, positions)
 
     manual = _manual_composition(provider)
@@ -100,7 +100,7 @@ def test_statistic_kind_and_result_type():
     fs = make_frameset(jr.PRNGKey(101))
     positions = jnp.array([[32.0, 48.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterArm(provider=provider)
     result = arm.detect(fs, positions)
     assert isinstance(result, DetectionStats)
     assert result.statistic_kind == "psf_template_t"
@@ -116,7 +116,7 @@ def test_grid_center_consulted():
         replace(fs.grid, center_y=20.0, center_x=40.0),
     )
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterArm(provider=provider)
     default_center = arm.detect(fs, positions)
     offset_center = arm.detect(fs_off, positions)
     assert not np.array_equal(
@@ -136,8 +136,8 @@ def test_whitening_differs_with_heteroscedastic_variance():
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
 
-    whitened = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX, whiten=True)
-    unwhitened = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX, whiten=False)
+    whitened = MatchedFilterArm(provider=provider, whiten=True)
+    unwhitened = MatchedFilterArm(provider=provider, whiten=False)
     with_whitening = whitened.detect(fs, positions)
     without_whitening = unwhitened.detect(fs, positions)
 
@@ -165,8 +165,8 @@ def test_whitening_matches_unwhitened_for_uniform_variance():
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
 
-    whitened = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX, whiten=True)
-    unwhitened = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX, whiten=False)
+    whitened = MatchedFilterArm(provider=provider, whiten=True)
+    unwhitened = MatchedFilterArm(provider=provider, whiten=False)
     with_whitening = whitened.detect(fs, positions)
     without_whitening = unwhitened.detect(fs, positions)
 
@@ -191,7 +191,7 @@ def test_detect_is_jit_safe():
     fs = make_frameset(jr.PRNGKey(105))
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     provider = ArrayTemplateProvider(_gaussian_stamp())
-    arm = MatchedFilterArm(provider=provider, fwhm_px=FWHM_PX)
+    arm = MatchedFilterArm(provider=provider)
 
     direct = arm.detect(fs, positions)
     jitted = eqx.filter_jit(lambda a, f, p: a.detect(f, p))(arm, fs, positions)
@@ -200,3 +200,39 @@ def test_detect_is_jit_safe():
         np.asarray(direct.statistic), np.asarray(jitted.statistic)
     )
     np.testing.assert_array_equal(np.asarray(direct.fpf), np.asarray(jitted.fpf))
+
+
+def test_excluded_variance_never_enters_nearest_neighbor_fit():
+    """Exclusion is the oracle: an excluded pixel's variance changes nothing, bitwise.
+
+    With order=0 the image patch is read nearest-neighbor but the variance
+    patch bilinearly, so the bilinear node one pixel past the rounded stamp
+    edge must count toward the candidate's footprint.
+    """
+    shape = (64, 64)
+    position = jnp.array([[32.2, 48.2]])
+    far = jnp.array([[32.0, 16.0]])
+    # Rounded stamp rows reach 39; the bilinear variance read reaches row 40.
+    pixel = (40, 48)
+    valid = jnp.ones(shape).at[pixel].set(0.0)
+    base = make_frameset(jr.PRNGKey(11), noise_variance=jnp.ones((3, *shape)))
+    base = replace(base, valid=valid)
+    provider = ArrayTemplateProvider(_gaussian_stamp())
+    arm = MatchedFilterArm(provider=provider, order=0, whiten=True)
+    positions = jnp.concatenate([position, far])
+    results = [
+        arm.detect(
+            replace(base, noise_variance=base.noise_variance.at[:, *pixel].set(value)),
+            positions,
+        )
+        for value in (1.0, 1e-6, np.nan)
+    ]
+    for other in results[1:]:
+        for field in ("statistic", "fpf", "dof"):
+            assert np.array_equal(
+                np.asarray(getattr(results[0], field)),
+                np.asarray(getattr(other, field)),
+                equal_nan=True,
+            ), field
+    assert np.isnan(results[0].statistic[0])
+    assert np.isfinite(results[0].statistic[1])

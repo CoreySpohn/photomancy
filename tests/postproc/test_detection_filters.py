@@ -4,6 +4,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from hwoutils.map_coordinates import map_coordinates
 
 from photomancy.postproc.core.detection.filters import (
@@ -87,3 +88,67 @@ class TestGaussianFilter:
         image = _test_image(4)
         filtered = gaussian_filter_2d(image, gaussian_kernel_1d(5.0))
         assert float(jnp.std(filtered)) < float(jnp.std(image))
+
+
+@pytest.mark.parametrize("kind", ["aperture", "gaussian", "map", "template"])
+@pytest.mark.parametrize("order", [0, 1, 3])
+def test_validity_box_and_stencil(kind, order):
+    """NumPy padded box counts and explicit interpolation nodes are exact oracles."""
+    from photomancy.postproc import ArrayTemplateProvider, MapFilter, PSFTemplateFilter
+
+    filters = {
+        "aperture": ApertureFilter(jnp.ones((5, 5)), order),
+        "gaussian": GaussianFilter(jnp.ones(5) / 5, order),
+        "map": MapFilter(order),
+        "template": PSFTemplateFilter(ArrayTemplateProvider(jnp.ones((5, 5))), order),
+    }
+    filt = filters[kind]
+    valid = np.ones((11, 13))
+    valid[1, 2] = 0.0
+    valid[6, 7] = 0.5
+    width = 1 if kind == "map" else 5
+    padded = np.pad(
+        valid > 0.5,
+        width // 2,
+        mode="reflect" if kind == "gaussian" else "constant",
+        **({} if kind == "gaussian" else {"constant_values": True}),
+    )
+    expected = np.lib.stride_tricks.sliding_window_view(padded, (width, width)).all(
+        axis=(-2, -1)
+    )
+    prepared = eqx.filter_jit(lambda v: filt.prepare_validity(v))(jnp.asarray(valid))
+    np.testing.assert_array_equal(prepared, expected)
+    assert np.asarray(filt.prepare_validity(jnp.ones(valid.shape))).all()
+    positions = np.array(
+        [[0.0, 0.0], [-0.5, 2.0], [2.25, 3.75], [7.5, 8.5], [10.5, 12.5], [20.0, 20.0]]
+    )
+    for position in positions:
+        if order == 0:
+            nodes = (np.sign(position) * np.floor(np.abs(position) + 0.5)).astype(int)[
+                :, None
+            ]
+        else:
+            offsets = np.arange(-1, 3) if order == 3 else np.arange(2)
+            nodes = np.floor(position).astype(int)[:, None] + offsets
+        usable = all(
+            expected[y, x]
+            for y in nodes[0]
+            for x in nodes[1]
+            if 0 <= y < valid.shape[0] and 0 <= x < valid.shape[1]
+        )
+        actual = eqx.filter_jit(filt.evaluate_validity)(prepared, jnp.asarray(position))
+        assert bool(actual) == usable
+
+
+def test_aperture_validity_even_box_matches_convolution():
+    """SciPy integer convolution defines even-box alignment; validity is exact."""
+    from scipy.signal import convolve2d
+
+    valid = np.ones((11, 13))
+    valid[5, 6] = 0.0
+    filt = ApertureFilter(jnp.ones((4, 6)), order=1)
+    expected = (
+        convolve2d((valid <= 0.5).astype(int), np.ones((4, 6), dtype=int), mode="same")
+        == 0
+    )
+    np.testing.assert_array_equal(filt.prepare_validity(jnp.asarray(valid)), expected)

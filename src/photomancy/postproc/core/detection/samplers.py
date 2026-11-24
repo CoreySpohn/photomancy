@@ -18,7 +18,7 @@ class ApertureSampler(AbstractSampler):
     Evaluates the filter at up to max_apertures positions on the candidate's
     circle, spaced by the aperture diameter with an exclusion buffer on both
     sides of the candidate. The validity map is sampled nearest-neighbor with
-    off-chip positions invalid, exactly matching the fused v1.1.1 core.
+    off-chip positions invalid. Every interpolation node must also be valid.
 
     Attributes:
         fwhm: Aperture diameter (resolution element) in pixels.
@@ -63,7 +63,8 @@ class ApertureSampler(AbstractSampler):
             filtered: Output of filt.prepare() for the current image.
             position_yx: (2,) candidate position (y, x) in pixels.
             filt: Filter evaluated at each reference aperture.
-            validity_map: (ny, nx) map, 1 = usable pixel, 0 = excluded.
+            validity_map: Propagated (ny, nx) footprint validity from
+                filt.prepare_validity(), usable above 0.5.
             center_yx: (2,) star center (y, x) in pixels.
 
         Returns:
@@ -98,6 +99,9 @@ class ApertureSampler(AbstractSampler):
         mask = idx_mask & (ref_validity > 0.5)
 
         positions = jnp.stack([ref_y, ref_x], axis=1)
+        mask = mask & jax.vmap(lambda pos: filt.evaluate_validity(validity_map, pos))(
+            positions
+        )
         samples = jax.vmap(lambda pos: filt.evaluate(filtered, pos))(positions)
 
         geom_ok = r_pix >= self.fwhm
@@ -166,7 +170,8 @@ class AnnulusSampler(AbstractSampler):
             filtered: Prepared image whose pixels are the noise samples.
             position_yx: (2,) candidate position (y, x) in pixels.
             filt: Unused; the samples are the prepared image's own pixels.
-            validity_map: (ny, nx) map, 1 = usable pixel, 0 = excluded.
+            validity_map: Propagated (ny, nx) footprint validity from
+                filt.prepare_validity(), usable above 0.5.
             center_yx: (2,) star center (y, x) in pixels.
 
         Returns:

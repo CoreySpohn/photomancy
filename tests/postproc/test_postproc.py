@@ -56,7 +56,7 @@ def test_mawet_arm_statistic_matches_snr_function():
     image = jr.normal(key, (64, 64))
     positions = jnp.array([[32.0, 48.0], [16.0, 32.0]])
     fs = make_frameset(image)
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     stats = arm.detect(fs, positions)
     expected = DetectionEstimator.mawet(FWHM_PX)(image, positions).statistic
     assert isinstance(stats, DetectionStats)
@@ -71,7 +71,7 @@ def test_mawet_arm_bright_planet_has_small_fpf():
     planet_pos = jnp.array([32.0, 50.0])
     image = inject_planet(image, gaussian_psf(n=64), flux=200.0, pos=planet_pos)
     fs = make_frameset(image)
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     stats = arm.detect(fs, planet_pos[None, :])
     assert float(stats.statistic[0]) > 5.0
     assert float(stats.fpf[0]) < 1e-3
@@ -83,7 +83,7 @@ def test_mawet_arm_empty_field_fpf_is_calibrated():
     key = jr.PRNGKey(2)
     image = jr.normal(key, (128, 128))
     fs = make_frameset(image)
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     # 50 random positions in an annulus well inside the field
     pos_key, angle_key = jr.split(jr.PRNGKey(3))
     radii = jr.uniform(pos_key, (50,), minval=15.0, maxval=45.0)
@@ -104,7 +104,7 @@ def test_mawet_arm_nan_statistic_gives_nan_fpf():
     key = jr.PRNGKey(4)
     image = jr.normal(key, (64, 64))
     fs = make_frameset(image)
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     stats = arm.detect(fs, jnp.array([[31.5, 32.5]]))  # r < fwhm -> NaN
     assert bool(jnp.isnan(stats.statistic[0]))
     assert bool(jnp.isnan(stats.fpf[0]))
@@ -121,7 +121,7 @@ def test_mawet_arm_ignores_references_and_uses_validity():
         validity,
         is_leaf=lambda x: x is None,
     )
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     positions = jnp.array([[32.0, 48.0]])
     with_refs = arm.detect(fs, positions, references=make_frameset(image))
     without = arm.detect(fs, positions)
@@ -135,7 +135,7 @@ def test_mawet_arm_multiframe_uses_coadd():
     key = jr.PRNGKey(6)
     image = jr.normal(key, (64, 64)) + 10.0
     fs = make_frameset(image, n_frames=4, frame_time_s=25.0)
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     positions = jnp.array([[32.0, 48.0]])
     stats = arm.detect(fs, positions)
     expected = DetectionEstimator.mawet(FWHM_PX)(fs.coadd(), positions).statistic
@@ -143,18 +143,21 @@ def test_mawet_arm_multiframe_uses_coadd():
 
 
 def test_mawet_arm_detect_works_under_jit():
-    """Test that arm.detect can be called from inside a jitted function."""
+    """Direct evaluation is the oracle; closed resolution gives exact JIT parity."""
     key = jr.PRNGKey(7)
     image = jr.normal(key, (64, 64))
     fs = make_frameset(image)
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     positions = jnp.array([[32.0, 48.0]])
 
     @jax.jit
-    def run(f: FrameSet, p):
+    def run(frames, p):
+        f = eqx.tree_at(lambda s: s.frames, fs, frames)
         return arm.detect(f, p).statistic
 
-    assert jnp.allclose(run(fs, positions), arm.detect(fs, positions).statistic)
+    np.testing.assert_array_equal(
+        run(fs.frames, positions), arm.detect(fs, positions).statistic
+    )
 
 
 def test_mawet_arm_coadd_uses_content_differing_frames():
@@ -186,7 +189,7 @@ def test_mawet_arm_coadd_uses_content_differing_frames():
         epoch=Epoch(J2000_JD),
         grid=PixelGrid.regular((n, n), 0.020, "arcsec"),
     )
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     stats = arm.detect(fs, planet_pos[None, :])
     explicit_coadd = jnp.sum(frames, axis=0) / jnp.sum(exposure)
     expected = DetectionEstimator.mawet(FWHM_PX)(
@@ -213,7 +216,7 @@ def test_mawet_arm_grid_center_matches_geometric():
         fs,
         replace(fs.grid, center_x=c, center_y=c),
     )
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     a = arm.detect(fs, positions)
     b = arm.detect(fs_center, positions)
     np.testing.assert_array_equal(np.asarray(a.statistic), np.asarray(b.statistic))
@@ -231,9 +234,224 @@ def test_mawet_arm_consults_off_center():
         fs,
         replace(fs.grid, center_y=20.0, center_x=40.0),
     )
-    arm = MawetArm(fwhm_px=FWHM_PX)
+    arm = MawetArm()
     a = arm.detect(fs, positions)
     b = arm.detect(fs_off, positions)
     assert not np.array_equal(
         np.asarray(a.statistic), np.asarray(b.statistic), equal_nan=True
     )
+
+
+def _small_science():
+    """CPU-float64 fixture with references passing within 2 px of the edge."""
+    frames = jnp.asarray(np.random.default_rng(120).normal(size=(2, 33, 33)))
+    return replace(
+        make_frameset(frames[0], 2),
+        frames=frames,
+        fwhm_px=jnp.asarray(2.5),
+    )
+
+
+def _arm_for(kind, **kwargs):
+    """Build either arm with a compact fixed template for shared contract tests."""
+    from photomancy.postproc import ArrayTemplateProvider, MatchedFilterArm
+
+    if kind == "mawet":
+        return MawetArm(**kwargs)
+    y, x = jnp.mgrid[:5, :5]
+    provider = ArrayTemplateProvider(jnp.exp(-((y - 2) ** 2 + (x - 2) ** 2) / 2.0))
+    return MatchedFilterArm(provider, **kwargs)
+
+
+@pytest.mark.parametrize("value", [100.0, np.nan, np.inf])
+def test_excluded_candidate_value_is_irrelevant(value):
+    """Exclusion is the oracle; every result field must match bitwise, NaNs equal."""
+    science = replace(
+        make_frameset(jnp.asarray(np.random.default_rng(120).normal(size=(33, 33)))),
+        fwhm_px=jnp.asarray(2.5),
+    )
+    valid = jnp.ones((33, 33)).at[16, 26].set(0.0)
+    science = replace(science, valid=valid, frames=science.frames.at[:, 16, 26].set(0))
+    positions = jnp.array([[16.0, 26.0], [6.0, 16.0]])
+    arm = MawetArm()
+    before = arm.detect(science, positions)
+    after = arm.detect(
+        replace(science, frames=science.frames.at[:, 16, 26].set(value)), positions
+    )
+    for field in ("statistic", "fpf", "dof", "positions_yx", "fwhm_px"):
+        assert np.array_equal(
+            np.asarray(getattr(before, field)),
+            np.asarray(getattr(after, field)),
+            equal_nan=True,
+        ), field
+    assert np.isnan(before.statistic[0])
+    assert np.isnan(before.fpf[0])
+    assert np.isfinite(before.statistic[1])
+
+
+@pytest.mark.parametrize("kind", ["mawet", "template"])
+@pytest.mark.parametrize("explicit_valid", [False, True])
+def test_all_valid_matches_base_bitwise(kind, explicit_valid):
+    """Exact literals recorded from the pre-change implementation on CPU float64.
+
+    The reference ring at radius 14 on a 33-pixel detector crosses the kernel
+    half-width from the edge. Bitwise equality, with no tolerance, preserves
+    the original off-image padding and arithmetic for None and all-ones masks.
+    """
+    science = _small_science()
+    if explicit_valid:
+        science = replace(science, valid=jnp.ones((33, 33)))
+    positions = jnp.array([[16.0, 30.0], [9.25, 21.5]])
+    recorded = {
+        "mawet": (
+            ("0x1.ba885dbba411ap-1", "0x1.448de7fdf5715p-1"),
+            ("0x1.934be552481cap-3", "0x1.117881170fc1ap-2"),
+        ),
+        "template": (
+            ("0x1.e05fd1b453f22p-2", "0x1.d6e68db3a9973p-3"),
+            ("0x1.48ca322481de2p-2", "0x1.a437b0b3cdc6dp-2"),
+        ),
+    }
+    result = _arm_for(kind).detect(science, positions)
+    for field, literals in zip(("statistic", "fpf"), recorded[kind], strict=True):
+        expected = np.array([float.fromhex(v) for v in literals])
+        assert np.array_equal(np.asarray(getattr(result, field)), expected), field
+    expected_dof = [float.fromhex(v) for v in ("0x1p+5", "0x1.2p+4")]
+    assert np.array_equal(np.asarray(result.dof), expected_dof)
+
+
+@pytest.mark.parametrize("kind", ["mawet", "template"])
+def test_arm_single_orientation_concrete_and_traced(kind):
+    """Modulo-360 equality is the oracle; exact parity and boolean NaN gates apply."""
+    science = _small_science()
+    science = replace(
+        science, frames=jnp.broadcast_to(science.frames[0], science.frames.shape)
+    )
+    positions = jnp.array([[16.0, 26.0], [7.0, 16.0]])
+    arm = _arm_for(kind)
+    with pytest.raises(ValueError, match=r"0.*90.*spread.*degrees"):
+        arm.detect(replace(science, telescope_pa_deg=jnp.array([0.0, 90.0])), positions)
+    expected = arm.detect(science, positions)
+    wrapped = arm.detect(
+        replace(science, telescope_pa_deg=jnp.array([0.0, 360.0])), positions
+    )
+    assert np.array_equal(np.asarray(expected.statistic), np.asarray(wrapped.statistic))
+
+    run = eqx.filter_jit(
+        lambda pa: arm.detect(
+            eqx.tree_at(lambda s: s.telescope_pa_deg, science, pa), positions
+        )
+    )
+    different = run(jnp.array([0.0, 90.0]))
+    assert np.isnan(different.statistic).all()
+    assert np.isnan(different.fpf).all()
+    same = run(jnp.array([0.0, 0.0]))
+    assert np.isfinite(same.statistic).all()
+    assert np.isfinite(same.fpf).all()
+
+
+@pytest.mark.parametrize("kind", ["mawet", "template"])
+def test_arm_rejects_private_resolution(kind):
+    """The public constructor contract forbids fwhm_px; TypeError is exact."""
+    with pytest.raises(TypeError, match="fwhm_px"):
+        _arm_for(kind, fwhm_px=2.5)
+
+
+@pytest.mark.parametrize("kind", ["mawet", "template"])
+def test_arm_resolution_comes_from_science(kind):
+    """Science resolution and aperture scaling are algebraic; compare exactly."""
+    from photomancy.postproc import make_aperture_kernel
+
+    science = _small_science()
+    positions = jnp.array([[16.0, 26.0]])
+    wider_science = replace(science, fwhm_px=jnp.asarray(5.0))
+    arm = _arm_for(kind)
+    wide = _arm_for(kind, aperture_fwhm=2.0)
+    assert arm.estimator(science).sampler.fwhm == science.fwhm_px
+    assert (
+        wide.estimator(science).sampler.fwhm == 2 * arm.estimator(science).sampler.fwhm
+    )
+    assert (
+        arm.estimator(wider_science).sampler.fwhm
+        == 2 * arm.estimator(science).sampler.fwhm
+    )
+    for configured in (arm, wide):
+        assert configured.detect(science, positions).fwhm_px == science.fwhm_px
+        assert (
+            configured.detect(wider_science, positions).fwhm_px == wider_science.fwhm_px
+        )
+    field = type(arm).__dataclass_fields__["aperture_fwhm"]
+    # MawetArm's kernel shape depends on the width, so it is static there.
+    assert field.metadata.get("static", False) == (kind == "mawet")
+    if kind == "mawet":
+        expected = make_aperture_kernel(radius=2.5, soft=True, sharpness=10.0)
+        assert np.array_equal(
+            np.asarray(wide.estimator(science).filter.kernel), expected
+        )
+
+
+def test_reference_footprint_exclusion_matches_numpy_t():
+    """NumPy box support and Bessel t formula are the oracle; roundoff is <1e-10."""
+    from scipy.ndimage import map_coordinates as numpy_sample
+    from scipy.signal import convolve2d
+
+    from photomancy.postproc import generate_aperture_coords, n_reference_apertures
+
+    image = np.random.default_rng(90).normal(size=(101, 101))
+    science = replace(make_frameset(jnp.asarray(image)), fwhm_px=jnp.asarray(5.0))
+    arm = MawetArm(fast=True)
+    estimator = arm.estimator(science)
+    position = jnp.array([50.0, 80.0])
+    n = int(n_reference_apertures(jnp.asarray(30.0), 5.0))
+    ry, rx, _ = generate_aperture_coords((50.0, 50.0), 30.0, 0.0, n, fwhm=5.0)
+    refs = np.stack([ry[:n], rx[:n]], axis=1)
+    half = estimator.filter.kernel.shape[0] // 2
+    lower = np.floor(refs).astype(int) - half
+    upper = np.floor(refs).astype(int) + half + 1  # bilinear's second node
+    # One column from the first reference's nearest center, away from the
+    # candidate and all other reference footprints on this radius-30 ring.
+    pixel = np.floor(refs[0] + 0.5).astype(int) + np.array([0, 1])
+    touched = np.all((lower <= pixel) & (pixel <= upper), axis=1)
+    centers = np.floor(refs + 0.5).astype(int)
+    assert touched.sum() == 1
+    assert not np.any(np.all(centers == pixel, axis=1))
+    valid = jnp.ones((101, 101)).at[tuple(pixel)].set(0.0)
+    all_valid = arm.detect(science, position[None])
+    result = arm.detect(replace(science, valid=valid), position[None])
+    assert float(result.dof[0]) == float(all_valid.dof[0]) - 1
+    clean = image.copy()
+    clean[tuple(pixel)] = 0.0
+    flux = convolve2d(clean, np.asarray(estimator.filter.kernel), mode="same")
+    samples = numpy_sample(flux, refs[~touched].T, order=1)
+    signal = numpy_sample(flux, np.asarray(position)[:, None], order=1)[0]
+    expected = (signal - samples.mean()) / (
+        samples.std(ddof=1) * np.sqrt(1 + 1 / len(samples))
+    )
+    np.testing.assert_allclose(result.statistic[0], expected, rtol=0, atol=1e-10)
+
+
+def test_mawet_arm_jit_with_uncached_kernel():
+    """Direct CPU float64 is the oracle; first-call JIT must give exact parity."""
+    from photomancy.postproc import make_aperture_kernel
+
+    science = replace(_small_science(), fwhm_px=jnp.asarray(2.75))
+    arm = MawetArm()
+    positions = jnp.array([[16.0, 26.0]])
+    make_aperture_kernel.cache_clear()
+    run = eqx.filter_jit(
+        lambda frames: arm.detect(replace(science, frames=frames), positions)
+    )
+    jitted = run(science.frames)
+    direct = arm.detect(science, positions)
+    assert np.isfinite(jitted.statistic).all()
+    assert np.array_equal(np.asarray(jitted.statistic), np.asarray(direct.statistic))
+    assert np.array_equal(np.asarray(jitted.fpf), np.asarray(direct.fpf))
+
+
+def test_mawet_arm_jits_as_an_argument():
+    """Direct evaluation is the oracle; the arm itself may be a jit argument."""
+    science = _small_science()
+    positions = jnp.array([[16.0, 26.0]])
+    arm = MawetArm(aperture_fwhm=1.5)
+    jitted = jax.jit(lambda a: a.detect(science, positions).statistic)(arm)
+    np.testing.assert_array_equal(jitted, arm.detect(science, positions).statistic)

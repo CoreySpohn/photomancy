@@ -211,3 +211,15 @@ def test_band_and_epoch_are_host_metadata_with_precise_offsets():
     assert fs.band == Band(495.0, 605.0)
     assert fs.epoch is epoch
     assert float(jax.jit(lambda f: f.time_d[0])(fs)) == 1 / 65536
+
+
+def test_frameset_single_orientation():
+    """Wrapped differences define equality; the contract tolerance is 1e-6 deg."""
+    assert bool(make_frameset(n_frames=1).single_orientation())
+    for angles in ([10.0, 370.0], [359.9999999, 0.0]):
+        science = make_frameset(n_frames=2, telescope_pa_deg=jnp.asarray(angles))
+        assert bool(science.single_orientation())
+    with pytest.raises(ValueError, match=r"0.*0.001.*spread.*degrees"):
+        make_frameset(
+            n_frames=2, telescope_pa_deg=jnp.array([0.0, 1e-3])
+        ).single_orientation()

@@ -91,19 +91,44 @@ class TestMawetParity:
         _assert_parity(stats.statistic, golden_snr)
         _assert_parity(stats.dof + 1.0, golden_n.astype(float))
 
-    def test_statistic_parity_with_validity_map(self):
-        """Validity-map threading matches the golden core."""
-        image = _scene(1)
-        positions = _positions()
-        n = image.shape[0]
-        validity = jnp.ones((n, n)).at[:, : n // 3].set(0.0)
-        kernel = make_aperture_kernel(radius=FWHM / 2.0, soft=True, sharpness=10.0)
-        golden_snr, golden_n = golden_snr_batch_core(
-            image, positions, kernel, FWHM, MAX_APERTURES, 3, EXCLUSION_BUFFER, validity
+    def test_validity_map_requires_full_footprints(self):
+        """Box and cubic-stencil bounds are the oracle; masks and dof are exact."""
+        from photomancy.postproc.core.geometry import (
+            generate_aperture_coords,
+            n_reference_apertures,
         )
-        stats = DetectionEstimator.mawet(FWHM)(image, positions, validity)
-        _assert_parity(stats.statistic, golden_snr)
-        _assert_parity(stats.dof + 1.0, golden_n.astype(float))
+
+        image = _scene(1)
+        positions = jnp.concatenate([_positions(), jnp.array([[50.0, 35.0]])])
+        n = image.shape[0]
+        boundary = n // 3
+        validity = jnp.ones((n, n)).at[:, :boundary].set(0.0)
+        estimator = DetectionEstimator.mawet(FWHM)
+        prepared = estimator.filter.prepare_validity(validity)
+        filtered = estimator.filter.prepare(jnp.where(validity > 0.5, image, 0.0))
+        stats = estimator(image, positions, validity)
+        half = estimator.filter.kernel.shape[0] // 2
+        for index, pos in enumerate(positions):
+            radius = jnp.linalg.norm(pos - 50.0)
+            count = n_reference_apertures(radius, FWHM)
+            _ry, rx, active = generate_aperture_coords(
+                (50.0, 50.0),
+                radius,
+                jnp.arctan2(pos[0] - 50, pos[1] - 50),
+                count,
+                fwhm=FWHM,
+            )
+            _, mask, _ = estimator.sampler(
+                filtered, pos, estimator.filter, prepared, jnp.array([50.0, 50.0])
+            )
+            # These rings remain on-chip. The leftmost cubic node is floor(x)-1.
+            expected = np.asarray(active) & (
+                np.floor(np.asarray(rx)) - 1 - half >= boundary
+            )
+            np.testing.assert_array_equal(mask, expected)
+            assert stats.dof[index] == expected.sum() - 1
+        assert np.isnan(stats.statistic[-1])
+        assert np.isnan(stats.fpf[-1])
 
     def test_statistic_parity_randomized(self):
         """Property sweep: random scenes and positions stay at parity."""

@@ -40,6 +40,32 @@ class AbstractFilter(eqx.Module):
             Scalar response.
         """
 
+    @abc.abstractmethod
+    def prepare_validity(self, validity_map: jnp.ndarray) -> jnp.ndarray:
+        """Propagate binary validity through the filter's footprint.
+
+        Args:
+            validity_map: (ny, nx) image validity, usable where greater than 0.5.
+
+        Returns:
+            Boolean map marking footprints containing only usable image pixels.
+            Off-image padding is valid; reflected padding follows the image.
+        """
+
+    @abc.abstractmethod
+    def evaluate_validity(
+        self, prepared_validity: jnp.ndarray, position_yx: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Check every pixel of the evaluation interpolation stencil.
+
+        Args:
+            prepared_validity: Boolean map from prepare_validity().
+            position_yx: (2,) evaluation position in pixels.
+
+        Returns:
+            Scalar bool, True if every in-image stencil pixel is usable.
+        """
+
     def bind(self, position_yx: jnp.ndarray) -> "AbstractFilter":
         """Specialize this filter to a candidate position.
 
@@ -88,7 +114,8 @@ class AbstractSampler(eqx.Module):
             filt: The filter whose response defines the samples (the
                 estimator passes the candidate-bound filter; see
                 AbstractFilter.bind).
-            validity_map: (ny, nx) map, 1 = usable pixel, 0 = excluded.
+            validity_map: Propagated (ny, nx) map from filt.prepare_validity();
+                1 = usable footprint, 0 = excluded.
             center_yx: (2,) star center in pixels.
 
         Returns:

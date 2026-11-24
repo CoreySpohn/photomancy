@@ -217,7 +217,7 @@ class TestYieldEstimatorArgument:
         assert bool(jnp.all(jnp.isfinite(out)))
 
     def test_matched_filter_estimator_uses_validity_map(self):
-        """The yield pipeline returns the matched-filter statistic with the mask."""
+        """Estimator output is the oracle; footprint NaN gates and parity are exact."""
         from photomancy.postproc import DetectionEstimator
 
         science, star, positions, fwhm = self._scene()
@@ -237,5 +237,21 @@ class TestYieldEstimatorArgument:
         expected = estimator(residual, positions, validity).statistic
         unmasked = estimator(residual, positions).statistic
         np.testing.assert_array_equal(out, expected)
-        assert bool(jnp.all(jnp.isfinite(out)))
+        assert bool(jnp.all(jnp.isnan(out)))
+        # A narrower excluded region affects the annular noise without touching
+        # either candidate footprint, so this case must remain measurable.
+        safe_validity = jnp.ones_like(science).at[:, :20].set(0.0)
+        safe_out = calculate_yield_snr(
+            science,
+            positions,
+            fwhm,
+            star_model=star,
+            validity_map=safe_validity,
+            estimator=estimator,
+        )
+        np.testing.assert_array_equal(
+            safe_out, estimator(residual, positions, safe_validity).statistic
+        )
+        assert bool(jnp.all(jnp.isfinite(safe_out)))
+        assert not np.array_equal(safe_out, unmasked)
         assert not np.array_equal(out, unmasked)
