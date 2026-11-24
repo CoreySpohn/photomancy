@@ -292,7 +292,17 @@ class StageTrace(eqx.Module):
         failed: Whether the stage met a non-finite loss. A stage with early stopping
             ends at the check that reads it (at most ``check_every`` steps after it);
             a stage without reads its trace once at the end. The parameters returned
-            are the last iterate, which can be non-finite then.
+            are the last iterate, which can be non-finite then. It is also set when the
+            loss at the returned point (``final_loss``) is non-finite, which the trace
+            alone cannot show because it holds the loss before each step.
+        regressed: Whether the loss at the returned point is worse than the best loss
+            in the trace by more than the stall tolerance (the larger of
+            ``STOP_MIN_DELTA`` and 1e-10 of the best). The returned point is the last
+            iterate, not the best one: check ``regressed``, or use
+            :func:`photomancy.detection.measure`, which reports it as not converged.
+        final_loss: The objective evaluated once at the returned point (NaN for a stage
+            that ran no step). ``loss`` holds the value before each step, so this is
+            the one number that says where the last step landed.
     """
 
     name: str = eqx.field(static=True)
@@ -302,6 +312,8 @@ class StageTrace(eqx.Module):
     loss: np.ndarray
     metrics: dict
     failed: bool = eqx.field(static=True, default=False)
+    regressed: bool = eqx.field(static=True, default=False)
+    final_loss: float = float("nan")
 
 
 class StepRecord(eqx.Module):
@@ -442,7 +454,10 @@ def map_fit(
     Returns:
         A :class:`MAPResult`. The parameters are the last iterate, not the best one.
         A stage that meets a non-finite loss ends with ``StageTrace.failed`` true and
-        ``stopped_early`` false, whatever else its rule said.
+        ``stopped_early`` false, whatever else its rule said. Each stage's loss is also
+        evaluated once at the point returned (``StageTrace.final_loss``): non-finite
+        sets ``failed``, and worse than the trace's best by more than the stall
+        tolerance sets ``regressed``.
     """
     if freeze not in _POLICIES:
         raise ValueError(f"freeze must be one of {_POLICIES}, got {freeze!r}")
@@ -516,6 +531,11 @@ def map_fit(
         return {g: tuple(arrays[k] for k in members[g]) for g in groups}
 
     steps, keep_alive = {}, []
+
+    @eqx.filter_jit
+    def final_objective(static_args, arrays):
+        ld, scale, _ = static_args
+        return -scale * _value_and_aux(ld, rebuild(arrays))[0]
 
     def get_step(table, free, closed_form):
         key = (id(table), free, id(closed_form))
@@ -738,7 +758,19 @@ def map_fit(
             failed = not np.all(
                 np.isfinite(np.asarray(bufs["loss"])[offset : offset + n_run])
             )
-        records.append((stage.name, offset, n_run, stopped, failed))
+        final, regressed = float("nan"), False
+        if n_run:
+            final = float(final_objective(static_args, dyn))
+            seen = np.asarray(bufs["loss"])[offset : offset + n_run]
+            seen = seen[np.isfinite(seen)]
+            if not np.isfinite(final):
+                failed = True
+            elif seen.size:
+                best_seen = float(seen.min())
+                tolerance = max(STOP_MIN_DELTA, 1e-10 * abs(best_seen))
+                regressed = final > best_seen + tolerance
+            stopped = stopped and not failed
+        records.append((stage.name, offset, n_run, stopped, failed, regressed, final))
         offset += n_run
 
     host = {name: np.asarray(buf) for name, buf in bufs.items()}
@@ -751,8 +783,10 @@ def map_fit(
             loss=host["loss"][start : start + n],
             metrics={m: host[m][start : start + n] for m in metrics},
             failed=failed,
+            regressed=regressed,
+            final_loss=final,
         )
-        for name, start, n, stopped, failed in records
+        for name, start, n, stopped, failed, regressed, final in records
     )
     return MAPResult(params=rebuild(dyn), stages=traces, opt_states=states)
 

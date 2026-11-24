@@ -454,6 +454,48 @@ def test_early_stopping_ends_a_stage_at_the_expected_step():
     assert not gated(ones, 0.1).failed
 
 
+class _Parabola(eqx.Module):
+    """``-0.5 sum x**2``."""
+
+    def __call__(self, p):
+        return -0.5 * jnp.sum(p.x**2)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_a_stage_reports_the_loss_at_the_point_it_returns():
+    """The last step is evaluated: a rise is ``regressed`` and a NaN is ``failed``.
+
+    Truth source: closed forms. ``sgd(2.5)`` on ``0.5 x**2`` from ``x = 1`` maps ``x``
+    to ``-1.5 x``: one step records the loss before it (1.0 for two entries) and lands
+    where the loss is 2.25, which only an evaluation at the returned point can show.
+    A damped step (``sgd(0.5)``) lands lower (0.25), so it is not regressed. Maximizing
+    ``-sum sqrt(x)`` with ``sgd(1.0)`` from ``x = 1`` makes ``x`` fall by
+    ``0.5 / sqrt(x)``: the losses before two steps are finite (2.0 and 1.414) and the
+    second step leaves the domain: the trace is finite, the returned loss is NaN.
+    Tolerance basis: exact-algebra (rtol 1e-12 on ``final_loss``; flags are boolean).
+    Fails if the loss at the returned point is not evaluated (``regressed`` and
+    ``failed`` stay false), or ``stopped_early`` survives a failed stage.
+    """
+    init = _Q(x=jnp.ones(2), y=jnp.zeros(2))
+    labels = group_labels(init, _Q_GROUPS)
+
+    def stage(logdensity, lr, steps, **kwargs):
+        stages = [MAPStage(steps, ("x",), **kwargs)]
+        out = map_fit(logdensity, init, labels, {"x": optax.sgd(lr)}, stages)
+        return out.stages[0]
+
+    rose = stage(_Parabola(), 2.5, 1)
+    assert rose.regressed and not rose.failed
+    np.testing.assert_array_equal(rose.loss, [1.0])
+    np.testing.assert_allclose(rose.final_loss, 2.25, rtol=1e-12)
+    calm = stage(_Parabola(), 0.5, 1)
+    assert not calm.regressed and not calm.failed
+    np.testing.assert_allclose(calm.final_loss, 0.25, rtol=1e-12)
+    left = stage(_SqrtLoss(), 1.0, 2, early_stopping=EarlyStopping(1, check_every=1))
+    assert np.all(np.isfinite(left.loss)) and not np.isfinite(left.final_loss)
+    assert left.failed and not left.stopped_early
+
+
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_callbacks_metrics_scale_and_stage_logdensity():
     """Callbacks get pre-step device copies; metrics, scale and stage densities apply.
@@ -569,7 +611,7 @@ def test_prepare_uses_current_host_parameters_and_reuses_the_step(
         callback=callbacks.append,
         metrics={"x0": lambda p, aux: aux[0]},
     )
-    assert len(traces) == 1
+    assert len(traces) == 1 + 1  # the step programs, and the final evaluation
     np.testing.assert_array_equal(seen[0].x, [4.0, -2.0])
     np.testing.assert_array_equal(seen[1].x, [5.5, -0.5])
     np.testing.assert_array_equal(result.params.x, [1.625, 0.125])
@@ -619,6 +661,7 @@ def test_one_compile_per_stage_configuration_and_fresh_transforms():
     Truth source: the number of times the log-density body runs, which is once per
     trace (a Python side effect at trace time). Stages differ in length and scale
     but two share their free set, transform table and closed form.
+    The returned point's loss is evaluated by one more program, traced once for the run.
     Tolerance basis: exact-algebra (integer counts).
     Fails if: a stage length, scale or repeated configuration retraces the step
     (six compiles per run would become one per stage), or a stage that supplies
@@ -640,7 +683,8 @@ def test_one_compile_per_stage_configuration_and_fresh_transforms():
         MAPStage(2, ("x", "y")),
     ]
     map_fit(ld, init, labels, tx, stages)
-    assert len(traces) == 4 - 1  # (x), (y), (x, y): the third stage repeats the first
+    # (x), (y), (x, y): the third stage repeats the first; plus the final evaluation
+    assert len(traces) == 4 - 1 + 1
 
     fresh = {"x": optax.adam(0.1), "y": optax.adam(0.1)}
     cont = map_fit(ld, init, labels, tx, [MAPStage(3, ("x",)), MAPStage(1, ("x",))])
