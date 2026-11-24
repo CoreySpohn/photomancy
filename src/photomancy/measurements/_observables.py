@@ -1,6 +1,7 @@
 """Observables read from a system or scene, shared by terms and reports."""
 
 import jax.numpy as jnp
+import numpy as np
 from orbix.system import System
 
 
@@ -12,6 +13,30 @@ def _sky_positions(system, time_d):
             ephemeris.offset_arcsec(jnp.arange(1, system.orbits.a_AU.size + 1))
         )
     return system.positions(time_d=time_d)
+
+
+def _planet_count(system):
+    """Number of planets of a system or scene, read on the host."""
+    if isinstance(system, System):
+        return int(system.orbits.a_AU.size)
+    if hasattr(system, "n_planets"):
+        return int(system.n_planets)
+    return int(system.positions(time_d=jnp.zeros(1)).shape[1])
+
+
+def _check_planets(system, planet, valid, name):
+    """Raise when a valid row selects a planet outside ``[0, n_planets)``.
+
+    Negative indices are refused, not wrapped. Padded rows are not read. Host only:
+    ``planet`` and ``valid`` must be concrete.
+    """
+    selected = np.asarray(planet)[np.asarray(valid)]
+    count = _planet_count(system)
+    if np.any((selected < 0) | (selected >= count)):
+        raise ValueError(
+            f"{name}: a valid row selects planet {np.unique(selected).tolist()} but "
+            f"the system has {count} planet(s); indices lie in [0, {count})"
+        )
 
 
 def _relative_positions(system, time_d, planet):

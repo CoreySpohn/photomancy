@@ -665,7 +665,7 @@ def test_rv_marginal_integrates_to_one_over_the_contrast():
         rv=[0.0, 0.0, 0.0],
         rv_err=[1.5, 2.5, 1.0],
         inst_ids=[0, 0, 1],
-        n_inst=2,
+        instruments=("a", "b"),
     )
     jitters = jnp.array([0.7, 0.3])
     model = jnp.where(data.valid, 3.0, 0.0)
@@ -808,3 +808,32 @@ def test_term_sampling_laws(kind):
     z = np.asarray(z)
     assert np.all(np.abs(z.mean(axis=0)) < 4 / np.sqrt(2000))
     assert np.all(np.abs(z.var(axis=0, ddof=1) - 1) < 4 * np.sqrt(2 / 1999))
+
+
+def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check():
+    """Planet 1 or -1 on a one-planet system raises in ``check`` for both selectors.
+
+    Truth: the system has one planet, so valid selectors are ``[0, 1)``; negative
+    values do not wrap. A padded row with planet 5 is not read.
+    Fails if: the selector is clamped (JAX gather) and the row silently scores planet 0.
+    """
+    system = _system()
+    astrometry = _data()
+    photometry = _new_term("photometry")
+    for planet in (1, -1):
+        row = eqx.tree_at(lambda d: d.planet, astrometry, jnp.full(4, planet))
+        with pytest.raises(ValueError, match="planet"):
+            RelativeAstrometryTerm(row).check(system)
+        with pytest.raises(ValueError, match="planet"):
+            Fit(system, {}, (RelativeAstrometryTerm(row),))
+        data = eqx.tree_at(lambda d: d.planet, photometry.data, jnp.full(4, planet))
+        with pytest.raises(ValueError, match="planet"):
+            eqx.tree_at(lambda t: t.data, photometry, data).check(system)
+    RelativeAstrometryTerm(astrometry).check(system)
+    photometry.check(system)
+    padded = eqx.tree_at(
+        lambda d: (d.planet, d.valid),
+        astrometry,
+        (jnp.full(4, 5), jnp.zeros(4, bool)),
+    )
+    RelativeAstrometryTerm(padded).check(system)

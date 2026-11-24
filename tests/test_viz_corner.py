@@ -132,3 +132,44 @@ def test_plot_corner_overlay_names_and_ranges():
     assert result.axes.shape == (3, 3)
     assert result.axes[2, 0].get_xlim() == (600.0, 1600.0)
     assert len(result.artists["hist"]) == 6
+
+
+def test_classical_elements_refuses_a_planet_outside_the_orbit_rows():
+    """Planet 1 of a one-row orbit block raises instead of clamping to row 0.
+
+    Fails if: the extractor indexes with JAX gather semantics and returns row 0.
+    """
+    from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
+    from priorities import LogUniform
+    from skyscapes.population import kipping_eccentricity
+    from system_helpers import _orbits, _scene
+
+    from photomancy.infer import Fit, Posterior
+    from photomancy.orbit import classical_elements
+
+    model = _scene(
+        jax.tree.map(lambda x: x[1], _orbits()),
+        mass_Mearth=1.0,
+        radius_AU=1e-4,
+        albedo=0.3,
+    )
+    law = OrbitLaw(
+        period_d=LogUniform(600.0, 1600.0), eccentricity=kipping_eccentricity()
+    )
+    block = OrbitBlock(ClassicalChart(), law, rows=(0,), system="dynamics")
+    fit = Fit(model, {"dynamics.orbits": block}, ())
+    draws = fit.sample_prior(jax.random.key(0), (2,))
+    posterior = Posterior(
+        samples=draws,
+        log_weights=jnp.zeros(2),
+        log_target=fit.log_density(draws),
+        log_evidence=jnp.array(0.0),
+        log_evidence_se=jnp.array(0.0),
+        fit=fit,
+        info=None,
+        kind="monte_carlo",
+    )
+    with pytest.raises(ValueError, match="planet 1"):
+        classical_elements(
+            posterior, jax.random.key(1), 4, orbit_path="dynamics.orbits", planet=1
+        )
