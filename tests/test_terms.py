@@ -10,7 +10,6 @@ import numpy as np
 import pytest
 from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, d2s
 from hwoutils.epoch import Epoch
-from hwoutils.leaves import canonical
 from kinematics import (
     predict_pm_anomaly,
     predict_relative_astrometry,
@@ -293,7 +292,7 @@ def test_mixed_terms_sum_in_a_fit():
     )
     astrometry = RelativeAstrometryTerm(_data(), system_path="scene")
     law = Normal(jnp.asarray(2.0), jnp.asarray(1.0))
-    fit = Fit(canonical(model), {"instrument": law}, (image, astrometry))
+    fit = Fit(model, {"instrument": law}, (image, astrometry))
     x = {"instrument": jnp.asarray(2.0)}
     parts = [both(term, model)[0] for term in fit.terms]
     np.testing.assert_allclose(fit.log_likelihood(x), sum(parts), rtol=1e-12)

@@ -8,7 +8,6 @@ import numpy as np
 import priorities
 import pytest
 from golden_systems import model_at, systems
-from hwoutils.leaves import canonical
 from hwoutils.model_paths import assign
 from orbix.system import (
     ClassicalChart,
@@ -138,7 +137,7 @@ def test_a_fit_on_a_bare_system_joins_the_block_path():
     """
     block = OrbitBlock(ClassicalChart(), OPEN_LAW, rows=(0,), system="")
     term = RelativeAstrometryTerm(_relative_data([0] * 5))
-    fit = Fit(canonical(_system()), {"orbits": block}, (term,))
+    fit = Fit(_system(), {"orbits": block}, (term,))
     x = fit.sample_prior(jax.random.key(0), (3,))
     assert x["orbits"][block.coordinate_names[0]].shape == (3, 1)
     assert np.all(np.isfinite(fit.log_density(x)))

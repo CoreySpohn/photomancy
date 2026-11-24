@@ -243,7 +243,7 @@ def test_cluster_to_mixture_recovers_period_aliases_from_the_laplace_modes():
         "phi": jnp.full(3, 0.5),
     }
     fit = Fit(
-        _Sinusoid(*(jnp.zeros((), jnp.float64) for _ in range(3))),
+        _Sinusoid(jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)),
         laws,
         (ForwardTerm(_SinusoidForward(t), gaussian_loglike(y, 0.4)),),
     )

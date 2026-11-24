@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.leaves import canonical
 from hwoutils.model_paths import resolve  # noqa: F401
 from orbix.system import OrbitLaw, System, ThieleInnesBlock
 from orbix.system.core import Body, SkyFrame
@@ -78,7 +77,7 @@ def _term(n_rows=4, err=0.004, shift=0.0, system_path=""):
 
 
 def _fit(term=None):
-    return Fit(canonical(_system()), {"orbits": _block()}, (term or _term(),))
+    return Fit(_system(), {"orbits": _block()}, (term or _term(),))
 
 
 @pytest.fixture(scope="module")
@@ -181,7 +180,7 @@ def test_the_screened_weight_is_unbiased(fit):
     standard errors (N = 2000 for a 4 SE near 0.05 of the mean at the weight spread
     here). A pool with no live member weighs zero, never NaN.
     """
-    fit = Fit(canonical(fit.model), fit.free, (*fit.terms, _MassTerm()))
+    fit = Fit(fit.model, fit.free, (*fit.terms, _MassTerm()))
     comp = Completion.from_fit(fit)
     # the four prior shapes whose pools are most alive, and one with a dead pool
     shape, _ = ShapePriorProposal().sample(jax.random.key(1), comp, 400)
@@ -231,7 +230,7 @@ def test_a_nan_score_refuses_the_slice(fit):
     The run of ``any_epoch`` must be a refused slice (every weight and the evidence
     NaN), never a finite cloud that dropped the broken draws as zero weights.
     """
-    broken = Fit(canonical(fit.model), fit.free, (*fit.terms, _NanTerm()))
+    broken = Fit(fit.model, fit.free, (*fit.terms, _NanTerm()))
     post = run(
         broken,
         any_epoch(n_draws=2**12, n_adapt_draws=2**12, n_rounds=2, n_centers=64),
@@ -254,7 +253,7 @@ def test_completion_refuses_a_term_on_another_system():
     model = Model(_system(), _system())
     block = _block("a")
     term = _term(system_path="b")
-    fit = Fit(canonical(model), {"a.orbits": block}, (term,))
+    fit = Fit(model, {"a.orbits": block}, (term,))
     with pytest.raises(ValueError, match="'b'"):
         Completion.from_fit(fit)
 

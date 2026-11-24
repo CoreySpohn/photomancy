@@ -194,8 +194,10 @@ stops once it has converged (the loss has stalled and the scaled gradient norm i
 convergence test and runs all `n_steps`. `Laplace` finds each mode with the same stage
 and the same stopping rule.
 
-`Fit` refuses a model that holds NumPy arrays, NumPy scalars or Python numbers as leaves.
-Convert such a model with `hwoutils.leaves.canonical` first.
+`Fit` converts the leaves of the model it is given with `hwoutils.leaves.canonical`: NumPy
+arrays, NumPy scalars, Python numbers and weakly typed arrays become JAX arrays in the active
+precision. `fit.model` is the converted tree, so read the base values from it rather than from
+the object you passed in.
 
 ## Give the solved coefficients a wide prior
 

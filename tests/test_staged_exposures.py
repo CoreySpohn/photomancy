@@ -11,7 +11,6 @@ import numpy as np
 import optax
 import pytest
 import toy_coronagraph as toy
-from hwoutils.leaves import canonical
 from hwoutils.model_paths import resolve
 from priorities import Normal
 from term_utils import ExposureRecord, ExposureRender
@@ -135,7 +134,7 @@ def _self_fit(companion_peak):
     # the companion flux stays at its model value (zero): it is not a free entry
     paths = ("exposures[0].tilt", _STAR_FLUX, "instrument.ote", "instrument.si")
     free = _wide_laws(init, paths)
-    fit = Fit(canonical(init), free, terms)
+    fit = Fit(init, free, terms)
     x0 = _entries(init, paths)
     labels = group_labels(
         fit.to_real(x0),
@@ -159,10 +158,7 @@ def _self_fit(companion_peak):
         "tilt": optax.adam(_cosine(_TILT_PX, _TILT_STEPS)),
         "si": seam(n_long),
     }
-    ref, sci = (
-        Fit(canonical(init), free, terms[:1]),
-        Fit(canonical(init), free, terms[1:]),
-    )
+    ref, sci = Fit(init, free, terms[:1]), Fit(init, free, terms[1:])
     stages = [
         MAPStage(
             _TILT_STEPS,

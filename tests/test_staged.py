@@ -649,7 +649,7 @@ class _BowlTerm(AbstractTerm):
 
 
 def _bowl_fit(terms=None):
-    model = _Bowl(x=jnp.asarray([8.0, -4.0]), y=jnp.asarray(0.0, jnp.float64))
+    model = _Bowl(x=jnp.asarray([8.0, -4.0]), y=jnp.asarray(0.0))
     terms = terms or (
         _BowlTerm(jnp.asarray([1.0, 2.0])),
         _BowlTerm(jnp.asarray([3.0, 0.0])),

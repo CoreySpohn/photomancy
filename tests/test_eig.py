@@ -5,7 +5,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg, Rearth2AU, two_pi
-from hwoutils.leaves import canonical
 from kinematics import predict_photometry, predict_relative_astrometry
 from orbix.equations import period_a
 from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
@@ -85,7 +84,7 @@ def _one_mode_posterior():
         period_d=LogUniform(300.0, 3000.0), eccentricity=kipping_eccentricity()
     )
     block = OrbitBlock(ClassicalChart(), law, rows=(0,), system="dynamics")
-    fit = Fit(canonical(model), {"dynamics.orbits": block}, ())
+    fit = Fit(model, {"dynamics.orbits": block}, ())
     truth = block.chart.unconstrain(
         block.chart.from_orbit(model.dynamics.orbits), block.chart_support(model)
     )[0]

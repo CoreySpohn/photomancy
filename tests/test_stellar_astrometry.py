@@ -12,7 +12,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hwoutils.leaves import canonical
 
 jax.config.update("jax_enable_x64", True)
 
@@ -166,9 +165,7 @@ def test_mass_is_identifiable_from_reflex():
         tp=jnp.array(1580.0),
         log_Mp=jnp.array(log_Mp_true + 0.2),
     )
-    fit = Fit(
-        canonical(truth), prior, (ForwardTerm(forward, gaussian_loglike(obs, err)),)
-    )
+    fit = Fit(truth, prior, (ForwardTerm(forward, gaussian_loglike(obs, err)),))
     post = run(fit, Laplace(n_draws=512, n_steps=800, init=x0), jax.random.key(1))
 
     assert int(post.info.n_modes_kept) == 1

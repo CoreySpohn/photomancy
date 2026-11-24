@@ -53,7 +53,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock, block_order, check_ties, check_writers
 from hwoutils.constants import two_pi
-from hwoutils.leaves import as_float_leaf, is_param, require_tree
+from hwoutils.leaves import as_float_leaf, canonical, is_param, require_tree
 from hwoutils.memory import DEFAULT_MAX_BYTES, MemoryLimit, largest_batch
 from hwoutils.model_paths import assign, paths_overlap, resolve
 from jax.flatten_util import ravel_pytree
@@ -542,7 +542,8 @@ class Fit(eqx.Module):
     """A normalized log density over the free entries of a model.
 
     Attributes:
-        model: The base model, every leaf an array. A held path keeps its value here.
+        model: The base model as converted by :func:`hwoutils.leaves.canonical`, every
+            leaf a JAX array. A held path keeps its value here.
         free: Path to leaf law (a ``priorities`` distribution over the whole leaf) or
             to a block (keyed by the path it owns). Keys are static.
         terms: Data terms, each a normalized log likelihood.
@@ -560,10 +561,14 @@ class Fit(eqx.Module):
         terms: tuple[AbstractTerm, ...] = (),
         _walls: tuple[tuple[str, tuple[str, ...]], ...] | None = None,
     ):
-        """Store the entries and the walls of the blocks.
+        """Convert the model, store the entries and the walls of the blocks.
 
         Args:
-            model: The base model.
+            model: The base model. Its leaves are converted with
+                :func:`hwoutils.leaves.canonical` (Python numbers, NumPy arrays and
+                weakly typed arrays become JAX arrays in the active precision; static
+                fields and third-party Modules are left alone), so ``fit.model`` is the
+                converted tree, not the object passed in.
             free: The free entries by path.
             terms: The data terms.
             _walls: Walls to keep for use under a transformation, as
@@ -571,7 +576,7 @@ class Fit(eqx.Module):
                 edits pass the walls of the entries they keep, and
                 ``dataclasses.replace`` passes the stored value.
         """
-        self.model = model
+        self.model = canonical(model)
         self.free = free
         self.terms = terms
         self._walls = _block_walls(free) if _walls is None else _walls
@@ -588,9 +593,9 @@ class Fit(eqx.Module):
                 path, a block cycle, a free path or block write that meets a term's
                 ``reads``, or two terms that marginalize the same latent
                 (``AbstractTerm.marginalizes``), named in the message.
-            TypeError: Also when the model holds a leaf that is not a JAX array of the
-                active precision (:func:`hwoutils.leaves.require_tree`); convert it
-                with :func:`hwoutils.leaves.canonical`.
+            TypeError: Also when the converted model still holds a leaf that is not a
+                JAX array of the active precision (:func:`hwoutils.leaves.require_tree`,
+                a postcondition of the conversion in ``__init__``).
         """
         if not jax.config.jax_enable_x64:
             raise RuntimeError(

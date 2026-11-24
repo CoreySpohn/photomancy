@@ -15,7 +15,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import GM_SUN_AU3_PER_D2, Mearth2kg, Msun2kg, Rearth2AU
-from hwoutils.leaves import canonical
 from hwoutils.model_paths import resolve
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
@@ -128,21 +127,19 @@ def _scene(planet_mass_Msun=0.0, Rp_Rearth=1.0, albedo=0.3):
         Rp_Rearth=jnp.array([Rp_Rearth]),
         physical_model=LambertianPhysicalModel(Ag=jnp.array([albedo])),
     )
-    return canonical(
-        Scene.from_classical(
-            FlatStar(1.0),
-            (planet,),
-            star_mass_Msun=1.0,
-            planet_mass_Msun=planet_mass_Msun,
-            dist_pc=10.0,
-            a_AU=1.5,
-            e=0.3,
-            i_rad=0.8,
-            W_rad=1.1,
-            w_rad=0.7,
-            M0_rad=0.4,
-            order=(0,),
-        )
+    return Scene.from_classical(
+        FlatStar(1.0),
+        (planet,),
+        star_mass_Msun=1.0,
+        planet_mass_Msun=planet_mass_Msun,
+        dist_pc=10.0,
+        a_AU=1.5,
+        e=0.3,
+        i_rad=0.8,
+        W_rad=1.1,
+        w_rad=0.7,
+        M0_rad=0.4,
+        order=(0,),
     )
 
 
@@ -655,20 +652,18 @@ def _two_planet_scene():
     def planet():
         return Planet(jnp.ones(1), LambertianPhysicalModel(jnp.array([0.3])))
 
-    return canonical(
-        Scene.from_classical(
-            FlatStar(1.0),
-            (planet(), planet()),
-            star_mass_Msun=1.1,
-            planet_mass_Msun=jnp.array([1e3, 3e2]) * Mearth2kg / Msun2kg,
-            dist_pc=10.0,
-            a_AU=jnp.array([1.0, 3.0]),
-            e=jnp.array([0.1, 0.2]),
-            i_rad=jnp.array([0.7, 0.9]),
-            W_rad=jnp.array([0.5, 1.5]),
-            w_rad=jnp.array([1.0, 2.0]),
-            M0_rad=jnp.array([2.0, 0.3]),
-        )
+    return Scene.from_classical(
+        FlatStar(1.0),
+        (planet(), planet()),
+        star_mass_Msun=1.1,
+        planet_mass_Msun=jnp.array([1e3, 3e2]) * Mearth2kg / Msun2kg,
+        dist_pc=10.0,
+        a_AU=jnp.array([1.0, 3.0]),
+        e=jnp.array([0.1, 0.2]),
+        i_rad=jnp.array([0.7, 0.9]),
+        W_rad=jnp.array([0.5, 1.5]),
+        w_rad=jnp.array([1.0, 2.0]),
+        M0_rad=jnp.array([2.0, 0.3]),
     )
 
 
@@ -1049,6 +1044,7 @@ def test_refuses_a_static_detector_field_as_static_structure():
 class _Leaves(eqx.Module):
     count: jax.Array
     value: jax.Array
+    rate: float = 2.0
     pixel_scale: float = eqx.field(static=True, default=0.1)
 
 
@@ -1057,7 +1053,9 @@ def test_free_accepts_a_float_leaf_and_refuses_a_static_field_and_an_integer_lea
 
     Truth source: definitional (the leaf predicate ``hwoutils.leaves.is_param``: a
     floating or complex array may be free; integer arrays and static fields fix
-    structure). Fails if the integer array is accepted or the float leaf refused.
+    structure). A non-static Python float is converted by ``Fit`` to a float array and
+    is then free. Fails if the integer array is accepted or a float leaf, array or
+    converted Python number, is refused.
     """
     model = _Leaves(
         count=jnp.asarray(3, jnp.int32), value=jnp.asarray(1.5, jnp.float64)
@@ -1067,30 +1065,78 @@ def test_free_accepts_a_float_leaf_and_refuses_a_static_field_and_an_integer_lea
     with pytest.raises(ValueError, match=r"count.*not a floating leaf"):
         Fit(model, {"count": Normal(3.0, 1.0)})
     assert "value" in Fit(model, {"value": Normal(1.5, 0.1)}).free
+    assert "rate" in Fit(model, {"rate": Normal(2.0, 0.1)}).free
 
 
-def test_fit_refuses_a_numpy_leaf_and_enters_an_owned_module_with_a_foreign_one():
-    """A NumPy leaf is refused naming its path; a foreign Module is not entered.
+class _Curve(eqx.Module):
+    table: object
+    value: jax.Array
+    rate: float
+    weak: jax.Array
 
-    Truth source: definitional (``hwoutils.leaves.require_tree``: every leaf of an owned
-    or user Module is a JAX array of the active dtype; third-party Modules such as
-    ``interpax`` interpolators are skipped). Fails if the NumPy scalar (a ``float``
-    subclass the old type tuple reported as a static field) is not refused with the
-    leaf rule naming ``.value``, or if the model holding an interpolator is refused.
-    """
+
+class _Holder(eqx.Module):
+    curve: _Curve
+
+
+def _holder(value, rate, weak):
     import interpax
-
-    class _Curve(eqx.Module):
-        table: interpax.Interpolator1D
-        value: jax.Array
-
-    class _Holder(eqx.Module):
-        curve: _Curve
 
     x = jnp.linspace(0.0, 1.0, 5)
     table = interpax.Interpolator1D(x, x**2, method="cubic")
-    bad = _Holder(_Curve(table, np.float64(2.0)))
+    return table, _Holder(_Curve(table, value, rate, weak))
+
+
+def test_fit_converts_numpy_python_and_weak_leaves_to_strong_arrays():
+    """The model a user builds is converted at the door; ``fit.model`` is the result.
+
+    Truth source: definitional (``hwoutils.leaves.canonical``: NumPy scalars, Python
+    numbers and weakly typed arrays become strong JAX arrays in the active dtype;
+    ``hwoutils.leaves.check_tree`` lists the leaves that break the rule). Fails if
+    ``Fit`` refuses the model or ``check_tree(fit.model)`` is not empty, if a leaf of
+    ``fit.model`` is not a strong float64 array, or if the model passed in was changed.
+    """
+    from hwoutils.leaves import check_tree
+
+    weak = jnp.asarray(3.0)
+    assert weak.weak_type
+    _, model = _holder(np.float64(2.0), 4.0, weak)
+    fit = Fit(model, {"curve.value": Normal(2.0, 0.1), "curve.rate": Normal(4.0, 0.1)})
+    assert check_tree(fit.model) == ()
+    for name, want in (("value", 2.0), ("rate", 4.0), ("weak", 3.0)):
+        leaf = getattr(fit.model.curve, name)
+        assert isinstance(leaf, jax.Array) and not leaf.weak_type
+        assert leaf.dtype == jnp.float64 and float(leaf) == want
+    assert isinstance(model.curve.value, np.float64) and model.curve.rate == 4.0
+
+
+def test_fit_refuses_what_the_conversion_missed(monkeypatch):
+    """With the conversion removed the postcondition refuses a NumPy leaf by path.
+
+    Truth source: definitional (``hwoutils.leaves.require_tree``, the check ``Fit``
+    keeps after converting). ``canonical`` is replaced by the identity, so the NumPy
+    scalar reaches the check. Fails if the model is accepted or the path
+    ``curve.value`` is not named.
+    """
+    import photomancy.infer.fit as fit_module
+
+    monkeypatch.setattr(fit_module, "canonical", lambda tree: tree)
+    _, model = _holder(np.float64(2.0), 4.0, jnp.asarray(3.0, jnp.float64))
     with pytest.raises(TypeError, match=r"curve\.value"):
-        Fit(bad, {"curve.value": Normal(2.0, 0.1)})
-    good = _Holder(_Curve(table, jnp.asarray(2.0, jnp.float64)))
-    assert "curve.value" in Fit(good, {"curve.value": Normal(2.0, 0.1)}).free
+        Fit(model, {})
+
+
+def test_fit_enters_an_owned_module_but_not_a_foreign_one():
+    """The interpolator inside an owned Module is kept as the same object.
+
+    Truth source: definitional (``canonical`` and ``require_tree`` skip third-party
+    Modules such as ``interpax`` interpolators and enter owned or user Modules).
+    Fails if the model holding an interpolator is refused or the interpolator in
+    ``fit.model`` is not the object that was passed in.
+    """
+    table, model = _holder(
+        jnp.asarray(2.0, jnp.float64), 4.0, jnp.asarray(3.0, jnp.float64)
+    )
+    fit = Fit(model, {"curve.value": Normal(2.0, 0.1)})
+    assert "curve.value" in fit.free
+    assert fit.model.curve.table is table
