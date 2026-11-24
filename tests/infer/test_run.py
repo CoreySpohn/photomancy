@@ -533,7 +533,7 @@ def _badly_scaled_fit(rootless=False):
     return fit, {"mu": jnp.asarray(truth * [0.5, 3.0, 5.0, 2.0, 0.1, 1.0])}, best
 
 
-@pytest.mark.medium(reason="five L-BFGS runs of at most 200 steps and the scale pass")
+@pytest.mark.medium(reason="five L-BFGS runs of at most 600 steps and the scale pass")
 def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     """The default stage runs in scaled coordinates, converges there and stops.
 
@@ -541,9 +541,15 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     likelihood (the prior is flat to 1e-16 of it); a gap is the log likelihood below
     that optimum. Tolerance basis: floating-point. The scaled run stops at step 35
     with ``stopped_early`` and a gap of 2e-14 nat (asserted under 1e-9 nat); the
-    unscaled default runs all 200 steps, never reports a stop, and reaches the same
-    optimum (gap 1.4e-14, under 1e-9). Cut at 40 steps the unscaled control is 3320
-    nat below the optimum (asserted above 1 nat) while its loss has stalled, which is
+    unscaled default runs all 600 steps, never reports a stop, and reaches the same
+    optimum (gap under 1e-13, asserted under 1e-9). The unscaled step budget is
+    not a tolerance: in coordinates spanning ten orders of magnitude the unscaled
+    run sits on a plateau about 30 nat below the optimum and leaves it at a step set
+    by last-bit rounding of the CPU math library (the optimum is reached by step 200
+    on a macOS CPU and between steps 300 and 340 on an x86-64 Linux CPU), so the
+    budget is about twice the slowest observed. Cut at 40 steps the unscaled
+    control is 3320 nat below the optimum (asserted above 1 nat) while its loss has
+    stalled, which is
     why a loss stall alone is not a stop; with the gradient tolerance set below any
     reachable norm (1e-30) the scaled stage runs all 200 steps, which a stall-only
     rule would not. A term with no Fisher root runs unscaled,
@@ -562,8 +568,8 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
 
     scaled, trace = gap(MAP(n_steps=200, init=start))
     assert abs(scaled) < 1e-9 and trace.stopped_early and trace.n_steps == 35
-    unscaled, trace = gap(MAP(n_steps=200, init=start, scale=False))
-    assert abs(unscaled) < 1e-9 and not trace.stopped_early and trace.n_steps == 200
+    unscaled, trace = gap(MAP(n_steps=600, init=start, scale=False))
+    assert abs(unscaled) < 1e-9 and not trace.stopped_early and trace.n_steps == 600
     cut, trace = gap(MAP(n_steps=40, init=start, scale=False))
     assert cut > 1.0 and not trace.stopped_early
     # the gate is the scaled gradient norm: below 1e-30 it is never met, so the
