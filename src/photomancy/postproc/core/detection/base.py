@@ -83,6 +83,12 @@ class AbstractFilter(eqx.Module):
         """Return the detector dimensions for reference-centre bounds checks.
 
         Override this if preparation changes the image dimensions.
+
+        Args:
+            prepared: Output of prepare() for the current image.
+
+        Returns:
+            (ny, nx) of the detector image that prepare() consumed.
         """
         return prepared.shape
 

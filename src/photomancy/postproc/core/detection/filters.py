@@ -170,7 +170,14 @@ class GaussianFilter(AbstractFilter):
         return gaussian_filter_2d(image, self.kernel_1d)
 
     def detector_shape(self, prepared: jnp.ndarray) -> tuple[int, int]:
-        """Remove the extra response row and column of an even-length kernel."""
+        """Remove the extra response row and column of an even-length kernel.
+
+        Args:
+            prepared: Filtered image from prepare().
+
+        Returns:
+            (ny, nx) of the detector image.
+        """
         extra = int(len(self.kernel_1d) % 2 == 0)
         ny, nx = prepared.shape
         return ny - extra, nx - extra
