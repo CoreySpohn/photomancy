@@ -600,7 +600,7 @@ class _Patch(AbstractSpeckleField):
 
     grid: PixelGrid = eqx.field(static=True)
     data: jax.Array
-    epoch_d: float = 0.0
+    epoch_d: float = eqx.field(static=True, converter=float, default=0.0)
 
     def __init__(self, n=12, step=0.3):
         """Build the field on an ``n`` cell grid of ``step`` lambda/D."""
@@ -613,7 +613,7 @@ class _Patch(AbstractSpeckleField):
         """The excess is achromatic."""
         return np.empty(0)
 
-    def realize(self, *, wavelength_nm, time_d=0.0):
+    def realize(self, *, wavelength_nm, elapsed_s=0.0):
         """The same cell integrals at every node and time."""
         return Image(
             self.data, self.grid, (), Measure.integral(), "stellar_flux_fraction"
