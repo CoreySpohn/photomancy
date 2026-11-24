@@ -156,26 +156,33 @@ parameters of an imaging fit span many orders of magnitude (condition number 4e1
 a full-scene fit, 3.7 after the scaling), and the scaled matrix decides without
 rounding whether it is positive definite.
 
-The result also says whether the point is a maximum. `regular` is true when the
-information is positive definite, and `min_eigenvalue` is its smallest eigenvalue. Where
-`regular` is false the point is a saddle, a ridge or an undetected source, and the
-widths of the parameters that carry the negative curvature are NaN. That is the correct
-statement: a Gaussian width is not defined there, and a number would hide it.
+The result also says whether the point is a maximum, in three fields: `finite`, `converged`
+and `positive_definite`, and `regular` is their conjunction. `positive_definite` is true when
+the smallest eigenvalue of the correlation-form information, which is `min_eigenvalue` and
+does not depend on the units of the coordinates, is above 1e-8. Where it is false the point
+is a saddle or a singular matrix, and the widths of the parameters that carry the negative
+curvature are NaN. That is the correct statement: a Gaussian width is not defined there, and
+a number would hide it.
 
-Two more fields say whether the run converged. `grad_norm` is the norm of the gradient of
-the log likelihood at the estimate, in the stored coordinates (judge it against the
-widths, not against one), and `newton_decrement` is `0.5 g' cov g`, the nats the
-estimate still lies below the peak of the Gaussian that `cov` describes. `regular` is
-true only when the information is positive definite and the decrement is at most
-`max_decrement` (1 nat by default). The run uses the optimizer `MAP` uses, in
-coordinates scaled by the Fisher information at the start, so it reaches the same
-objective from a start several formal errors away.
+`converged` says the run reached the peak where the data constrain it. `grad_norm` is the
+norm of the gradient scaled by the square roots of the diagonal of the information (it has no
+units), and `newton_decrement` is `0.5 g' cov g` over the constrained directions, the nats
+the estimate still lies below the peak of the Gaussian that `cov` describes. `converged` needs
+the decrement at most `max_decrement` (1e-3 nat by default), no gradient above 1e-3 along a
+direction the data do not constrain, and a final log likelihood that is not below the start or
+the best the run reached. `n_steps`, `stopped_early` and `n_newton` report the optimizer. The
+run uses the stage `MAP` uses, in coordinates scaled by the Fisher information at the start,
+so it reaches the same objective from a start several formal errors away. A run that ends
+non-finite has `finite` false and NaN widths. `regular` does not say that the data constrain
+every combination of a source's parameters: for that, scale the source's own
+{func}`~photomancy.detection.curvature_block` by its diagonal, as the rule in
+{doc}`fit-a-scene` does.
 
 A source that may be faint needs a law with signed support. A bounded law, such as a
 positive amplitude, puts the maximum of a source consistent with zero on the edge of the
 support, where the position drops out of the likelihood; once the data pull past that edge by
-more than `max_decrement` nats the nonzero stored-coordinate gradient makes `regular`
-false. A wide
+more than `max_decrement` nats the nonzero stored-coordinate gradient makes `converged`
+and so `regular` false. A wide
 `Normal` on the amplitude lets the same source return a finite summary, and its width is
 irrelevant because `measure` reads no prior density. A detection threshold for the
 amplitude is a separate question: for a high-count, white Poisson null and an 81-trial

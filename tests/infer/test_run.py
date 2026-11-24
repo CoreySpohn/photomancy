@@ -26,6 +26,7 @@ from test_fit import (
     _scene,
 )
 
+from photomancy.detection import measure
 from photomancy.infer import (
     MAP,
     MCLMC,
@@ -550,7 +551,11 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     so its result equals ``scale=False`` bit for bit.
     Fails if: the default stage is not rescaled, the scale is wrong by a Jacobian or
     a square root, a fit without roots is scaled, the scaled stage stops on a loss
-    stall without the gradient gate, or the unscaled stage stops early.
+    stall without the gradient gate, the unscaled stage stops early, or ``measure``
+    stops on a stall alone (with the gate shut it then ends before its 200 steps; the
+    runs use ``n_newton=0``, so the polish cannot hide it; the scaled run's gap is
+    asserted under 1e-9 nat). The unscaled rootless run is 30 nat short at 200 steps
+    and ``measure`` says so (``converged`` false) until the Newton polish.
     """
     fit, start, best = _badly_scaled_fit()
     top = float(fit.log_likelihood({"mu": jnp.asarray(best)}))
@@ -576,6 +581,25 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     a = run(rootless, MAP(n_steps=10, init=start_r), jax.random.key(0))
     b = run(rootless, MAP(n_steps=10, init=start_r, scale=False), jax.random.key(0))
     np.testing.assert_array_equal(a.samples["mu"], b.samples["mu"])
+
+    # ``measure`` runs the same stage: scaled it stops at the same step, and with the
+    # gradient gate shut (1e-30) it runs every step, which a stall-only rule would not;
+    # unscaled it runs every step and never reports a stop (unscaled L-BFGS stalls 30
+    # nat short here, so the Newton polish brings it to the optimum)
+    est = measure(fit, start, n_steps=200, n_newton=0)
+    assert abs(top - float(est.log_likelihood)) < 1e-9
+    assert bool(est.stopped_early) and int(est.n_steps) == 35 and bool(est.converged)
+    monkeypatch.setattr("photomancy.infer.backends.staged._GRAD_TOL", 1e-30)
+    shut = measure(fit, start, n_steps=200, n_newton=0)
+    assert int(shut.n_steps) == 200 and not bool(shut.stopped_early)
+    monkeypatch.undo()
+    rootless, start_r, best_r = _badly_scaled_fit(rootless=True)
+    top_r = float(rootless.log_likelihood({"mu": jnp.asarray(best_r)}))
+    est = measure(rootless, start_r, n_steps=200, n_newton=0)
+    assert int(est.n_steps) == 200 and not bool(est.stopped_early)
+    assert not bool(est.converged)  # 30 nat short, and it says so
+    est = measure(rootless, start_r, n_steps=200, n_newton=4)
+    assert abs(top_r - float(est.log_likelihood)) < 1e-9 and bool(est.regular)
 
 
 @pytest.mark.medium(

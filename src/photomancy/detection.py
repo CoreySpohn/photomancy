@@ -46,10 +46,9 @@ from priorities import AbstractDistribution
 
 from photomancy.infer._scale import information_scale
 from photomancy.infer.backends.staged import (
-    EarlyStopping,
-    MAPStage,
+    STOP_MIN_DELTA,
+    default_stage,
     map_fit,
-    rescaled_transform,
 )
 from photomancy.infer.fit import Fit, _admit_information, _mapped, observed_hessian
 
@@ -449,6 +448,9 @@ def detect(
 class LikelihoodEstimate(eqx.Module):
     """The maximum of a fit's likelihood and the covariance from its curvature.
 
+    Three statements make an estimate regular, and each is a field:
+    ``regular = finite & converged & positive_definite``.
+
     Attributes:
         value: The estimate, an entry dictionary keyed by ``fit.free`` (the format of
             the fit's ``x``).
@@ -457,28 +459,47 @@ class LikelihoodEstimate(eqx.Module):
             shape ``(D, D)`` with rows in the order of
             :func:`photomancy.infer.posterior.ravel_samples` (the entries' leaves in
             ``jax.tree.leaves`` order, each row-major). It is a likelihood-only
-            statement and says nothing about the prior. Where ``regular`` is false the
-            diagonal can be negative and the widths in :attr:`sigma` are NaN there: the
-            point is not a maximum and the NaN says so.
+            statement and says nothing about the prior. Where ``positive_definite`` is
+            false the diagonal can be negative and the widths in :attr:`sigma` are NaN
+            there: the point is not a maximum and the NaN says so. NaN throughout when
+            ``finite`` is false.
         corr: The correlation matrix ``cov_ij / sqrt(cov_ii cov_jj)``; meaningful where
-            ``regular`` is true.
-        regular: True when the estimate is a regular maximum: the observed information
-            is positive definite and the point is stationary
-            (``newton_decrement <= max_decrement``). False at a saddle, on a ridge
-            (a direction the data do not constrain), off the peak, against the edge of
-            a leaf's support (a bounded law whose maximum lies outside it), or after a
-            run that did not converge.
-        min_eigenvalue: The smallest eigenvalue of the observed information, in the
-            units of the stored coordinates (negative when the point is not a
-            maximum).
-        grad_norm: The Euclidean norm of the gradient of the log likelihood at the
-            estimate, in the stored coordinates (the units of the entries, so it is
-            judged against the widths, not against one). Zero at a stationary point;
-            small beside a flat direction.
-        newton_decrement: ``0.5 g' cov g``, the nats the estimate still lies below the
-            peak of the Gaussian that ``cov`` describes. Unit free: a value near zero
-            says the run converged in every direction the data constrain. Meaningful
-            where the information is positive definite, like ``cov``.
+            ``positive_definite`` is true.
+        regular: True when the estimate is a regular maximum: finite, converged and
+            positive definite. False at a saddle, on a ridge (a direction the data do
+            not constrain), off the peak, against the edge of a leaf's support (a
+            bounded law whose maximum lies outside it), or after a run that did not
+            converge. It does not require ``stopped_early``: the Newton polish can
+            finish a run that hit its step cap.
+        converged: True when the estimate is stationary where the data constrain it:
+            ``newton_decrement <= max_decrement``, the scaled gradient has no
+            component on a direction below the eigenvalue floor larger than 1e-3, and
+            the final log likelihood is not below the start's or below the best the
+            optimizer's trace reached by more than the stall tolerance (1e-7 nat, or
+            1e-10 of the value when larger: one sum in two orders differs by rounding).
+        positive_definite: True when the smallest eigenvalue of the correlation-form
+            information :math:`C = D^{-1} A D^{-1}` exceeds 1e-8, with ``A`` the
+            observed information and ``D = sqrt(|diag A|)``. The test is unit free:
+            rescaling a coordinate (arcsec to radians, a flux by 1e-4) changes ``A``
+            but not ``C``.
+        finite: True when the log likelihood, the gradient, the information and the
+            value are all finite.
+        min_eigenvalue: The smallest eigenvalue of ``C`` (unit free; at most 1 minus
+            the largest correlation, so below the floor for a ridge, negative at a
+            saddle).
+        grad_norm: The Euclidean norm of the scaled gradient ``D^-1 g`` of the log
+            likelihood at the estimate (unit free; zero at a stationary point).
+        newton_decrement: ``0.5 g' cov g`` over the directions of ``C`` above the
+            floor, the nats the estimate still lies below the peak of the Gaussian
+            that ``cov`` describes. Unit free, and finite beside a flat direction,
+            which it leaves out (the projection of the gradient on those directions
+            is part of ``converged``).
+        log_likelihood: The log likelihood at the estimate.
+        n_steps: L-BFGS steps run.
+        stopped_early: Whether the optimizer's stop rule ended the run before its step
+            cap (loss stalled and scaled gradient small); false for a run without a
+            scale (a term with no Fisher root) and after a non-finite loss.
+        n_newton: Newton polishing steps that moved the estimate.
         assumptions: The fit's ``Fit.assumptions``, copied because the estimate does
             not hold the fit. An estimate is comparable with another only under the
             same assumptions.
@@ -488,9 +509,16 @@ class LikelihoodEstimate(eqx.Module):
     cov: jax.Array
     corr: jax.Array
     regular: jax.Array
+    converged: jax.Array
+    positive_definite: jax.Array
+    finite: jax.Array
     min_eigenvalue: jax.Array
     grad_norm: jax.Array
     newton_decrement: jax.Array
+    log_likelihood: jax.Array
+    n_steps: jax.Array
+    stopped_early: jax.Array
+    n_newton: jax.Array
     assumptions: tuple[str, ...] = eqx.field(static=True, default=())
 
     @property
@@ -507,6 +535,19 @@ def _require_float64(flat):
         )
 
 
+_EIGENVALUE_FLOOR = 1e-8
+"""Smallest correlation-form eigenvalue of a direction the data constrain."""
+
+_FLAT_GRADIENT = 1e-3
+"""Largest scaled gradient along the directions below the floor of a converged point."""
+
+
+def _scaling(info):
+    """``D = sqrt(|diag A|)`` with a zero entry replaced by one."""
+    scale = jnp.sqrt(jnp.abs(jnp.diag(info)))
+    return jnp.where(scale > 0.0, scale, 1.0)
+
+
 def _correlation_inverse(info):
     """Invert a symmetric matrix in correlation form and classify it.
 
@@ -514,14 +555,15 @@ def _correlation_inverse(info):
     matrix whose entries span many orders of magnitude (condition number 4e12 on a
     full-scene fit) to one near unity (3.7 there); the inverse is
     ``D^-1 C^-1 D^-1``. A congruence by a positive diagonal keeps the signature, so
-    the sign of the eigenvalues of ``C`` is that of ``A`` without the scale's rounding.
+    the sign of the eigenvalues of ``C`` is that of ``A`` without the scale's rounding,
+    and the eigenvalues of ``C`` do not depend on the units of the coordinates.
 
     Returns:
-        ``(cov, corr, regular, min_eigenvalue)``: the inverse, its correlation matrix,
-        whether ``A`` is positive definite, and the smallest eigenvalue of ``A``.
+        ``(cov, corr, positive_definite, min_eigenvalue)``: the inverse, its
+        correlation matrix, whether the smallest eigenvalue of ``C`` is above 1e-8, and
+        that eigenvalue.
     """
-    scale = jnp.sqrt(jnp.abs(jnp.diag(info)))
-    scale = jnp.where(scale > 0.0, scale, 1.0)
+    scale = _scaling(info)
     scaled = info / jnp.outer(scale, scale)
     inverse = jnp.linalg.inv(scaled)
     cov = inverse / jnp.outer(scale, scale)
@@ -529,8 +571,31 @@ def _correlation_inverse(info):
     root = jnp.sqrt(jnp.abs(jnp.diag(inverse)))
     root = jnp.where(root > 0.0, root, 1.0)
     corr = inverse / jnp.outer(root, root)
-    regular = jnp.min(jnp.linalg.eigvalsh(scaled)) > 0.0
-    return cov, 0.5 * (corr + corr.T), regular, jnp.min(jnp.linalg.eigvalsh(info))
+    smallest = jnp.linalg.eigvalsh(scaled)[0]
+    return cov, 0.5 * (corr + corr.T), smallest > _EIGENVALUE_FLOOR, smallest
+
+
+def _stationarity(info, grad):
+    """Scaled gradient, Newton decrement and the gradient along the flat directions.
+
+    With ``C = D^-1 A D^-1`` and ``g_s = D^-1 g``, the decrement is
+    ``0.5 sum (v_i . g_s)**2 / lambda_i`` over the eigenpairs of ``C`` above the floor
+    (the pseudo-inverse form: finite beside a flat direction), and the projection of
+    ``g_s`` on the eigenvectors below the floor is returned as a norm, so a gradient
+    along a direction the decrement leaves out is still judged.
+
+    Returns:
+        ``(norm of g_s, decrement, norm of the flat projection)``.
+    """
+    scale = _scaling(info)
+    values, vectors = jnp.linalg.eigh(info / jnp.outer(scale, scale))
+    scaled = grad / scale
+    along = vectors.T @ scaled
+    above = values > _EIGENVALUE_FLOOR
+    safe = jnp.where(above, values, 1.0)
+    decrement = 0.5 * jnp.sum(jnp.where(above, along**2 / safe, 0.0))
+    flat = jnp.linalg.norm(jnp.where(above, 0.0, along))
+    return jnp.linalg.norm(scaled), decrement, flat
 
 
 class _LikelihoodInReal(eqx.Module):
@@ -550,13 +615,20 @@ class _LikelihoodInReal(eqx.Module):
         return jnp.asarray(self.fit.log_likelihood(x), jnp.float64)
 
 
+_BACKTRACKS = 8
+"""Halvings of a Newton step tried before the step is refused."""
+
+
 @eqx.filter_jit
 def _newton(fit, u, scale, n_newton, batch_size):
     """Newton steps on the likelihood in the support coordinates, where they help.
 
     A step is taken only where the (scaled) information is positive definite and the
     step raises the likelihood, so it can neither follow a saddle nor leave the
-    support (the coordinates are unconstrained).
+    support (the coordinates are unconstrained). A full step that does not raise the
+    likelihood (curvature at the start says little about a point far from the peak) is
+    halved up to ``_BACKTRACKS`` times; if no halving raises it the step is refused and
+    the point stays. Returns the result and the number of steps that moved it.
     """
     flat, unravel = jax.flatten_util.ravel_pytree(u)
     width = jax.flatten_util.ravel_pytree(scale)[0]
@@ -572,15 +644,29 @@ def _newton(fit, u, scale, n_newton, batch_size):
         scaled = info * jnp.outer(width, width)
         ok = jnp.all(jnp.linalg.eigvalsh(scaled) > 0.0)
         safe = jnp.where(ok, scaled, jnp.eye(theta.size))
-        new = theta - width * jnp.linalg.solve(safe, width * grad(theta))
-        moved = ok & (negative(new) < negative(theta))
-        return jnp.where(moved, new, theta), None
+        direction = width * jnp.linalg.solve(safe, width * grad(theta))
+        before = negative(theta)
 
-    theta, _ = jax.lax.scan(step, flat, None, length=n_newton)
-    return unravel(theta)
+        def halve(carry):
+            fraction, _, count = carry
+            fraction = 0.5 * fraction
+            return fraction, negative(theta - fraction * direction), count + 1
+
+        def pending(carry):
+            _, value, count = carry
+            return (count < _BACKTRACKS) & ~(value < before)
+
+        fraction, value, _ = jax.lax.while_loop(
+            pending, halve, (1.0, negative(theta - direction), 0)
+        )
+        moved = ok & (value < before)
+        return jnp.where(moved, theta - fraction * direction, theta), moved
+
+    theta, moved = jax.lax.scan(step, flat, None, length=n_newton)
+    return unravel(theta), jnp.sum(moved, dtype=jnp.int32)
 
 
-def _stationarity(fit, x):
+def _gradient(fit, x):
     """Gradient of the log likelihood at ``x``, flat in the stored coordinates."""
     flat, unravel = jax.flatten_util.ravel_pytree(x)
     return jax.grad(lambda theta: fit.log_likelihood(unravel(theta)))(flat)
@@ -594,7 +680,7 @@ def measure(
     n_newton: int = 4,
     batch_size: int | None = 1,
     max_bytes: int | None = DEFAULT_MAX_BYTES,
-    max_decrement: float = 1.0,
+    max_decrement: float = 1e-3,
 ) -> LikelihoodEstimate:
     """Maximize a fit's likelihood from ``start`` and take the covariance there.
 
@@ -602,12 +688,15 @@ def measure(
     maximum does not depend on the coordinates, so the run moves in the support
     coordinates of each leaf law (``fit.to_real``: a bounded law is mapped onto the
     real line, so no step can leave the support). It uses the optimizer ``MAP`` uses
-    (:func:`photomancy.infer.backends.staged.map_fit`, L-BFGS), in coordinates scaled
-    by the Fisher information at the start without the prior, then polishes with
-    ``n_newton`` Newton steps where the information is positive definite and the step
-    raises the likelihood. It is for a likelihood summary (a flux and a position per
-    source), not a posterior: a posterior is ``MAP`` or a sampler, and neither takes a
-    flag that turns it into this.
+    (:func:`photomancy.infer.backends.staged.map_fit` with its default stage, L-BFGS),
+    in coordinates scaled by the Fisher information at the start without the prior, and
+    stops by the same rule: the loss has stalled and the scaled gradient norm is below
+    its tolerance (a fit with a term that has no Fisher root runs unscaled and takes
+    all ``n_steps``). It then polishes with ``n_newton`` Newton steps where the
+    information is positive definite and the step (halved up to eight times) raises the
+    likelihood, and returns the last iterate, not the best one. It is for a likelihood
+    summary (a flux and a position per source), not a posterior: a posterior is ``MAP``
+    or a sampler, and neither takes a flag that turns it into this.
 
     The covariance is the inverse of the observed information
     (:meth:`photomancy.infer.fit.Fit.information` with ``kind="observed"`` and
@@ -616,22 +705,33 @@ def measure(
     matrix decides without rounding whether it is positive definite). It is the formal
     covariance of the maximum-likelihood estimate and says nothing about the prior.
 
-    The result says whether it is a maximum. ``regular`` is false, and the widths of
-    the affected parameters are NaN, where the information is not positive definite
-    (an undetected source: its amplitude is consistent with zero, so its position is
-    not constrained, a flat direction; a saddle) or the point is not stationary
-    (``newton_decrement`` above ``max_decrement``: a run that did not converge, or a
-    maximum that lies against the edge of a bounded law). The last case is why the
-    amplitude of a source that may be faint needs a law with signed support at this
+    The result says whether it is a maximum, in three parts that
+    :class:`LikelihoodEstimate` reports separately: ``finite``, ``converged`` and
+    ``positive_definite``; ``regular`` is their conjunction. All three are unit free.
+    Positive definiteness is the smallest eigenvalue of the correlation-form
+    information above 1e-8, a floor on numerical rank that does not move when a
+    coordinate is rescaled. It certifies that the matrix is invertible and has no
+    negative curvature, not that the data constrain every combination of parameters:
+    a source whose amplitude runs to a value far above its width can sit at a
+    correlation-form eigenvalue of 1e-3 and pass. Judge that with the source's own
+    block (:func:`curvature_block`, scaled by its diagonal). Convergence is a Newton
+    decrement at most ``max_decrement`` (1e-3 nat, about 0.045 formal widths) together
+    with a scaled gradient under 1e-3 along any flat direction and a final log
+    likelihood that is neither below the start's nor below the best the optimizer's
+    trace reached by more than its stall tolerance (1e-7 nat, or 1e-10 of the value).
+    A run that ends non-finite has ``finite`` false and NaN widths. A run that walked
+    along a ridge and was ended by its step cap is positive definite and not
+    converged; ``regular`` is false.
+
+    The amplitude of a source that may be faint needs a law with signed support at this
     stage: ``Fit.with_priors`` with an unbounded law (a wide ``Normal``; its width is
     irrelevant because no density is read) lets a source of amplitude 0.3 plus or
     minus 1 return a finite summary. A positive law puts the maximum of such a source
     on the edge, where the stored-coordinate gradient is not zero: the decrement
-    exposes it (``regular=False``) once the data pull past the edge by more than
-    ``max_decrement`` nats (a measured amplitude below minus 1.4 formal errors at
-    the default); a smaller pull is within the noise and is reported as measured.
-    The Fisher matrix (``kind="fisher"``) cannot make
-    these statements.
+    exposes it (``converged=False``) once the data pull past the edge by more than
+    ``max_decrement`` nats (a measured amplitude below minus 0.045 formal errors at the
+    default); a smaller pull is within the noise and is reported as measured. The
+    Fisher matrix (``kind="fisher"``) cannot make these statements.
 
     Size. The observed information over every free scalar is the cost: about 20 s and
     7 GB for ten parameters on a full-scene fit. ``measure`` refuses with
@@ -645,14 +745,13 @@ def measure(
         fit: A :class:`~photomancy.infer.fit.Fit`.
         start: Entry dictionary, the format of the fit's ``x`` for one draw, with
             exactly the keys of ``fit.free``, inside every leaf's support.
-        n_steps: L-BFGS iterations at the most (a run ends early once 5 successive
-            checks gain less than ``1e-7`` nats).
+        n_steps: L-BFGS iterations at the most (the default stage's stop rule can end
+            the run earlier).
         n_newton: Newton polishing steps.
         batch_size: Hessian columns per batch (``None`` for all at once); the default
             holds one gradient's intermediates.
         max_bytes: Memory limit of the closed-form estimate, as in ``Fit.information``.
-        max_decrement: Largest Newton decrement, in nats, of an estimate called
-            regular (the default of :class:`photomancy.infer.Laplace`).
+        max_decrement: Largest Newton decrement, in nats, of a converged estimate.
 
     Returns:
         A :class:`LikelihoodEstimate`.
@@ -671,23 +770,39 @@ def measure(
     )
     u = fit.to_real(start)
     scale = information_scale(fit, u, include_prior=False)
-    solver = optax.lbfgs()
-    if scale is None:
-        scale = jax.tree.map(jnp.ones_like, u)
-    else:
-        solver = rescaled_transform(solver, {"all": tuple(jax.tree.leaves(scale))})
-    stage = MAPStage(
-        n_steps,
-        ("all",),
-        solver=solver,
-        early_stopping=EarlyStopping(patience=5, min_delta=1e-7, check_every=5),
-        name="measure",
-    )
+    stage = default_stage(n_steps, optax.lbfgs(), scale)
     labels = jax.tree.map(lambda _: "all", u)
     result = map_fit(_LikelihoodInReal(fit), u, labels, {}, (stage,))
+    trace = result.stages[0]
     u = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), result.params)
+    width = flat.size
+    nan = jnp.full((width, width), jnp.nan)
+    if not bool(jnp.all(jnp.isfinite(jax.flatten_util.ravel_pytree(u)[0]))):
+        # a run that ended off the real line: nothing to differentiate there
+        x = jax.tree.map(lambda a: jnp.full_like(a, jnp.nan), start)
+        return LikelihoodEstimate(
+            value=x,
+            cov=nan,
+            corr=nan,
+            regular=jnp.asarray(False),
+            converged=jnp.asarray(False),
+            positive_definite=jnp.asarray(False),
+            finite=jnp.asarray(False),
+            min_eigenvalue=jnp.asarray(jnp.nan),
+            grad_norm=jnp.asarray(jnp.nan),
+            newton_decrement=jnp.asarray(jnp.nan),
+            log_likelihood=jnp.asarray(jnp.nan),
+            n_steps=jnp.asarray(trace.n_steps, jnp.int32),
+            stopped_early=jnp.asarray(False),
+            n_newton=jnp.asarray(0, jnp.int32),
+            assumptions=fit.assumptions,
+        )
+    moved = jnp.asarray(0, jnp.int32)
     if n_newton:
-        u = _newton(fit, u, scale, n_newton, batch_size)
+        unit = jax.tree.map(jnp.ones_like, u)
+        u, moved = _newton(
+            fit, u, unit if scale is None else scale, n_newton, batch_size
+        )
     x, _ = fit.from_real(u)
     info = fit.information(
         x,
@@ -697,17 +812,41 @@ def measure(
         max_bytes=max_bytes,
     )
     cov, corr, positive, min_eig = _correlation_inverse(info)
-    grad = _stationarity(fit, x)
-    decrement = 0.5 * grad @ cov @ grad
-    regular = positive & (decrement <= max_decrement)
+    grad = _gradient(fit, x)
+    grad_norm, decrement, flat_gradient = _stationarity(info, grad)
+    likelihood = jnp.asarray(fit.log_likelihood(x), jnp.float64)
+    finite = (
+        jnp.all(jnp.isfinite(jax.flatten_util.ravel_pytree(x)[0]))
+        & jnp.isfinite(likelihood)
+        & jnp.all(jnp.isfinite(grad))
+        & jnp.all(jnp.isfinite(info))
+    )
+    # the trace holds the loss before each step, so its first entry is the start
+    reached = -jnp.min(jnp.asarray(trace.loss)) if trace.n_steps else -jnp.inf
+    # the loss inside the optimizer and this evaluation sum the pixels in different
+    # orders, so they agree to about 1e-12 of the value (1.3e-7 nat at 6.5e4)
+    below = likelihood < reached - jnp.maximum(STOP_MIN_DELTA, 1e-10 * jnp.abs(reached))
+    converged = (
+        (decrement <= max_decrement)
+        & (flat_gradient < _FLAT_GRADIENT)
+        & ~below
+        & (not trace.failed)
+    )
     return LikelihoodEstimate(
         value=x,
-        cov=cov,
-        corr=corr,
-        regular=regular,
+        cov=jnp.where(finite, cov, jnp.nan),
+        corr=jnp.where(finite, corr, jnp.nan),
+        regular=finite & converged & positive,
+        converged=converged,
+        positive_definite=positive,
+        finite=finite,
         min_eigenvalue=min_eig,
-        grad_norm=jnp.linalg.norm(grad),
+        grad_norm=grad_norm,
         newton_decrement=decrement,
+        log_likelihood=likelihood,
+        n_steps=jnp.asarray(trace.n_steps, jnp.int32),
+        stopped_early=jnp.asarray(trace.stopped_early),
+        n_newton=moved,
         assumptions=fit.assumptions,
     )
 

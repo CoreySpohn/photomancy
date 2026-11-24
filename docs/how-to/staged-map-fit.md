@@ -13,8 +13,8 @@ weight one. It has no evidence, so `log_evidence` is NaN, and its `info` is a
 The fit below has a model with two leaves, `shape` (two numbers) and `offset` (one number),
 and three measurements. The first two measurements see `shape + offset`, and the third
 sees `offset` alone. Each group of measurements is one term, so a stage can score one term
-without the other. Every free entry gets a wide Normal prior, which the last section
-explains.
+without the other. Every free entry gets a wide Normal prior, so that the prior does not move
+the optimum in this toy fit (see "The likelihood, not the posterior").
 
 ```python
 import equinox as eqx
@@ -125,6 +125,8 @@ coordinates is below 1e-3, and the stage trace then reports `stopped_early=True`
 stall alone does not stop it. The unscaled default stage (`scale=False`, or a fit whose
 terms have no Fisher root) runs all `n_steps` and never reports `stopped_early`. Explicit
 `stages` run as written: stopping applies only to a stage that sets `early_stopping`.
+A non-finite loss is a failure, not a stall: the stage ends with `failed=True` on its trace and
+`stopped_early=False`, and the parameters returned are the last iterate, which can be non-finite.
 
 ## Choices a stage can make
 
@@ -202,21 +204,117 @@ array size or a branch.
 `fit.model` is the converted tree, so read the base values from it rather than from the object
 you passed in.
 
-## Give the solved coefficients a wide prior
+## The likelihood, not the posterior
 
-A MAP fit returns the point where the whole objective, the prior included, is largest.
-The coefficients that a stage solves for, by gradient or by `closed_form`, should
-therefore carry a prior wide enough to be negligible next to the data, a Normal of width
-`1e8` rather than a few units.
+A MAP fit returns the point where the whole objective, the prior included, is largest. To ask
+for the peak of the likelihood and its width, do not make the prior negligible: use
+{func}`~photomancy.detection.measure` with a law of signed support on each amplitude, which
+reads no prior density, and see {doc}`fit-a-scene`. The wide Normal laws on this page keep the
+prior out of the way in a toy fit, but a prior of width `1e8` is a numerical hazard in a
+fit with many parameters and gives no width, so it is not the route to a likelihood summary.
 
-The prior pulls the optimum toward its mean by about its own gradient, `(x - m) / w**2`
-for a Normal with mean `m` and width `w`, divided by how sharply the data constrain that
-coefficient. For a coefficient the data pin down tightly the pull is invisible. For one the
-data constrain only weakly, it is not: in an exposure fit whose detector seam coefficients
-are weakly constrained, a Normal of width `1e3` moved them by about `1e-2` relative, while
-a width of `1e8` matched the closed-form answer to `1e-13`. A wide prior does not change
-what the data say, because it is flat across the range the data allow. The fits on this
-page use `1e8` for that reason.
+A coefficient that a stage solves for (by gradient or by `closed_form`) and that the data
+constrain only weakly is pulled toward the prior mean by about `(x - m) / w**2` for a
+Normal of mean `m` and width `w`, divided by how sharply the data constrain it. When that pull
+matters, say so in the prior you choose rather than hiding it.
+
+## Aliases and modes
+
+One `MAP` point is one answer. Two kinds of repeated answer look alike and are not.
+
+- **An alias is the same model written another way.** The disk orientation `(i, PA)` has four
+  such points: `(i, PA)`, `(180 - i, PA + 180)`, `(i + 180, PA)`, and the two radial slopes
+  exchanged. The images agree to rounding, so the four points have the same log likelihood,
+  and the data cannot tell them apart because there is nothing to tell. They are one disk. The
+  log prior can differ between them (it does for `default_disk_prior`), and the fit ends at
+  whichever is nearer the start or higher in density.
+- **A mode is a different model that the data cannot exclude.** An orbit at inclination `i` or
+  `180 - i` from sky positions alone is a pair of such modes: the two have different log
+  likelihoods, and each is a separate answer with its own weight.
+
+To tell them apart, evaluate `fit.log_likelihood` at the relabeled point. Equal to rounding
+(relative `1e-10`) is an alias, and the value is the same disk. Different is a mode.
+
+After a `MAP` run on a fit with an alias-prone orientation, evaluate the log density at the
+relabeled points of the optimum, a handful of evaluations, and report the highest. A start
+near edge-on can end in an alias other than the one you expect. The example below does this
+for a model that depends on its parameter only through `s**2`, so `s` and `-s` are aliases.
+
+```python
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import numpy as np
+from priorities import Normal
+
+from photomancy.infer import MAP, Fit, ForwardTerm, Laplace, run
+from photomancy.infer.likelihoods import gaussian_loglike
+
+jax.config.update("jax_enable_x64", True)
+
+
+class Shape(eqx.Module):
+    s: jax.Array
+
+
+class Curve(eqx.Module):
+    tilt: float = eqx.field(static=True)
+
+    def __call__(self, m):
+        k = jnp.arange(1.0, 6.0)
+        return jnp.concatenate([k * m.s**2, jnp.atleast_1d(self.tilt * m.s)])
+
+
+def build(tilt):
+    render = Curve(tilt)
+    data = render(Shape(jnp.asarray(2.0))) + np.random.default_rng(0).normal(
+        0.0, 0.5, 6
+    )
+    term = ForwardTerm(render, gaussian_loglike(data, 0.5))
+    return Fit(Shape(jnp.asarray(1.0)), {"s": Normal(0.0, 5.0)}, (term,))
+
+
+def point(fit, start):
+    posterior = run(fit, MAP(init={"s": jnp.asarray(start)}), jax.random.key(0))
+    return jax.tree.map(lambda a: a[0], posterior.samples)
+
+
+fit = build(tilt=0.0)  # symmetric: s and -s are one answer
+x = point(fit, -1.0)
+mirror = {"s": -x["s"]}
+assert abs(float(fit.log_likelihood(x)) - float(fit.log_likelihood(mirror))) < 1e-10
+```
+
+The same relabeling in a model that is not symmetric is a different answer. With `tilt=0.8` the
+mirror point has a log likelihood 20 nats lower, so it is a mode: a second, much less probable
+answer, not a second way of writing the first.
+
+```python continuation
+fit = build(tilt=0.8)
+x = point(fit, 1.0)
+assert float(fit.log_likelihood(x)) - float(fit.log_likelihood({"s": -x["s"]})) > 10.0
+```
+
+A mode is reported by running from one start per candidate. {class}`~photomancy.infer.Laplace`
+takes `n_modes` and an `init` with that many starts, and puts a Gaussian at each mode, weighted
+by its evidence; `posterior.info.n_modes_kept` counts the modes it kept, and
+`posterior.info.mode_log_evidence` says how much each is worth. For a sampler, start
+{class}`~photomancy.infer.NUTS` chains in both candidates. A single `MAP` point reports one
+mode, so a posterior with two modes needs one of these.
+
+```python continuation
+two = run(
+    fit,
+    Laplace(n_draws=200, n_modes=2, init={"s": jnp.array([2.0, -2.0])}),
+    jax.random.key(1),
+)
+assert int(two.info.n_modes_kept) == 2
+evidence = np.asarray(two.info.mode_log_evidence)
+assert evidence[0] - evidence[1] > 10.0
+```
+
+Random restarts are for a fit with no known symmetry and a residual that looks wrong, not a
+routine step: where the alias or the mirror is known, start from it.
 
 ## Freezing policies
 
