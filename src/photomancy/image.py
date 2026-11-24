@@ -172,6 +172,16 @@ def _scored_flag(rates, static_beyond_speckle):
     return rates.supported
 
 
+def _used_set(mask, rates, static_beyond_speckle) -> jax.Array:
+    """The scored pixels: the mask, else the render's support, else every pixel."""
+    if mask is not None:
+        return mask
+    flag = _scored_flag(rates, static_beyond_speckle)
+    if flag is not None:
+        return flag
+    return jnp.ones(jnp.shape(rates.total()), bool)
+
+
 @eqx.filter_jit
 def _flags(scene, instrument, exposure):
     """The ``(W, ny, nx)`` support flags ``(supported, static_supported)``.
@@ -205,6 +215,35 @@ def _lit_planets_outside(scene, instrument, exposure):
         lit = scene.planet_flux_densities(centre, times, ephemeris=ephemeris)[:, 0] > 0
         outside |= np.asarray(~psfs.valid & lit)
     return int(outside.sum())
+
+
+class _ImageScore(eqx.Module):
+    """The log likelihood of one frame as a function of the expected rates.
+
+    Holds what ``ImageTerm.__call__`` reads besides the rates: the frame, the mask,
+    the detector and the frame plan, all arrays of the term and the model that do not
+    move with a source amplitude. Calling it on the rates of a render is the term's
+    value.
+
+    Attributes:
+        observed_e: The observed frame.
+        mask: The pixel mask, or ``None`` for every supported pixel.
+        detector: The detector whose ``log_prob`` scores the frame.
+        plan: The frame plan.
+        static_beyond_speckle: Whether the beyond-speckle set is static.
+    """
+
+    observed_e: jax.Array
+    mask: jax.Array | None
+    detector: eqx.Module
+    plan: eqx.Module
+    static_beyond_speckle: bool = eqx.field(static=True)
+
+    def __call__(self, rates) -> jax.Array:
+        used = _used_set(self.mask, rates, self.static_beyond_speckle)
+        observed = jnp.where(used, self.observed_e, 0.0)
+        log_prob = self.detector.log_prob(observed, rates, self.plan)
+        return jnp.sum(jnp.where(used, log_prob, 0.0), dtype=jnp.float64)
 
 
 class ImageModel(eqx.Module):
@@ -381,12 +420,7 @@ class ImageTerm(AbstractTerm):
 
     def _used(self, rates) -> jax.Array:
         """The scored pixels: the mask, else the render's support, else every pixel."""
-        if self.mask is not None:
-            return self.mask
-        flag = _scored_flag(rates, self.static_beyond_speckle)
-        if flag is not None:
-            return flag
-        return jnp.ones(jnp.shape(rates.total()), bool)
+        return _used_set(self.mask, rates, self.static_beyond_speckle)
 
     @property
     def footprint_paths(self) -> tuple[str, ...]:
@@ -485,11 +519,30 @@ class ImageTerm(AbstractTerm):
         Returns:
             The scalar log likelihood of the scored pixels.
         """
+        rates, score = self.split(model)
+        return score(rates)
+
+    def split(self, model):
+        """Return the expected rates at ``model`` and the function that scores them.
+
+        ``score(rates)`` is ``__call__(model)`` for the rates of this render, so a
+        caller that moves the rates linearly (``detect``) renders once and scores
+        many times. ``score`` is an ``eqx.Module`` of arrays that do not depend on the
+        model's source amplitudes (the frame, the mask, the detector and the plan).
+
+        Args:
+            model: The model PyTree holding the scene, and the instrument and exposure
+                at their paths when they are not held by the term.
+
+        Returns:
+            ``(rates, score)``: the :class:`optixstuff.Rates` of the render and the
+            callable ``rates -> scalar log likelihood``.
+        """
         detector, rates, plan = self._rates(model)
-        used = self._used(rates)
-        observed = jnp.where(used, self.observed_e, 0.0)
-        log_prob = detector.log_prob(observed, rates, plan)
-        return jnp.sum(jnp.where(used, log_prob, 0.0), dtype=jnp.float64)
+        score = _ImageScore(
+            self.observed_e, self.mask, detector, plan, self.static_beyond_speckle
+        )
+        return rates, score
 
     def predict(self, model) -> jax.Array:
         """Return the expected electron counts per pixel, shape ``(W, ny, nx)``.

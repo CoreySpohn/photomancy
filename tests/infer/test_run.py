@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.flatten_util import ravel_pytree
-from priorities import Uniform
+from priorities import Normal, Uniform
 from test_fit import (
     GOLDEN,
     _block,
@@ -481,6 +481,86 @@ def test_map_finds_the_mode():
     np.testing.assert_allclose(
         float(post.log_target[0]), float(fit.log_density(post.samples)[0]), rtol=1e-12
     )
+
+
+class _Row(eqx.Module):
+    """One parameter row ``mu`` for a linear forward."""
+
+    mu: jax.Array
+
+
+class _Matrix(eqx.Module):
+    """Forward ``model -> A @ mu``."""
+
+    matrix: jax.Array
+
+    def __call__(self, model):
+        return self.matrix @ model.mu
+
+
+class _Opaque(eqx.Module):
+    """A likelihood that hides its Fisher root."""
+
+    inner: eqx.Module
+
+    def __call__(self, predicted):
+        return self.inner(predicted)
+
+
+def _badly_scaled_fit(rootless=False):
+    """A linear Gaussian fit whose six parameters span ten orders of magnitude.
+
+    Two pairs of columns are nearly collinear, the condition that makes unscaled
+    L-BFGS crawl. The priors are the wide Normal of the staged-fit how-to, so the
+    prior's curvature is invisible and the scale comes from the data.
+    """
+    rng = np.random.default_rng(0)
+    cols = rng.normal(size=(60, 6))
+    cols[:, 1] = cols[:, 0] + 0.1 * cols[:, 1]
+    cols[:, 4] = cols[:, 3] + 0.1 * cols[:, 4]
+    matrix = cols * np.array([1e-5, 1e-3, 1.0, 1e1, 1e3, 1e5])
+    truth = np.array([2.0, 1.0, -1.0, 0.5, 3.0, -2.0]) / np.array(
+        [1e-5, 1e-3, 1.0, 1e1, 1e3, 1e5]
+    )
+    data = matrix @ truth + 0.1 * rng.normal(size=60)
+    like = gaussian_loglike(data, 0.1)
+    if rootless:
+        like = _Opaque(like)
+    term = ForwardTerm(_Matrix(jnp.asarray(matrix)), like)
+    prior = Normal(jnp.zeros(6), 1e8 * jnp.ones(6))
+    fit = Fit(_Row(jnp.zeros(6)), {"mu": prior}, (term,))
+    best = np.linalg.lstsq(matrix, data, rcond=None)[0]
+    return fit, {"mu": jnp.asarray(truth * [0.5, 3.0, 5.0, 2.0, 0.1, 1.0])}, best
+
+
+@pytest.mark.medium(reason="three 40-step L-BFGS runs and the scale pass, 7 s cold")
+def test_map_scales_its_coordinates_by_the_information():
+    """The default stage runs in scaled coordinates and reaches the optimum sooner.
+
+    Truth source: ``numpy.linalg.lstsq``, the exact maximizer of the Gaussian
+    likelihood (the prior is flat to 1e-16 of it); the gap is the log likelihood
+    below the optimum after 40 L-BFGS steps. Tolerance basis: floating-point (the
+    scaled run is within 1e-5 nat of the optimum and the unscaled run, the control, is
+    more than 1 nat below it, at least six orders of magnitude apart; a term with no
+    Fisher root runs unscaled, so its result equals ``scale=False`` bit for bit).
+    Fails if: the default stage is not rescaled, the scale is wrong by a Jacobian
+    or a square root, or a fit without roots is scaled.
+    """
+    fit, start, best = _badly_scaled_fit()
+    top = float(fit.log_likelihood({"mu": jnp.asarray(best)}))
+
+    def gap(backend, fit=fit):
+        post = run(fit, backend, jax.random.key(0))
+        best = jax.tree.map(lambda a: a[0], post.samples)
+        return top - float(fit.log_likelihood(best))
+
+    scaled = gap(MAP(n_steps=40, init=start))
+    unscaled = gap(MAP(n_steps=40, init=start, scale=False))
+    assert scaled < 1e-5 and unscaled > 1.0
+    rootless, start_r, _ = _badly_scaled_fit(rootless=True)
+    a = run(rootless, MAP(n_steps=10, init=start_r), jax.random.key(0))
+    b = run(rootless, MAP(n_steps=10, init=start_r, scale=False), jax.random.key(0))
+    np.testing.assert_array_equal(a.samples["mu"], b.samples["mu"])
 
 
 def test_nested_sampling_recovers_the_evidence():

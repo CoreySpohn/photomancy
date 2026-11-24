@@ -39,11 +39,19 @@ import equinox as eqx
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
+import optax
 from hwoutils.memory import DEFAULT_MAX_BYTES
 from hwoutils.model_paths import resolve
 from priorities import AbstractDistribution
 
-from photomancy.infer.fit import Fit, observed_hessian
+from photomancy.infer._scale import information_scale
+from photomancy.infer.backends.staged import (
+    EarlyStopping,
+    MAPStage,
+    map_fit,
+    rescaled_transform,
+)
+from photomancy.infer.fit import Fit, _admit_information, _mapped, observed_hessian
 
 __all__ = [
     "DetectionMap",
@@ -173,8 +181,8 @@ def _map_terms(terms, n_newton, position):
 
 @eqx.filter_jit
 def _run_map(terms, positions, n_newton, batch_size):
-    a_hat, z, sigma = jax.lax.map(
-        lambda x: _map_terms(terms, n_newton, x), positions, batch_size=batch_size
+    a_hat, z, sigma = _mapped(
+        lambda x: _map_terms(terms, n_newton, x), positions, batch_size
     )
     return DetectionMap(a_hat=a_hat, z=z, sigma=sigma)
 
@@ -182,7 +190,7 @@ def _run_map(terms, positions, n_newton, batch_size):
 def likelihood_ratio_map(
     terms: Sequence[tuple[Callable, Any, Callable]],
     positions,
-    batch_size: int | None = None,
+    batch_size: int | None = 1,
     n_newton: int = 4,
 ) -> DetectionMap:
     """Profile a shared source amplitude at every trial position.
@@ -194,9 +202,9 @@ def likelihood_ratio_map(
     root ``z = sign(a_hat) sqrt(Lambda)`` and the formal standard error of ``a_hat``.
     With Gaussian likelihoods this is the whitened matched filter.
 
-    Positions are processed with :func:`jax.lax.map`, ``batch_size`` of them at a time
-    (all in sequence when ``None``), which sets the peak memory: each position renders
-    one template per term. Masked or NaN pixels do not leak, as in
+    Positions are processed ``batch_size`` of them at a time (one at a time by default,
+    every position at once for ``None``), which sets the peak memory: each position
+    renders one template per term. Masked or NaN pixels do not leak, as in
     :func:`profile_amplitude`.
 
     Args:
@@ -207,7 +215,9 @@ def likelihood_ratio_map(
             instead of compiled constants.
         positions: Trial positions, an array (or PyTree of arrays) whose leading axis
             indexes positions; ``template_fn`` receives one slice.
-        batch_size: Positions per ``lax.map`` batch, or ``None`` for one at a time.
+        batch_size: Positions per batch: 1 (the default) runs them in sequence, ``None``
+            runs every position at once (the fast choice on a GPU with the memory for
+            it).
         n_newton: Newton steps per position, as in :func:`profile_amplitude`.
 
     Returns:
@@ -233,18 +243,77 @@ def _check_entries(entries, who):
         )
 
 
+def _splits(fit) -> bool:
+    """Whether every term of ``fit`` offers ``AbstractTerm.split``."""
+    try:
+        for term in fit.terms:
+            eqx.filter_eval_shape(lambda m, t=term: t.split(m)[0], fit.model)
+    except NotImplementedError:
+        return False
+    return True
+
+
+def _linear_in(a, base, tangent):
+    """``base + a * tangent`` on the inexact leaves; every other leaf is the base."""
+    return jax.tree.map(
+        lambda p, t: p + a * t if eqx.is_inexact_array(p) else p, base, tangent
+    )
+
+
+def _profile_split(fit, x, amplitude, shape, n_newton):
+    """Profile the amplitude from one render and its derivative.
+
+    The model is rendered once, at ``a = 0`` with the tangent of the render along the
+    amplitude, and every Newton step scores ``prediction + a * tangent`` pointwise, so
+    the nested derivatives never reach the renderer. This is exact when the
+    prediction is linear in the amplitude.
+    """
+    holder = []
+
+    def render(a):
+        model = fit.model_at({**x, amplitude: jnp.reshape(a, shape)})
+        parts = [term.split(model) for term in fit.terms]
+        dyn, stat = zip(
+            *(eqx.partition(score, eqx.is_array) for _, score in parts), strict=True
+        )
+        holder.append(stat)
+        return tuple(p for p, _ in parts), dyn
+
+    zero = jnp.zeros((), jnp.float64)
+    base, tangent, dyn = jax.jvp(
+        render, (zero,), (jnp.ones((), jnp.float64),), has_aux=True
+    )
+    scores = tuple(eqx.combine(d, s) for d, s in zip(dyn, holder[-1], strict=True))
+
+    def objective(a):
+        total = sum(
+            score(_linear_in(a, p, t))
+            for score, p, t in zip(scores, base, tangent, strict=True)
+        )
+        return jnp.asarray(total, jnp.float64)
+
+    return _summarize(*_profile(objective, n_newton, jnp.float64))
+
+
+def _profile_render(fit, x, amplitude, shape, n_newton):
+    """Profile the amplitude by Newton steps through the fit's own likelihood."""
+
+    def objective(a):
+        full = {**x, amplitude: jnp.reshape(a, shape)}
+        return jnp.asarray(fit.log_likelihood(full), jnp.float64)
+
+    return _summarize(*_profile(objective, n_newton, jnp.float64))
+
+
 @eqx.filter_jit
-def _detect(fit, trials, amplitude, n_newton, batch_size):
+def _detect(fit, trials, amplitude, n_newton, batch_size, once):
     shape = jnp.shape(resolve(fit.model, amplitude))
+    profile = _profile_split if once else _profile_render
 
     def at(x):
-        def objective(a):
-            full = {**x, amplitude: jnp.reshape(a, shape)}
-            return jnp.asarray(fit.log_likelihood(full), jnp.float64)
+        return profile(fit, x, amplitude, shape, n_newton)
 
-        return _summarize(*_profile(objective, n_newton, jnp.float64))
-
-    a_hat, z, sigma = jax.lax.map(at, trials, batch_size=batch_size)
+    a_hat, z, sigma = _mapped(at, trials, batch_size)
     return DetectionMap(a_hat=a_hat, z=z, sigma=sigma, assumptions=fit.assumptions)
 
 
@@ -254,7 +323,7 @@ def detect(
     *,
     amplitude: str,
     n_newton: int = 4,
-    batch_size: int | None = None,
+    batch_size: int | None = 1,
 ) -> DetectionMap:
     """Matched-filter map of a source over trial values, from the fit's likelihood.
 
@@ -279,8 +348,8 @@ def detect(
         amplitude: The free leaf-law path that is profiled; its leaf has one element.
         n_newton: Newton steps per trial. A Gaussian likelihood linear in the
             amplitude is exact after one; a Poisson likelihood needs a few.
-        batch_size: Trials per ``jax.lax.map`` batch (which sets peak memory), or
-            ``None`` for one at a time.
+        batch_size: Trials per batch, which sets peak memory: 1 (the default) runs them
+            in sequence, ``None`` runs every trial at once.
 
     Returns:
         A :class:`DetectionMap` with leaves of shape ``(n_trials,)`` and the fit's
@@ -296,7 +365,7 @@ def detect(
     if jnp.size(resolve(fit.model, amplitude)) != 1:
         raise ValueError(f"the leaf at {amplitude!r} must have one element")
     _check_entries(trials, set(fit.free) - {amplitude})
-    return _detect(fit, trials, amplitude, n_newton, batch_size)
+    return _detect(fit, trials, amplitude, n_newton, batch_size, _splits(fit))
 
 
 class LikelihoodEstimate(eqx.Module):
@@ -315,11 +384,23 @@ class LikelihoodEstimate(eqx.Module):
             point is not a maximum and the NaN says so.
         corr: The correlation matrix ``cov_ij / sqrt(cov_ii cov_jj)``; meaningful where
             ``regular`` is true.
-        regular: True when the observed information is positive definite, so the
-            estimate is a regular maximum and ``cov`` is a covariance. False at a
-            saddle, on a ridge or off the peak (an undetected source).
+        regular: True when the estimate is a regular maximum: the observed information
+            is positive definite and the point is stationary
+            (``newton_decrement <= max_decrement``). False at a saddle, on a ridge
+            (a direction the data do not constrain), off the peak, against the edge of
+            a leaf's support (a bounded law whose maximum lies outside it), or after a
+            run that did not converge.
         min_eigenvalue: The smallest eigenvalue of the observed information, in the
-            units of the stored coordinates (negative when ``regular`` is false).
+            units of the stored coordinates (negative when the point is not a
+            maximum).
+        grad_norm: The Euclidean norm of the gradient of the log likelihood at the
+            estimate, in the stored coordinates (the units of the entries, so it is
+            judged against the widths, not against one). Zero at a stationary point;
+            small beside a flat direction.
+        newton_decrement: ``0.5 g' cov g``, the nats the estimate still lies below the
+            peak of the Gaussian that ``cov`` describes. Unit free: a value near zero
+            says the run converged in every direction the data constrain. Meaningful
+            where the information is positive definite, like ``cov``.
         assumptions: The fit's ``Fit.assumptions``, copied because the estimate does
             not hold the fit. An estimate is comparable with another only under the
             same assumptions.
@@ -330,6 +411,8 @@ class LikelihoodEstimate(eqx.Module):
     corr: jax.Array
     regular: jax.Array
     min_eigenvalue: jax.Array
+    grad_norm: jax.Array
+    newton_decrement: jax.Array
     assumptions: tuple[str, ...] = eqx.field(static=True, default=())
 
     @property
@@ -372,71 +455,126 @@ def _correlation_inverse(info):
     return cov, 0.5 * (corr + corr.T), regular, jnp.min(jnp.linalg.eigvalsh(info))
 
 
+class _LikelihoodInReal(eqx.Module):
+    """``u -> fit.log_likelihood`` at the stored values of the unconstrained ``u``.
+
+    No prior and no volume term: the likelihood does not depend on the coordinates,
+    so its maximum is the same in the support coordinates ``u`` as in the stored ones.
+
+    Attributes:
+        fit: The fit whose likelihood is maximized.
+    """
+
+    fit: Fit
+
+    def __call__(self, u):
+        x, _ = self.fit.from_real(u)
+        return jnp.asarray(self.fit.log_likelihood(x), jnp.float64)
+
+
 @eqx.filter_jit
-def _measure(fit, start, n_newton, batch_size, max_bytes):
-    start = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), start)
-    flat, unravel = jax.flatten_util.ravel_pytree(start)
-    _require_float64(flat)
+def _newton(fit, u, scale, n_newton, batch_size):
+    """Newton steps on the likelihood in the support coordinates, where they help.
 
-    def loglike(theta):
-        return jnp.asarray(fit.log_likelihood(unravel(theta)), jnp.float64)
+    A step is taken only where the (scaled) information is positive definite and the
+    step raises the likelihood, so it can neither follow a saddle nor leave the
+    support (the coordinates are unconstrained).
+    """
+    flat, unravel = jax.flatten_util.ravel_pytree(u)
+    width = jax.flatten_util.ravel_pytree(scale)[0]
+    objective = _LikelihoodInReal(fit)
 
-    def information(theta):
-        return fit.information(
-            unravel(theta),
-            kind="observed",
-            include_prior=False,
-            batch_size=batch_size,
-            max_bytes=max_bytes,
-        )
+    def negative(theta):
+        return -objective(unravel(theta))
 
-    grad = jax.grad(loglike)
+    grad = jax.grad(negative)
 
     def step(theta, _):
-        g, h = grad(theta), -information(theta)
-        ok = jnp.all(jnp.linalg.eigvalsh(h) < 0.0)
-        delta = jnp.linalg.solve(jnp.where(ok, h, -jnp.eye(theta.size)), g)
-        return theta - jnp.where(ok, delta, 0.0), None
+        info = observed_hessian(negative, theta, batch_size=batch_size)
+        scaled = info * jnp.outer(width, width)
+        ok = jnp.all(jnp.linalg.eigvalsh(scaled) > 0.0)
+        safe = jnp.where(ok, scaled, jnp.eye(theta.size))
+        new = theta - width * jnp.linalg.solve(safe, width * grad(theta))
+        moved = ok & (negative(new) < negative(theta))
+        return jnp.where(moved, new, theta), None
 
     theta, _ = jax.lax.scan(step, flat, None, length=n_newton)
-    return (unravel(theta), *_correlation_inverse(information(theta)))
+    return unravel(theta)
+
+
+def _stationarity(fit, x):
+    """Gradient of the log likelihood at ``x``, flat in the stored coordinates."""
+    flat, unravel = jax.flatten_util.ravel_pytree(x)
+    return jax.grad(lambda theta: fit.log_likelihood(unravel(theta)))(flat)
 
 
 def measure(
     fit: Fit,
     start: dict,
     *,
+    n_steps: int = 100,
     n_newton: int = 4,
     batch_size: int | None = 1,
     max_bytes: int | None = DEFAULT_MAX_BYTES,
+    max_decrement: float = 1.0,
 ) -> LikelihoodEstimate:
     """Maximize a fit's likelihood from ``start`` and take the covariance there.
 
-    Newton steps on ``fit.log_likelihood`` over every free scalar jointly, from
-    ``start`` (a detection peak from :func:`detect`, say). A step is skipped while the
-    Hessian is not negative definite. The covariance is the inverse of the observed
-    information (:meth:`photomancy.infer.fit.Fit.information` with ``kind="observed"``
-    and ``include_prior=False``) at the estimate, inverted in correlation form, so it
-    is the formal covariance of the maximum-likelihood estimate and is not a statement
-    about the prior. The estimate is only as good as the start: a start far from any
-    peak can leave the Newton iteration on a saddle.
+    The likelihood alone is maximized, with no prior density and no volume term: the
+    maximum does not depend on the coordinates, so the run moves in the support
+    coordinates of each leaf law (``fit.to_real``: a bounded law is mapped onto the
+    real line, so no step can leave the support). It uses the optimizer ``MAP`` uses
+    (:func:`photomancy.infer.backends.staged.map_fit`, L-BFGS), in coordinates scaled
+    by the Fisher information at the start without the prior, then polishes with
+    ``n_newton`` Newton steps where the information is positive definite and the step
+    raises the likelihood. It is for a likelihood summary (a flux and a position per
+    source), not a posterior: a posterior is ``MAP`` or a sampler, and neither takes a
+    flag that turns it into this.
+
+    The covariance is the inverse of the observed information
+    (:meth:`photomancy.infer.fit.Fit.information` with ``kind="observed"`` and
+    ``include_prior=False``) at the estimate, in the stored coordinates, inverted in
+    correlation form (scaled by the square roots of its diagonal first, so the scaled
+    matrix decides without rounding whether it is positive definite). It is the formal
+    covariance of the maximum-likelihood estimate and says nothing about the prior.
 
     The result says whether it is a maximum. ``regular`` is false, and the widths of
-    the affected parameters are NaN, where the information is not positive definite: an
-    undetected source (its amplitude is consistent with zero, so its position is not
-    constrained), a saddle, or a point the iteration did not reach the peak from. The
-    Fisher matrix (``kind="fisher"``) cannot make that statement.
+    the affected parameters are NaN, where the information is not positive definite
+    (an undetected source: its amplitude is consistent with zero, so its position is
+    not constrained, a flat direction; a saddle) or the point is not stationary
+    (``newton_decrement`` above ``max_decrement``: a run that did not converge, or a
+    maximum that lies against the edge of a bounded law). The last case is why the
+    amplitude of a source that may be faint needs a law with signed support at this
+    stage: ``Fit.with_priors`` with an unbounded law (a wide ``Normal``; its width is
+    irrelevant because no density is read) lets a source of amplitude 0.3 plus or
+    minus 1 return a finite summary. A positive law puts the maximum of such a source
+    on the edge, where the stored-coordinate gradient is not zero: the decrement
+    exposes it (``regular=False``) once the data pull past the edge by more than
+    ``max_decrement`` nats (a measured amplitude below minus 1.4 formal errors at
+    the default); a smaller pull is within the noise and is reported as measured.
+    The Fisher matrix (``kind="fisher"``) cannot make
+    these statements.
+
+    Size. The observed information over every free scalar is the cost: about 20 s and
+    7 GB for ten parameters on a full-scene fit. ``measure`` refuses with
+    :class:`hwoutils.memory.MemoryLimit` beyond ``max_bytes`` before it optimizes,
+    and is for tens of free scalars, not free pixels. The optimization loop runs on
+    the host, so ``measure`` is not itself compiled or vmapped.
 
     Needs ``jax_enable_x64``.
 
     Args:
         fit: A :class:`~photomancy.infer.fit.Fit`.
         start: Entry dictionary, the format of the fit's ``x`` for one draw, with
-            exactly the keys of ``fit.free``.
-        n_newton: Newton steps.
+            exactly the keys of ``fit.free``, inside every leaf's support.
+        n_steps: L-BFGS iterations at the most (a run ends early once 5 successive
+            checks gain less than ``1e-7`` nats).
+        n_newton: Newton polishing steps.
         batch_size: Hessian columns per batch (``None`` for all at once); the default
             holds one gradient's intermediates.
         max_bytes: Memory limit of the closed-form estimate, as in ``Fit.information``.
+        max_decrement: Largest Newton decrement, in nats, of an estimate called
+            regular (the default of :class:`photomancy.infer.Laplace`).
 
     Returns:
         A :class:`LikelihoodEstimate`.
@@ -444,17 +582,54 @@ def measure(
     Raises:
         ValueError: If the keys of ``start`` are not the free paths.
         RuntimeError: If ``jax_enable_x64`` is off.
+        MemoryLimit: If the information matrix does not fit ``max_bytes``.
     """
     _check_entries(start, set(fit.free))
-    value, cov, corr, regular, min_eig = _measure(
-        fit, start, n_newton, batch_size, max_bytes
+    start = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), start)
+    flat, _ = jax.flatten_util.ravel_pytree(start)
+    _require_float64(flat)
+    _admit_information(
+        flat.size, flat.size * 8, 2 * flat.size * flat.size * 8, batch_size, max_bytes
     )
+    u = fit.to_real(start)
+    scale = information_scale(fit, u, include_prior=False)
+    solver = optax.lbfgs()
+    if scale is None:
+        scale = jax.tree.map(jnp.ones_like, u)
+    else:
+        solver = rescaled_transform(solver, {"all": tuple(jax.tree.leaves(scale))})
+    stage = MAPStage(
+        n_steps,
+        ("all",),
+        solver=solver,
+        early_stopping=EarlyStopping(patience=5, min_delta=1e-7, check_every=5),
+        name="measure",
+    )
+    labels = jax.tree.map(lambda _: "all", u)
+    result = map_fit(_LikelihoodInReal(fit), u, labels, {}, (stage,))
+    u = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), result.params)
+    if n_newton:
+        u = _newton(fit, u, scale, n_newton, batch_size)
+    x, _ = fit.from_real(u)
+    info = fit.information(
+        x,
+        kind="observed",
+        include_prior=False,
+        batch_size=batch_size,
+        max_bytes=max_bytes,
+    )
+    cov, corr, positive, min_eig = _correlation_inverse(info)
+    grad = _stationarity(fit, x)
+    decrement = 0.5 * grad @ cov @ grad
+    regular = positive & (decrement <= max_decrement)
     return LikelihoodEstimate(
-        value=value,
+        value=x,
         cov=cov,
         corr=corr,
         regular=regular,
         min_eigenvalue=min_eig,
+        grad_norm=jnp.linalg.norm(grad),
+        newton_decrement=decrement,
         assumptions=fit.assumptions,
     )
 

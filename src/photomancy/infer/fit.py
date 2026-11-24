@@ -131,6 +131,27 @@ class AbstractTerm(eqx.Module):
         """
         raise NotImplementedError(f"{type(self).__name__} has no prediction")
 
+    def split(self, model) -> tuple:
+        """Return the prediction at ``model`` and the function that scores it.
+
+        The pair ``(prediction, score)`` has ``score(prediction) == self(model)``:
+        ``prediction`` is what the model renders (a PyTree whose inexact leaves are
+        the numbers a source amplitude scales) and ``score`` is a PyTree of arrays
+        that is callable, holding the data and everything else the likelihood reads.
+        It lets :func:`photomancy.detection.detect` render once at an amplitude of
+        zero and its derivative, and then score ``prediction + a * tangent`` at any
+        ``a`` without rendering again. A term that does not offer it keeps the
+        default, which raises ``NotImplementedError``, and ``detect`` renders at
+        every Newton step for a fit that holds such a term.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            ``(prediction, score)``.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot split its likelihood")
+
     def residual(self, model) -> jax.Array:
         """Return the whitened residual of the data at ``model``, shaped like the data.
 
@@ -885,14 +906,13 @@ class Fit(eqx.Module):
 
     # ----- curvature -------------------------------------------------------------
 
-    def _root_vector(self, x):
-        """Concatenated float64 Fisher roots of every term at the draw ``x``."""
+    def _root_vector(self, x, dtype=jnp.float64):
+        """Concatenated Fisher roots of every term at the draw ``x``, in ``dtype``."""
         model = self.model_at(x)
         parts = [
-            jnp.ravel(term.fisher_root(model)).astype(jnp.float64)
-            for term in self.terms
+            jnp.ravel(term.fisher_root(model)).astype(dtype) for term in self.terms
         ]
-        return jnp.concatenate(parts) if parts else jnp.zeros((0,))
+        return jnp.concatenate(parts) if parts else jnp.zeros((0,), dtype)
 
     def _root_length(self):
         """Length of :meth:`_root_vector`, from shapes only.

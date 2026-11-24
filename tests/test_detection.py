@@ -7,13 +7,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import toy_coronagraph as toy
+from hwoutils.memory import MemoryLimit
 from image_scene import (
     make_detector,
     make_exposure,
     make_instrument,
     make_scene,
 )
-from priorities import Uniform
+from priorities import Normal, Uniform
 from scipy import stats
 from skyscapes.physical_model import GridPhysicalModel
 
@@ -215,7 +216,10 @@ def test_noise_free_companion_is_found_at_its_pixel_with_its_flux():
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_batched_map_equals_the_unbatched_map():
-    """``batch_size`` changes the memory use, not the result.
+    """``batch_size`` changes the memory use, not the result; ``None`` is all at once.
+
+    The default is one position at a time (``batch_size=1``) and ``None`` runs every
+    position at once, as everywhere else in the package.
 
     Truth source: the same map with one position at a time.
     Tolerance basis: floating-point (1e-9 of each output's largest magnitude: a batch
@@ -228,8 +232,14 @@ def test_batched_map_equals_the_unbatched_map():
     instrument, base, flux, mask, sigma, grid = _toy_scene()
     data = base + flux * toy.point_image(instrument, jnp.asarray([6.0, -5.0]))
     terms = ((gaussian_loglike(data, sigma, mask), base, _PointTemplate(instrument)),)
-    plain = likelihood_ratio_map(terms, jnp.asarray(grid))
-    for batch in (7, 16):
+    plain = likelihood_ratio_map(terms, jnp.asarray(grid), batch_size=1)
+    for a, b in zip(
+        jax.tree.leaves(plain),
+        jax.tree.leaves(likelihood_ratio_map(terms, jnp.asarray(grid))),
+        strict=True,
+    ):
+        np.testing.assert_array_equal(a, b)
+    for batch in (7, 16, None):
         batched = likelihood_ratio_map(terms, jnp.asarray(grid), batch_size=batch)
         for a, b in zip(jax.tree.leaves(plain), jax.tree.leaves(batched), strict=True):
             np.testing.assert_allclose(
@@ -357,6 +367,9 @@ class _Sky(eqx.Module):
     pa_deg: jax.Array
 
 
+_SCENE_BUILDS = []  # one entry per time a term builds and renders the scene
+
+
 class _SkyImage(AbstractTerm):
     """An ImageTerm on a scene rebuilt from the model's amplitude and position angle.
 
@@ -372,6 +385,7 @@ class _SkyImage(AbstractTerm):
     reads = ()
 
     def _scene(self, model):
+        _SCENE_BUILDS.append(1)
         # The planet table is built once on the host; only its values vary here.
         grid = self.unit_model.contrast_grid * model.amplitude * _UNIT_CONTRAST
         planet_model = eqx.tree_at(lambda m: m.contrast_grid, self.unit_model, grid)
@@ -390,8 +404,18 @@ class _SkyImage(AbstractTerm):
     def fisher_root(self, model):
         return self.image.fisher_root(self._scene(model))
 
+    def split(self, model):
+        return self.image.split(self._scene(model))
+
     def draw(self, key, model):
         raise NotImplementedError
+
+
+class _NoSplit(_SkyImage):
+    """The same term without ``split``: ``detect`` renders at every Newton step."""
+
+    def split(self, model):
+        return AbstractTerm.split(self, model)
 
 
 def _sky(amplitude, pa_deg):
@@ -493,17 +517,24 @@ def test_detect_refuses_a_bad_amplitude_path_or_trial_keys():
 
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
 @pytest.mark.medium(reason="two Newton depths through the renderer, 5 s cold")
-def test_detect_on_poisson_counts_recovers_the_planet():
-    """On Poisson counts the map peaks at the true angle and the amplitude is close.
+def test_detect_on_poisson_counts_recovers_the_planet_and_renders_once():
+    """On Poisson counts the map peaks at the true angle, and ``detect`` renders once.
 
     The amplitude is within four formal standard errors of the truth, and Newton has
-    converged by four steps.
+    converged by four steps. The render-once path (a term that offers ``split``) gives
+    the map the nested-derivative path gives (the same term without ``split``), and it
+    builds the scene once where the nested path builds it at every derivative.
 
-    Truth source: the injected amplitude and position angle.
+    Truth source: the injected amplitude and position angle; for the parity, the
+    nested-derivative path that ``detect`` takes for a term without ``split``,
+    which is today's code; the scene builds are counted while ``detect`` traces.
     Tolerance basis: monte-carlo (one seeded realization, four formal sigma; a
-    correct implementation passes for any seed with probability above 0.9999) and
-    floating-point (rtol 1e-6 between 4 and 8 Newton steps).
-    Fails if: the Poisson term is not the one profiled, or Newton diverges.
+    correct implementation passes for any seed with probability above 0.9999),
+    floating-point (rtol 1e-6 between 4 and 8 Newton steps; rtol 1e-9 between the two
+    paths, which differ only in the order of the arithmetic).
+    Fails if: the Poisson term is not the one profiled, Newton diverges, the
+    render-once path scores a different likelihood (the scored set, the detector law,
+    the tangent) or renders more than once.
     """
     fit, _, _ = _image_problem("poisson")
     out = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude")
@@ -512,6 +543,21 @@ def test_detect_on_poisson_counts_recovers_the_planet():
     assert abs(float(out.a_hat[best]) - _TRUE_AMP) < 4.0 * float(out.sigma[best])
     more = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude", n_newton=8)
     np.testing.assert_allclose(out.a_hat, more.a_hat, rtol=1e-6, atol=1e-9)
+
+    nested = _fit(_NoSplit(fit.terms[0].image))
+    trials = {"pa_deg": _PAS[:7]}  # a new shape, so both paths trace afresh
+    del _SCENE_BUILDS[:]
+    once = detect(fit, trials, amplitude="amplitude")
+    builds_once = len(_SCENE_BUILDS)
+    del _SCENE_BUILDS[:]
+    other = detect(nested, trials, amplitude="amplitude")
+    builds_nested = len(_SCENE_BUILDS)
+    # the host-side shape check of ``split`` builds the scene once, the trace once
+    assert builds_once == 2 and builds_nested >= 4, (builds_once, builds_nested)
+    for name in ("a_hat", "z", "sigma"):
+        np.testing.assert_allclose(
+            getattr(once, name), getattr(other, name), rtol=1e-9, atol=1e-12
+        )
 
 
 _NULL_FRAMES = 1600
@@ -788,25 +834,70 @@ class _P(eqx.Module):
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_measure_flags_a_saddle_and_stays_there():
-    """``measure`` at a saddle skips the Newton step, reports ``regular == False``.
+    """``measure`` at a stationary saddle stays, reports ``regular == False``.
 
     Truth source: the Hessian of the quadratic ``-0.5 (p0**2 - p1**2)`` is
     ``diag(-1, 1)``, so the information is ``diag(1, -1)`` and the covariance
-    ``diag(1, -1)`` (the second width is NaN).
+    ``diag(1, -1)`` (the second width is NaN); the gradient at the origin is zero.
     Tolerance basis: exact-algebra (rtol 1e-12).
-    Fails if: the flag is missing, a step is taken on an indefinite Hessian, or the
-    covariance is not finite.
+    Fails if: the flag is missing, a step leaves the stationary point, the gradient
+    norm or Newton decrement is not zero there, or the width is not NaN.
     """
     term = ForwardTerm(_Identity(), _Saddle())
     fit = Fit(_P(jnp.zeros(2)), {"p": Uniform(-5.0, 5.0)}, (term,))
-    start = {"p": jnp.array([0.2, -0.1])}
+    start = {"p": jnp.zeros(2)}
     est = measure(fit, start)
     assert not bool(est.regular)
+    assert float(est.grad_norm) == 0.0
+    assert float(est.newton_decrement) == pytest.approx(0.0, abs=1e-12)
     assert float(est.min_eigenvalue) == pytest.approx(-1.0)
     np.testing.assert_allclose(est.value["p"], start["p"], rtol=1e-12)
     np.testing.assert_allclose(est.cov, np.diag([1.0, -1.0]), rtol=1e-12)
     assert np.isnan(float(est.sigma[1])) and float(est.sigma[0]) == pytest.approx(1.0)
     assert est.assumptions == ()
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_measure_needs_signed_support_for_a_faint_source_and_sizes_itself():
+    """Positive support is not regular at a negative estimate; signed support is.
+
+    The model is ``(a, a * b / 360)`` observed with unit noise, ``b`` a position
+    stand-in. Truth source: the closed-form maximum. With the data ``(-3, 0)`` the
+    unconstrained maximum is ``a = -3``, ``b = 0``; a law on ``(0, 5)`` puts the
+    maximum on the edge ``a -> 0`` where ``b`` drops out of the likelihood (a flat
+    direction; the stored-coordinate gradient is ``-3``, a Newton decrement of 4.5
+    nats, above the 1 nat limit). With data ``(0, 0)`` and
+    a start at ``a = 0`` the gradient is exactly zero and the information is
+    ``diag(1, 0)``: a flat direction with ``grad_norm == 0``.
+    Tolerance basis: exact-algebra (atol 1e-6 on the signed maximum, exact zeros on the
+    flat point).
+    Fails if: a positive law reports a regular maximum at its edge, a signed law does
+    not reach the maximum, the flat point is called regular, or ``measure`` does not
+    refuse beyond ``max_bytes`` (``MemoryLimit``) before optimizing.
+    """
+    free_signed = {"amplitude": Normal(0.0, 10.0), "pa_deg": Uniform(-200.0, 200.0)}
+    free_positive = {"amplitude": Uniform(0.0, 5.0), "pa_deg": Uniform(-200.0, 200.0)}
+    start = {"amplitude": jnp.asarray(0.5), "pa_deg": jnp.asarray(10.0)}
+    data = gaussian_loglike(jnp.array([-3.0, 0.0]), 1.0)
+    term = ForwardTerm(_Line(), data)
+    signed = measure(Fit(_sky(0.0, 0.0), free_signed, (term,)), start)
+    np.testing.assert_allclose(signed.value["amplitude"], -3.0, atol=1e-6)
+    assert bool(signed.regular)
+    positive = measure(Fit(_sky(0.0, 0.0), free_positive, (term,)), start)
+    assert not bool(positive.regular)
+    assert float(positive.value["amplitude"]) < 1e-6
+
+    flat_data = gaussian_loglike(jnp.zeros(2), 1.0)
+    flat_fit = Fit(_sky(0.0, 0.0), free_signed, (ForwardTerm(_Line(), flat_data),))
+    flat = measure(
+        flat_fit, {"amplitude": jnp.asarray(0.0), "pa_deg": jnp.asarray(10.0)}
+    )
+    assert float(flat.grad_norm) == 0.0
+    assert not bool(flat.regular)
+    assert float(flat.min_eigenvalue) <= 0.0
+
+    with pytest.raises(MemoryLimit):
+        measure(flat_fit, start, max_bytes=10)
 
 
 class _Line(eqx.Module):

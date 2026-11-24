@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from photomancy.infer._scale import information_scale
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
 from photomancy.infer.fit import Fit
 from photomancy.infer.posterior import Posterior
@@ -775,7 +776,16 @@ class MAP(AbstractBackend):
     does not certify.
 
     With no ``stages`` the fit is one stage of ``n_steps`` L-BFGS iterations over every
-    parameter. Pass ``labels``, ``transforms`` and ``stages`` as for :func:`map_fit`
+    parameter, run in coordinates scaled by the information at the start
+    (:func:`photomancy.infer._scale.information_scale` with the prior included): the
+    free parameters of an imaging fit span many orders of magnitude, and unscaled
+    L-BFGS crawls along the stiff ones. The scale changes the path and the point the
+    run reaches in a given number of steps, not the density it maximizes. A fit with a
+    term that has no Fisher root runs unscaled, and so does one with ``scale=False``.
+    Explicit ``stages`` are never rescaled: their transforms are written in the
+    coordinates of ``fit.to_real`` (use :func:`rescaled_transform`
+    to change them). Pass ``labels``, ``transforms``
+    and ``stages`` as for :func:`map_fit`
     (labels have the structure of ``fit.to_real`` of one draw) for a staged fit.
 
     The objective of a step is ``value_and_aux(u)``, which returns
@@ -804,6 +814,7 @@ class MAP(AbstractBackend):
         callback_every: Steps between callbacks, or a predicate on the global step.
         init: ``None`` for a prior draw, one constrained draw (a dict of the fit's
             entries), or a ``Posterior`` whose highest-``log_target`` draw starts it.
+        scale: Scale the default stage by the information at the start (see above).
     """
 
     n_steps: int = eqx.field(static=True, default=200)
@@ -815,6 +826,7 @@ class MAP(AbstractBackend):
     callback: Callable | None = None
     callback_every: int | Callable = eqx.field(static=True, default=1)
     init: Posterior | dict | None = None
+    scale: bool = eqx.field(static=True, default=True)
 
     def _start(self, fit, key):
         if self.init is None:
@@ -835,9 +847,17 @@ class MAP(AbstractBackend):
         stages = self.stages
         transforms = self.transforms
         if stages is None:
-            stages = (
-                MAPStage(self.n_steps, ("all",), solver=optax.lbfgs(), name="lbfgs"),
+            solver = optax.lbfgs()
+            scale = (
+                information_scale(fit, start, include_prior=True)
+                if self.scale
+                else None
             )
+            if scale is not None:
+                solver = rescaled_transform(
+                    solver, {"all": tuple(jax.tree.leaves(scale))}
+                )
+            stages = (MAPStage(self.n_steps, ("all",), solver=solver, name="lbfgs"),)
         stages = tuple(_real_stage(stage, fit) for stage in stages)
         result = map_fit(
             _RealLogProb(fit),

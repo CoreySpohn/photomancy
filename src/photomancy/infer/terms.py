@@ -62,6 +62,17 @@ class ForwardTerm(AbstractTerm):
         """
         return self.forward(model)
 
+    def split(self, model):
+        """Return the forward's output at ``model`` and the likelihood that scores it.
+
+        Args:
+            model: The model at one draw, every leaf an array.
+
+        Returns:
+            ``(forward(model), likelihood)``.
+        """
+        return self.forward(model), self.likelihood
+
     def __call__(self, model):
         """Return the scalar log likelihood of the data at ``model``.
 

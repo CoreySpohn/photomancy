@@ -173,6 +173,15 @@ assert abs(float(posterior.samples["offset"][0]) - 2.0) < 1e-3
 A fit with a closed form renders each term twice per step, once for the gradient and once
 for the prediction, so it compiles a larger program than a fit without one.
 
+## Scaling of the coordinates
+
+`MAP` scales its unconstrained coordinates by the information scale, `1 / sqrt(diag
+Fisher)` (with the prior's curvature added, and a floor so a flat direction does not
+stretch the step), through {func}`~photomancy.infer.rescaled_transform`. A fit whose
+parameters differ by many orders of magnitude, such as a flux and a position, then takes
+the same L-BFGS steps in every coordinate. Pass `scale=False` to start from unscaled
+coordinates; a fit whose terms have no Fisher root falls back to them.
+
 ## Give the solved coefficients a wide prior
 
 A MAP fit returns the point where the whole objective, the prior included, is largest.

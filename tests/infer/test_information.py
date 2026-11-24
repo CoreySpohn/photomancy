@@ -7,12 +7,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.memory import MemoryLimit
-from priorities import Normal
+from priorities import Normal, Uniform
 from scipy import integrate
 
 jax.config.update("jax_enable_x64", True)
 
 from photomancy.infer import AbstractTerm, Fit, ForwardTerm  # noqa: E402
+from photomancy.infer._scale import SCALE_SPAN, information_scale  # noqa: E402
 from photomancy.infer.likelihoods import (  # noqa: E402
     _KERNELS,
     gaussian_loglike,
@@ -235,3 +236,71 @@ def test_information_refuses_what_does_not_fit_max_bytes():
     assert fit.information(x, kind="fisher", max_bytes=None).shape == (5, 5)
     with pytest.raises(MemoryLimit):
         fit.information(x, kind="observed", max_bytes=100)
+
+
+class _Two(eqx.Module):
+    flux: jax.Array
+    faint: jax.Array
+    other: jax.Array
+
+
+class _TwoForward(eqx.Module):
+    """``model -> [flux * s1, faint * s2]``: two independent unit-weight data."""
+
+    s1: float = eqx.field(static=True)
+    s2: float = eqx.field(static=True)
+
+    def __call__(self, model):
+        return jnp.stack([model.flux * self.s1, model.faint * self.s2])
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_information_scale_is_the_root_norm_in_unconstrained_coordinates():
+    """The scale of a coordinate is ``1 / sqrt(root norm + |prior curvature|)``.
+
+    ``flux`` has a bounded (Uniform) law, so its unconstrained coordinate is the logit
+    and the scale carries the Jacobian of the map: the diagonal of ``Fit.information``
+    is not what the helper returns. ``faint`` has no data (a zero multiplier) and a
+    Normal prior of width 0.5: its entry is the prior's, ``1 / 0.25``. ``other`` has
+    neither data nor curvature and takes the floor, ``span`` times the smallest
+    scale. The volume term of the logit, ``|d2/du2 log(s (1 - s))| = 2 s (1 - s)``,
+    enters only with ``include_prior``. A fit with a term that has no root
+    returns ``None``.
+
+    Truth source: closed forms. With ``x = lo + (hi - lo) s`` and ``s`` the logistic
+    of ``u``, ``dx/du = (hi - lo) s (1 - s)`` and the data entry of ``flux`` is
+    ``(s1 dx/du)**2 / sigma**2``; the Normal prior's curvature is ``1 / width**2``.
+    Tolerance basis: exact-algebra (rtol 1e-12, closed forms evaluated in float64).
+    Fails if: the Jacobian of ``from_real`` is dropped, the prior is read without its
+    absolute value, the floor is missing (an infinite scale), the dtype is not that of
+    ``u``, or a term without a root does not return ``None``.
+    """
+    lo, hi, sigma, s1 = 0.0, 5.0, 0.5, 3.0
+    like = gaussian_loglike(jnp.zeros(2), sigma)
+    term = ForwardTerm(_TwoForward(s1, 0.0), like)
+    laws = {
+        "flux": Uniform(lo, hi),
+        "faint": Normal(jnp.asarray(0.0), jnp.asarray(0.5)),
+        "other": Normal(jnp.asarray(0.0), jnp.asarray(1e9)),
+    }
+    base = _Two(*(jnp.asarray(v) for v in (1.0, 0.0, 0.0)))
+    fit = Fit(base, laws, (term,))
+    x = {"flux": jnp.asarray(1.5), "faint": jnp.asarray(0.0), "other": jnp.asarray(0.0)}
+    u = fit.to_real(x)
+    s = 1.5 / 5.0
+    data = (s1 * (hi - lo) * s * (1 - s)) ** 2 / sigma**2
+    got = information_scale(fit, u, include_prior=False)
+    assert got["flux"].dtype == u["flux"].dtype == jnp.float64
+    np.testing.assert_allclose(got["flux"], data**-0.5, rtol=1e-12)
+    # no data and no prior curvature but a Normal's: the entries are the priors'
+    np.testing.assert_allclose(got["faint"], got["flux"] * SCALE_SPAN, rtol=1e-12)
+    np.testing.assert_allclose(got["other"], got["flux"] * SCALE_SPAN, rtol=1e-12)
+    with_prior = information_scale(fit, u, include_prior=True)
+    np.testing.assert_allclose(with_prior["faint"], 0.5, rtol=1e-12)
+    np.testing.assert_allclose(with_prior["other"], 1e9, rtol=1e-12)
+    volume = 2.0 * s * (1 - s)  # |d2/du2 log(s (1 - s))|, the logit's volume
+    np.testing.assert_allclose(with_prior["flux"], (data + volume) ** -0.5, rtol=1e-12)
+    custom = information_scale(fit, u, include_prior=False, span=10.0)
+    np.testing.assert_allclose(custom["other"], 10.0 * got["flux"], rtol=1e-12)
+    rootless = Fit(base, laws, (term, _NoRoot()))
+    assert information_scale(rootless, u, include_prior=True) is None

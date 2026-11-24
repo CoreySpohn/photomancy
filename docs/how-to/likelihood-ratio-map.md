@@ -84,7 +84,10 @@ assert float(detection.z[best]) > 10.0
 `detection.a_hat` is the amplitude, `detection.z` the signed root of the statistic and
 `detection.sigma` the formal standard error of `a_hat`, `1 / sqrt(curvature)`, which
 for a Gaussian likelihood equals `a_hat / z`. Positions are processed with
-{func}`jax.lax.map`, `batch_size` at a time, so `batch_size` sets the memory use. A
+{func}`jax.lax.map`, `batch_size` at a time (the default of 1 holds one position's
+intermediates; `None` maps all at once, the fast choice on a GPU), so `batch_size` sets
+the memory use. The renderer runs once per call rather than once per position, which
+assumes the prediction is linear in the amplitude. A
 batched map agrees with the one-at-a-time map to rounding, not bit for bit.
 
 The significance holds for the likelihood you give it. A Huber likelihood gives a map
@@ -145,6 +148,32 @@ information is positive definite, and `min_eigenvalue` is its smallest eigenvalu
 `regular` is false the point is a saddle, a ridge or an undetected source, and the
 widths of the parameters that carry the negative curvature are NaN. That is the correct
 statement: a Gaussian width is not defined there, and a number would hide it.
+
+Two more fields say whether the run converged. `grad_norm` is the norm of the gradient of
+the log likelihood at the estimate, in the stored coordinates (judge it against the
+widths, not against one), and `newton_decrement` is `0.5 g' cov g`, the nats the
+estimate still lies below the peak of the Gaussian that `cov` describes. `regular` is
+true only when the information is positive definite and the decrement is at most
+`max_decrement` (1 nat by default). The run uses the optimizer `MAP` uses, in
+coordinates scaled by the Fisher information at the start, so it reaches the same
+objective from a start several formal errors away.
+
+A source that may be faint needs a law with signed support. A bounded law, such as a
+positive amplitude, puts the maximum of a source consistent with zero on the edge of the
+support, where the position drops out of the likelihood; once the data pull past that edge by
+more than `max_decrement` nats the nonzero stored-coordinate gradient makes `regular`
+false. A wide
+`Normal` on the amplitude lets the same source return a finite summary, and its width is
+irrelevant because `measure` reads no prior density. A detection threshold for the
+amplitude is a separate question: for a high-count, white Poisson null and an 81-trial
+grid on two rolls, the 99 percent per-map maximum of `z` is 3.8 sigma (3.77, interval
+3.59 to 3.84). That value holds only for that grid and null; a denser grid needs the
+threshold `isf(0.01 / N_eff)` for its own effective number of independent trials.
+
+`measure` is for tens of free scalars. The observed information over every free scalar
+costs about 20 s and 7 GB for ten parameters on a full-scene fit, and `measure` raises
+`MemoryLimit` before it optimizes when the closed-form estimate is above `max_bytes`.
+Free pixels do not belong in it.
 
 ```python
 import equinox as eqx
