@@ -86,6 +86,7 @@ class MawetArm(AbstractDetectionArm):
 
     def __init__(
         self,
+        *,
         soft: bool = True,
         sharpness: float = 10.0,
         fast: bool = False,
@@ -94,6 +95,8 @@ class MawetArm(AbstractDetectionArm):
         aperture_fwhm: float = 1.0,
     ):
         """Configure aperture photometry independently of the science resolution.
+
+        Every option is keyword-only.
 
         Args:
             soft: Use differentiable soft aperture edges.
@@ -214,6 +217,7 @@ class MatchedFilterArm(AbstractDetectionArm):
     def __init__(
         self,
         provider: AbstractTemplateProvider,
+        *,
         order: int = 3,
         max_apertures: int = 200,
         exclusion_buffer: float = 0.5,
@@ -221,6 +225,8 @@ class MatchedFilterArm(AbstractDetectionArm):
         aperture_fwhm: float = 1.0,
     ):
         """Build the arm around a template provider.
+
+        Every option after the provider is keyword-only.
 
         Args:
             provider: Template source (its stamp size sets the fit window).

@@ -369,6 +369,18 @@ def test_arm_rejects_private_resolution(kind):
         _arm_for(kind, fwhm_px=2.5)
 
 
+def test_arm_options_are_keyword_only():
+    """A positional width can no longer bind to an unrelated option."""
+    from photomancy.postproc import ArrayTemplateProvider, MatchedFilterArm
+
+    provider = ArrayTemplateProvider(jnp.ones((3, 3)))
+    with pytest.raises(TypeError):
+        MawetArm(4.0)
+    with pytest.raises(TypeError):
+        MatchedFilterArm(provider, 4.0)
+    assert MatchedFilterArm(provider, order=1).order == 1
+
+
 @pytest.mark.parametrize("kind", ["mawet", "template"])
 def test_arm_resolution_comes_from_science(kind):
     """Science resolution and aperture scaling are algebraic; compare exactly."""
