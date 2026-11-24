@@ -22,10 +22,8 @@ from the model by a path (when the roll or the time is free); exactly one of the
 given.
 
 **What the term reads.** :func:`coronagraphoto.expected` is a pure function and builds
-nothing, so a term with a plain exposure reads nothing. A built product that carries a
-``reads`` tuple of scene paths (as ``coronagraphoto.ApertureRecord`` does) and is held
-as the exposure has its entries prefixed with the scene path
-(:func:`hwoutils.model_paths.join`) and declared in ``reads``.
+nothing, and the held exposure is an :class:`optixstuff.Exposure`, which caches no
+scene values, so the term declares no ``reads``.
 
 **What the term refuses.** The coronagraph renders only what its data hold: a detector
 pixel its tables do not cover is zero with ``Rates.supported`` False, and a planet
@@ -57,7 +55,7 @@ electrons per pixel with read noise.
 """
 
 from dataclasses import replace
-from typing import Self
+from typing import ClassVar, Self
 
 import equinox as eqx
 import jax
@@ -241,6 +239,8 @@ class ImageTerm(AbstractTerm):
     model the roll is not checked.
 
     Attributes:
+        reads: Model paths a held build cached. Empty: the term reads the model
+            by path and holds no build.
         observed_e: Observed electrons, shape ``(*batch, W, ny, nx)``. Leading batch
             axes are further frames of the same exposure model (scored jointly).
         mask: Boolean, broadcastable to ``observed_e``; true where a pixel is scored.
@@ -278,6 +278,7 @@ class ImageTerm(AbstractTerm):
             :attr:`assumptions`.
     """
 
+    reads: ClassVar[tuple[str, ...]] = ()
     observed_e: jax.Array
     mask: jax.Array | None = None
     instrument: Instrument | None = None
@@ -355,12 +356,6 @@ class ImageTerm(AbstractTerm):
     def assumptions(self) -> tuple[str, ...]:
         """``("static_beyond_speckle",)`` when the option is set, else empty."""
         return ("static_beyond_speckle",) if self.static_beyond_speckle else ()
-
-    @property
-    def reads(self) -> tuple[str, ...]:
-        """Scene paths a held built exposure cached, prefixed with the scene path."""
-        held = getattr(self.exposure, "reads", ())
-        return tuple(join(self.scene_path, path) for path in held)
 
     def _instrument(self, model):
         if self.instrument_path is None:
