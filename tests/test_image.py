@@ -318,41 +318,17 @@ def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument():
         )
 
 
-def test_reads_are_the_held_products_reads_under_the_scene_path():
-    """A held product that declares reads has them prefixed with the scene path.
+def test_the_term_declares_no_reads():
+    """The held exposure caches no scene values, so the term declares none.
 
-    The exposure builder declares none, since the knots of the tabulated sources it
-    resolved are static (the toy scene's planet table is one); a held product that
-    does carry reads, such as an aperture record, has them prefixed. The truth is
-    the declared tuple itself, so there is no tolerance.
+    The exposure builder holds the knots of the tabulated sources it resolved as
+    static data, so there is nothing to refuse a free leaf for. The truth is the
+    empty tuple itself, so there is no tolerance.
     """
     model, exposure = _setup("poisson")
     observed = jnp.zeros((1, *model.instrument.detector.shape))
     assert exposure.resolution.rules
     assert _term(model, exposure, observed).reads == ()
-
-    class Built(type(exposure)):
-        reads: tuple[str, ...] = eqx.field(static=True, default=())
-
-    built = Built(
-        exposure.time_d,
-        exposure.roll_deg,
-        exposure.quadrature,
-        exposure.plan,
-        reads=("star.flux_phot_per_nm_m2", "dynamics.orbits"),
-    )
-    term = ImageTerm(observed, jnp.ones(observed.shape, bool), exposure=built, **_PATHS)
-    assert term.reads == (
-        "scene.star.flux_phot_per_nm_m2",
-        "scene.dynamics.orbits",
-    )
-    rooted = ImageTerm(
-        observed,
-        jnp.ones(observed.shape, bool),
-        instrument=model.instrument,
-        exposure=built,
-    )
-    assert rooted.reads == ("star.flux_phot_per_nm_m2", "dynamics.orbits")
 
 
 def test_an_observed_image_is_checked_against_the_held_detector_and_roll():
@@ -443,26 +419,6 @@ def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene():
         model, {f"scene.{path}": law}, (_scored(model, exposure, observed),)
     ).log_density({f"scene.{path}": grid})
     np.testing.assert_allclose(on_scene, on_record, rtol=1e-12)
-
-
-def test_a_free_leaf_that_a_held_build_read_is_refused():
-    """A held exposure whose build read the contrast grid refuses to have it freed."""
-    model, exposure = _setup("poisson")
-
-    class Built(type(exposure)):
-        reads: tuple[str, ...] = eqx.field(static=True, default=())
-
-    built = Built(
-        exposure.time_d,
-        exposure.roll_deg,
-        exposure.quadrature,
-        exposure.plan,
-        reads=("planets[0].physical_model.contrast_grid",),
-    )
-    observed = jnp.zeros((1, *model.instrument.detector.shape))
-    term = ImageTerm(observed, jnp.ones(observed.shape, bool), exposure=built, **_PATHS)
-    with pytest.raises(ValueError, match="reads"):
-        Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
 
 
 def test_a_count_where_the_mean_is_zero_is_minus_infinity_not_nan():
