@@ -1038,3 +1038,191 @@ def test_rescaled_solver_is_lbfgs_on_the_scaled_variable():
     direct = run(optax.lbfgs(), g, q0)
     scaled = run(rescaled_transform(optax.lbfgs(), s), f, q0 * s)
     np.testing.assert_allclose(scaled / np.asarray(s), direct, rtol=1e-9, atol=0)
+
+
+_RIPPLE_MODE = np.asarray([1.0, 2.0, 3.0, 0.0, 0.0])
+
+
+def _rippled_quadratic(amplitude, frequency, evaluations):
+    """A quadratic with a deterministic ripple that defeats the zoom line search.
+
+    ``-0.5 |x - mode|^2`` plus ``amplitude * sum(sin(frequency * (a + b0)))``: near the
+    mode the ripple moves the loss by more than the quadratic does, so no step length
+    meets the sufficient-decrease and curvature conditions. ``evaluations`` collects one
+    entry per objective evaluation (host callback).
+    """
+
+    def logdensity(p):
+        d = jnp.concatenate([p.a, p.b]) - jnp.asarray(_RIPPLE_MODE)
+        ripple = amplitude * jnp.sum(jnp.sin(frequency * (p.a + p.b[0])))
+        jax.debug.callback(lambda: evaluations.append(1))
+        return -0.5 * jnp.sum(d**2) + ripple
+
+    return logdensity
+
+
+def _stalling_oracle(logdensity, x0, n_steps, stop_on_stall):
+    """The plain optax L-BFGS loop, ending at the first failed line search if asked.
+
+    Returns the iterate, the number of steps taken and the stall flag per step.
+    """
+
+    def f(v):
+        return -logdensity(_Toy(v[:3], v[3:], jnp.ones(2)))
+
+    solver = optax.lbfgs()
+    value_and_grad = optax.value_and_grad_from_state(f)
+
+    @jax.jit
+    def step(x, state):
+        value, grad = value_and_grad(x, state=state)
+        update, state = solver.update(
+            grad, state, x, value=value, grad=grad, value_fn=f
+        )
+        return optax.apply_updates(x, update), state
+
+    x, state, stalls = x0, solver.init(x0), []
+    for _ in range(n_steps):
+        x, state = step(x, state)
+        info = optax.tree.get(state, "info")
+        stalls.append(
+            bool(max(float(info.decrease_error), float(info.curvature_error)) > 0)
+        )
+        if stop_on_stall and stalls[-1]:
+            break
+    return np.asarray(x), len(stalls), stalls
+
+
+def _ripple_stage(logdensity, stopping, n_steps=60):
+    init = _toy_init()
+    return map_fit(
+        logdensity,
+        init,
+        group_labels(init, _TOY_GROUPS),
+        _toy_transforms(),
+        [MAPStage(n_steps, ("a", "b"), solver=optax.lbfgs(), early_stopping=stopping)],
+    )
+
+
+def _rule_converged(loss, patience, min_delta):
+    """The loss-stall rule evaluated independently on a stage's loss trace."""
+    best, bad = np.inf, 0
+    for value in loss:
+        if value < best - min_delta:
+            best, bad = value, 0
+        else:
+            bad += 1
+        if bad >= patience:
+            return True
+    return False
+
+
+@vv.case("scene-fits", "code-verification", basis="mutation")
+def test_solver_stage_ends_at_the_first_stalled_line_search_near_the_optimum():
+    """A stage ends at the first step whose zoom line search fails, near the optimum.
+
+    Truth source: the plain optax L-BFGS loop on the same objective, ended by hand at
+    the first step whose line search reports a positive decrease or curvature error
+    (optax's public ``info``); the objective is a quadratic with a rounding-scale
+    ripple (amplitude 1e-13, frequency 1e6), whose mode is known.
+    Tolerance basis: mutation and floating-point. The stage takes the oracle's 12
+    steps and 44 objective evaluations (pinned: the ripple path is chaotic, so the
+    pins hold for float64 on CPU); a stage that ignores the stall takes 14 steps and
+    67 evaluations and fails both pins. The estimate is within 1e-5 of the mode. The
+    converged flag is the loss-stall rule evaluated on the stage's own trace.
+    Fails if: a failed line search does not end the stage (also at a host check
+    interval of 5), or the stall decides the converged flag.
+    """
+    amplitude, frequency = 1e-13, 1e6
+    x0 = jnp.concatenate([_toy_init().a, _toy_init().b])
+    patience, min_delta = 3, 0.0
+    x, n_steps, stalls = _stalling_oracle(
+        _rippled_quadratic(amplitude, frequency, []), x0, 80, True
+    )
+    assert stalls[-1] and not any(stalls[:-1]) and n_steps == 12
+    for check_every in (1, 5):
+        calls = []
+        result = _ripple_stage(
+            _rippled_quadratic(amplitude, frequency, calls),
+            EarlyStopping(patience, min_delta=min_delta, check_every=check_every),
+            80,
+        )
+        trace = result.stages[0]
+        assert trace.n_steps == n_steps
+        assert len(calls) == 44
+        got = np.concatenate([result.params.a, result.params.b])
+        np.testing.assert_allclose(got, x, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(got, _RIPPLE_MODE, rtol=0, atol=1e-5)
+        assert trace.stopped_early == _rule_converged(trace.loss, patience, min_delta)
+        assert not trace.failed
+
+
+@vv.case("scene-fits", "code-verification", basis="mutation")
+def test_stalled_line_search_far_from_the_optimum_reports_not_converged():
+    """A stall away from the optimum ends the stage and the gradient gate says no.
+
+    Truth source: the stage's own early-stopping rule (loss stalled and scaled gradient
+    norm below 1e-6) on a quadratic whose ripple (amplitude 1e-10, frequency 1e8) makes
+    the line search fail about 2e-3 from the mode.
+    Tolerance basis: mutation. The stage ends at step 8 after 39 evaluations (pinned
+    for float64 on CPU) and is not converged; a stage that ignores the stall runs 27
+    steps and 110 evaluations and reports converged, so the test fails if the stall is
+    ignored or reported as convergence.
+    Fails if: the stall is reported as convergence, or does not end the stage.
+    """
+    calls = []
+    result = _ripple_stage(
+        _rippled_quadratic(1e-10, 1e8, calls),
+        EarlyStopping(
+            3,
+            min_delta=1e-9,
+            check_every=1,
+            grad_tol=1e-6,
+            grad_scale={"a": (1.0,), "b": (1.0,)},
+        ),
+    )
+    trace = result.stages[0]
+    assert trace.n_steps == 8 and len(calls) == 39
+    assert not trace.stopped_early and not trace.failed
+    distance = np.max(
+        np.abs(np.concatenate([result.params.a, result.params.b]) - _RIPPLE_MODE)
+    )
+    assert distance > 1e-3
+
+
+def test_solver_stage_without_a_stall_runs_as_before():
+    """A smooth quadratic reports no failed search, so the stage runs to the rule."""
+    x0 = jnp.concatenate([_toy_init().a, _toy_init().b])
+    result = _ripple_stage(
+        _rippled_quadratic(0.0, 1.0, []),
+        EarlyStopping(3, min_delta=1e-12, check_every=1),
+    )
+    n_steps = result.stages[0].n_steps
+    _, _, stalls = _stalling_oracle(
+        _rippled_quadratic(0.0, 1.0, []), x0, n_steps, False
+    )
+    assert not any(stalls)
+    assert result.stages[0].stopped_early
+
+
+def test_stall_read_ignores_group_names_and_other_line_searches():
+    """A group called ``info`` and a backtracking line search both run unharmed.
+
+    Fails if the stall is read by key name from the whole solver state, or assumes
+    every line search records a curvature error.
+    """
+    init = _toy_init()
+    stopping = EarlyStopping(3, check_every=1)
+    backtracking = optax.lbfgs(
+        linesearch=optax.scale_by_backtracking_linesearch(max_backtracking_steps=10)
+    )
+    labels = group_labels(init, {"info": lambda t: t.a, "b": lambda t: t.b})
+    for solver in (optax.lbfgs(), backtracking):
+        result = map_fit(
+            _toy_logdensity,
+            init,
+            labels,
+            {"info": optax.adam(0.05), "b": optax.adam(0.02)},
+            [MAPStage(5, ("info", "b"), solver=solver, early_stopping=stopping)],
+        )
+        assert result.stages[0].n_steps >= 1
