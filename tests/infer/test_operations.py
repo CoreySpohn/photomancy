@@ -34,7 +34,9 @@ from photomancy.infer import (
 )
 from photomancy.infer.backends.grid import midpoint_rule
 
-jax.config.update("jax_enable_x64", True)
+pytestmark = pytest.mark.float64_only(
+    reason="float64 posterior coordinates and log weights"
+)
 
 norm = jax.scipy.stats.norm
 

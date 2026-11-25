@@ -11,18 +11,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-jax.config.update("jax_enable_x64", True)
-
-from hwoutils.constants import G, Mearth2kg  # noqa: E402
-from kinematics import (  # noqa: E402
+from hwoutils.constants import G, Mearth2kg
+from kinematics import (
     predict_pm_anomaly,
     predict_relative_astrometry,
 )
-from orbix.equations.orbit import period_a, period_to_sma  # noqa: E402
-from priorities import Uniform  # noqa: E402
+from orbix.equations.orbit import period_a, period_to_sma
+from priorities import Uniform
 
-from photomancy.infer import (  # noqa: E402
+from photomancy.infer import (
     Fit,
     ForwardTerm,
     Laplace,
@@ -30,8 +27,8 @@ from photomancy.infer import (  # noqa: E402
     weighted_cov,
     weighted_mean,
 )
-from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
-from photomancy.measurements import (  # noqa: E402
+from photomancy.infer.likelihoods import gaussian_loglike
+from photomancy.measurements import (
     ProperMotionAnomalyData,
     loglike_pm_anomaly,
 )
@@ -140,6 +137,7 @@ class _Forward(eqx.Module):
 
 
 # Medium: The joint seven-parameter PMa fit needs a cold gradient and Hessian compile.
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium
 def test_joint_relative_astrom_and_pma_recovers_mass():
     """Relative astrometry pins the orbit shape; the PMa then pins the mass.

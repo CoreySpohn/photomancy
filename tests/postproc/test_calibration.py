@@ -4,7 +4,6 @@ import math
 from fractions import Fraction
 
 import ineedvalidation as vv
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -22,15 +21,6 @@ from photomancy.postproc.core.detection import (
     MapFilter,
     TwoSampleTTest,
 )
-
-
-@pytest.fixture(autouse=True)
-def _enable_x64():
-    """Run each test in float64 so the identities hold to rounding."""
-    previous = jax.config.jax_enable_x64
-    jax.config.update("jax_enable_x64", True)
-    yield
-    jax.config.update("jax_enable_x64", previous)
 
 
 def _binomial_cdf_exact(n, p, k):

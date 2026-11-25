@@ -19,8 +19,6 @@ from photomancy.measurements import (
 )
 
 # Enable float64 for numerical stability in gradient checks
-jax.config.update("jax_enable_x64", True)
-
 
 # ============================================================================
 # Test fixtures -- common orbital parameters

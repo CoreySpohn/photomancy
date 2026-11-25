@@ -19,6 +19,8 @@ from photomancy.infer import MAP, Fit, Posterior, run
 from photomancy.infer.backends._flat import start_points
 from photomancy.infer.backends.staged import MAPStage, _real_stage
 
+pytestmark = pytest.mark.float64_only(reason="float64 Fit coordinates")
+
 
 def _fit(law, target=0.5, shape=()):
     return Fit(_Bowl(jnp.zeros(shape), jnp.zeros(())), {"x": law}, (_BowlTerm(target),))

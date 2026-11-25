@@ -35,7 +35,9 @@ from photomancy.infer import (
 )
 from photomancy.infer.diagnostics import kish_temperature
 
-jax.config.update("jax_enable_x64", True)
+pytestmark = pytest.mark.float64_only(
+    reason="float64 posterior coordinates and log weights"
+)
 
 TWO_PI = 2.0 * math.pi
 

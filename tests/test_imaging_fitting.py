@@ -7,15 +7,12 @@ tests pin the gradient finite and the padding helpers.
 """
 
 import jax
-
-jax.config.update("jax_enable_x64", True)
-
-import jax.numpy as jnp  # noqa: E402
-from kinematics import (  # noqa: E402
+import jax.numpy as jnp
+from kinematics import (
     predict_photometry,
 )
 
-from photomancy.measurements import (  # noqa: E402
+from photomancy.measurements import (
     DMagData,
     loglike_dmag,
 )

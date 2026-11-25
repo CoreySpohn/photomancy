@@ -53,6 +53,7 @@ def _mean(model, exposure):
     ).predict(model)
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_poisson_value_is_the_summed_pmf_of_the_expected_counts():
     """A photon-counting detector scores the Poisson pmf of ``predict`` per pixel.
@@ -76,6 +77,7 @@ def test_poisson_value_is_the_summed_pmf_of_the_expected_counts():
     assert all(np.all(np.isfinite(x)) for x in jax.tree.leaves(grad))
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_gaussian_value_is_the_summed_density_of_the_detector_moments():
     """A read-noise detector scores the Gaussian of its own mean and variance.
@@ -100,6 +102,7 @@ def test_gaussian_value_is_the_summed_density_of_the_detector_moments():
     np.testing.assert_allclose(term(model), want, rtol=1e-12)
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize("kind", ["constant", "read", "poisson"])
 def test_excluded_nonfinite_rates_do_not_enter_the_score_gradient(kind):
@@ -147,6 +150,7 @@ def test_excluded_nonfinite_rates_do_not_enter_the_score_gradient(kind):
     assert np.isnan(values[4:]).all()
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_exclusion_preserves_the_finite_detector_floor():
     """The detector uses the finite frame peak to classify negative totals.
@@ -185,6 +189,7 @@ def _contrast(model):
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize("kind", ["poisson", "read"])
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_residual_is_the_offset_in_detector_standard_deviations(kind):
     """The residual returns the injected offsets in units of the detector's sigma.
 
@@ -291,6 +296,7 @@ def test_residual_reads_the_floored_rates_and_is_safe_to_differentiate():
     assert np.isfinite(jax.grad(chi_square)(below))
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 def test_the_value_peaks_at_the_true_model():
     """Noise-free counts are likelier at the truth than at 5 percent off."""
     model, exposure = _setup("poisson")
@@ -319,6 +325,7 @@ def test_draw_gives_counts_consistent_with_the_expectation_and_keeps_masked_pixe
     assert abs(z.std() - 1.0) < 0.2 and abs(z.mean()) < 0.25
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 def test_batched_frames_are_scored_jointly():
     """A batch of two frames scores as the sum of the two single frames."""
     model, exposure = _setup("poisson")
@@ -335,6 +342,7 @@ def test_batched_frames_are_scored_jointly():
     assert not np.array_equal(drawn[0], drawn[1])
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 def test_exposure_comes_from_the_model_by_path_or_the_term_not_both():
     """A path exposure equals a held one; giving both or neither fails."""
     model, exposure = _setup("poisson")
@@ -364,6 +372,7 @@ def test_exposure_comes_from_the_model_by_path_or_the_term_not_both():
         )
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument():
     """The model may be the scene itself, with the instrument held by the term.
 
@@ -403,6 +412,7 @@ def test_the_term_declares_no_reads():
     assert _scored(model, exposure, observed).reads == ()
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_an_observed_image_is_checked_against_the_held_detector_and_roll():
     """An ``Image`` from ``observe`` scores as its data; foreign data are refused.
 
@@ -478,6 +488,7 @@ def test_an_observed_image_is_checked_against_the_held_detector_and_roll():
 _CONTRAST = "scene.planets[0].physical_model.contrast_grid"
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_an_image_fit_frees_a_scene_leaf_and_gradients_flow():
     """``Fit`` accepts the term over a scene leaf: finite density and gradient."""
     model, exposure = _setup("poisson")
@@ -491,6 +502,7 @@ def test_an_image_fit_frees_a_scene_leaf_and_gradients_flow():
     assert fit.log_likelihood(x) > fit.log_likelihood(worse)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene():
     """A held-instrument term on ``Fit(scene, ...)`` scores like the record model."""
     model, exposure = _setup("poisson")
@@ -507,6 +519,7 @@ def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene():
     np.testing.assert_allclose(on_scene, on_record, rtol=1e-12)
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 def test_a_count_where_the_mean_is_zero_is_minus_infinity_not_nan():
     """An impossible Poisson count on a covered pixel gives ``-inf``.
 
@@ -542,6 +555,7 @@ def _wide(kind="poisson", n=48):
     return ImageModel(scene, instrument), make_exposure(scene, instrument)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 @pytest.mark.medium(reason="renders on two detector sizes, 8 s cold")
 def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
@@ -644,6 +658,7 @@ def test_a_lit_planet_outside_the_source_domain_is_refused():
             term.check(model)
 
 
+@pytest.mark.float64_only(reason="float64 image log-density reduction")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_score_keeps_the_reference_footprint_as_wavelength_nodes_move():
     """Wavelength changes must keep the 400 reference pixels in the density.
@@ -774,6 +789,7 @@ def test_multiband_check_counts_lit_planets_outside_the_second_component():
             term.check(make_scene(separation_arcsec=separation))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_free_leaf_that_moves_the_field_of_view_is_checked_at_both_ends():
     """Fails if a fit frees the band nodes and scores pixels uncovered at an end.
 
@@ -890,6 +906,7 @@ def _support_counts(model, exposure):
     return int((~static).sum()), int((static & ~strict).sum())
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 @pytest.mark.medium(reason="renders three instruments and one Newton step, 7 s cold")
 def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option():

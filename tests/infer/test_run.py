@@ -53,8 +53,6 @@ from photomancy.infer.evidence import importance_evidence
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.infer.posterior import cluster_to_mixture, ravel_samples
 
-jax.config.update("jax_enable_x64", True)
-
 KEY = "planets[0].Rp_Rearth"
 HIGH = 4.0
 WIDTH = 0.3
@@ -113,6 +111,7 @@ def _check_contract(post, fit, n=None):
 # ----- the Posterior type --------------------------------------------------------
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_posterior_checks_its_fields():
     """Wrong kind, keys, dtype and shapes are refused; batch axes are draw axes."""
     fit = _leaf_fit()
@@ -145,6 +144,7 @@ def test_posterior_checks_its_fields():
         Posterior(**{**fields, "samples": {KEY: post.samples[KEY][:-1]}})
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_ravel_samples_round_trips_a_block_fit():
     """``ravel_samples`` flattens leaf and block entries and ``unravel`` inverts it."""
     fit = Fit(
@@ -162,6 +162,7 @@ def test_ravel_samples_round_trips_a_block_fit():
     assert only.shape == (8, 1)
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_cluster_to_mixture_follows_the_modes():
     """Two well-separated clusters give two modes with their masses."""
     fit = _leaf_fit()
@@ -182,6 +183,7 @@ def test_cluster_to_mixture_follows_the_modes():
     )
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_cluster_to_mixture_takes_init_centers_and_checks_their_shape():
     """``init`` fixes the starting centers; a wrong count is refused.
 
@@ -219,6 +221,7 @@ class _SinusoidForward(eqx.Module):
         return p.K * jnp.sin(2 * jnp.pi * self.t / 10.0**p.logP + p.phi)
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="a three-alias Laplace fit, then clustering on four keys")
 def test_cluster_to_mixture_recovers_period_aliases_from_the_laplace_modes():
     """One component per alias, weighted by the cloud, when seeded with the modes.
@@ -270,6 +273,7 @@ def test_cluster_to_mixture_recovers_period_aliases_from_the_laplace_modes():
 # ----- backends on the one-leaf fit with a closed-form evidence ------------------
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_grid_is_quadrature_with_the_exact_evidence():
     """A fine midpoint rule recovers the evidence and mean; refining converges."""
     fit = _leaf_fit()
@@ -291,6 +295,7 @@ def test_grid_is_quadrature_with_the_exact_evidence():
         run(fit, Grid({"x": midpoint_rule(0.0, 1.0, 3)}), None)
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_laplace_corrects_the_gaussian_with_importance_weights():
     """Weighted draws and evidence are right though the real-line target is skewed."""
     fit = _leaf_fit()
@@ -329,6 +334,7 @@ def _mode_radii(fit, post):
     return np.asarray(x[KEY])[:, 0]
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.parametrize("backend", [Laplace, Pathfinder])
 def test_explicit_starts_land_on_distinct_modes(backend):
     """One start per bump gives one mode per bump; a repeated start gives one mode."""
@@ -345,6 +351,7 @@ def test_explicit_starts_land_on_distinct_modes(backend):
     assert np.all(np.abs(_mode_radii(fit, one) - 1.0) < 0.15)
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_laplace_merges_starts_that_reach_the_same_mode():
     """Three starts on two bumps keep two modes and map the duplicate to its mode.
 
@@ -371,6 +378,7 @@ def test_laplace_merges_starts_that_reach_the_same_mode():
     np.testing.assert_array_equal(again.info.mode_index, info.mode_index)
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_merge_distance_wraps_on_periodic_coordinates():
     """Two modes on either side of the period boundary are one mode."""
     means = jnp.array([[0.02, 0.0], [5.98, 0.0], [3.0, 0.0]])
@@ -387,6 +395,7 @@ def test_merge_distance_wraps_on_periodic_coordinates():
     assert np.asarray(index).tolist() == [0, -1, 2]
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_explicit_starts_refuse_a_wrong_leading_length():
     """The leading axis must match the number of starts."""
     with pytest.raises(ValueError, match="one start each"):
@@ -397,6 +406,7 @@ def test_explicit_starts_refuse_a_wrong_leading_length():
         )
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.parametrize("with_leaf", [False, True], ids=["block_only", "block_leaf"])
 def test_stacked_starts_pass_through_for_a_block_fit(with_leaf):
     """Stacked starts of a block fit become ``(n, d)`` flat starts, one per start.
@@ -420,6 +430,7 @@ def test_stacked_starts_pass_through_for_a_block_fit(with_leaf):
     np.testing.assert_allclose(single, jnp.broadcast_to(fit.to_flat(one), flat.shape))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_mixed_rank_starts_name_the_entry():
     """One entry stacked and another not raises, and the message names an entry."""
     fit = Fit(
@@ -434,6 +445,7 @@ def test_mixed_rank_starts_name_the_entry():
     assert KEY in str(err.value)
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_nuts_has_no_evidence_and_the_right_moments():
     """NUTS draws match the known mean; the evidence is NaN; chains are in info."""
     fit = _leaf_fit()
@@ -448,6 +460,7 @@ def test_nuts_has_no_evidence_and_the_right_moments():
     assert not np.any(np.asarray(post.info.divergent))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_mclmc_recovers_the_mean():
     """MCLMC (two or more dimensions) matches the known mean and has no evidence."""
     fit = Fit(
@@ -463,6 +476,7 @@ def test_mclmc_recovers_the_mean():
     assert abs(ag.mean() - 0.55) < 0.05
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_pathfinder_importance_weights_target_the_fit():
     """Pathfinder's mixture proposal is corrected to the fit's density."""
     fit = _leaf_fit()
@@ -471,6 +485,7 @@ def test_pathfinder_importance_weights_target_the_fit():
     assert abs(_moments(post)[0] - 1.5) < 0.02
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_map_finds_the_mode():
     """MAP returns one draw at the optimum."""
     fit = _leaf_fit()
@@ -535,6 +550,7 @@ def _badly_scaled_fit(rootless=False):
     return fit, {"mu": jnp.asarray(truth * [0.5, 3.0, 5.0, 2.0, 0.1, 1.0])}, best
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="five L-BFGS runs of at most 600 steps and the scale pass")
 def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     """The default stage runs in scaled coordinates, converges there and stops.
@@ -613,6 +629,7 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     assert abs(top_r - float(est.log_likelihood)) < 1e-9 and bool(est.regular)
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(
     reason="a Laplace and a MAP run of at most 200 steps and two scale passes"
 )
@@ -645,6 +662,7 @@ def test_laplace_finds_the_mode_with_the_default_map_stage():
     )
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="a Laplace run of 40 steps with a loss that never gains")
 def test_laplace_stops_on_a_stall_only_when_the_gradient_gate_is_met(monkeypatch):
     """The Laplace optimizer ends a loss stall only once the scaled gradient is small.
@@ -681,6 +699,7 @@ def test_laplace_stops_on_a_stall_only_when_the_gradient_gate_is_met(monkeypatch
         jax.clear_caches()
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_nested_sampling_recovers_the_evidence():
     """Jaxns gives the exact evidence within its standard deviation.
 
@@ -709,6 +728,7 @@ def test_nested_sampling_recovers_the_evidence():
     assert bool(jnp.isfinite(block_fit.log_density(stored)))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_a_stack_of_worlds_equals_the_per_world_loop():
     """``eqx.filter_vmap(run)`` over two stacked fits equals running each in turn."""
     centers = (1.2, 2.0)
@@ -763,6 +783,7 @@ _WORLD_BACKENDS = {
 }
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.parametrize("name", list(_WORLD_BACKENDS))
 def test_every_batching_backend_maps_over_two_worlds(name):
     """``filter_vmap(run)`` over two stacked fits gives two posteriors of one type.
@@ -802,6 +823,7 @@ class _NanAbove(_Gauss):
         return jnp.where(r > 2.2, jnp.nan, super().__call__(model))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_a_nan_term_refuses_the_slice_instead_of_zero_weight():
     """NaN values of a term make the whole slice NaN, in weights and evidence.
 
@@ -822,6 +844,7 @@ def _prior_only_orbit_fit():
     return Fit(_scene(), {"dynamics.orbits": _block()}, ())
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="eight 4000-draw runs of one compiled Laplace, 25 s cold")
 def test_laplace_prior_only_evidence_on_an_orbit_block_is_zero():
     """The prior-only evidence through ``Laplace`` averages to 0 over eight keys.
@@ -852,6 +875,7 @@ def test_laplace_prior_only_evidence_on_an_orbit_block_is_zero():
     assert np.all(np.isnan(published[~passes]))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
     """The documented remedy: refit a mixture on the Laplace cloud and adapt from it.
 
@@ -878,6 +902,7 @@ def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
     assert float(pareto_khat(post.log_weights)) < 0.7
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.parametrize("sequence", ["random", "roberts"])
 def test_prior_importance_prior_only_evidence_is_exactly_zero(sequence):
     """Drawing from the prior itself gives unit weights, so ``log Z = 0`` to rounding.
@@ -894,6 +919,7 @@ def test_prior_importance_prior_only_evidence_is_exactly_zero(sequence):
     assert float(post.log_evidence_se) < 1e-8
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.parametrize("sequence", ["random", "roberts"])
 def test_prior_importance_recovers_the_conjugate_evidence(sequence):
     """Prior-sampling importance on the one-leaf fit recovers the exact evidence.
@@ -910,6 +936,7 @@ def test_prior_importance_recovers_the_conjugate_evidence(sequence):
     assert abs(float(post.log_evidence) - _exact_log_z()) < 3 * se
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_a_ladder_that_stops_short_of_one_refuses_the_slice():
     """An adaptive run whose last proposal was fitted below temperature one is NaN.
 
@@ -945,6 +972,7 @@ def test_a_ladder_that_stops_short_of_one_refuses_the_slice():
     assert abs(float(full.log_evidence) - _exact_log_z()) < 3 * se
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_a_seeded_adaptive_run_starts_at_temperature_one():
     """A proposal other than the prior is a seed: every round is at temperature one.
 
@@ -971,6 +999,7 @@ def test_a_seeded_adaptive_run_starts_at_temperature_one():
     assert float(post.info.temperatures[0]) == 1.0
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_importance_evidence_is_the_importance_mean_of_its_weights():
     """The backend evidence equals ``importance_evidence`` on the same weights.
 
@@ -1009,6 +1038,7 @@ def _unravel_leaf(fit):
     return ravel_pytree(fit.to_real(fit.sample_prior(jax.random.key(0))))[1]
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.parametrize(
     "backend",
     [NUTS(n_warmup=30, n_draws=20, n_chains=2)],
@@ -1036,6 +1066,7 @@ class _AlwaysNan(_Gauss):
         return super().__call__(model) * jnp.nan
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_laplace_with_no_surviving_mode_returns_a_nan_slice():
     """A fit whose only mode fails the guard gives NaN weights and evidence.
 
@@ -1049,17 +1080,11 @@ def test_laplace_with_no_surviving_mode_returns_a_nan_slice():
     assert np.isnan(float(post.log_evidence))
 
 
+@pytest.mark.float32_only(reason="Fit must refuse a float32 process")
 def test_run_refuses_a_fit_built_without_x64():
     """Fit refuses float32 mode at construction, so ``run`` never sees one."""
-    jax.config.update("jax_enable_x64", False)
-    try:
-        with pytest.raises(RuntimeError, match="jax_enable_x64"):
-            _leaf_fit()
-    finally:
-        jax.config.update("jax_enable_x64", True)
-
-
-# ----- the golden orbit -----------------------------------------------------------
+    with pytest.raises(RuntimeError, match="jax_enable_x64"):
+        _leaf_fit()
 
 
 def _golden_fit():
@@ -1094,6 +1119,7 @@ def _chain_features(post, n_chains, n_draws):
 GOLDEN_LOG_Z = -19.04
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.slow
 def test_adaptive_importance_on_the_golden_orbit_converges_or_refuses():
     """Adaptive importance from the prior returns the converged evidence or NaN.
@@ -1128,6 +1154,7 @@ def test_adaptive_importance_on_the_golden_orbit_converges_or_refuses():
     assert float(pareto_khat(full.log_weights)) < 0.7
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.slow
 def test_nuts_and_mclmc_agree_on_the_golden_orbit():
     """Two independent gradient samplers give the same posterior feature means.

@@ -17,8 +17,6 @@ from photomancy.infer import Fit, Posterior
 from photomancy.infer.eig import eig_alias_breaking, eig_detectability, eig_geometric
 from photomancy.orbit import eig_astrometry
 
-jax.config.update("jax_enable_x64", True)
-
 DIST_PC = 10.0
 MASS_RATIO = 0.1
 # a (AU), e, i, W, w, M0 (rad) at day zero, the truth of the one-mode posterior.
@@ -133,6 +131,7 @@ def _score(posterior, epochs, curve):
     )
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="the scene model and the EIG forward compile, 8 s cold")
 def test_predictions_are_the_orbit_at_the_total_mass(one_mode):
     """Fails if the EIG forward drops the planet mass, the scale or the epoch axis.
@@ -156,6 +155,7 @@ def test_predictions_are_the_orbit_at_the_total_mass(one_mode):
     np.testing.assert_array_equal(result.eig.detectability, jnp.ones((2, 1)))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="three EIG evaluations on the shared posterior")
 def test_the_contrast_curve_decides_each_report(one_mode):
     """Fails if a planet outside the curve scores, or a repeat call keeps a stale curve.
@@ -189,6 +189,7 @@ def test_the_contrast_curve_decides_each_report(one_mode):
     np.testing.assert_array_equal(shallow.eig.total, jnp.zeros(2))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="a scale-and-rotate run, the clustering and the EIG forward")
 def test_modes_of_a_run_score_every_candidate():
     """Fails if the dead draws of a run poison the modes or the scores.

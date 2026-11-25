@@ -10,11 +10,9 @@ from hwoutils.memory import MemoryLimit
 from priorities import Normal, Uniform
 from scipy import integrate
 
-jax.config.update("jax_enable_x64", True)
-
-from photomancy.infer import AbstractTerm, Fit, ForwardTerm  # noqa: E402
-from photomancy.infer._scale import SCALE_SPAN, information_scale  # noqa: E402
-from photomancy.infer.likelihoods import (  # noqa: E402
+from photomancy.infer import AbstractTerm, Fit, ForwardTerm
+from photomancy.infer._scale import SCALE_SPAN, information_scale
+from photomancy.infer.likelihoods import (
     _KERNELS,
     gaussian_loglike,
     huber_loglike,
@@ -64,6 +62,7 @@ def _fit(matrix, likelihood, prior_sigma=3.0):
     return Fit(_Model(jnp.zeros(n_param)), {"mu": prior}, (term,))
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 @pytest.mark.parametrize("shape", [(40, 5), (3, 5)], ids=["forward", "reverse"])
 @pytest.mark.parametrize("batch_size", [None, 1, 2])
@@ -93,6 +92,7 @@ def test_fisher_and_observed_equal_the_linear_gaussian_closed_form(shape, batch_
             np.testing.assert_allclose(got, want + extra, rtol=1e-12, atol=1e-13)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_observed_equals_jax_hessian_of_the_negative_log_density():
     """The column-by-column observed matrix is ``jax.hessian`` of the density.
@@ -136,6 +136,7 @@ def _score_variance_constant(kind, shape_param):
     return half(lambda z: float(psi(z)) ** 2 * density(z)) / half(density)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize(
     ("builder", "kind", "shape_param"),
@@ -165,6 +166,7 @@ def test_robust_fisher_is_a_constant_times_the_gaussian_one(builder, kind, shape
     np.testing.assert_allclose(got, want, rtol=1e-9)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 def test_a_fit_with_a_term_that_has_no_root_refuses_fisher_and_names_it():
     """One term without a root makes ``kind="fisher"`` unavailable for the whole fit."""
     matrix, sigma, data, _ = _problem(10, 3)
@@ -180,6 +182,7 @@ def test_a_fit_with_a_term_that_has_no_root_refuses_fisher_and_names_it():
     assert fit.information(x, kind="observed").shape == (3, 3)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 def test_a_callable_likelihood_has_no_root():
     """A ForwardTerm whose likelihood is not a masked kernel has no Fisher root."""
 
@@ -192,6 +195,7 @@ def test_a_callable_likelihood_has_no_root():
         fit.information({"mu": jnp.ones(3)}, kind="fisher")
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 def test_an_unknown_kind_is_refused():
     """``kind`` is one of the two names."""
     fit = _fit(np.eye(3), gaussian_loglike(np.zeros(3), 1.0))
@@ -199,13 +203,17 @@ def test_an_unknown_kind_is_refused():
         fit.information({"mu": jnp.ones(3)}, kind="expected")
 
 
+@pytest.mark.float64_only(reason="float64 Fit before testing the curvature refusal")
 def test_float32_is_refused():
     """With x64 off the curvature is refused rather than computed in float32."""
     fit = _fit(np.eye(3), gaussian_loglike(np.zeros(3), 1.0))
+    point = {"mu": jnp.ones(3, dtype=jnp.float32)}
+    assert fit.information(point, kind="observed").dtype == jnp.float64
     with jax.enable_x64(False), pytest.raises(RuntimeError, match="x64"):
-        fit.information({"mu": jnp.ones(3, dtype=jnp.float32)}, kind="observed")
+        fit.information(point, kind="observed")
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_information_refuses_what_does_not_fit_max_bytes():
     """The closed-form estimate is checked before anything is built.
@@ -254,6 +262,7 @@ class _TwoForward(eqx.Module):
         return jnp.stack([model.flux * self.s1, model.faint * self.s2])
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_information_scale_is_the_root_norm_in_unconstrained_coordinates():
     """The scale of a coordinate is ``1 / sqrt(root norm + |prior curvature|)``.

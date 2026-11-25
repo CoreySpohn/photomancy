@@ -16,16 +16,14 @@ import pytest
 from hwoutils.model_paths import resolve
 from priorities import Uniform
 
-jax.config.update("jax_enable_x64", True)
-
-from photomancy.atmosphere import (  # noqa: E402
+from photomancy.atmosphere import (
     abundance_paths,
     contrast_forward,
     default_abundance_prior,
 )
-from photomancy.infer import MAP, Fit, ForwardTerm, Laplace, run  # noqa: E402
-from photomancy.infer.diagnostics import weighted_mean  # noqa: E402
-from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
+from photomancy.infer import MAP, Fit, ForwardTerm, Laplace, run
+from photomancy.infer.diagnostics import weighted_mean
+from photomancy.infer.likelihoods import gaussian_loglike
 
 GOLDEN = json.loads(
     (Path(__file__).parent / "data" / "forward_fit_golden.json").read_text()
@@ -105,6 +103,7 @@ def test_default_abundance_prior_is_uniform_over_range():
     assert tuple(only) == abundance_paths(pm)[:1]
 
 
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 def test_fit_density_matches_the_legacy_density_up_to_the_gaussian_constant():
     """The fit density minus the Gaussian normalization is the stored legacy density.
 
@@ -131,6 +130,7 @@ def test_fit_density_matches_the_legacy_density_up_to_the_gaussian_constant():
         )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.parametrize("backend", ["map", "laplace"])
 def test_fit_recovers_abundances(backend):
     """MAP and Laplace recover the two abundances from a noisy toy spectrum."""

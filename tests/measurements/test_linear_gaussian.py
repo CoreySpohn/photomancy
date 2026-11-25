@@ -31,8 +31,6 @@ from photomancy.measurements import (
     StellarAstrometryTerm,
 )
 
-jax.config.update("jax_enable_x64", True)
-
 TIMES = np.array([31.0, 120.0, 290.0, 470.0, 650.0])
 OPEN_LAW = OrbitLaw(priorities.HalfNormal(0.3), a_AU=priorities.LogNormal(0.0, 1.0))
 CONSTANTS = ("A_AU", "B_AU", "F_AU", "G_AU")
@@ -129,6 +127,7 @@ def test_relative_form_on_a_bare_system_with_records_of_its_row():
         mixed.linear_gaussian(system, planet=0)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_fit_on_a_bare_system_joins_the_block_path():
     """Fails if an orbit block on a bare system (``system=""``) cannot be fit.
 
@@ -186,6 +185,7 @@ def test_the_linear_capability_is_a_type_and_the_stellar_term_does_not_have_it()
     }
 
 
+@pytest.mark.float64_only(reason="float64 conditional evidence")
 def test_conditional_marginal_is_the_density_of_the_data_in_arcsec():
     """Fails if the form is not in the data's units (the evidence is off by dist^2).
 

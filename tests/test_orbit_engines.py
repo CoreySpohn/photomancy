@@ -35,7 +35,9 @@ from photomancy.orbit.completion import (
 )
 from photomancy.orbit.proposals import ScaleRotateProposal, ShapePriorProposal
 
-jax.config.update("jax_enable_x64", True)
+pytestmark = pytest.mark.float64_only(
+    reason="float64 posterior coordinates and log weights"
+)
 
 TIMES = np.array([31.0, 120.0, 290.0, 470.0])
 KEY = jax.random.key(0)

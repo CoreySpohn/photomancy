@@ -20,7 +20,8 @@ def position_au(times, *, T, a, e, cos_i, W, cos_w, sin_w, tp):
     AJ 162, 186, Eqs. 6-9. Here Y includes sqrt(1-e^2), so F and G
     are the classical Thiele-Innes constants.
     """
-    mean = (2 * np.pi * (np.asarray(times) - tp) / T + np.pi) % (2 * np.pi) - np.pi
+    times = np.asarray(times, dtype=np.float64)
+    mean = (2 * np.pi * (times - tp) / T + np.pi) % (2 * np.pi) - np.pi
     eccentric = mean.copy()
     for _ in range(50):
         step = (eccentric - e * np.sin(eccentric) - mean) / (1 - e * np.cos(eccentric))

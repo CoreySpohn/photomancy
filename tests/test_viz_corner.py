@@ -41,6 +41,7 @@ def test_plot_corner_samples_door_excludes_ll_total():
     assert labels == ["P [days]", "e", "cos i"]
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(
     reason="prior draws, one draw model and the corner door compile apart, 7 s cold"
 )
@@ -134,6 +135,7 @@ def test_plot_corner_overlay_names_and_ranges():
     assert len(result.artists["hist"]) == 6
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_classical_elements_refuses_a_planet_outside_the_orbit_rows():
     """Planet 1 of a one-row orbit block raises instead of clamping to row 0.
 

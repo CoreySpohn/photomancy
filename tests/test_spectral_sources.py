@@ -170,6 +170,7 @@ def test_photometry_integrates_the_star_over_a_tabulated_filter():
     assert abs(float(sampled[0, 0, 0]) / _truth(scene) - 1.0) > 1e-3
 
 
+@pytest.mark.float64_only(reason="finite differences at eps=1e-4")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_photometry_gradients_through_the_resolution():
     """Fails if a gradient through the star table or the filter is wrong.
@@ -189,20 +190,19 @@ def test_photometry_gradients_through_the_resolution():
         held = eqx.tree_at(lambda t: t.transmissions[0].transmission, term, response)
         return held.predict(scene)[0] * 1e10
 
-    with jax.enable_x64():
-        for fun, arg in (
-            (by_star, scene.star._flux_density_phot),
-            (by_filter, term.transmissions[0].transmission),
-        ):
-            check_grads(
-                fun,
-                (arg,),
-                order=1,
-                modes=("fwd", "rev"),
-                eps=1e-4,
-                atol=1e-4,
-                rtol=1e-4,
-            )
+    for fun, arg in (
+        (by_star, scene.star._flux_density_phot),
+        (by_filter, term.transmissions[0].transmission),
+    ):
+        check_grads(
+            fun,
+            (arg,),
+            order=1,
+            modes=("fwd", "rev"),
+            eps=1e-4,
+            atol=1e-4,
+            rtol=1e-4,
+        )
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -319,6 +319,7 @@ def test_terms_holding_a_resolution_declare_no_reads():
         CountRateTable(*table, resolution=term.resolution, reads=())
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_a_fit_frees_the_star_flux_table_under_a_held_resolution():
     """Fails if a fit refuses the star's flux table, or its prediction goes stale.

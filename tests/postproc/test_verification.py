@@ -11,26 +11,10 @@ Run with: pytest tests/test_verification.py -v
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from hwoutils.transforms import resample_flux
 
 from photomancy.postproc.core.modeling import inject_planet, make_simple_disk
 from photomancy.postproc.core.pca import get_pca_basis, pca_subtract
-
-
-@pytest.fixture(autouse=True)
-def _enable_x64():
-    """Run each test in this module in float64, restoring the flag afterwards.
-
-    The math-identity checks here need double precision. Scoping the flag to
-    this module keeps the rest of the suite in the default float32 regime:
-    previously the module enabled x64 globally at import, so full-suite runs
-    were float64 everywhere while single-file runs stayed float32.
-    """
-    previous = jax.config.jax_enable_x64
-    jax.config.update("jax_enable_x64", True)
-    yield
-    jax.config.update("jax_enable_x64", previous)
 
 
 class TestPCANumericalAccuracy:

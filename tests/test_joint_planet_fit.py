@@ -25,6 +25,8 @@ from photomancy.infer.backends.staged import (
 )
 from photomancy.infer.likelihoods import gaussian_loglike, huber_loglike
 
+pytestmark = pytest.mark.float64_only(reason="float64 Fit coordinates")
+
 _N_LONG, _N_TILT, _N_PLANET, _N_FINAL = 600, 150, 300, 2500
 _SEAM_NM, _TILT_PX = 1e-3, 2e-2
 _TRUE_OFFSET = (6.3, -4.8)

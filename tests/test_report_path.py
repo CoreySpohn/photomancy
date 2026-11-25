@@ -36,8 +36,6 @@ from photomancy.orbit.completion import CompletedProposal, Completion
 from photomancy.orbit.proposals import ScaleRotateProposal, ShapePriorProposal
 from photomancy.orbit.sheets import SheetSum
 
-jax.config.update("jax_enable_x64", True)
-
 LEAF = "planets[0].Rp_Rearth"
 ORBITS = "dynamics.orbits"
 BAND = Band(550.0, 650.0)
@@ -176,6 +174,7 @@ def fit():
     return build_fit()
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium(reason="the report fit density compiles once, 8 s cold")
 def test_the_leaf_record_never_enters_the_fit_density(fit):
     """Fails if ``leaf_path`` or ``leaf_exponent`` reaches the report likelihood.
@@ -193,6 +192,7 @@ def test_the_leaf_record_never_enters_the_fit_density(fit):
     np.testing.assert_array_equal(on, other)
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_unproposed_free_entries_are_refused_by_name():
     """Fails if a free leaf no term proposes is drawn, or few_epoch takes a free leaf.
 
@@ -210,6 +210,7 @@ def test_unproposed_free_entries_are_refused_by_name():
         bare.append_term(sheet_sum(report_term(leaf=None)))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="compiles one screened completion on the report fit, 15 s")
 def test_a_pool_with_no_live_constant_weighs_zero_without_nan(fit):
     """Fails if a ``shape`` whose pool lies outside the prior gets a weight or a NaN.
@@ -240,6 +241,7 @@ def test_a_pool_with_no_live_constant_weighs_zero_without_nan(fit):
     assert not np.any(np.isnan(np.asarray(log_density)))
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.medium(reason="the completed report run under filter_vmap, 17 s")
 def test_the_report_run_under_vmap_equals_the_loop():
     """Fails if a batch of report fits differs from the per-world loop.
@@ -291,6 +293,7 @@ def _scores(fit, both, one, z, astro=None):
     return jax.vmap(per)(z)
 
 
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 @pytest.mark.medium(reason="one compiled scorer for three reports at six draws, 9 s")
 @pytest.mark.parametrize("name", list(REPORTS))
 def test_report_term_matches_the_stored_golden(fit, name):
@@ -342,6 +345,7 @@ def test_report_term_matches_the_stored_golden(fit, name):
     assert np.any(peaks) if name in ("fixture", "positions") else not np.any(peaks)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_report_planet_and_sheet_sum_planet_outside_the_model_are_refused():
     """Planet 1 or -1 of a one-planet model raises for the report and the sheet sum.
 
@@ -405,6 +409,7 @@ def test_report_planet_check_holds_under_jit_and_a_late_epoch_model_passes():
         far.check(Late(model))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_sheet_sum_requires_a_resolvable_path_and_counts_the_last_axis():
     """An unresolvable ``orbit_path`` refuses at fit setup; planets index the last axis.
 

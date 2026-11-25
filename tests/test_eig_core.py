@@ -4,23 +4,20 @@ import json
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
-
-jax.config.update("jax_enable_x64", True)
-
-import jax.numpy as jnp  # noqa: E402
-from jax.scipy.stats import norm  # noqa: E402
-from nmc_reference import (  # noqa: E402
+from jax.scipy.stats import norm
+from nmc_reference import (
     class_mi_mc,
     detection_channel_mi_mc,
     mixture_mode_mi_mc,
     probit_site_moments_mc,
     reported_mixture_mode_mi_mc,
 )
-from priorities import Mixture, MultivariateNormal  # noqa: E402
+from priorities import Mixture, MultivariateNormal
 
-from photomancy.infer.eig import (  # noqa: E402
+from photomancy.infer.eig import (
     LinearizedEIG,
     _ep_probit_update,
     _null_update,
@@ -1020,6 +1017,7 @@ def _golden_detectable(z, c):
     return jax.nn.sigmoid(z[0] - 0.2 * c)
 
 
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 @pytest.mark.parametrize("name", ["two_modes_plain", "three_modes_reporting"])
 def test_eig_linearized_matches_golden_of_the_legacy_input(name):
     """The Mixture input reproduces the result captured from the legacy input.

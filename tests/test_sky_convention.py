@@ -29,6 +29,7 @@ _FORWARD_TIMES = np.array([-120.0, 0.0, 137.0, 690.0])
 _ECCENTRIC_ELEMENTS = (2.7, 0.6, 0.4, 1.1, 0.6, 0.8, -43.0)
 
 
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 @pytest.mark.parametrize(
     "elements, mass_ratio, relative, stellar, anomaly",
     [
@@ -162,6 +163,7 @@ def test_forward_predictors_keep_their_values(
         np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=atol)
 
 
+@pytest.mark.float64_only(reason="float64 central differences at relative step 1e-5")
 @pytest.mark.parametrize("cos_i", [0.4, 1.0, -1.0])
 def test_relative_astrometry_element_gradients(cos_i):
     """Compare independent element derivatives to x64 central differences.

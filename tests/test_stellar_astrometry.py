@@ -12,17 +12,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-jax.config.update("jax_enable_x64", True)
-
-from hwoutils.constants import Mearth2kg  # noqa: E402
-from kinematics import (  # noqa: E402
+from hwoutils.constants import Mearth2kg
+from kinematics import (
     predict_relative_astrometry,
     predict_stellar_astrometry,
 )
-from priorities import Uniform  # noqa: E402
+from priorities import Uniform
 
-from photomancy.infer import (  # noqa: E402
+from photomancy.infer import (
     Fit,
     ForwardTerm,
     Laplace,
@@ -30,8 +27,8 @@ from photomancy.infer import (  # noqa: E402
     weighted_cov,
     weighted_mean,
 )
-from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
-from photomancy.measurements import (  # noqa: E402
+from photomancy.infer.likelihoods import gaussian_loglike
+from photomancy.measurements import (
     AstrometryData,
     loglike_relative_astrom,
     loglike_stellar_astrom,
@@ -129,6 +126,7 @@ class _Reflex(eqx.Module):
 
 
 # Medium: The seven-parameter reflex fit includes a cold optimizer and Hessian.
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium
 def test_mass_is_identifiable_from_reflex():
     """A reflex-astrometry fit recovers the planet mass (period -> a -> amplitude).
