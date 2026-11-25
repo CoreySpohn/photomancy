@@ -1,5 +1,7 @@
 """Detection: amplitude profiling, the likelihood-ratio map and the curvature block."""
 
+from collections.abc import Callable
+
 import equinox as eqx
 import ineedvalidation as vv
 import jax
@@ -1082,6 +1084,126 @@ class _Bump(eqx.Module):
         return jnp.sum(jnp.exp(-0.5 * predicted**2) - 1.0)
 
 
+class _CountedLikelihood(eqx.Module):
+    likelihood: eqx.Module
+    record: Callable = eqx.field(static=True)
+
+    def __call__(self, predicted):
+        jax.debug.callback(self.record, predicted, ordered=True)
+        return self.likelihood(predicted)
+
+
+def _counted_measure(likelihood, prior, point, n_newton, *, n_steps=0):
+    calls = []
+    term = ForwardTerm(_Identity(), _CountedLikelihood(likelihood, calls.append))
+    fit = Fit(_P(jnp.zeros_like(point)), {"p": prior}, (term,))
+    estimate = measure(fit, {"p": point}, n_steps=n_steps, n_newton=n_newton)
+    jax.effects_barrier()
+    count = len(calls)
+    info = fit.information(
+        estimate.value, kind="observed", include_prior=False, batch_size=1
+    )
+    jax.effects_barrier()
+    return count, estimate, info
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.parametrize("n_newton", [1, 4])
+def test_measure_stops_evaluating_after_the_first_newton_refusal(n_newton):
+    """At a stationary maximum, the count is independent of the Newton budget.
+
+    Truth source: ordered runtime callbacks and the zero of the pseudo-Huber score.
+    Base a103c3f evaluated the likelihood 15 times for one step and 51 for four.
+    Tolerance basis: exact callback counts and flags, rtol 1e-10 for curvature.
+    Fails if: Newton rescans a refused point, evaluates a rounded-away trial, or
+    recomputes the final identity-coordinate Hessian.
+    """
+    calls, estimate, info = _counted_measure(
+        _PseudoHuber(), Normal(0.0, 10.0), jnp.asarray(0.0), n_newton
+    )
+    assert calls == 5
+    np.testing.assert_allclose(estimate.value["p"], 0.0, rtol=1e-10)
+    np.testing.assert_allclose(info, [[1.0]], rtol=1e-10)
+    np.testing.assert_allclose(estimate.cov, [[1.0]], rtol=1e-10)
+    assert bool(estimate.regular) and bool(estimate.converged)
+    assert int(estimate.n_steps) == int(estimate.n_newton) == 0
+    assert not bool(estimate.stopped_early)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.parametrize(
+    "n_newton, calls, point, curvature, variance, moved, regular",
+    [
+        (1, 9, -0.4999999999999978, 0.7155417527999346, 1.3975424859373649, 1, False),
+        (8, 32, 7.450580596923828e-09, 1.0, 1.0, 4, True),
+    ],
+)
+def test_measure_reuses_newton_curvature_only_at_the_final_point(
+    n_newton, calls, point, curvature, variance, moved, regular
+):
+    """Newton keeps the backtracked steps and reuses curvature only after a refusal.
+
+    Truth source: the pseudo-Huber likelihood starting at 2 and a103c3f, which
+    evaluated it 9 times with one step and 69 times with eight.
+    Tolerance basis: exact counts and flags, rtol 1e-10 against the base values.
+    Fails if: a backtracked step changes, a refusal is retried, or the Hessian from
+    before an accepted step is used at the new point.
+    """
+    count, estimate, info = _counted_measure(
+        _PseudoHuber(), Normal(0.0, 10.0), jnp.asarray(2.0), n_newton
+    )
+    assert count == calls
+    np.testing.assert_allclose(estimate.value["p"], point, rtol=1e-10)
+    np.testing.assert_allclose(info, [[curvature]], rtol=1e-10)
+    np.testing.assert_allclose(estimate.cov, [[variance]], rtol=1e-10)
+    assert bool(estimate.regular) is bool(estimate.converged) is regular
+    assert int(estimate.n_steps) == 0 and int(estimate.n_newton) == moved
+    assert not bool(estimate.stopped_early)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_measure_builds_stored_curvature_for_a_bounded_fit():
+    """A refused Newton step on bounded support still needs the stored Hessian.
+
+    Truth source: the saddle has stored information diag(1, -1), whereas the
+    support map has derivative 2.5 at the origin. Base a103c3f evaluated the
+    likelihood 56 times for the same budget of four steps.
+    Tolerance basis: exact counts and flags, rtol 1e-10 for curvature.
+    Fails if: polishing retries the refusal or substitutes the real-coordinate Hessian.
+    """
+    calls, estimate, info = _counted_measure(
+        _Saddle(), Uniform(-5.0, 5.0), jnp.zeros(2), 4
+    )
+    assert calls == 8
+    np.testing.assert_allclose(estimate.value["p"], [0.0, 0.0], rtol=1e-10)
+    np.testing.assert_allclose(info, np.diag([1.0, -1.0]), rtol=1e-10)
+    np.testing.assert_allclose(estimate.cov, np.diag([1.0, -1.0]), rtol=1e-10)
+    assert not bool(estimate.regular) and bool(estimate.converged)
+    assert int(estimate.n_steps) == int(estimate.n_newton) == 0
+    assert not bool(estimate.stopped_early)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_measure_run_with_both_stages_uses_fewer_evaluations():
+    """A complete measure run keeps the estimate with fewer likelihood calls.
+
+    Truth source: a103c3f evaluated this pseudo-Huber likelihood 53 times with both
+    the L-BFGS and Newton budgets set to four. The L-BFGS stage is unchanged.
+    Tolerance basis: exact counts and flags, rtol 1e-10 against the base values.
+    Fails if: the Newton polish does redundant work or changes the final estimate.
+    """
+    calls, estimate, info = _counted_measure(
+        _PseudoHuber(), Normal(0.0, 10.0), jnp.asarray(2.0), 4, n_steps=4
+    )
+    assert calls == 28
+    np.testing.assert_allclose(estimate.value["p"], 6.8579414972368136e-09, rtol=1e-10)
+    np.testing.assert_allclose(info, [[1.0]], rtol=1e-10)
+    np.testing.assert_allclose(estimate.cov, [[1.0]], rtol=1e-10)
+    assert bool(estimate.regular) and bool(estimate.converged)
+    assert int(estimate.n_steps) == 4 and int(estimate.n_newton) == 1
+    assert not bool(estimate.stopped_early)
+
+
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_the_newton_polish_accepts_a_step_only_where_the_likelihood_rises():
     """A full Newton step that overshoots is backtracked; an indefinite point stays.
@@ -1108,7 +1230,7 @@ def test_the_newton_polish_accepts_a_step_only_where_the_likelihood_rises():
     start = far.to_real({"p": jnp.asarray(2.0)})
     ones = jax.tree.map(jnp.ones_like, start)
     for n in (1, 4):
-        moved, count = detection._newton(far, start, ones, n, 1)
+        moved, count, _ = detection._newton(far, start, ones, n, 1)
         x, _ = far.from_real(moved)
         assert int(count) >= 1
         assert float(far.log_likelihood(x)) > -np.sqrt(5.0) + 0.5
@@ -1122,7 +1244,7 @@ def test_the_newton_polish_accepts_a_step_only_where_the_likelihood_rises():
         (ForwardTerm(_Identity(), _Bump()),),
     )
     start = saddle.to_real({"p": jnp.asarray(2.0)})
-    moved, count = detection._newton(
+    moved, count, _ = detection._newton(
         saddle, start, jax.tree.map(jnp.ones_like, start), 4, 1
     )
     assert int(count) == 0
