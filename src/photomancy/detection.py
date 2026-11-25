@@ -794,8 +794,21 @@ def _newton(fit, u, scale, n_newton, batch_size):
     step raises the likelihood, so it can neither follow a saddle nor leave the
     support (the coordinates are unconstrained). A full step that does not raise the
     likelihood (curvature at the start says little about a point far from the peak) is
-    halved up to ``_BACKTRACKS`` times; if no halving raises it the step is refused and
-    the point stays. Returns the result and the number of steps that moved it.
+    halved up to ``_BACKTRACKS`` times. A trial that rounds to the same bit pattern as
+    the current vector ends backtracking because smaller updates round there too.
+    A refused step ends polishing because another step at the same point would make
+    the same proposal.
+
+    Args:
+        fit: The fit whose likelihood is maximized.
+        u: Initial entries in the unconstrained coordinates.
+        scale: Per-entry widths used to scale the Newton solve.
+        n_newton: Maximum number of Newton steps.
+        batch_size: Hessian columns per batch, or ``None`` for all at once.
+
+    Returns:
+        The final entries, the number of accepted steps, and the last Hessian in
+        unconstrained coordinates. After a refusal the Hessian is at the final point.
     """
     flat, unravel = jax.flatten_util.ravel_pytree(u)
     width = jax.flatten_util.ravel_pytree(scale)[0]
@@ -806,31 +819,44 @@ def _newton(fit, u, scale, n_newton, batch_size):
 
     grad = jax.grad(negative)
 
-    def step(theta, _):
+    def attempt(theta):
         info = observed_hessian(negative, theta, batch_size=batch_size)
         scaled = info * jnp.outer(width, width)
         ok = jnp.all(jnp.linalg.eigvalsh(scaled) > 0.0)
         safe = jnp.where(ok, scaled, jnp.eye(theta.size))
         direction = width * jnp.linalg.solve(safe, width * grad(theta))
         before = negative(theta)
+        theta_bits = jax.lax.bitcast_convert_type(theta, jnp.uint8)
+
+        def trial(fraction, count):
+            candidate = theta - fraction * direction
+            candidate_bits = jax.lax.bitcast_convert_type(candidate, jnp.uint8)
+            distinct = jnp.any(candidate_bits != theta_bits)
+            value = jax.lax.cond(distinct, negative, lambda _: before, candidate)
+            return fraction, candidate, value, distinct, count
 
         def halve(carry):
-            fraction, _, count = carry
-            fraction = 0.5 * fraction
-            return fraction, negative(theta - fraction * direction), count + 1
+            fraction, _, _, _, count = carry
+            return trial(0.5 * fraction, count + 1)
 
         def pending(carry):
-            _, value, count = carry
-            return (count < _BACKTRACKS) & ~(value < before)
+            _, _, value, distinct, count = carry
+            return distinct & (count < _BACKTRACKS) & ~(value < before)
 
-        fraction, value, _ = jax.lax.while_loop(
-            pending, halve, (1.0, negative(theta - direction), 0)
-        )
+        _, candidate, value, _, _ = jax.lax.while_loop(pending, halve, trial(1.0, 0))
         moved = ok & (value < before)
-        return jnp.where(moved, theta - fraction * direction, theta), moved
+        return jnp.where(moved, candidate, theta), info, ~moved
 
-    theta, moved = jax.lax.scan(step, flat, None, length=n_newton)
-    return unravel(theta), jnp.sum(moved, dtype=jnp.int32)
+    def step(carry, _):
+        theta, _, refused = carry
+        carry = jax.lax.cond(refused, lambda _: carry, attempt, theta)
+        return carry, ~carry[2]
+
+    empty = jnp.zeros((flat.size, flat.size), flat.dtype)
+    (theta, info, _), moved = jax.lax.scan(
+        step, (flat, empty, False), None, length=n_newton
+    )
+    return unravel(theta), jnp.sum(moved, dtype=jnp.int32), info
 
 
 def _gradient(fit, x):
@@ -859,7 +885,7 @@ def measure(
     in coordinates scaled by the Fisher information at the start without the prior, and
     stops by the same rule: the loss has stalled and the scaled gradient norm is below
     its tolerance (a fit with a term that has no Fisher root runs unscaled and takes
-    all ``n_steps``). It then polishes with ``n_newton`` Newton steps where the
+    all ``n_steps``). It then polishes with up to ``n_newton`` Newton steps where the
     information is positive definite and the step (halved up to eight times) raises the
     likelihood, and returns the last iterate, not the best one. It is for a likelihood
     summary (a flux and a position per source), not a posterior: a posterior is ``MAP``
@@ -965,19 +991,30 @@ def measure(
             assumptions=fit.assumptions,
         )
     moved = jnp.asarray(0, jnp.int32)
+    info = None
     if n_newton:
         unit = jax.tree.map(jnp.ones_like, u)
-        u, moved = _newton(
+        u, moved, last_info = _newton(
             fit, u, unit if scale is None else scale, n_newton, batch_size
         )
+        # Real-support leaves and nonperiodic blocks pass through from_real unchanged.
+        identity = type(fit) is Fit and all(
+            entry.bounds == "real"
+            if isinstance(entry, AbstractDistribution)
+            else all(period is None for period in entry.periods)
+            for entry in fit.free.values()
+        )
+        if identity and int(moved) < n_newton:
+            info = last_info
     x, _ = fit.from_real(u)
-    info = fit.information(
-        x,
-        kind="observed",
-        include_prior=False,
-        batch_size=batch_size,
-        max_bytes=max_bytes,
-    )
+    if info is None:
+        info = fit.information(
+            x,
+            kind="observed",
+            include_prior=False,
+            batch_size=batch_size,
+            max_bytes=max_bytes,
+        )
     cov, corr, positive, min_eig = _correlation_inverse(info)
     grad = _gradient(fit, x)
     grad_norm, decrement, flat_gradient = _stationarity(info, grad)
