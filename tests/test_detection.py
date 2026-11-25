@@ -674,7 +674,10 @@ def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame():
     Tolerance basis: exact-algebra (rtol 1e-9; one Newton step is exact for a
     quadratic, and the data are about 1e3 counts so the residual keeps 12 digits).
     Fails if: the statistic uses the wrong noise, the mask, the trial axis, or the
-    Newton step is not exact for a Gaussian term.
+    Newton step is not exact for a Gaussian term. The batched run is held to the
+    same 1e-9: a batch size changes the vectorization and so the summation order
+    of the scored-pixel sums, which agree only to the 12 digits the residual keeps,
+    so a relative 1e-12 is below that resolution (one platform differed by 3.7e-10).
     """
     fit, _, mask = _image_problem("constant")
     sky = fit.terms[0]
@@ -696,7 +699,7 @@ def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame():
     assert int(jnp.argmax(out.z)) == int(np.argmax(np.asarray(_PAS) == _TRUE_PA))
     assert float(out.z.max()) > 5.0
     batched = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude", batch_size=5)
-    np.testing.assert_allclose(batched.z, out.z, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(batched.z, out.z, rtol=1e-9, atol=1e-9)
 
 
 def test_detect_refuses_a_bad_amplitude_path_or_trial_keys():
