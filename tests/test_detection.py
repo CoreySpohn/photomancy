@@ -50,7 +50,8 @@ def _problem(seed=1, n=200, shift=0.7):
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-def test_gaussian_profile_equals_the_closed_form():
+@pytest.mark.parametrize("budget", [{}, {"n_newton": 1}], ids=["default", "one-step"])
+def test_gaussian_profile_equals_the_closed_form(budget):
     """``a_hat = t'Wr / t'Wt``, ``2 dlogL = (t'Wr)**2 / t'Wt``, curvature ``t'Wt``.
 
     Truth source: the weighted least-squares solution for ``r = data - base`` and
@@ -64,12 +65,198 @@ def test_gaussian_profile_equals_the_closed_form():
     r = data - base
     tw = np.sum(template * w * template)
     want = np.sum(template * w * r) / tw
-    a_hat, two_delta, curvature = profile_amplitude(
-        gaussian_loglike(data, sigma), base, template
+    a_hat, two_delta, curvature, resolved = profile_amplitude(
+        gaussian_loglike(data, sigma), base, template, **budget
     )
+    assert bool(resolved)
     np.testing.assert_allclose(a_hat, want, rtol=1e-12)
     np.testing.assert_allclose(two_delta, want**2 * tw, rtol=1e-12)
     np.testing.assert_allclose(curvature, tw, rtol=1e-12)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_poisson_profile_stays_in_the_domain():
+    """A count of one against a null mean of ten favors an amplitude of -9.
+
+    Truth source: the Poisson score vanishes at mu = k. Twice the log ratio
+    is 2 (log(1/10) - 1 + 10).
+    Tolerance basis: rtol 1e-6 allows for iterative convergence in float64.
+    Fails if: the first Newton step goes to -90 and leaves the log domain.
+    """
+
+    def like(mu):
+        return jnp.sum(jnp.log(mu) - mu)
+
+    a_hat, gain, _, resolved = profile_amplitude(like, jnp.array([10.0]), jnp.ones(1))
+    np.testing.assert_allclose(a_hat, -9.0, rtol=1e-6)
+    np.testing.assert_allclose(gain, 2 * (np.log(0.1) + 9), rtol=1e-6)
+    assert bool(resolved)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_huber_profile_reaches_the_peak_from_a_linear_tail():
+    """A single observation ten sigma above the null has positive gain.
+
+    Truth source: the maximum of the Huber log likelihood on a 100,000 point
+    NumPy grid over [0, 20], including the null.
+    Tolerance basis: rtol 1e-4 on twice the gain. The nearest grid point is
+    within 0.00011 sigma of the peak in its unit-curvature quadratic core.
+    Fails if: the zero curvature at the null leaves the gain at zero.
+    """
+    delta = 1.345
+    residual = np.abs(10.0 - np.linspace(0.0, 20.0, 100_000))
+    loss = np.where(
+        residual <= delta, 0.5 * residual**2, delta * residual - 0.5 * delta**2
+    )
+    like = huber_loglike(jnp.array([10.0]), 1.0, delta=delta)
+    _, gain, _, resolved = profile_amplitude(like, jnp.zeros(1), jnp.ones(1))
+    np.testing.assert_allclose(gain, 2 * (loss[0] - loss.min()), rtol=1e-4)
+    assert bool(resolved)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.parametrize("scale", [1e-6, 1e-3, 1.0, 1e6])
+def test_huber_profile_does_not_depend_on_the_template_scale(scale):
+    """A source ten sigma above the null is found at any template scale.
+
+    Truth source: the Huber loss is linear beyond delta, so the peak is at
+    a = 10 / scale with twice the gain 2 (10 delta - delta^2 / 2).
+    Tolerance basis: rtol 1e-6 allows for iterative convergence in float64.
+    Fails if: a rejected overshoot is discarded rather than bracketed, or the
+    expansion cannot reach an amplitude of 1e7 units.
+    """
+    delta = 1.345
+    like = huber_loglike(jnp.array([10.0]), 1.0, delta=delta)
+    a_hat, gain, _, resolved = profile_amplitude(like, jnp.zeros(1), jnp.full(1, scale))
+    np.testing.assert_allclose(a_hat * scale, 10.0, rtol=1e-6)
+    np.testing.assert_allclose(gain, 2 * (10 * delta - 0.5 * delta**2), rtol=1e-6)
+    assert bool(resolved)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.parametrize("null", [300.0, 1000.0])
+def test_poisson_profile_survives_a_far_domain_overshoot(null):
+    """A count of one against a large null mean is found by bracketing.
+
+    Truth source: the Poisson score vanishes at mu = k, so a = 1 - null and
+    twice the gain is 2 (log(1/null) - 1 + null).
+    Tolerance basis: rtol 1e-6 allows for iterative convergence in float64.
+    Fails if: halving alone cannot return from outside the log domain and the
+    profile is left unresolved at zero gain.
+    """
+
+    def like(mu):
+        return jnp.sum(jnp.log(mu) - mu)
+
+    a_hat, gain, _, resolved = profile_amplitude(like, jnp.array([null]), jnp.ones(1))
+    np.testing.assert_allclose(a_hat, 1 - null, rtol=1e-6)
+    np.testing.assert_allclose(gain, 2 * (np.log(1 / null) - 1 + null), rtol=1e-6)
+    assert bool(resolved)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_bright_poisson_source_resolves_at_the_default_budget():
+    """One hundred counts against a null mean of ten resolve by default.
+
+    Truth source: with k = 100 and unit template, a = 90 and twice the gain is
+    2 [100 log(10) - 90].
+    Tolerance basis: rtol 1e-9, the profile converges to rounding.
+    Fails if: the default iteration budget leaves a bright source unresolved
+    (a = 71.5 after four iterations).
+    """
+    k = 100.0
+
+    def like(mu):
+        return jnp.sum(k * jnp.log(mu) - mu)
+
+    a_hat, gain, _, resolved = profile_amplitude(like, jnp.array([10.0]), jnp.ones(1))
+    np.testing.assert_allclose(a_hat, 90.0, rtol=1e-9)
+    np.testing.assert_allclose(gain, 2 * (k * np.log(10.0) - 90.0), rtol=1e-9)
+    assert bool(resolved)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_closed_bracket_resolves_a_flat_huber_peak():
+    """Opposite Huber tail slopes cancel throughout the peak.
+
+    Truth source: the losses for observations 8 and 12 with delta = 1 sum to
+    3 throughout (9, 11). The null loss is 19. The curvature on the plateau is zero.
+    Tolerance basis: exact plateau bounds and rtol 1e-12 for the gain in float64.
+    Fails if: a closed bracket needs positive curvature to resolve.
+    """
+    like = huber_loglike(jnp.array([8.0, 12.0]), 1.0, delta=1.0)
+    a_hat, gain, curvature, resolved = profile_amplitude(
+        like, jnp.zeros(2), jnp.ones(2)
+    )
+    assert 9 < float(a_hat) < 11
+    np.testing.assert_allclose(gain, 2 * (19 - 3), rtol=1e-12)
+    assert float(curvature) == 0 and bool(resolved)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_only_roundoff_losses_have_zero_significance():
+    """A resolved gain can round slightly below zero.
+
+    Truth source: a negative likelihood ratio statistic has no real square
+    root. A one-ulp loss at unit scale is within subtraction roundoff.
+    Tolerance basis: exact zeros and NaNs for one ulp, a one-nat loss,
+    and a zero gain with the resolution flag clear.
+    Fails if: a material loss or an unresolved null produces zero significance.
+    """
+    gain = jnp.array([-np.finfo(float).eps, -1.0, 0.0, 0.0])
+    resolved = jnp.array([True, True, True, False])
+    _, z, sigma = detection._summarize(jnp.ones(4), gain, jnp.zeros(4), resolved)
+    np.testing.assert_array_equal(z, [0.0, np.nan, 0.0, np.nan])
+    assert np.all(np.isposinf(sigma))
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_unresolved_huber_profile_has_nan_significance():
+    """One Newton step crosses two Huber core boundaries and misses the peak.
+
+    Truth source: at zero only the first residual is in the quadratic core.
+    Newton moves to 0.5 + 2 delta, where the three tail slopes sum to -delta.
+    Tolerance basis: exact boolean and NaN at a point with nonzero slope.
+    Fails if: exhausting the budget marks the profile resolved or gives a
+    numeric map significance.
+    """
+    like = huber_loglike(jnp.array([0.5, 1.6, 10.0]), 1.0)
+    base, template = jnp.zeros(3), jnp.ones(3)
+    _, _, _, resolved = profile_amplitude(like, base, template, n_newton=1)
+    assert not bool(resolved)
+    found = likelihood_ratio_map(
+        ((like, base, lambda x: x * template),), jnp.ones(1), n_newton=1
+    )
+    assert np.isnan(float(found.z[0]))
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_jitted_vmap_profiles_match_scalar_profiles_bitwise():
+    """One compiled batch handles eight mixed core and tail observations.
+
+    Truth source: a Python loop over scalar amplitude profiles of the same data.
+    Tolerance basis: bitwise equality for one pixel with a unit template and
+    exactly representable Huber transition, with no pixel reduction to reorder.
+    Fails if: batching mixes brackets, changes a result, or retraces for new data.
+    """
+    traces = 0
+
+    def profile(data):
+        nonlocal traces
+        traces += 1
+        like = huber_loglike(data, 1.0, delta=1.0)
+        return profile_amplitude(like, jnp.asarray(0.0), jnp.asarray(1.0))
+
+    data = jnp.array([-12.0, -6.5, -0.5, 0.0, 0.25, 2.0, 8.0, 10.5])
+    expected = tuple(
+        np.stack(col) for col in zip(*(profile(y) for y in data), strict=True)
+    )
+    traces = 0
+    batch = eqx.filter_jit(jax.vmap(profile))
+    for order in (slice(None), slice(None, None, -1)):
+        for got, want in zip(batch(data[order]), expected, strict=True):
+            assert np.asarray(got).tobytes() == want[order].tobytes()
+    assert traces == 1
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
@@ -92,8 +279,9 @@ def test_huber_profile_matches_a_bisection_optimum():
     for _ in range(200):
         mid = 0.5 * (lo + hi)
         lo, hi = (mid, hi) if grad(mid) > 0 else (lo, mid)
-    a_hat, two_delta, curvature = profile_amplitude(like, base, template)
+    a_hat, two_delta, curvature, resolved = profile_amplitude(like, base, template)
     np.testing.assert_allclose(a_hat, 0.5 * (lo + hi), atol=1e-9)
+    assert bool(resolved)
     assert float(two_delta) > 0.0 and float(curvature) > 0.0
 
 
@@ -107,8 +295,11 @@ def test_zero_template_gives_zero_without_nan():
     """
     data, base, _, sigma = _problem()
     for like in (gaussian_loglike(data, sigma), huber_loglike(data, sigma)):
-        out = profile_amplitude(like, base, jnp.zeros_like(base))
-        assert [float(v) for v in out] == [0.0, 0.0, 0.0]
+        a_hat, two_delta, curvature, resolved = profile_amplitude(
+            like, base, jnp.zeros_like(base)
+        )
+        assert (float(a_hat), float(two_delta), float(curvature)) == (0.0, 0.0, 0.0)
+        assert bool(resolved)
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -149,9 +340,10 @@ def test_masked_nan_does_not_leak():
 
     for build in (gaussian_loglike, huber_loglike):
         like = build(poisoned(data), sigma, mask)
-        a_hat, two_delta, curvature = profile_amplitude(
+        a_hat, two_delta, curvature, resolved = profile_amplitude(
             like, poisoned(base), poisoned(template)
         )
+        assert bool(resolved)
         assert all(np.isfinite(float(v)) for v in (a_hat, two_delta, curvature))
         if build is gaussian_loglike:
             np.testing.assert_allclose(a_hat, want, rtol=1e-12)
@@ -762,7 +954,7 @@ def test_psf_template_filter_amplitude_equals_the_linear_profile_amplitude():
         b = np.sum(w * patch) / np.sum(w)
         t_zm = stamp - np.sum(w * stamp) / np.sum(w)
         sigma = np.sqrt(var_patch) if weighted else np.ones_like(patch)
-        want, _, _ = profile_amplitude(
+        want, _, _, _ = profile_amplitude(
             gaussian_loglike(patch, sigma), np.full_like(patch, b), t_zm
         )
         np.testing.assert_allclose(got, want, rtol=1e-9)
