@@ -1129,9 +1129,10 @@ def test_solver_stage_ends_at_the_first_stalled_line_search_near_the_optimum():
     steps and 44 objective evaluations (pinned: the ripple path is chaotic, so the
     pins hold for float64 on CPU); a stage that ignores the stall takes 14 steps and
     67 evaluations and fails both pins. The estimate is within 1e-5 of the mode. The
-    converged flag is the loss-stall rule evaluated on the stage's own trace.
+    stall counts as the loss half of the stopping rule (the patience count alone has
+    not been reached on this trace, so without the stall the stage would run on).
     Fails if: a failed line search does not end the stage (also at a host check
-    interval of 5), or the stall decides the converged flag.
+    interval of 5), or does not report it stopped.
     """
     amplitude, frequency = 1e-13, 1e6
     x0 = jnp.concatenate([_toy_init().a, _toy_init().b])
@@ -1153,8 +1154,31 @@ def test_solver_stage_ends_at_the_first_stalled_line_search_near_the_optimum():
         got = np.concatenate([result.params.a, result.params.b])
         np.testing.assert_allclose(got, x, rtol=0, atol=1e-10)
         np.testing.assert_allclose(got, _RIPPLE_MODE, rtol=0, atol=1e-5)
-        assert trace.stopped_early == _rule_converged(trace.loss, patience, min_delta)
-        assert not trace.failed
+        # the stall is evidence the loss stalled: with no gradient gate it stops
+        # the stage as converged although the patience count was not reached
+        assert not _rule_converged(trace.loss, patience, min_delta)
+        assert trace.stopped_early and not trace.failed
+
+
+def test_stall_with_a_small_gradient_stops_the_gated_stage_as_converged():
+    """A stall near the optimum passes a scaled-gradient gate; the stage is converged.
+
+    Same fixture as the near-optimum test with ``grad_tol`` 1e-3: the scaled gradient
+    at the stall is far below it, so the stage reports ``stopped_early`` (what keeps
+    ``measure`` from rerunning it). With the gate shut (1e-30) the stall ends the stage
+    not converged.
+    """
+    scale = {"a": (1.0,), "b": (1.0,)}
+    stops = []
+    for tol in (1e-3, 1e-30):
+        result = _ripple_stage(
+            _rippled_quadratic(1e-13, 1e6, []),
+            EarlyStopping(3, check_every=1, grad_tol=tol, grad_scale=scale),
+            80,
+        )
+        assert result.stages[0].n_steps == 12
+        stops.append(result.stages[0].stopped_early)
+    assert stops == [True, False]
 
 
 @vv.case("scene-fits", "code-verification", basis="mutation")

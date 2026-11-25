@@ -791,10 +791,12 @@ def map_fit(
                 if stopped or failed:
                     break
             if stalled:
-                # The line search ended without meeting its conditions: the loss
-                # is flat to rounding along every direction it can find, so more
-                # steps only repeat the search. Whether the stage converged is
-                # still the early-stopping rule's call, made just above.
+                # The line search ended without meeting its conditions: direct
+                # evidence that the loss has stalled, so the loss half of the
+                # rule is taken as met and only the gradient half is evaluated, at
+                # the last recorded iterate. A small scaled gradient means
+                # converged; otherwise the stage ends not converged.
+                stopped = stopping.grad_tol is None or float(norm) < stopping.grad_tol
                 break
         if not failed and stopping is None and n_run:
             failed = not np.all(
