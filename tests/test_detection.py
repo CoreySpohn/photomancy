@@ -232,6 +232,65 @@ def test_unresolved_huber_profile_has_nan_significance():
     assert np.isnan(float(found.z[0]))
 
 
+@vv.case("scene-fits", "code-verification", basis="mutation")
+def test_float32_profile_three_sigma_off_a_large_objective_is_unresolved():
+    """A float32 quadratic objective of size 1e7 left 3 standard errors off its peak.
+
+    Truth source: for -1e7 - (a - 3)^2 / 2 at a = 0 the slope over the root
+    curvature is exactly 3 standard errors.
+    Tolerance basis: mutation; the float32 rounding allowance is
+    sqrt(eps * 1e7) = 1.09 standard errors here, and the summation bound
+    (8 eps per reduction level) would admit 3.09 and resolve this point.
+    Fails if: the resolution tolerance admits an amplitude error of several
+    standard errors on a large objective.
+    """
+    with jax.enable_x64(False):
+
+        def objective(a):
+            return jnp.float32(-1e7) - 0.5 * (a - 3) ** 2
+
+        _, _, curvature, resolved = detection._profile(objective, 0, jnp.float32)
+    assert float(curvature) == 1.0
+    assert not bool(resolved)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.parametrize(
+    ("build", "expected_z"),
+    [
+        (gaussian_loglike, np.array([10.05, 1.5]) / np.sqrt(1.01)),
+        (
+            huber_loglike,
+            [
+                np.sqrt(2 * 1.345 * 10 - 1.345**2 + 0.25 - 0.25 / 1.01),
+                0.5 + 0.1 * 1.345,
+            ],
+        ),
+    ],
+)
+def test_float32_map_resolves_source_on_bright_background(build, expected_z):
+    """Two pixels have excess counts of 10 and 0.5 background standard deviations.
+
+    Truth source: the Gaussian z is the projection onto the unit-norm template.
+    At the source the Huber fit leaves both residuals in the quadratic core.
+    At the neighbor the bright pixel stays in the linear tail, so it adds a
+    constant 0.1 * delta to the slope from the other pixel.
+    Tolerance basis: rounding a 1e4 count prediction costs about 1e-5 sigma.
+    Fails if: roundoff in the fitted slope makes either significance NaN.
+    """
+    with jax.enable_x64(False):
+        base = jnp.full((1, 2), 1e4)
+        like = build(base + jnp.array([[1000.0, 50.0]]), 100.0)
+
+        def template(position):
+            return jnp.where(jnp.arange(2)[None, :] == position, 1.0, 0.1)
+
+        found = likelihood_ratio_map(
+            ((like, base, template),), jnp.arange(2), batch_size=None
+        )
+        np.testing.assert_allclose(found.z, expected_z, rtol=0, atol=2e-5)
+
+
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_jitted_vmap_profiles_match_scalar_profiles_bitwise():
     """One compiled batch handles eight mixed core and tail observations.

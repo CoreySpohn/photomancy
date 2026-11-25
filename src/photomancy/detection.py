@@ -108,10 +108,12 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
     Refine a bracket with 48 golden-section steps, retaining its best finite point.
 
     Resolution requires a bracket of width at most 1e-8 * max(1, abs(a)), or a
-    slope within 1e-6 * sqrt(curvature) of zero. At a quadratic peak the slope
-    vanishes and abs(slope) / sqrt(curvature) is the estimated amplitude error
-    in formal standard errors. A stationary flat null also resolves. Forward
-    differentiation lets the likelihood mask NaN template tangents.
+    stationary point. With positive curvature, abs(slope) / sqrt(curvature)
+    estimates the amplitude error in formal standard errors. A point is
+    stationary if this error is at most 1e-6 or its square (the Newton
+    decrement) is within eps * max(1, abs(objective)). A stationary flat
+    null also resolves. Forward differentiation lets the likelihood mask NaN
+    template tangents.
     """
     d1 = jax.jacfwd(objective)
     d2 = jax.jacfwd(d1)
@@ -131,15 +133,20 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
 
         return jax.lax.cond(eqx.internal.unvmap_any(active), selected, lambda: state)
 
-    def stationary(g, curvature):
-        return (curvature > 0) & (jnp.abs(g) <= 1e-6 * jnp.sqrt(jnp.abs(curvature)))
+    def roundoff(value):
+        return relative_roundoff * jnp.maximum(1, jnp.abs(value))
+
+    def small_slope(g, curvature, tolerance):
+        return (curvature > 0) & (
+            jnp.abs(g) <= tolerance * jnp.sqrt(jnp.abs(curvature))
+        )
 
     def advance(a, value, g, h, move):
         newton = h < 0
         step = jnp.where(newton, -g / jnp.where(newton, h, 1), jnp.sign(g)).astype(
             dtype
         )
-        floor = value - relative_roundoff * jnp.maximum(1, jnp.abs(value))
+        floor = value - roundoff(value)
 
         def acceptable(offset, score):
             return jnp.isfinite(a + offset) & jnp.isfinite(score) & (score >= floor)
@@ -227,7 +234,7 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
         g, h = d1(a), d2(a)
         move = ~closed & (g != 0) & jnp.isfinite(g) & jnp.isfinite(h)
         # Always offer the first Newton step, including for a very faint Gaussian.
-        move &= (i == 0) | ~stationary(g, -h)
+        move &= (i == 0) | ~small_slope(g, -h, 1e-6)
         return update_if(move, lambda: advance(a, value, g, h, move), state)
 
     a_hat, value, closed = jax.lax.fori_loop(
@@ -238,13 +245,14 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
     two_delta = 2 * (value - null)
     finite = jnp.isfinite(a_hat) & jnp.isfinite(two_delta)
     resolved = finite & jnp.isfinite(g) & jnp.isfinite(curvature)
-    resolved &= stationary(g, curvature) | closed | flat_null
+    # The score can resolve to roundoff while further steps still refine a_hat.
+    # One eps of the objective (not the summation bound) caps the admitted
+    # amplitude error at sqrt(eps * abs(value)) standard errors.
+    eps = jnp.finfo(null.dtype).eps
+    tolerance = jnp.maximum(1e-6, jnp.sqrt(eps * jnp.maximum(1, jnp.abs(value))))
+    resolved &= small_slope(g, curvature, tolerance) | closed | flat_null
     # Apply the subtraction tolerance while both objective values are available.
-    rounding = (
-        2
-        * relative_roundoff
-        * jnp.maximum(1, jnp.maximum(jnp.abs(null), jnp.abs(value)))
-    )
+    rounding = 2 * roundoff(jnp.maximum(jnp.abs(null), jnp.abs(value)))
     rounded_loss = resolved & (two_delta < 0) & (two_delta >= -rounding)
     two_delta = jnp.where(rounded_loss, 0, two_delta)
     return a_hat, two_delta, curvature, resolved
@@ -276,9 +284,10 @@ def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 8):
         twice the gain over the null and curvature is the negative second
         derivative at the estimate. Its inverse square root is the formal
         standard error. A finite profile is resolved when the estimated error
-        from the slope is within 1e-6 standard errors, the bracket width is at
-        most 1e-8 times max(1, abs(a_hat)), or the null is flat and stationary.
-        A zero template resolves at zero amplitude with zero gain.
+        from the slope is within 1e-6 standard errors, the Newton decrement is
+        within eps * max(1, abs(log likelihood)) at positive curvature, the bracket
+        width is at most 1e-8 times max(1, abs(a_hat)), or the null is flat and
+        stationary. A zero template resolves at zero amplitude with zero gain.
 
     Raises:
         ValueError: If the likelihood is the Laplace density.

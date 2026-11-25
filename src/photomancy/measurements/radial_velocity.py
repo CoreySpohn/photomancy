@@ -19,6 +19,14 @@ from photomancy.measurements._padding import _pad_1d, _valid_mask
 __all__ = ["RadialVelocityData", "RadialVelocityTerm", "loglike_rv_marginalized"]
 
 
+def _instrument_names(instruments):
+    if isinstance(instruments, str):
+        raise TypeError(
+            "Received a single string for instruments. Pass (name,) for one instrument."
+        )
+    return tuple(instruments)
+
+
 class RadialVelocityData(eqx.Module):
     """Radial velocity observations from one or more named instruments.
 
@@ -92,7 +100,7 @@ class RadialVelocityData(eqx.Module):
             rv_err=_pad_1d(rv_err, max_n, fill=1.0),
             inst_ids=_pad_1d(inst_ids, max_n).astype(int),
             valid=_valid_mask(n, max_n),
-            instruments=tuple(instruments),
+            instruments=_instrument_names(instruments),
         )
 
     @classmethod
@@ -112,7 +120,7 @@ class RadialVelocityData(eqx.Module):
             rv_err=jnp.ones(max_n),
             inst_ids=jnp.zeros(max_n, dtype=int),
             valid=jnp.zeros(max_n, dtype=bool),
-            instruments=tuple(instruments),
+            instruments=_instrument_names(instruments),
         )
 
 
