@@ -11,21 +11,23 @@ import numpy as np
 import pytest
 from hwoutils.model_paths import resolve
 from image_scene import (
+    BANDS,
     GaussianCoronagraph,
     make_detector,
     make_exposure,
     make_instrument,
     make_scene,
 )
-from optixstuff import AbstractSpeckleField
+from optixstuff import AbstractSpeckleField, Rates
 from optixstuff.coronagraph import MultiBandCoronagraph
+from optixstuff.exposure import FramePlan
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band
 from priorities import LogUniform
 from scipy import stats
 
 from photomancy import detection
-from photomancy.image import ImageModel, ImageTerm
+from photomancy.image import ImageModel, ImageTerm, _ImageScore
 from photomancy.infer.fit import Fit
 from photomancy.orbit.sheets import SheetSum
 
@@ -96,6 +98,82 @@ def test_gaussian_value_is_the_summed_density_of_the_detector_moments():
         np.asarray(term.mask)
     ].sum()
     np.testing.assert_allclose(term(model), want, rtol=1e-12)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.parametrize("kind", ["constant", "read", "poisson"])
+def test_excluded_nonfinite_rates_do_not_enter_the_score_gradient(kind):
+    """Only the first of two pixels contributes to the score and its gradient.
+
+    Truth source: the gradient with finite rates at the excluded pixel and the
+    same scored rates. With unit mean and shot variance rates and zero counts,
+    the Poisson derivative with respect to live time is -1. The unit-variance
+    Gaussian derivative is minus the live time. For read noise of 3 electrons,
+    the score is ``-(time**2 / (time + 9) + log(2*pi*(time + 9))) / 2``, whose
+    derivative at one second is -0.145.
+    Tolerance basis: floating-point (rtol 1e-12 for float64 gradients).
+    Fails if: a likelihood derivative at the excluded pixel enters the reverse
+    pass, or a NaN rate at a scored pixel gives a finite score.
+    """
+    mask = jnp.array([[[True, False]]])
+    detector = make_detector(kind)
+
+    def score(time, mean_rate, variance_rate):
+        variance = Rates(BANDS, "electron", thermal=variance_rate.reshape(mask.shape))
+        rates = Rates(
+            BANDS,
+            "electron",
+            star_leakage=mean_rate.reshape(mask.shape),
+            variance=variance,
+            supported=mask,
+        )
+        return _ImageScore(
+            jnp.zeros(mask.shape), mask, detector, FramePlan(time, 1), False
+        )(rates)
+
+    evaluate = jax.jit(jax.vmap(jax.value_and_grad(score)))
+    values, gradients = evaluate(
+        jnp.ones(6),
+        jnp.array([[1, 2], [1, jnp.nan], [1, jnp.inf], [1, 2], [jnp.nan, 2], [1, 2]]),
+        jnp.array([[1, 2], [1, 2], [1, 2], [1, jnp.nan], [1, 2], [jnp.nan, 2]]),
+    )
+    assert np.isfinite(values[:4]).all()
+    np.testing.assert_array_equal(values[1:4], np.broadcast_to(values[0], (3,)))
+    assert np.isfinite(gradients[:4]).all()
+    np.testing.assert_allclose(gradients[1:4], gradients[0], rtol=1e-12, atol=0)
+    np.testing.assert_allclose(
+        gradients[0], -0.145 if kind == "read" else -1.0, rtol=1e-12
+    )
+    assert np.isnan(values[4:]).all()
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_exclusion_preserves_the_finite_detector_floor():
+    """The detector uses the finite frame peak to classify negative totals.
+
+    Truth source: the excluded sources cancel in the total and contribute 1000
+    to the peak of the sum of absolute component rates. The tolerance is 1e-4
+    times that peak. At zero observed counts the Poisson score for a rate
+    clipped to zero is zero, and a rate below the tolerance gives minus infinity.
+    Tolerance basis: exact-algebra (exact zero and negative infinity).
+    Fails if: masking reduces the floor tolerance and rejects a scored rate
+    that the original finite frame would clip to zero.
+    """
+    mask = jnp.array([[[True, False]]])
+    score = _ImageScore(
+        jnp.zeros(mask.shape), mask, make_detector("poisson"), FramePlan(1, 1), False
+    )
+
+    def rates(first):
+        return Rates(
+            BANDS,
+            "electron",
+            planet=jnp.array([[[first, 500.0]]]),
+            star_leakage=jnp.array([[[0.0, -500.0]]]),
+        )
+
+    assert score(rates(-0.05)) == 0.0
+    assert np.isneginf(score(rates(-0.2)))
 
 
 _READ_NOISE_E = {"poisson": 0.0, "read": 3.0}
