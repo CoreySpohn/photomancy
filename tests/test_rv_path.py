@@ -559,6 +559,22 @@ def test_rv_data_refuses_ids_outside_the_instruments_but_not_padded_rows():
         RadialVelocityData.zeros(2, ())
 
 
+@pytest.mark.parametrize(
+    ("factory", "rows"),
+    [
+        (
+            RadialVelocityData.pad,
+            dict(time_d=[0.0], rv=[0.0], rv_err=[1.0], inst_ids=[0]),
+        ),
+        (RadialVelocityData.zeros, {}),
+    ],
+)
+def test_rv_factories_reject_a_bare_instrument_name(factory, rows):
+    """Fails if a factory splits a spectrograph name into one offset per letter."""
+    with pytest.raises(TypeError, match="instruments"):
+        factory(max_n=1, instruments="HARPS", **rows)
+
+
 def test_rv_merge_of_traced_terms_names_the_host_requirement():
     """Merging inside ``jit`` raises a ValueError that says both terms must be concrete.
 
