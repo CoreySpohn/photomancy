@@ -40,7 +40,7 @@ from priorities import AbstractDistribution, Mixture, MultivariateNormal
 
 from photomancy.infer.diagnostics import kish_ess, mc_se, pareto_khat, weighted_mean
 from photomancy.infer.evidence import importance_evidence
-from photomancy.infer.fit import Fit
+from photomancy.infer.fit import Fit, _check_draws
 from photomancy.infer.particles import (
     categorical_indices,
     systematic_indices,
@@ -396,18 +396,14 @@ class Posterior(eqx.Module):
     kind: str = eqx.field(static=True)
 
     def __check_init__(self):
-        """Refuse a malformed posterior on the host (trailing axes only).
+        """Refuse a malformed posterior on the host.
 
         Raises:
             ValueError: For a wrong ``kind``, key set, dtype or shape.
         """
         if self.kind not in _KINDS:
             raise ValueError(f"kind must be one of {_KINDS}, got {self.kind!r}")
-        if set(self.samples) != set(self.fit.free):
-            raise ValueError(
-                "samples must have exactly the keys of fit.free: "
-                f"{sorted(self.samples)} against {sorted(self.fit.free)}"
-            )
+        leading = self.fit.check_draws(self.samples)
         for name in ("log_weights", "log_target", "log_evidence", "log_evidence_se"):
             dtype = jnp.asarray(getattr(self, name)).dtype
             if dtype != jnp.float64:
@@ -415,7 +411,7 @@ class Posterior(eqx.Module):
         shape = jnp.shape(self.log_weights)
         if not shape:
             raise ValueError("log_weights needs a draw axis")
-        batch, n = shape[:-1], shape[-1]
+        batch = shape[:-1]
         if jnp.shape(self.log_target) != shape:
             raise ValueError(
                 f"log_target has shape {jnp.shape(self.log_target)}, "
@@ -427,15 +423,11 @@ class Posterior(eqx.Module):
                     f"{name} has shape {jnp.shape(getattr(self, name))}, "
                     f"expected the batch shape {batch}"
                 )
-        for key, entry in self.samples.items():
-            for leaf in jax.tree.leaves(entry):
-                if jnp.ndim(leaf) < len(batch) + 1 or jnp.shape(leaf)[
-                    : len(batch) + 1
-                ] != (*batch, n):
-                    raise ValueError(
-                        f"samples[{key!r}] has a leaf of shape {jnp.shape(leaf)}; "
-                        f"expected leading axes {(*batch, n)} (batch, then draws)"
-                    )
+        if self.samples and leading != shape:
+            key = next(iter(self.samples))
+            raise ValueError(
+                f"samples[{key!r}] has leading axes {leading}, expected {shape}"
+            )
 
     # ----- draws -----------------------------------------------------------------
 
@@ -1018,15 +1010,16 @@ def cluster_to_mixture(
         wanted = sorted(posterior.samples if keys is None else keys)
         if sorted(init) != wanted:
             raise ValueError(f"init needs the entries {wanted}, got {sorted(init)}")
+        schema = posterior.fit.draw_schema()
+        leading = _check_draws(init, {name: schema[name] for name in wanted})
+        if leading != (n_modes,):
+            raise ValueError(
+                f"init has leading shape {leading}, expected n_modes={n_modes}"
+            )
         leaves = jax.tree.leaves({name: init[name] for name in wanted})
         centers = jnp.concatenate(
-            [jnp.reshape(leaf, (jnp.shape(leaf)[0], -1)) for leaf in leaves], axis=-1
+            [jnp.reshape(leaf, (n_modes, -1)) for leaf in leaves], axis=-1
         )
-        if centers.shape != (n_modes, d):
-            raise ValueError(
-                f"init has {centers.shape[0]} centers of dimension {centers.shape[1]}; "
-                f"expected n_modes={n_modes} of dimension {d}"
-            )
 
     floor = (1e-2 * scale) ** 2
 

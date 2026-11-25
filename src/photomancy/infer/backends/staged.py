@@ -211,9 +211,10 @@ class MAPStage(eqx.Module):
         groups: Names of the groups the stage optimizes, a tuple of strings.
         fit: The density for this stage, replacing the one given to :func:`map_fit`
             (for example a ``Fit`` over one exposure). :class:`MAP` requires a
-            ``Fit`` with the free entries of the run fit; the engine :func:`map_fit`
-            also takes a callable. Before the first ``prepare``, this override applies
-            only to this stage. After it, the replacement persists in later stages.
+            ``Fit`` with the same coordinates as the run fit. The engine
+            :func:`map_fit` also takes a callable. Before the first ``prepare``, this
+            override applies only to this stage. After it, the replacement persists
+            in later stages.
             ``None`` keeps the current density.
         objective_scale: The stage minimizes ``-objective_scale * log_density``; the
             loss trace records that scaled objective. It is an array at run time, so
@@ -869,11 +870,11 @@ class _RealLogProb(eqx.Module):
 
 
 def _real_view(view, fit):
-    """Wrap a stage ``Fit`` for the optimizer; refuse a different free set.
+    """Wrap a stage ``Fit`` after checking its coordinate map.
 
     Raises:
         TypeError: If ``view`` is not a ``Fit``.
-        ValueError: If its free entries differ from those of ``fit``.
+        ValueError: If its free keys or coordinate maps differ from those of ``fit``.
     """
     if not isinstance(view, Fit):
         raise TypeError(f"a MAP stage density must be a Fit, got {type(view).__name__}")
@@ -882,6 +883,10 @@ def _real_view(view, fit):
             "a stage Fit must have the free entries of the run fit; "
             f"got {sorted(view.free)}, expected {sorted(fit.free)}"
         )
+    difference = fit._coordinate_difference(view)
+    if difference is not None:
+        key, reason = difference
+        raise ValueError(f"stage Fit coordinates differ at {key!r}: {reason}")
     return _RealLogProb(view)
 
 
@@ -893,7 +898,9 @@ def _real_stage(stage, fit):
         prepare = stage.prepare
 
         def wrapped(params):
-            return _real_view(prepare(params), fit)
+            with jax.ensure_compile_time_eval():
+                view = prepare(params)
+            return _real_view(view, fit)
 
         stage = eqx.tree_at(lambda s: s.prepare, stage, wrapped)
     return stage
@@ -952,10 +959,11 @@ class MAP(AbstractBackend):
     and the metrics see the unconstrained entry dict ``u`` (identity under a ``Normal``
     law); the prediction is a second call of the term on the same model, so a render is
     traced twice per stage configuration. A stage's ``fit``, or what its
-    ``prepare`` returns, is a ``Fit`` over a subset of the terms (a view of one
-    exposure, say); it must have the same free entries as the run fit, a different
-    set raises ``ValueError`` on the host, and anything but a ``Fit`` raises
-    ``TypeError``.
+    ``prepare`` returns, may change terms and prior densities. It must have the
+    same free keys, trailing shapes and coordinate maps as the run fit. A
+    difference raises ``ValueError`` on the host. During tracing a leaf support
+    bound that depends on traced values is checked only for shape. A stage
+    density of another type raises ``TypeError``.
 
     Attributes:
         n_steps: The most L-BFGS iterations of the default stage. The scaled stage
@@ -994,6 +1002,9 @@ class MAP(AbstractBackend):
             x = jax.tree.map(lambda a: a[best], self.init.samples)
         else:
             x = self.init
+        leading = fit.check_draws(x)
+        if leading:
+            raise ValueError(f"MAP init needs one draw, got leading shape {leading}")
         return fit.to_real(x)
 
     def _run(self, fit, key, *, batch_size=None):

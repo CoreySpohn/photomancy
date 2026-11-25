@@ -429,8 +429,9 @@ def test_mixed_rank_starts_name_the_entry():
     )
     starts = fit.sample_prior(jax.random.key(1), (3,))
     bad = {**starts, KEY: starts[KEY][0]}
-    with pytest.raises(ValueError, match="extra leading axis"):
+    with pytest.raises(ValueError, match=r"leading shape \(\), expected \(3,\)") as err:
         start_points(fit, bad, jax.random.key(0), 3)
+    assert KEY in str(err.value)
 
 
 def test_nuts_has_no_evidence_and_the_right_moments():
