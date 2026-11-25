@@ -18,7 +18,9 @@ from image_scene import (
     make_scene,
 )
 from optixstuff import AbstractSpeckleField
+from optixstuff.coronagraph import MultiBandCoronagraph
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
+from optixstuff.spectral import Band
 from priorities import LogUniform
 from scipy import stats
 
@@ -37,25 +39,16 @@ def _setup(kind="poisson", contrast=1e-10):
     return ImageModel(scene, instrument), exposure
 
 
-def _term(model, exposure, observed, mask=None):
-    observed = jnp.asarray(observed)
-    mask = jnp.ones(observed.shape, bool) if mask is None else mask
-    return ImageTerm(observed, mask, exposure=exposure, **_PATHS)
-
-
 def _scored(model, exposure, observed):
-    """A term whose mask is the pixels the toy coronagraph's tables cover.
-
-    The detector is as wide as the tables, so the edge pixels (more at the blue
-    node of the band) are unsupported; ``Fit`` refuses a mask that scores them.
-    """
-    blank = _term(model, exposure, observed)
-    return _term(model, exposure, observed, blank.supported_mask(model))
+    """Score the pixels covered by the toy coronagraph at the reference model."""
+    return ImageTerm.on_support(model, observed, exposure=exposure, **_PATHS)
 
 
 def _mean(model, exposure):
     shape = (1, *model.instrument.detector.shape)
-    return _term(model, exposure, jnp.zeros(shape)).predict(model)
+    return ImageTerm(
+        jnp.zeros(shape), jnp.ones(shape, bool), exposure=exposure, **_PATHS
+    ).predict(model)
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -71,10 +64,10 @@ def test_poisson_value_is_the_summed_pmf_of_the_expected_counts():
     model, exposure = _setup("poisson")
     mean = np.asarray(_mean(model, exposure))
     counts = np.random.default_rng(3).poisson(mean).astype(float)
-    mask = np.ones(counts.shape, bool)
-    mask[..., :4, :] = False
+    mask = np.zeros(counts.shape, bool)
+    mask[..., 4:-4, 4:-4] = True
     observed = np.where(mask, counts, np.nan)
-    term = _term(model, exposure, observed, mask)
+    term = ImageTerm(observed, mask, exposure=exposure, **_PATHS)
     want = stats.poisson.logpmf(counts[mask], mean[mask]).sum()
     np.testing.assert_allclose(term(model), want, rtol=1e-12)
     grad = eqx.filter_grad(term)(model)
@@ -86,20 +79,22 @@ def test_gaussian_value_is_the_summed_density_of_the_detector_moments():
     """A read-noise detector scores the Gaussian of its own mean and variance.
 
     Truth source: ``scipy.stats.norm.logpdf`` with the detector's
-    ``mean_and_variance`` at the model's expected rates.
+    ``mean_and_variance`` at the model's expected rates, summed over covered pixels.
     Tolerance basis: exact-algebra (rtol 1e-12).
     Fails if: the variance is dropped or the log-determinant constant is missing.
     """
     model, exposure = _setup("read")
     detector = model.instrument.detector
-    probe = _term(model, exposure, jnp.zeros((1, *detector.shape)))
+    probe = _scored(model, exposure, jnp.zeros((1, *detector.shape)))
     _, rates, plan = probe._rates(model)
     mean, variance = (np.asarray(x) for x in detector.mean_and_variance(rates, plan))
     observed = mean + np.sqrt(variance) * np.random.default_rng(4).normal(
         size=mean.shape
     )
-    term = _term(model, exposure, observed)
-    want = stats.norm.logpdf(observed, mean, np.sqrt(variance)).sum()
+    term = eqx.tree_at(lambda t: t.observed_e, probe, observed)
+    want = stats.norm.logpdf(observed, mean, np.sqrt(variance))[
+        np.asarray(term.mask)
+    ].sum()
     np.testing.assert_allclose(term(model), want, rtol=1e-12)
 
 
@@ -221,7 +216,7 @@ def test_residual_reads_the_floored_rates_and_is_safe_to_differentiate():
 def test_the_value_peaks_at_the_true_model():
     """Noise-free counts are likelier at the truth than at 5 percent off."""
     model, exposure = _setup("poisson")
-    term = _term(model, exposure, jnp.round(_mean(model, exposure)))
+    term = _scored(model, exposure, jnp.round(_mean(model, exposure)))
     off = _setup("poisson", contrast=1.05e-10)[0]
     assert term(model) > term(off)
 
@@ -229,14 +224,14 @@ def test_the_value_peaks_at_the_true_model():
 def test_draw_gives_counts_consistent_with_the_expectation_and_keeps_masked_pixels():
     """Drawn counts are integers about the mean; masked pixels keep their stored value.
 
-    Tolerance: the standardized residual of 576 Poisson pixels has a standard error of
-    0.03 on its standard deviation and of 0.04 on its mean; the bounds are 0.2 and 0.25.
+    Tolerance: with over 350 scored Poisson pixels the standard errors of the
+    standard deviation and mean are below 0.04 and 0.06. The bounds are 0.2 and 0.25.
     """
     model, exposure = _setup("poisson")
     mean = _mean(model, exposure)
-    supported = _term(model, exposure, mean).supported_mask(model)
+    supported = _scored(model, exposure, mean).mask
     mask = supported & jnp.ones(mean.shape, bool).at[0, :3, :].set(False)
-    term = _term(model, exposure, jnp.full(mean.shape, -7.0), mask)
+    term = ImageTerm(jnp.full(mean.shape, -7.0), mask, exposure=exposure, **_PATHS)
     drawn = term.draw(jax.random.PRNGKey(5), model)
     out = np.asarray(drawn.observed_e)
     assert np.all(out[0, :3] == -7.0)
@@ -252,8 +247,8 @@ def test_batched_frames_are_scored_jointly():
     mean = np.asarray(_mean(model, exposure))
     rng = np.random.default_rng(6)
     frames = rng.poisson(np.broadcast_to(mean, (2, *mean.shape))).astype(float)
-    both = _term(model, exposure, frames)
-    singles = [_term(model, exposure, f) for f in frames]
+    both = _scored(model, exposure, frames)
+    singles = [_scored(model, exposure, f) for f in frames]
     np.testing.assert_allclose(
         both(model), sum(float(t(model)) for t in singles), rtol=1e-12
     )
@@ -266,10 +261,8 @@ def test_exposure_comes_from_the_model_by_path_or_the_term_not_both():
     """A path exposure equals a held one; giving both or neither fails."""
     model, exposure = _setup("poisson")
     observed = jnp.round(_mean(model, exposure))
-    held = _term(model, exposure, observed)
-    by_path = ImageTerm(
-        observed, jnp.ones(observed.shape, bool), exposure_path="exposures[0]", **_PATHS
-    )
+    held = _scored(model, exposure, observed)
+    by_path = ImageTerm(observed, held.mask, exposure_path="exposures[0]", **_PATHS)
     with_exposure = ImageModel(model.scene, model.instrument, (exposure,))
     np.testing.assert_allclose(by_path(with_exposure), held(model), rtol=1e-12)
     with pytest.raises(ValueError, match="exactly one"):
@@ -305,7 +298,7 @@ def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument():
     observed = jnp.round(_mean(model, exposure))
     mask = _scored(model, exposure, observed).mask
     rooted = ImageTerm(observed, mask, instrument=model.instrument, exposure=exposure)
-    held = _term(model, exposure, observed)
+    held = _scored(model, exposure, observed)
     np.testing.assert_allclose(rooted(model.scene), held(model), rtol=1e-12)
     with pytest.raises(ValueError, match="instrument"):
         ImageTerm(observed, mask, exposure=exposure)
@@ -329,21 +322,21 @@ def test_the_term_declares_no_reads():
     model, exposure = _setup("poisson")
     observed = jnp.zeros((1, *model.instrument.detector.shape))
     assert exposure.resolution.rules
-    assert _term(model, exposure, observed).reads == ()
+    assert _scored(model, exposure, observed).reads == ()
 
 
 def test_an_observed_image_is_checked_against_the_held_detector_and_roll():
     """An ``Image`` from ``observe`` scores as its data; foreign data are refused.
 
     Truth source: the same term built from the bare ``Image.data`` array, and, for
-    ``mask=None``, the explicit mask ``supported_mask(model)`` (the toy detector is
+    ``on_support``, the explicit mask ``supported_mask(model)`` (the toy detector is
     wider than its tables, 69 percent supported).
     Tolerance basis: exact (the same pixels and the same renderer, compared bit for
     bit); angles equal modulo 360 to the float32 resolution of the angle.
     Fails if: the term drops the data of an ``Image``; accepts data on another
     pitch, at another roll (also with the instrument read from the model), with no
     orientation where the roll is known, or in another quantity or measure; refuses
-    a roll of 360 against 0 or a float32 copy of the roll; or ``mask=None`` scores
+    a roll of 360 against 0 or a float32 copy of the roll; or ``on_support`` scores
     anything but the supported pixels (all True is refused by ``Fit``).
     """
     model, exposure = _setup("poisson")
@@ -354,8 +347,12 @@ def test_an_observed_image_is_checked_against_the_held_detector_and_roll():
     from_image = ImageTerm(image, mask, instrument=instrument, exposure=exposure)
     from_array = ImageTerm(image.data, mask, instrument=instrument, exposure=exposure)
     assert float(from_image(model.scene)) == float(from_array(model.scene))
-    supported = ImageTerm(image, instrument=instrument, exposure=exposure)
-    assert supported.mask is None
+    supported = ImageTerm.on_support(
+        model.scene, image, instrument=instrument, exposure=exposure
+    )
+    np.testing.assert_array_equal(
+        supported.mask, from_array.supported_mask(model.scene)
+    )
     law = {"planets[0].physical_model.contrast_grid": LogUniform(1e-12, 1e-8)}
     fit = Fit(model.scene, law, (supported,))
     x = {k: resolve(model.scene, k) for k in law}
@@ -365,28 +362,38 @@ def test_an_observed_image_is_checked_against_the_held_detector_and_roll():
         grid.shape, 2.0 * grid.step, grid.unit, orientation=grid.orientation
     )
     with pytest.raises(ValueError, match="detector grid"):
-        ImageTerm(replace(image, grid=coarse), instrument=instrument, exposure=exposure)
+        ImageTerm(
+            replace(image, grid=coarse), mask, instrument=instrument, exposure=exposure
+        )
     turned = replace(grid, orientation=SkyOrientation(grid.orientation.pa_y_deg + 30))
     with pytest.raises(ValueError, match="roll"):
-        ImageTerm(replace(image, grid=turned), instrument=instrument, exposure=exposure)
+        ImageTerm(
+            replace(image, grid=turned), mask, instrument=instrument, exposure=exposure
+        )
     with pytest.raises(ValueError, match="roll"):
-        ImageTerm(replace(image, grid=turned), exposure=exposure, **_PATHS)
+        ImageTerm(replace(image, grid=turned), mask, exposure=exposure, **_PATHS)
     bare = replace(grid, orientation=None)
     with pytest.raises(ValueError, match="no sky orientation"):
-        ImageTerm(replace(image, grid=bare), instrument=instrument, exposure=exposure)
+        ImageTerm(
+            replace(image, grid=bare), mask, instrument=instrument, exposure=exposure
+        )
     for quantity, measure in (("electrons/s", image.measure), ("electrons", None)):
         measure = Measure.intensive() if measure is None else measure
         foreign = replace(image, quantity=quantity, measure=measure)
         with pytest.raises(ValueError, match="electrons per pixel"):
-            ImageTerm(foreign, instrument=instrument, exposure=exposure)
+            ImageTerm(foreign, mask, instrument=instrument, exposure=exposure)
     full_turn = replace(grid, orientation=SkyOrientation(360.0))
-    ImageTerm(replace(image, grid=full_turn), instrument=instrument, exposure=exposure)
+    ImageTerm(
+        replace(image, grid=full_turn), mask, instrument=instrument, exposure=exposure
+    )
     rolled = eqx.tree_at(lambda e: e.roll_deg, exposure, jnp.asarray(30.1))
     single = replace(grid, orientation=SkyOrientation(float(np.float32(30.1))))
-    ImageTerm(replace(image, grid=single), instrument=instrument, exposure=rolled)
-    unchecked = ImageTerm(replace(image, grid=coarse), exposure=exposure, **_PATHS)
+    ImageTerm(replace(image, grid=single), mask, instrument=instrument, exposure=rolled)
+    unchecked = ImageTerm(
+        replace(image, grid=coarse), mask, exposure=exposure, **_PATHS
+    )
     assert float(unchecked(model)) == float(
-        ImageTerm(image.data, exposure=exposure, **_PATHS)(model)
+        ImageTerm(image.data, mask, exposure=exposure, **_PATHS)(model)
     )
 
 
@@ -423,7 +430,7 @@ def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene():
 
 
 def test_a_count_where_the_mean_is_zero_is_minus_infinity_not_nan():
-    """Outside the support the term is ``-inf``; NaN is reserved for a real failure.
+    """An impossible Poisson count on a covered pixel gives ``-inf``.
 
     A detector with zero quantum efficiency has zero expected counts everywhere: a
     zero frame scores 0 and a frame with one count scores ``-inf``, with no NaN.
@@ -437,8 +444,8 @@ def test_a_count_where_the_mean_is_zero_is_minus_infinity_not_nan():
     exposure = make_exposure(scene, instrument)
     model = ImageModel(scene, instrument)
     shape = (1, *dead.shape)
-    zero = _term(model, exposure, jnp.zeros(shape))
-    one = _term(model, exposure, jnp.zeros(shape).at[0, 5, 5].set(1.0))
+    zero = _scored(model, exposure, jnp.zeros(shape))
+    one = _scored(model, exposure, jnp.zeros(shape).at[0, 5, 5].set(1.0))
     assert float(zero(model)) == 0.0
     assert float(one(model)) == -np.inf
 
@@ -472,7 +479,9 @@ def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
     model, exposure = _wide()
     rng = np.random.default_rng(0)
     observed = jnp.asarray(rng.poisson(_mean(model, exposure)).astype(float))
-    full = _term(model, exposure, observed)
+    full = ImageTerm(
+        observed, jnp.ones(observed.shape, bool), exposure=exposure, **_PATHS
+    )
     supported = np.asarray(full.supported_mask(model))
     n_bad = int((~supported).sum())
     assert 0 < n_bad < supported.size
@@ -490,7 +499,7 @@ def test_a_mask_on_unsupported_pixels_is_refused_at_fit_setup():
         Fit(model, law, (held,))
     assert held.footprint_paths == full.footprint_paths != ()
 
-    scored = _term(model, exposure, observed, jnp.asarray(supported))
+    scored = ImageTerm(observed, supported, exposure=exposure, **_PATHS)
     scored.check(model)
     fit = Fit(model, law, (scored,))
     x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid * 1.2}
@@ -549,13 +558,142 @@ def test_a_lit_planet_outside_the_source_domain_is_refused():
         exposure = make_exposure(scene, instrument)
         model = ImageModel(scene, instrument)
         observed = jnp.zeros((1, *detector.shape))
-        probe = _term(model, exposure, observed)
-        term = _term(model, exposure, observed, probe.supported_mask(model))
+        term = _scored(model, exposure, observed)
         if refused:
             with pytest.raises(ValueError, match="outside the coronagraph's source"):
                 term.check(model)
         else:
             term.check(model)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_score_keeps_the_reference_footprint_as_wavelength_nodes_move():
+    """Wavelength changes must keep the 400 reference pixels in the density.
+
+    Truth source: each zero observation at zero signal and unit Gaussian variance
+    contributes -log(2 pi) / 2. The reference footprint is 20 by 20 pixels.
+    Tolerance basis: exact-algebra, absolute tolerance 1e-9 on the float64 sum.
+    Fails if: shrinking the footprint drops observations or growing it adds them.
+    """
+    detector = eqx.tree_at(lambda d: d._qe, make_detector("constant"), jnp.asarray(0.0))
+    instrument = make_instrument(detector)
+    scene = make_scene()
+    exposure = make_exposure(scene, instrument)
+    model = ImageModel(scene, instrument, (exposure,))
+    term = ImageTerm.on_support(
+        model, jnp.zeros((1, *detector.shape)), exposure_path="exposures[0]", **_PATHS
+    )
+    np.testing.assert_array_equal(term.mask, term.supported_mask(model))
+    assert int(term.mask.sum()) == 400
+    nodes = exposure.quadrature.nodes_nm
+
+    def scaled(factor):
+        return eqx.tree_at(
+            lambda m: m.exposures[0].quadrature.nodes_nm, model, factor * nodes
+        )
+
+    assert np.isnan(term(scaled(0.9)))
+    larger = scaled(1.1)
+    assert int(term.supported_mask(larger).sum()) > 400
+    np.testing.assert_allclose(
+        term(larger), -200 * np.log(2 * np.pi), rtol=0, atol=1e-9
+    )
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_image_mask_requires_a_boolean_array():
+    """The scored pixels must be chosen at construction.
+
+    Truth source: the explicit boolean mask contract.
+    Tolerance basis: exact exception checks.
+    Fails if: None selects a changing footprint or numeric weights become booleans.
+    """
+    model, exposure = _setup()
+    frame = jnp.zeros((1, *model.instrument.detector.shape))
+    with pytest.raises(ValueError, match="on_support"):
+        ImageTerm(frame, mask=None, exposure=exposure, **_PATHS)
+    with pytest.raises(TypeError, match="bool"):
+        ImageTerm(frame, frame, exposure=exposure, **_PATHS)
+
+
+_TWO_BANDS = (Band(500.0, 540.0), Band(560.0, 600.0))
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_image_check_requires_the_resolved_band_and_detector_shape():
+    """Only leading observation axes can index additional frames.
+
+    Truth source: the exposure has two bands and the detector has 24 by 24 pixels.
+    Tolerance basis: exact shapes for the observation and shared mask.
+    Fails if: one observed band broadcasts to two, or a batch-shaped mask passes,
+    in the check or in a direct call that skips it.
+    """
+    model, single = _setup()
+    exposure = cp.build_exposure(
+        model.scene, model.instrument, _TWO_BANDS, time_d=0.0, plan=single.plan
+    )
+    model = ImageModel(model.scene, model.instrument, (exposure,))
+    shape = (2, 24, 24)
+    for observed, mask in [
+        ((1, 24, 24), shape),
+        ((2, 1, 24), (2, 1, 24)),
+        (shape, (1, 24, 24)),
+        ((3, *shape), (3, *shape)),
+    ]:
+        term = ImageTerm(
+            jnp.zeros(observed),
+            jnp.zeros(mask, bool),
+            exposure_path="exposures[0]",
+            **_PATHS,
+        )
+        with pytest.raises(ValueError) as exc:
+            term.check(model)
+        assert str(shape) in str(exc.value)
+        assert str(observed if mask == shape else mask) in str(exc.value)
+        with pytest.raises(ValueError, match="must match the render"):
+            term(model)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_multiband_check_counts_lit_planets_outside_the_second_component():
+    """The second band sees a smaller source domain than the first.
+
+    Truth source: the source radii are four lambda/D at 520 nm and two at 580 nm.
+    A separation of 0.02 arcsec is inside both, 0.05 is outside the second only
+    and 0.10 is outside both.
+    Tolerance basis: exact admission and count for one planet.
+    Fails if: the check reads a single coronagraph grid or counts an unlit planet.
+    """
+
+    class Component(GaussianCoronagraph):
+        bandpass: Band = eqx.field(static=True)
+        radius_lod: float = eqx.field(static=True)
+
+        def __init__(self, band, radius_lod):
+            super().__init__()
+            self.bandpass = band
+            self.radius_lod = radius_lod
+
+        def _native_source_psfs(self, x_lod, y_lod):
+            psfs = super()._native_source_psfs(x_lod, y_lod)
+            return type(psfs)(psfs.image, jnp.hypot(x_lod, y_lod) <= self.radius_lod)
+
+    components = (Component(_TWO_BANDS[0], 4.0), Component(_TWO_BANDS[1], 2.0))
+    model, single = _setup()
+    instrument = eqx.tree_at(
+        lambda i: i.coronagraph, model.instrument, MultiBandCoronagraph(components)
+    )
+    scene = make_scene(separation_arcsec=0.02)
+    exposure = cp.build_exposure(
+        scene, instrument, _TWO_BANDS, time_d=0.0, plan=single.plan
+    )
+    frame = jnp.zeros((2, *instrument.detector.shape))
+    term = ImageTerm.on_support(scene, frame, instrument=instrument, exposure=exposure)
+    term.check(scene)
+    term.check(make_scene(separation_arcsec=0.05, contrast=0.0))
+    for separation in (0.05, 0.10):
+        with pytest.raises(ValueError, match=r"^1 lit planet"):
+            term.check(make_scene(separation_arcsec=separation))
 
 
 def test_a_free_leaf_that_moves_the_field_of_view_is_checked_at_both_ends():
@@ -711,10 +849,10 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     field with the option. Guard: on the default term's own mask the log
     likelihood is identical for the two settings. ``Fit.assumptions`` and the
     ``LikelihoodEstimate`` of ``measure`` name the option when it is set and are
-    empty otherwise. With ``mask=None`` the option scores exactly the
+    empty otherwise. With ``on_support`` the option scores exactly the
     ``static_supported`` set, the speckle-only pixels included: the value equals
     the all-True mask's and the residual is finite on every speckle-only pixel,
-    where the default ``mask=None`` term leaves it NaN. The option accepts a NumPy
+    where the default ``on_support`` term leaves it NaN. The option accepts a NumPy
     or 0-d JAX boolean and stores a Python bool; an int or a boolean array is
     refused.
     """
@@ -759,7 +897,10 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     assert np.all(mean[~supported] > 0)
 
     speckle_only = ~supported
-    loose, tight = term(observed, None, True), term(observed, None, False)
+    loose = ImageTerm.on_support(
+        model, observed, exposure=exposure, static_beyond_speckle=True, **_PATHS
+    )
+    tight = _scored(model, exposure, observed)
     assert float(loose(model)) == float(kept(model))
     assert np.isfinite(np.asarray(loose.residual(model))[speckle_only]).all()
     assert np.isnan(np.asarray(tight.residual(model))[speckle_only]).all()

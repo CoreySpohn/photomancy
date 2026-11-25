@@ -24,8 +24,10 @@ term is an image.
 
 An {class}`~photomancy.image.ImageTerm` scores one exposure. It takes the `Image` that
 {func}`coronagraphoto.observe` returns, the instrument that made it and the exposure, and it checks
-the image grid against the detector grid when it is built. The mask defaults to every pixel the
-render supports.
+the image grid against the detector grid when it is built. Choose the scored pixels once per
+exposure. `on_support` stores the pixels covered by the reference model. To exclude bad pixels
+or restrict the fit to a smaller field, pass a boolean mask of shape `(W, ny, nx)` shared by
+all frames.
 
 This block is not run with the documentation, which holds no rendered image or instrument.
 
@@ -33,10 +35,19 @@ This block is not run with the documentation, which holds no rendered image or i
 from photomancy.image import ImageTerm
 
 terms = tuple(
-    ImageTerm(image, instrument=instrument, exposure=exposure)
+    ImageTerm.on_support(scene, image, instrument=instrument, exposure=exposure)
     for image, exposure in zip(images, exposures)
 )
+
+# Keep only calibrated pixels in the reference footprint of the first exposure.
+mask = terms[0].mask & good_pixels
+first = ImageTerm(images[0], mask, instrument=instrument, exposure=exposures[0])
 ```
+
+When a free instrument parameter or wavelength changes the field of view, a NaN image term
+can mean that the proposed render lost coverage of a scored pixel. A larger footprint adds
+no observations to the score. Choose a mask covered throughout the allowed parameter range.
+`Fit` checks coverage at setup and at both prior endpoints for leaves that move the footprint.
 
 One term per exposure: a frame that the model does not describe then shows up in its own sum of
 squares (stage 6). The detector law (counting statistics, white) belongs to `ImageTerm`. For any

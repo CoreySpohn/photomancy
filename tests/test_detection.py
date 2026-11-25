@@ -628,12 +628,14 @@ def test_detect_false_alarms_match_the_poisson_null():
     empty = make_scene(contrast=0.0)
     exposure = make_exposure(empty, instrument)
     shape = (1, *detector.shape)
-    blank = ImageTerm(jnp.zeros(shape), instrument=instrument, exposure=exposure)
+    blank = ImageTerm.on_support(
+        empty, jnp.zeros(shape), instrument=instrument, exposure=exposure
+    )
     sky = _SkyImage(blank, separation_arcsec=_NULL_SEPARATION)
     mean = np.asarray(sky.predict(_sky(0.0, 0.0)))
     rng = np.random.default_rng(0)
     frames = rng.poisson(mean, size=(_NULL_FRAMES, *mean.shape)).astype(float)
-    mask = blank.supported_mask(empty)
+    mask = blank.mask
     image = ImageTerm(frames[0], mask, instrument=instrument, exposure=exposure)
     fit = _fit(_SkyImage(image, separation_arcsec=_NULL_SEPARATION))
     templates = _Templates(

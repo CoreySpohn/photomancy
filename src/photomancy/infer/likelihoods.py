@@ -134,7 +134,8 @@ class MaskedLogLikelihood(eqx.Module):
         Returns:
             Scalar normalized log likelihood over the unmasked elements.
         """
-        z = (jnp.asarray(predicted) - self.data) / self.sigma
+        predicted = jnp.broadcast_to(jnp.asarray(predicted), self.data.shape)
+        z = (predicted - self.data) / self.sigma
         z = jnp.where(self.mask, z, 0.0)
         kernel = _KERNELS[self.kind](z, self.shape_param)
         return self.log_norm - jnp.sum(jnp.where(self.mask, kernel, 0.0))
