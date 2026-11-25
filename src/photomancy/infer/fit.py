@@ -580,6 +580,70 @@ def _split_python_scalars(model):
     return eqx.partition(model, _is_python_int_or_bool, is_leaf=_is_third_party_module)
 
 
+def _check_keys(x, schema, path):
+    if not isinstance(x, dict):
+        raise ValueError(f"{path} must be a dict with keys {sorted(schema)}")
+    missing = sorted(schema.keys() - x.keys())
+    extra = sorted(x.keys() - schema.keys(), key=repr)
+    if missing or extra:
+        raise ValueError(f"{path} has missing keys {missing}, extra keys {extra}")
+
+
+def _check_draws(x, schema):
+    """Check the keys and array shapes against a full or selected draw schema."""
+    _check_keys(x, schema, "draw (keys of fit.free)")
+    leading = None
+    for key, entry in schema.items():
+        if isinstance(entry, dict):
+            _check_keys(x[key], entry, key)
+            fields = (
+                (f"{key}.{name}", x[key][name], spec) for name, spec in entry.items()
+            )
+        else:
+            fields = [(key, x[key], entry)]
+        for path, value, spec in fields:
+            if not eqx.is_array_like(value):
+                raise ValueError(
+                    f"{path} needs an array with trailing shape {spec.shape}"
+                )
+            shape = jnp.shape(value)
+            n = len(shape) - len(spec.shape)
+            if n < 0 or shape[n:] != spec.shape:
+                raise ValueError(
+                    f"{path} has shape {shape}, expected trailing shape {spec.shape}"
+                )
+            batch = shape[:n]
+            if leading is not None and batch != leading:
+                raise ValueError(
+                    f"{path} has leading shape {batch}, expected {leading}"
+                )
+            leading = batch
+    return leading or ()
+
+
+def _leaf_map_difference(old, new, shape):
+    """Describe the first difference between two priorities coordinate maps.
+
+    Bounds are compared after broadcasting to the leaf ``shape``. A bound that
+    depends on traced values cannot be shown equal, so it counts as a difference.
+    """
+    if old.bounds != new.bounds:
+        return f"transform families differ ({old.bounds} and {new.bounds})"
+    with jax.ensure_compile_time_eval():
+        for a, b in zip(old.support(), new.support(), strict=True):
+            if isinstance(a, jax.core.Tracer) or isinstance(b, jax.core.Tracer):
+                return "traced support bounds cannot be compared"
+            try:
+                same = np.array_equal(
+                    np.broadcast_to(a, shape), np.broadcast_to(b, shape)
+                )
+            except ValueError:
+                return "support bounds have different shapes"
+            if not same:
+                return "support bounds differ"
+    return None
+
+
 class Fit(eqx.Module):
     """A normalized log density over the free entries of a model.
 
@@ -604,7 +668,7 @@ class Fit(eqx.Module):
         terms: tuple[AbstractTerm, ...] = (),
         _walls: tuple[tuple[str, tuple[str, ...]], ...] | None = None,
     ):
-        """Convert the model, store the entries and the walls of the blocks.
+        """Convert the model and store its entries and the walls of the blocks.
 
         Args:
             model: The base model. Its leaves are converted with
@@ -628,7 +692,9 @@ class Fit(eqx.Module):
         self.terms = terms
         self._walls = _block_walls(free) if _walls is None else _walls
 
-    def __check_init__(self):
+        self._check_fit()
+
+    def _check_fit(self):
         """Refuse an inconsistent fit on the host.
 
         Raises:
@@ -806,22 +872,95 @@ class Fit(eqx.Module):
         """
         return tuple(sorted({name for term in self.terms for name in term.assumptions}))
 
+    def _schema_of(self, key):
+        """Shape and dtype record of one free entry, from the current model."""
+        entry = self.free[key]
+        if isinstance(entry, AbstractBlock):
+            return jax.eval_shape(lambda: entry.inverse(self.model))
+        leaf = resolve(self.model, key)
+        return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype)
+
+    @property
+    def _schema(self) -> dict:
+        return {key: self._schema_of(key) for key in self.free}
+
+    def _coordinate_difference(self, other):
+        """Return the first differing key and reason, or None for the same map."""
+
+        def shapes(spec):
+            return jax.tree.map(lambda s: s.shape, spec)
+
+        for key in sorted(self.free.keys() | other.free.keys()):
+            if key not in self.free or key not in other.free:
+                return key, "free keys differ"
+            old, new = self.free[key], other.free[key]
+            if isinstance(old, AbstractBlock) != isinstance(new, AbstractBlock):
+                return key, "entry kinds differ"
+            if isinstance(old, AbstractBlock):
+                with jax.ensure_compile_time_eval():
+                    if not old.same_map(new):
+                        return key, "block maps differ"
+            else:
+                reason = _leaf_map_difference(old, new, self._schema_of(key).shape)
+                if reason:
+                    return key, reason
+            if shapes(self._schema_of(key)) != shapes(other._schema_of(key)):
+                return key, "trailing shapes differ"
+        return None
+
+    def same_coordinates(self, other: "Fit") -> bool:
+        """Whether draws in both fits have the same keys, shapes and coordinate maps.
+
+        Blocks decide map equality with their same_map method. Leaf laws compare
+        their real transform family and support endpoints, broadcast to the leaf
+        shape. An endpoint that depends on traced values cannot be compared and
+        counts as a difference.
+
+        Args:
+            other: Fit whose coordinates are compared with this fit.
+
+        Returns:
+            True when every free entry agrees.
+        """
+        return self._coordinate_difference(other) is None
+
+    def draw_schema(self) -> dict:
+        """Return the shape and dtype of each coordinate of one stored draw.
+
+        Returns:
+            Free keys mapped to shape and dtype records. Each block holds a dict
+            of these records keyed by coordinate name.
+        """
+        return self._schema
+
+    def check_draws(self, x: dict) -> tuple[int, ...]:
+        """Validate stored draws against the free entries of this fit.
+
+        Args:
+            x: Entry dict with the same leading batch axes on every array.
+
+        Returns:
+            Common leading shape, empty for a single draw or an empty free set.
+
+        Raises:
+            ValueError: For missing or extra keys or incompatible array shapes.
+        """
+        return _check_draws(x, self._schema)
+
     def _batch_ndim(self, x):
         """Number of leading batch axes of an entry dict (all entries agree)."""
-        for key, entry in self.free.items():
-            if isinstance(entry, AbstractBlock):
-                return jnp.ndim(next(iter(x[key].values()))) - 1
-            return jnp.ndim(x[key]) - jnp.ndim(resolve(self.model, key))
-        return 0
+        return len(self._batch_shape(x))
 
     def _batch_shape(self, x):
         """Shape of the leading batch axes of an entry dict."""
-        for key, entry in self.free.items():
-            if isinstance(entry, AbstractBlock):
-                return jnp.shape(next(iter(x[key].values())))[:-1]
-            return jnp.shape(x[key])[
-                : jnp.ndim(x[key]) - jnp.ndim(resolve(self.model, key))
-            ]
+        for key in self.free:
+            spec = self._schema_of(key)
+            value = x[key]
+            if isinstance(spec, dict):
+                name = next(iter(spec))
+                value, spec = value[name], spec[name]
+            shape = jnp.shape(value)
+            return shape[: len(shape) - len(spec.shape)]
         return ()
 
     def _over_batch(self, fn, x, batch_size=None):
@@ -843,7 +982,11 @@ class Fit(eqx.Module):
 
     def _assign_leaf_laws(self, x, model):
         for path in self.leaf_laws:
-            model = assign(model, path, as_float_leaf(x[path]))
+            value = as_float_leaf(x[path])
+            expected = resolve(model, path).shape
+            if value.shape != expected:
+                raise ValueError(f"{path} has shape {value.shape}, expected {expected}")
+            model = assign(model, path, value)
         return model
 
     def _walk(self, x):

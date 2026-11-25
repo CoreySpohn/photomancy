@@ -89,9 +89,12 @@ A stage names the groups it frees, and every group has an `optax` transform. A g
 stage does not free keeps its values and its optimizer state exactly (`freeze="hold"`).
 
 The first stage below frees `shape` alone and scores only the first term. Its `fit`
-is a second `Fit` over a subset of the terms, a view of the exposure. The view must have the
-same free entries as the run's fit, and a different set raises a `ValueError`; anything but a `Fit` raises a `TypeError`. The second
-stage frees both groups and scores every term, the density of the run.
+is a second `Fit` over a subset of the terms, a view of the exposure. A stage may
+change the terms and prior densities while keeping the same free keys, trailing
+shapes and coordinate maps as the run fit. Changing a mapped bound raises a
+`ValueError`, for example `stage Fit coordinates differ at 'x': support bounds differ`.
+A stage density of another type raises a `TypeError`. The second stage frees both
+groups and scores every term, the density of the run.
 
 ```python continuation
 backend = MAP(
