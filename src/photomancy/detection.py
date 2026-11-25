@@ -111,7 +111,7 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
     stationary point. With positive curvature, abs(slope) / sqrt(curvature)
     estimates the amplitude error in formal standard errors. A point is
     stationary if this error is at most 1e-6 or its square (the Newton
-    decrement) is within the objective's rounding floor. A stationary flat
+    decrement) is within eps * max(1, abs(objective)). A stationary flat
     null also resolves. Forward differentiation lets the likelihood mask NaN
     template tangents.
     """
@@ -246,7 +246,10 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
     finite = jnp.isfinite(a_hat) & jnp.isfinite(two_delta)
     resolved = finite & jnp.isfinite(g) & jnp.isfinite(curvature)
     # The score can resolve to roundoff while further steps still refine a_hat.
-    tolerance = jnp.maximum(1e-6, jnp.sqrt(roundoff(value)))
+    # One eps of the objective (not the summation bound) caps the admitted
+    # amplitude error at sqrt(eps * abs(value)) standard errors.
+    eps = jnp.finfo(null.dtype).eps
+    tolerance = jnp.maximum(1e-6, jnp.sqrt(eps * jnp.maximum(1, jnp.abs(value))))
     resolved &= small_slope(g, curvature, tolerance) | closed | flat_null
     # Apply the subtraction tolerance while both objective values are available.
     rounding = 2 * roundoff(jnp.maximum(jnp.abs(null), jnp.abs(value)))
@@ -282,7 +285,7 @@ def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 8):
         derivative at the estimate. Its inverse square root is the formal
         standard error. A finite profile is resolved when the estimated error
         from the slope is within 1e-6 standard errors, the Newton decrement is
-        within the objective's rounding floor at positive curvature, the bracket
+        within eps * max(1, abs(log likelihood)) at positive curvature, the bracket
         width is at most 1e-8 times max(1, abs(a_hat)), or the null is flat and
         stationary. A zero template resolves at zero amplitude with zero gain.
 

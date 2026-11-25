@@ -232,6 +232,28 @@ def test_unresolved_huber_profile_has_nan_significance():
     assert np.isnan(float(found.z[0]))
 
 
+@vv.case("scene-fits", "code-verification", basis="mutation")
+def test_float32_profile_three_sigma_off_a_large_objective_is_unresolved():
+    """A float32 quadratic objective of size 1e7 left 3 standard errors off its peak.
+
+    Truth source: for -1e7 - (a - 3)^2 / 2 at a = 0 the slope over the root
+    curvature is exactly 3 standard errors.
+    Tolerance basis: mutation; the float32 rounding allowance is
+    sqrt(eps * 1e7) = 1.09 standard errors here, and the summation bound
+    (8 eps per reduction level) would admit 3.09 and resolve this point.
+    Fails if: the resolution tolerance admits an amplitude error of several
+    standard errors on a large objective.
+    """
+    with jax.enable_x64(False):
+
+        def objective(a):
+            return jnp.float32(-1e7) - 0.5 * (a - 3) ** 2
+
+        _, _, curvature, resolved = detection._profile(objective, 0, jnp.float32)
+    assert float(curvature) == 1.0
+    assert not bool(resolved)
+
+
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize(
     ("build", "expected_z"),
