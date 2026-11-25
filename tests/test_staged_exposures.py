@@ -238,12 +238,15 @@ def test_self_fit_recovers_the_seams_and_leaves_the_companion_out():
     are mixed across a stage boundary, the closed-form flux lags a step, a fresh
     transform table does not restart its clock, the step recompiles (the render is
     traced twice per stage configuration, once in the value and once in the
-    prediction, four configurations, plus the two terms that ``run`` scores at the
-    optimum), or the companion flux is touched (it must stay exactly zero and the
-    science model exactly the star-only model).
+    prediction, four configurations, plus the two terms of the loss ``map_fit``
+    reads at each stage's returned point, one program shared by every stage, and
+    the two terms that ``run`` scores at the optimum), or the companion flux is
+    touched (it must stay exactly zero and the science model exactly the star-only
+    model).
     """
     golden = json.loads(_GOLDEN.read_text())["self_fit"]
     stage_configurations, traces_per_configuration = 4, 2
+    n_final_loss = 2  # map_fit's loss at the returned point: one program, both terms
     n_scored_at_the_optimum = 2  # run evaluates both terms for log_target
     for peak in (0.0, 3e-6):
         truth, sci_star, render, model, log, n_before = _self_fit(peak)
@@ -254,7 +257,9 @@ def test_self_fit_recovers_the_seams_and_leaves_the_companion_out():
         assert float(jnp.linalg.norm(star.tilt - sci_star.tilt)) < 5e-4
         assert float(abs(star.flux / sci_star.flux - 1.0)) < 5e-4
         assert len(log) - n_before == (
-            stage_configurations * traces_per_configuration + n_scored_at_the_optimum
+            stage_configurations * traces_per_configuration
+            + n_final_loss
+            + n_scored_at_the_optimum
         )
         assert float(model.scene.flux) == 0.0
         np.testing.assert_array_equal(
