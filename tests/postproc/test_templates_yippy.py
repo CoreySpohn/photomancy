@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import replace
+from typing import ClassVar
 
 import ineedvalidation as vv
 import jax
@@ -34,6 +35,7 @@ class SyntheticCoronagraph(AbstractTableCoronagraph):
     grid: PixelGrid
 
     bandpass: Band
+    band_averaged: ClassVar[bool] = False
 
     @property
     def sky_trans(self):
