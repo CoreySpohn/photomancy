@@ -232,6 +232,7 @@ def test_unresolved_huber_profile_has_nan_significance():
     assert np.isnan(float(found.z[0]))
 
 
+@pytest.mark.float32_only(reason="exercises the float32 objective resolution limit")
 @vv.case("scene-fits", "code-verification", basis="mutation")
 def test_float32_profile_three_sigma_off_a_large_objective_is_unresolved():
     """A float32 quadratic objective of size 1e7 left 3 standard errors off its peak.
@@ -244,16 +245,16 @@ def test_float32_profile_three_sigma_off_a_large_objective_is_unresolved():
     Fails if: the resolution tolerance admits an amplitude error of several
     standard errors on a large objective.
     """
-    with jax.enable_x64(False):
 
-        def objective(a):
-            return jnp.float32(-1e7) - 0.5 * (a - 3) ** 2
+    def objective(a):
+        return jnp.float32(-1e7) - 0.5 * (a - 3) ** 2
 
-        _, _, curvature, resolved = detection._profile(objective, 0, jnp.float32)
+    _, _, curvature, resolved = detection._profile(objective, 0, jnp.float32)
     assert float(curvature) == 1.0
     assert not bool(resolved)
 
 
+@pytest.mark.float32_only(reason="float32 significance at the objective rounding floor")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize(
     ("build", "expected_z"),
@@ -278,17 +279,16 @@ def test_float32_map_resolves_source_on_bright_background(build, expected_z):
     Tolerance basis: rounding a 1e4 count prediction costs about 1e-5 sigma.
     Fails if: roundoff in the fitted slope makes either significance NaN.
     """
-    with jax.enable_x64(False):
-        base = jnp.full((1, 2), 1e4)
-        like = build(base + jnp.array([[1000.0, 50.0]]), 100.0)
+    base = jnp.full((1, 2), 1e4)
+    like = build(base + jnp.array([[1000.0, 50.0]]), 100.0)
 
-        def template(position):
-            return jnp.where(jnp.arange(2)[None, :] == position, 1.0, 0.1)
+    def template(position):
+        return jnp.where(jnp.arange(2)[None, :] == position, 1.0, 0.1)
 
-        found = likelihood_ratio_map(
-            ((like, base, template),), jnp.arange(2), batch_size=None
-        )
-        np.testing.assert_allclose(found.z, expected_z, rtol=0, atol=2e-5)
+    found = likelihood_ratio_map(
+        ((like, base, template),), jnp.arange(2), batch_size=None
+    )
+    np.testing.assert_allclose(found.z, expected_z, rtol=0, atol=2e-5)
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
@@ -553,6 +553,7 @@ def test_white_noise_gives_unit_variance_z():
     assert abs(np.mean(z)) < 4.0 / np.sqrt(2000)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_curvature_block_matches_closed_form_and_finite_difference():
     """The block is ``-d2 logp`` over the chosen leaves, the rest held fixed.
@@ -719,6 +720,7 @@ def _image_problem(kind, seed=11):
     return _fit(_SkyImage(image)), mean, mask
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 @pytest.mark.medium(
     reason="forward-mode scan through the renderer compiles for each of three calls"
@@ -761,6 +763,7 @@ def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame():
     np.testing.assert_allclose(batched.z, out.z, rtol=1e-9, atol=1e-9)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_detect_refuses_a_bad_amplitude_path_or_trial_keys():
     """The amplitude must be a free one-element leaf law; trials cover the rest."""
     fit, _, _ = _image_problem("constant")
@@ -772,6 +775,7 @@ def test_detect_refuses_a_bad_amplitude_path_or_trial_keys():
         measure(fit, {"amplitude": jnp.asarray(1.0)})
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
 @pytest.mark.medium(reason="two Newton depths through the renderer, 5 s cold")
 def test_detect_on_poisson_counts_recovers_the_planet_and_renders_once():
@@ -847,6 +851,7 @@ class _Templates(eqx.Module):
 
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
 @pytest.mark.slow(reason="12800 null trials, past the 2000-draw unit limit")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_detect_false_alarms_match_the_poisson_null():
     """On planet-free Poisson frames ``z`` and the pull are unit normals.
 
@@ -927,6 +932,7 @@ def test_detect_false_alarms_match_the_poisson_null():
     np.testing.assert_allclose(mapped.z**2, z**2, rtol=0, atol=1e-7)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.medium(
     reason="second-order autodiff through the renderer compiles the Hessian"
@@ -1032,6 +1038,7 @@ def _spd(n, seed, cond):
     return (q * np.geomspace(1.0, cond, n)) @ q.T
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize("span", [1e6, 1e8])
 def test_correlation_form_inverse_recovers_a_known_covariance_at_condition_1e12(span):
@@ -1070,6 +1077,7 @@ def test_correlation_form_inverse_recovers_a_known_covariance_at_condition_1e12(
     )
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_regular_is_false_at_a_saddle_and_true_at_a_maximum():
     """The flag is the sign of the information's eigenvalues, with finite output.
@@ -1107,6 +1115,7 @@ class _P(eqx.Module):
     p: jax.Array
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_measure_flags_a_saddle_and_stays_there():
     """``measure`` at a stationary saddle stays, reports ``regular == False``.
@@ -1169,6 +1178,7 @@ def _counted_measure(likelihood, prior, point, n_newton, *, n_steps=0):
     return count, estimate, info
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 @pytest.mark.parametrize("n_newton", [1, 4])
 def test_measure_stops_evaluating_after_the_first_newton_refusal(n_newton):
@@ -1192,6 +1202,7 @@ def test_measure_stops_evaluating_after_the_first_newton_refusal(n_newton):
     assert not bool(estimate.stopped_early)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize(
     "n_newton, calls, point, curvature, variance, moved, regular",
@@ -1223,6 +1234,7 @@ def test_measure_reuses_newton_curvature_only_at_the_final_point(
     assert not bool(estimate.stopped_early)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_measure_builds_stored_curvature_for_a_bounded_fit():
     """A refused Newton step on bounded support still needs the stored Hessian.
@@ -1245,6 +1257,7 @@ def test_measure_builds_stored_curvature_for_a_bounded_fit():
     assert not bool(estimate.stopped_early)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_measure_run_with_both_stages_uses_fewer_evaluations():
     """A complete measure run keeps the estimate with fewer likelihood calls.
@@ -1266,6 +1279,7 @@ def test_measure_run_with_both_stages_uses_fewer_evaluations():
     assert not bool(estimate.stopped_early)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_the_newton_polish_accepts_a_step_only_where_the_likelihood_rises():
     """A full Newton step that overshoots is backtracked; an indefinite point stays.
@@ -1321,6 +1335,7 @@ class _TwoBumps(eqx.Module):
         return jnp.log(0.7 * bump(-2.0) + 0.3 * bump(2.0))
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_measure_is_not_converged_when_the_last_iterate_is_below_the_best_reached(
     monkeypatch,
@@ -1358,6 +1373,7 @@ def test_measure_is_not_converged_when_the_last_iterate_is_below_the_best_reache
     assert bool(bad.finite) and not bool(bad.converged) and not bool(bad.regular)
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_measure_needs_signed_support_for_a_faint_source_and_sizes_itself():
     """Positive support is not regular at a negative estimate; signed support is.
@@ -1433,6 +1449,7 @@ class _SquareNoSplit(ForwardTerm):
         return AbstractTerm.split(self, model)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_render_once_detect_holds_only_for_a_prediction_linear_in_the_amplitude():
     """``detect`` checks the render-once path and answers a nonlinear forward.
@@ -1517,6 +1534,7 @@ class _Assuming(ForwardTerm):
         return self.named
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_the_detection_results_copy_the_fit_assumptions():
     """Fails if ``detect``, ``measure`` or a ``SheetSum`` loses the fit's assumptions.
 
@@ -1553,6 +1571,7 @@ def test_the_detection_results_copy_the_fit_assumptions():
     assert Fit(held, free, (sheets,)).assumptions == sheets.assumptions
 
 
+@pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 @pytest.mark.medium(reason="forward-mode tangents through the renderer, two kinds")
 @pytest.mark.parametrize("kind", ["poisson", "constant"])

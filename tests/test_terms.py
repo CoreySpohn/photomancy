@@ -184,6 +184,7 @@ def test_system_element_parity():
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.float64_only(reason="float64 central differences at relative step 1e-5")
 @pytest.mark.parametrize("padding", [False, True])
 def test_element_gradients_and_padding(padding):
     """Truth source: central differences in all seven stored orbital elements.
@@ -275,6 +276,7 @@ def test_planet_and_epoch_routing():
     np.testing.assert_array_equal(prediction, [east, -2 * east])
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_mixed_terms_sum_in_a_fit():
     """Truth source: separately evaluated image and astrometry terms and one prior.
@@ -433,6 +435,7 @@ def _new_term_value_grad(term, parameters):
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.float64_only(reason="float64 central differences at relative step 1e-5")
 @pytest.mark.parametrize("kind", ["stellar", "rv", "pma", "photometry"])
 def test_new_term_gradients_and_padding(kind):
     """Truth source: central differences in all seven elements and planet mass.
@@ -810,6 +813,7 @@ def test_term_sampling_laws(kind):
     assert np.all(np.abs(z.var(axis=0, ddof=1) - 1) < 4 * np.sqrt(2 / 1999))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check():
     """Planet 1 or -1 on a one-planet system raises in ``check`` for both selectors.
 
@@ -839,6 +843,7 @@ def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check():
     RelativeAstrometryTerm(padded).check(system)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_selector_checks_skip_traced_inputs_and_a_band_only_model_is_accepted():
     """Traced selectors skip ``check``; a model with only ``band_contrasts`` fits.
 
@@ -877,6 +882,7 @@ def test_selector_checks_skip_traced_inputs_and_a_band_only_model_is_accepted():
         eqx.tree_at(lambda t: t.data, photometry, bad).check(model)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check():
     """Band -1 or 1 with one band raises; band 0 and padded rows pass.
 
@@ -901,6 +907,7 @@ def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check():
     eqx.tree_at(lambda t: t.data, term, padded).check(system)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_traced_planet_count_and_a_late_epoch_model_pass_check():
     """A traced ``n_planets`` skips the check; a model covering only later days fits.
 

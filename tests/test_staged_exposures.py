@@ -24,6 +24,8 @@ from photomancy.infer.backends.staged import (
 )
 from photomancy.infer.likelihoods import huber_loglike
 
+pytestmark = pytest.mark.float64_only(reason="float64 Fit coordinates")
+
 _GOLDEN = Path(__file__).parent / "data" / "exposure_staged_golden.json"
 
 

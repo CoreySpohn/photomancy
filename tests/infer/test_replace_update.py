@@ -27,7 +27,9 @@ from photomancy.infer import (
 from photomancy.infer.backends.grid import midpoint_rule
 from photomancy.measurements import RadialVelocityData, RadialVelocityTerm
 
-jax.config.update("jax_enable_x64", True)
+pytestmark = pytest.mark.float64_only(
+    reason="float64 posterior coordinates and log weights"
+)
 
 GATE = {"min_n_eff": 500, "max_khat": 0.7}
 

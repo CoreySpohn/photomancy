@@ -26,8 +26,6 @@ settings.register_profile("quick", max_examples=25, deadline=None)
 settings.register_profile("nightly", max_examples=200, deadline=None)
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "quick"))
 
-jax.config.update("jax_enable_x64", True)
-
 _CACHE_DIR = Path(
     os.environ.get(
         "JAX_COMPILATION_CACHE_DIR",

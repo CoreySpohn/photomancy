@@ -748,6 +748,7 @@ def _bowl_backend(stage):
     )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_map_stage_fit_view_equals_a_hand_restriction():
     """A stage ``Fit`` over one term runs the fit that holds only that term.
@@ -778,6 +779,7 @@ def test_map_stage_fit_view_equals_a_hand_restriction():
     )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_map_refuses_a_stage_fit_with_a_different_free_set():
     """A stage ``Fit`` whose free entries differ from the run fit raises on the host.
@@ -797,6 +799,7 @@ def test_map_refuses_a_stage_fit_with_a_different_free_set():
         run(fit, _bowl_backend(MAPStage(2, ("x",), prepare=lambda p: other)), key)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_map_refuses_a_stage_density_that_is_not_a_fit():
     """A stage density other than a ``Fit`` raises ``TypeError`` before any step.
@@ -818,6 +821,7 @@ def test_map_refuses_a_stage_density_that_is_not_a_fit():
         )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_map_closed_form_receives_the_pre_step_predictions():
     """``closed_form`` gets ``aux = (term predictions,)`` from before the step.
@@ -1117,6 +1121,7 @@ def _rule_converged(loss, patience, min_delta):
     return False
 
 
+@pytest.mark.float64_only(reason="float64 rounding-scale perturbation")
 @vv.case("scene-fits", "code-verification", basis="mutation")
 def test_solver_stage_ends_at_the_first_stalled_line_search_near_the_optimum():
     """A stage ends at the first step whose zoom line search fails, near the optimum.
@@ -1160,6 +1165,7 @@ def test_solver_stage_ends_at_the_first_stalled_line_search_near_the_optimum():
         assert trace.stopped_early and not trace.failed
 
 
+@pytest.mark.float64_only(reason="float64 rounding-scale perturbation")
 def test_stall_with_a_small_gradient_stops_the_gated_stage_as_converged():
     """A stall near the optimum passes a scaled-gradient gate; the stage is converged.
 
@@ -1181,6 +1187,7 @@ def test_stall_with_a_small_gradient_stops_the_gated_stage_as_converged():
     assert stops == [True, False]
 
 
+@pytest.mark.float64_only(reason="float64 rounding-scale perturbation")
 @vv.case("scene-fits", "code-verification", basis="mutation")
 def test_stalled_line_search_far_from_the_optimum_reports_not_converged():
     """A stall away from the optimum ends the stage and the gradient gate says no.

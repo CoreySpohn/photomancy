@@ -2,6 +2,9 @@
 
 import subprocess
 import sys
+from textwrap import indent
+
+import pytest
 
 BLOCKED_BACKENDS = """
 import sys
@@ -16,8 +19,6 @@ from priorities import Uniform
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.infer import MCLMC, NUTS, Fit, NestedSampling, Pathfinder, run
 from photomancy.infer.terms import ForwardTerm
-
-jax.config.update("jax_enable_x64", True)
 
 class Model(eqx.Module):
     x: jax.Array
@@ -70,11 +71,32 @@ def test_import_photomancy_loads_no_sampler_library():
     assert result.returncode == 0, result.stderr
 
 
-def test_backend_without_its_sampler_names_the_extra():
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_backend_without_its_sampler_names_the_extra(tmp_path, precision, pytestconfig):
     """Each sampler backend raises an ImportError naming its extra when it runs.
 
     Fails if a backend surfaces a bare ModuleNotFoundError, or names the wrong
     extra, when blackjax or jaxns is not installed.
     """
-    result = _run(BLOCKED_BACKENDS)
-    assert result.returncode == 0, result.stderr
+    child = tmp_path / "test_blocked_backends.py"
+    child.write_text(
+        "def test_blocked_backends():\n" + indent(BLOCKED_BACKENDS, "    ")
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-c",
+            str(pytestconfig.inipath),
+            f"--precision={precision.name}",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            f"--basetemp={tmp_path / 'pytest'}",
+            str(child),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

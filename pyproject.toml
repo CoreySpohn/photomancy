@@ -148,6 +148,8 @@ library = "photomancy"
 "tests/test_likelihoods.py" = { case = "scene-fits", evidence = "code-verification" }
 
 [tool.pytest.ini_options]
+addopts = "-p hwoutils.testing.precision"
+default_precision = "float32"
 filterwarnings = [
     "error",
     # tol_colors initializes colormaps with Matplotlib's deprecated set_bad API.

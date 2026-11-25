@@ -59,6 +59,8 @@ from photomancy.disk import radiance_forward
 from photomancy.image import ImageTerm
 from photomancy.infer import MAP, NUTS, Fit, ForwardTerm, Laplace, run
 
+pytestmark = pytest.mark.float64_only(reason="float64 Fit coordinates")
+
 # The admission threshold: the 99th percentile of the per-map maximum of z over an
 # 81-trial grid and two rolls, for white Poisson noise and a model equal to the truth.
 THRESHOLD = 3.8

@@ -18,8 +18,6 @@ from photomancy import RadialVelocityTerm
 from photomancy.measurements import RadialVelocityData
 from photomancy.orbit.sheets import SheetSum
 
-jax.config.update("jax_enable_x64", True)
-
 
 def _circular_system(periods, masses_kg, cos_i=0.0):
     """Planets on circular orbits at their own two-body semi-major axes."""
@@ -457,6 +455,7 @@ def _rv_row_term(times, rvs, ids, instruments, jitters=None, max_n=None):
     )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_rv_offset_is_one_latent_per_instrument_and_merged_terms_score_the_union():
     """Two terms of one instrument are refused; their merge scores the joint rows.
 
@@ -616,7 +615,7 @@ def test_rv_score_is_unchanged_by_a_large_common_offset():
         np.testing.assert_allclose(float(value), expected, rtol=0, atol=1e-7)
 
 
-def test_a_single_row_instrument_scores_zero_whatever_its_offset():
+def test_a_single_row_instrument_scores_zero_whatever_its_offset(precision):
     """One row of 90000 m/s with a tiny error contributes exactly nothing.
 
     Truth: an instrument with one valid row has no residual contrast, so with its
@@ -626,21 +625,20 @@ def test_a_single_row_instrument_scores_zero_whatever_its_offset():
     """
     from photomancy.measurements import loglike_rv_marginalized
 
-    for dtype, err, atol in (
-        (jnp.float64, 5.5979819791232904e-12, 1e-12),
-        (jnp.float32, 1e-3, 1e-4),
+    err, atol = (
+        (5.5979819791232904e-12, 1e-12) if precision == jnp.float64 else (1e-3, 1e-4)
+    )
+    args = (
+        jnp.array([9.0e4], precision),
+        jnp.zeros(1, precision),
+        jnp.array([err], precision),
+        jnp.zeros(1, dtype=int),
+        1,
+        jnp.zeros(1, precision),
+        jnp.ones(1, dtype=bool),
+    )
+    for call in (
+        loglike_rv_marginalized,
+        jax.jit(loglike_rv_marginalized, static_argnums=4),
     ):
-        args = (
-            jnp.array([9.0e4], dtype),
-            jnp.zeros(1, dtype),
-            jnp.array([err], dtype),
-            jnp.zeros(1, dtype=int),
-            1,
-            jnp.zeros(1, dtype),
-            jnp.ones(1, dtype=bool),
-        )
-        for call in (
-            loglike_rv_marginalized,
-            jax.jit(loglike_rv_marginalized, static_argnums=4),
-        ):
-            np.testing.assert_allclose(float(call(*args)), 0.0, rtol=0, atol=atol)
+        np.testing.assert_allclose(float(call(*args)), 0.0, rtol=0, atol=atol)

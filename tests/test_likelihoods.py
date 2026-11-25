@@ -103,6 +103,7 @@ def _huber_at(delta, sigma=1.0, data=0.0):
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.float64_only(reason="finite differences and a 1e-9 Huber join probe")
 @pytest.mark.parametrize("delta", [0.5, 1.345, 3.0])
 def test_huber_pieces_and_smooth_join(delta):
     """Huber is quadratic inside delta, linear outside, and C1 at the join.
@@ -223,6 +224,7 @@ def test_jit_equals_eager(name):
         assert not jax.make_jaxpr(lambda lk, p: lk(p))(like, predicted).consts
 
 
+@pytest.mark.float64_only(reason="finite differences at eps=1e-4")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize("name", [*BUILDERS, "low_rank"])
 def test_gradients_match_finite_differences(name):
@@ -259,16 +261,15 @@ def test_gradients_match_finite_differences(name):
         )
     else:
         like = BUILDERS[name](data, sigma)
-    with jax.enable_x64():
-        check_grads(
-            like,
-            (predicted,),
-            order=2,
-            modes=("fwd", "rev"),
-            eps=1e-4,
-            atol=1e-4,
-            rtol=1e-4,
-        )
+    check_grads(
+        like,
+        (predicted,),
+        order=2,
+        modes=("fwd", "rev"),
+        eps=1e-4,
+        atol=1e-4,
+        rtol=1e-4,
+    )
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -341,6 +342,7 @@ def test_low_rank_zero_is_diagonal_gaussian():
     )
 
 
+@pytest.mark.float32_only(reason="float32 Gram factorization and cancellation")
 @pytest.mark.parametrize(
     ("data", "basis"),
     [([2e4, 0], [[1e4], [0]]), ([0, 0], [[1e4, 1e4], [0, 0]])],
@@ -355,9 +357,8 @@ def test_low_rank_float32_large_aligned_residual(data, basis):
     data = np.array(data, dtype=np.float32)
     basis = np.array(basis, dtype=np.float32)
     sigma = np.ones(2, dtype=np.float32)
-    with jax.enable_x64(False):
-        like = low_rank_gaussian_loglike(data, sigma, basis)
-        value = like(np.zeros_like(data))
+    like = low_rank_gaussian_loglike(data, sigma, basis)
+    value = like(np.zeros_like(data))
     variance = 1 + np.sum(basis.astype(float) ** 2, axis=1)
     expected = stats.norm.logpdf(data, scale=np.sqrt(variance)).sum()
     np.testing.assert_allclose(value, expected, rtol=1e-6)

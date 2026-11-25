@@ -21,8 +21,6 @@ from photomancy.infer import (
     weighted_quantile,
 )
 
-jax.config.update("jax_enable_x64", True)
-
 
 def _zhang_stephens(x):
     """Reference GPD fit (Zhang and Stephens 2009) with the PSIS shrinkage."""
@@ -255,10 +253,10 @@ def test_batch_prefix_equals_per_slice_loop():
     assert norm.shape == log_w.shape and total.shape == none.shape == (2,)
 
 
-def test_weighted_quantile_matches_numpy_with_repetition():
+def test_weighted_quantile_matches_numpy_with_repetition(precision):
     """Integer weights reproduce the repeated-sample quantile exactly."""
     rng = np.random.default_rng(2)
-    values = rng.normal(size=(12, 3))
+    values = rng.normal(size=(12, 3)).astype(precision)
     counts = rng.integers(0, 6, size=12)
     counts[0] = 3
     q = np.array([0.0, 0.05, 0.25, 0.5, 0.75, 0.95, 1.0])

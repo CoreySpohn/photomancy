@@ -7,10 +7,8 @@ import numpy as np
 import pytest
 from priorities import Normal
 
-jax.config.update("jax_enable_x64", True)
-
-from photomancy.infer import AbstractTerm, Fit, ForwardTerm  # noqa: E402
-from photomancy.infer.likelihoods import (  # noqa: E402
+from photomancy.infer import AbstractTerm, Fit, ForwardTerm
+from photomancy.infer.likelihoods import (
     gaussian_loglike,
     huber_loglike,
 )
@@ -60,6 +58,7 @@ class _Built(eqx.Module):
         return self.weights
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_reads_are_the_forwards_reads_and_a_fit_refuses_freeing_them():
     """The term reports what its forward's build read; ``Fit`` refuses freeing it.
 
@@ -104,6 +103,7 @@ def test_refuses_a_forward_that_is_not_a_module():
         ForwardTerm(lambda model: model.mu, gaussian_loglike(jnp.zeros(3), 1.0))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_residuals_come_from_the_likelihood_and_a_fit_names_a_term_without_one():
     """``Fit.residuals`` gives each term's residual at ``model_at(x)``.
 
@@ -158,6 +158,7 @@ def test_a_closure_likelihood_is_refused():
         _term(lambda predicted: -0.5 * jnp.sum(predicted**2))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_fit_density_adds_the_prior_to_the_term_value():
     """A Fit over the term is the prior plus the term value, whatever the likelihood.
 

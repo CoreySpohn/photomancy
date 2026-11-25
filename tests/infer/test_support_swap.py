@@ -20,7 +20,9 @@ from test_fit import _block, _scene
 from photomancy.infer import AbstractTerm, Fit, Posterior
 from photomancy.infer.evidence import importance_evidence
 
-jax.config.update("jax_enable_x64", True)
+pytestmark = pytest.mark.float64_only(
+    reason="float64 posterior coordinates and log weights"
+)
 
 KEY = "dynamics.orbits"
 N = 20000

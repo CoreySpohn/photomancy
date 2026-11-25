@@ -41,8 +41,6 @@ from photomancy.measurements import (
     RadialVelocityData,
 )
 
-jax.config.update("jax_enable_x64", True)
-
 GOLDEN = json.loads(
     (Path(__file__).parent.parent / "data" / "fit_density_golden.json").read_text()
 )
@@ -210,6 +208,7 @@ def offsets():
     return {}
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_golden_fixed_mass_astrometry(offsets):
     """Fixed mass, relative astrometry: same density up to the chart constant."""
     fit = Fit(_scene(), {"dynamics.orbits": _block()}, (_relative(),))
@@ -222,6 +221,7 @@ def test_golden_fixed_mass_astrometry(offsets):
     )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_golden_free_mass_kinematics(offsets):
     """Free planet mass with stellar astrometry, RV and proper-motion anomaly.
 
@@ -258,6 +258,7 @@ def test_golden_free_mass_kinematics(offsets):
     )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_golden_free_radius_albedo_photometry(offsets):
     """Free radius and albedo with astrometry and photometry on scene leaves."""
     rp = LogUniform(RADIUS_BOUNDS[0] / Rearth2AU, RADIUS_BOUNDS[1] / Rearth2AU)
@@ -291,6 +292,7 @@ def test_golden_free_radius_albedo_photometry(offsets):
     offsets["g3"] = _check_against_old(fit, golden, entries, jacobian)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_golden_prior_offset_is_zero(offsets):
     """The old chart prior was already normalized: no constant separates the two.
 
@@ -321,6 +323,7 @@ class _ReadsRadius(AbstractTerm):
         return self
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_refuses_a_free_key_that_meets_term_reads():
     """A free path inside a term's read set is refused, naming path and term."""
     with pytest.raises(ValueError, match=r"Rp_Rearth.*_ReadsRadius"):
@@ -332,6 +335,7 @@ def test_refuses_a_free_key_that_meets_term_reads():
     Fit(_scene(), {}, (_ReadsRadius(),))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_refuses_a_block_write_that_meets_term_reads():
     """A block whose write overlaps a read is refused, as a free leaf is."""
 
@@ -348,6 +352,7 @@ def test_refuses_a_block_write_that_meets_term_reads():
         Fit(_scene(), {"dynamics.orbits": _block()}, (Orbits(),))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_refuses_two_writers():
     """A leaf law on a path a block writes, and a block not keyed by its node."""
     from orbix.system import ThieleInnesBlock
@@ -367,6 +372,7 @@ def test_refuses_two_writers():
         Fit(_scene(), {"dynamics.orbit": _block()})
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_refuses_unknown_paths_and_bad_entries():
     """A path the model lacks, a node that is not an array leaf, a wrong kind."""
     with pytest.raises(ValueError, match="unknown model path"):
@@ -381,12 +387,14 @@ def test_refuses_unknown_paths_and_bad_entries():
         )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_refuses_an_index_into_an_array_leaf():
     """``leaf[0]`` into an array is not a path: refused as an unknown path."""
     with pytest.raises(ValueError, match="unknown model path"):
         Fit(_scene(), {"planets[0].Rp_Rearth[0]": LogUniform(0.5, 4.0)})
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_refuses_a_changed_free_set():
     """with_priors keeps the free set and the layout of a block.
 
@@ -424,6 +432,7 @@ def test_refuses_a_changed_free_set():
     )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_refuses_a_term_that_is_not_an_abstract_term():
     """A term on the old protocol cannot enter a fit: TypeError names the index."""
     with pytest.raises(TypeError, match=r"terms\[1\] is a _LegacyTerm"):
@@ -458,6 +467,7 @@ class _RadiusReading(AbstractTerm):
         return self
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_caller_defined_term_adds_only_its_own_value():
     """Fails if a caller-defined term gains a hidden factor or two terms share data.
 
@@ -478,17 +488,11 @@ def test_a_caller_defined_term_adds_only_its_own_value():
     assert np.min(np.abs(densities[0] - densities[1])) > 1e-6
 
 
+@pytest.mark.float32_only(reason="Fit must refuse a float32 process")
 def test_refuses_without_x64():
     """Construction on the host refuses when float64 is off."""
-    jax.config.update("jax_enable_x64", False)
-    try:
-        with pytest.raises(RuntimeError, match="jax_enable_x64"):
-            Fit(_scene(), {})
-    finally:
-        jax.config.update("jax_enable_x64", True)
-
-
-# ----- round trip, leaf laws, draws ---------------------------------------------
+    with pytest.raises(RuntimeError, match="jax_enable_x64"):
+        Fit(_scene(), {})
 
 
 def _mixed_fit():
@@ -504,6 +508,7 @@ def _mixed_fit():
     )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium(reason="mixed fit compile, 7 s cold")
 def test_real_round_trip_and_density():
     """to_real and from_real invert each other; real_log_prob adds the volume."""
@@ -531,6 +536,7 @@ def test_real_round_trip_and_density():
     assert all(np.all(np.isfinite(g)) for g in jax.tree.leaves(grad))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.parametrize(
     "law",
     [
@@ -587,6 +593,7 @@ def _cut_round_trip_excess(law, ulps=4.0, cut_ulps=32.0):
     return jnp.abs(law.cdf(value) - unit) - bound
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium(reason="mixed fit batch compile, 6 s cold")
 def test_density_is_normalized_prior_draws_agree():
     """Prior draws have finite log_prior and the batch shapes hold."""
@@ -606,6 +613,7 @@ def test_density_is_normalized_prior_draws_agree():
     assert off == -jnp.inf
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_prior_draws_do_not_depend_on_the_insertion_order_of_free():
     """A pytree round trip sorts the free keys; the draws must not change."""
     free = {
@@ -622,6 +630,7 @@ def test_prior_draws_do_not_depend_on_the_insertion_order_of_free():
         np.testing.assert_array_equal(value, crossed.sample_prior(key, (3,))[name])
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_from_real_volume_has_the_batch_shape_for_a_block_only_fit():
     """A fit with only block entries still returns one volume per draw."""
     fit = Fit(_scene(), {"dynamics.orbits": _block()})
@@ -630,6 +639,7 @@ def test_from_real_volume_has_the_batch_shape_for_a_block_only_fit():
     assert volume.shape == (3,)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_the_block_chain_is_traced_once_per_density():
     """log_density runs each block's forward once per density."""
     calls = []
@@ -657,6 +667,7 @@ def test_the_block_chain_is_traced_once_per_density():
 # ----- an orbit fit through a block on a real Scene ------------------------------
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_orbit_fit_recovers_the_truth_on_a_scene():
     """The density peaks near the generating orbit and sample_prior feeds it."""
     scene = _scene(planet_mass_Msun=0.0)
@@ -711,6 +722,7 @@ def _two_planet_scene():
     )
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_thiele_innes_fit_exposes_the_written_star_mass_in_model_at():
     """The star mass a Thiele-Innes block writes is the enclosed mass minus planets.
 
@@ -743,6 +755,7 @@ def test_thiele_innes_fit_exposes_the_written_star_mass_in_model_at():
     np.testing.assert_allclose(held_gm / GM_SUN_AU3_PER_D2, total, rtol=1e-10)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_free_star_mass_rates_the_held_row_and_the_freed_row():
     """A freed star mass moves the mean motion of the held row, not its geometry.
 
@@ -785,6 +798,7 @@ def _mean_ratio(old_fit, new_fit, n=40000):
     return ratio.mean(), ratio.std() / np.sqrt(n)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.parametrize("kind", ["leaf", "orbit"])
 def test_a_prior_swap_ratio_averages_to_one_under_the_old_prior(kind):
     """``E_old[pi_new / pi_old] = 1`` when the new support lies inside the old.
@@ -833,6 +847,7 @@ def _orbit_leaf_laws(system):
     }
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.parametrize("prefix", ["dynamics", ""], ids=["scene", "root-system"])
 def test_refuses_a_leaf_law_inside_a_stored_orbit_or_a_lone_mass(prefix):
     """Fails if a fit can return orbits that break Kepler's third law.
@@ -861,6 +876,7 @@ def test_refuses_a_leaf_law_inside_a_stored_orbit_or_a_lone_mass(prefix):
             Fit(model, {path(key): law})
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.parametrize("prefix", ["dynamics", ""], ids=["scene", "root-system"])
 def test_a_free_mass_with_an_orbit_block_keeps_every_row_keplerian(prefix):
     """Fails if a mass leaf beside an orbit block leaves a row off Kepler's third law.
@@ -918,6 +934,7 @@ def _walled_fits():
     }
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_gradient_samplers_refuse_a_fit_with_walls():
     """Fails if NUTS or MCLMC samples a density with walls, or refuses one without.
 
@@ -956,6 +973,7 @@ def _stack_two(fit):
     return eqx.combine(jax.tree.map(lambda a: jnp.stack([a, a]), arrays), static)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_walls_are_evaluated_once_and_survive_stacking_jit_and_edits():
     """Fails if a stacked, jitted or edited fit reports walls its source did not have.
 
@@ -989,6 +1007,7 @@ def test_walls_are_evaluated_once_and_survive_stacking_jit_and_edits():
         assert seen == {"jit": fit.walls, "vmap": fit.walls, "edit": fit.walls}, name
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_walls_follow_a_law_edited_in_place_and_survive_replace():
     """Fails if an edit that skips ``__init__`` leaves ``Fit.walls`` stale.
 
@@ -1040,6 +1059,7 @@ def test_walls_follow_a_law_edited_in_place_and_survive_replace():
         assert replaced.terms == (_ReadsNothing(),)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium(reason="two-world NUTS compile, about 10 s cold")
 def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack():
     """Fails if a stack of wall-free fits is refused, or a stack of walled fits runs.
@@ -1063,6 +1083,7 @@ def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack():
         eqx.filter_vmap(lambda f, k: run(f, nuts, k))(_stack_two(cartesian), keys)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_refuses_a_static_detector_field_as_static_structure():
     """Fails if the pixel scale is reported as a node to free through a block.
 
@@ -1092,6 +1113,7 @@ class _Leaves(eqx.Module):
     pixel_scale: float = eqx.field(static=True, default=0.1)
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_free_accepts_a_float_leaf_and_refuses_a_static_field_and_an_integer_leaf():
     """Freeing a static field, an integer leaf and a float leaf: refuse, refuse, accept.
 
@@ -1131,6 +1153,7 @@ def _holder(value, rate, weak):
     return table, _Holder(_Curve(table, value, rate, weak))
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_fit_converts_numpy_python_and_weak_leaves_to_strong_arrays():
     """The model a user builds is converted at the door; ``fit.model`` is the result.
 
@@ -1167,6 +1190,7 @@ class _Counted(eqx.Module):
     mode: _Mode = _Mode.B
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_fit_keeps_python_int_and_bool_scalars_as_compile_time_constants():
     """A Python ``int`` or ``bool`` field survives ``Fit`` and drives a jitted model.
 
@@ -1264,6 +1288,7 @@ class _Written(eqx.Module):
     c: jax.Array
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_values_written_by_a_block_enter_the_model_as_strong_float_arrays():
     """A float32 or Python-float value from a block is stored as a strong float64.
 
@@ -1304,6 +1329,7 @@ class _InverseProbeBlock(_FloatWritingBlock):
         return False
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_a_support_swap_maps_block_writes_through_the_conversion():
     """The prior swap of a posterior re-expresses a draw through converted writes.
 
@@ -1325,6 +1351,7 @@ def test_a_support_swap_maps_block_writes_through_the_conversion():
     assert seen and all(row == (jnp.float64, False) for row in seen), seen
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_fit_refuses_what_the_conversion_missed(monkeypatch):
     """With the conversion removed the postcondition refuses a NumPy leaf by path.
 
@@ -1341,6 +1368,7 @@ def test_fit_refuses_what_the_conversion_missed(monkeypatch):
         Fit(model, {})
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_fit_enters_an_owned_module_but_not_a_foreign_one():
     """The interpolator inside an owned Module is kept as the same object.
 

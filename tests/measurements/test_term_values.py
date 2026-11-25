@@ -11,8 +11,6 @@ from golden_systems import imaging_data, model_at, systems
 
 from photomancy.measurements import DMagTerm
 
-jax.config.update("jax_enable_x64", True)
-
 STORED = json.loads(
     (
         Path(__file__).parent.parent / "data" / "measurement_terms_golden.json"
@@ -21,6 +19,7 @@ STORED = json.loads(
 _N_POINTS = 6
 
 
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 @pytest.mark.parametrize("name", ["g1", "g2", "g3"])
 def test_terms_equal_the_stored_values(name):
     """Fails if a term's arithmetic changed in the move to the measurements package.
@@ -43,6 +42,7 @@ def test_terms_equal_the_stored_values(name):
             )
 
 
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 def test_null_epochs_are_the_old_null_term():
     """Fails if a DMagTerm of nulls differs from the deleted ``NullTerm``.
 

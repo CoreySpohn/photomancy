@@ -4,23 +4,20 @@ import json
 import math
 from pathlib import Path
 
+import equinox as eqx
 import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
+from hwoutils.epoch import Epoch
+from hwoutils.model_paths import resolve
+from optixstuff.grids import PixelGrid, SkyOrientation
+from priorities import LogNormal, Normal
 
-jax.config.update("jax_enable_x64", True)
-
-import equinox as eqx  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
-import numpy as np  # noqa: E402
-from hwoutils.epoch import Epoch  # noqa: E402
-from hwoutils.model_paths import resolve  # noqa: E402
-from optixstuff.grids import PixelGrid, SkyOrientation  # noqa: E402
-from priorities import LogNormal, Normal  # noqa: E402
-
-from photomancy.disk import default_disk_prior, radiance_forward  # noqa: E402
-from photomancy.infer import MAP, Fit, ForwardTerm, Laplace, run  # noqa: E402
-from photomancy.infer.diagnostics import weighted_mean  # noqa: E402
-from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
+from photomancy.disk import default_disk_prior, radiance_forward
+from photomancy.infer import MAP, Fit, ForwardTerm, Laplace, run
+from photomancy.infer.diagnostics import weighted_mean
+from photomancy.infer.likelihoods import gaussian_loglike
 
 WL, TIME = 500.0, 0.0
 GRID = PixelGrid.regular((51, 51), 0.2, "arcsec", orientation=SkyOrientation(0.0))
@@ -108,6 +105,7 @@ def make_system():
     return build
 
 
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_the_disk_has_no_orientation_leaf_to_free(make_system):
     """Fails if a disk grows an orientation leaf a fit can free but a read never uses.
 
@@ -122,6 +120,7 @@ def test_the_disk_has_no_orientation_leaf_to_free(make_system):
 
 
 # Medium: The disk image and its six-parameter gradient exceed the unit compile budget.
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium
 def test_disk_fit_is_finite_and_differentiable(make_system):
     """The disk fit is finite and grad-safe at the system's own values."""
@@ -139,6 +138,7 @@ def test_disk_fit_is_finite_and_differentiable(make_system):
 
 
 # Medium: the golden needs the disk render at three points.
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 @pytest.mark.medium
 def test_fit_density_matches_the_legacy_density_up_to_the_gaussian_constant(
     make_system,
@@ -168,6 +168,7 @@ def test_fit_density_matches_the_legacy_density_up_to_the_gaussian_constant(
         )
 
 
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.slow
 def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
     """MAP and Laplace recover the truth disk shape and orientation from noise.
@@ -216,6 +217,7 @@ def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
 
 # Medium: the disk render at four points.
 @pytest.mark.medium
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_disk_aliases_have_equal_likelihood(make_system):
     """The relabelings of one disk give the same image and the same log likelihood.
 
@@ -252,6 +254,7 @@ class _Scaled(eqx.Module):
 
 # Medium: this consumer can pay for the deferred scene-stack import.
 @pytest.mark.medium
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_forward_is_swappable(make_system):
     """A swapped forward module fits end to end, and a closure is refused."""
     system = make_system()
@@ -267,6 +270,7 @@ def test_forward_is_swappable(make_system):
 
 
 # Medium: this consumer can pay for the deferred scene-stack import.
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium
 def test_default_disk_prior_is_keyed_by_path_and_centers_on_system(make_system):
     """default_disk_prior is one law per path, centered on the system's values."""

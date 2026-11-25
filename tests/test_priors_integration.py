@@ -12,9 +12,7 @@ import numpy as np
 import pytest
 from priorities import Mixture, Normal, Uniform
 
-jax.config.update("jax_enable_x64", True)
-
-from photomancy.infer import (  # noqa: E402
+from photomancy.infer import (
     Fit,
     ForwardTerm,
     Grid,
@@ -24,8 +22,10 @@ from photomancy.infer import (  # noqa: E402
     weighted_cov,
     weighted_mean,
 )
-from photomancy.infer.backends.grid import midpoint_rule  # noqa: E402
-from photomancy.infer.likelihoods import gaussian_loglike  # noqa: E402
+from photomancy.infer.backends.grid import midpoint_rule
+from photomancy.infer.likelihoods import gaussian_loglike
+
+pytestmark = pytest.mark.float64_only(reason="float64 Fit coordinates")
 
 SIGMA = 0.4
 

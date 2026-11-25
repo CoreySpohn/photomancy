@@ -166,6 +166,7 @@ def _check_scores(name, actual, expected, components):
     assert np.all(errors <= floors), (name, errors, floors)
 
 
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 @pytest.mark.medium(reason="compiles every channel's term on one scene")
 def test_every_channel_scores_the_frozen_factors(data):
     """Fails if an observable, its multiplicity or a channel's normalization changes.
@@ -267,6 +268,7 @@ def two_planets(data):
     return data, pairs, scene
 
 
+@pytest.mark.float64_only(reason="stored float64 V&V reference values")
 def test_independent_pair_scores(two_planets):
     """Fails if the multi-planet terms use the outer pair's wrong mass or origin.
 

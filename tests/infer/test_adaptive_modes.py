@@ -9,6 +9,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from priorities import Uniform
 
 from photomancy.infer import (
@@ -20,7 +21,9 @@ from photomancy.infer import (
     khat_threshold,
 )
 
-jax.config.update("jax_enable_x64", True)
+pytestmark = pytest.mark.float64_only(
+    reason="float64 posterior coordinates and log weights"
+)
 
 HALF = 6.0
 CENTERS = jnp.array([[-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
