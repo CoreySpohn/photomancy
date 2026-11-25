@@ -22,7 +22,7 @@ at every position.
 ## Profile one amplitude
 
 {func}`~photomancy.detection.profile_amplitude` maximizes over the amplitude at one
-position with a fixed number of Newton steps. It takes any likelihood builder from
+position with a fixed number of safeguarded iterations. It takes any likelihood builder from
 {mod}`photomancy.infer.likelihoods` that is curved in the prediction.
 
 ```python
@@ -45,16 +45,23 @@ base = 1.0 + 0.2 * x  # best fit of the model without the source
 data = base + 0.7 * bump(0.3) + 0.05 * rng.normal(size=x.size)
 likelihood = gaussian_loglike(data, 0.05)
 
-a_hat, two_delta, curvature = profile_amplitude(likelihood, base, bump(0.3))
+a_hat, two_delta, curvature, resolved = profile_amplitude(likelihood, base, bump(0.3))
+assert bool(resolved)
 print(float(a_hat), float(two_delta), 1.0 / float(jnp.sqrt(curvature)))
 assert abs(float(a_hat) - 0.7) < 0.1
 ```
 
 A Gaussian likelihood is quadratic in the amplitude, so one step is exact; a Huber one is
-piecewise quadratic and settles in a few (`n_newton=4` by default). The Laplace builder
+piecewise quadratic and settles in a few (`n_newton=8` by default). The Laplace builder
 has zero curvature and is rejected with a `ValueError`. Pixels the likelihood masks out
 may be NaN in `base` and in the template: they add nothing to the value or the
 derivatives.
+
+An unresolved pixel has `resolved=False` in the profile and NaN in the map's `z`.
+This can occur when the iteration budget runs out before the slope is small or
+the bracket closes, or when the final objective is non-finite. A likelihood
+that is not unimodal in amplitude, such as Student-t, can leave the global
+maximum outside the bracket and produce an unresolved pixel or a local maximum.
 
 ## Map it over positions
 
@@ -75,7 +82,7 @@ centers = jnp.linspace(-0.9, 0.9, 181)
 terms = ((likelihood, base, BumpTemplate(jnp.asarray(x), 0.05)),)
 detection = likelihood_ratio_map(terms, centers, batch_size=32)
 
-best = int(jnp.argmax(detection.z))
+best = int(jnp.nanargmax(detection.z))
 print(float(centers[best]), float(detection.z[best]), float(detection.a_hat[best]))
 assert abs(float(centers[best]) - 0.3) < 0.03
 assert float(detection.z[best]) > 10.0

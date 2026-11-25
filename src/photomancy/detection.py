@@ -17,7 +17,7 @@ prediction and a template function, an ``eqx.Module``, so the model that produce
 ``t(x)`` (optics, detector, spectral weights) stays outside this module.
 
 - :func:`profile_amplitude` maximizes the log-likelihood over one amplitude with a
-  fixed number of Newton steps.
+  fixed number of safeguarded iterations and reports whether the peak was resolved.
 - :func:`likelihood_ratio_map` does that at every trial position, for one or several
   exposures that share the amplitude.
 - :func:`detect` is the same map over a :class:`~photomancy.infer.fit.Fit`: one free
@@ -33,6 +33,7 @@ prediction and a template function, an ``eqx.Module``, so the model that produce
 """
 
 from collections.abc import Callable, Sequence
+from math import prod
 from typing import Any
 
 import equinox as eqx
@@ -93,57 +94,191 @@ def _check_curvature(likelihood) -> None:
         )
 
 
-def _profile(objective: Callable, n_newton: int, dtype):
-    """Newton-maximize a scalar ``objective(a)`` from ``a = 0``.
+def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
+    """Maximize a scalar objective from zero with forward-mode derivatives.
 
-    The derivatives are taken in forward mode, so a template that is NaN where the
-    likelihood is masked adds nothing: the mask selects the tangent before it is used.
-    A step is taken only where the curvature is negative.
+    Allow 8 eps times max(1, abs(current log likelihood)) per reduction level:
+    one for a scalar score plus ceil(log2(n_elements)) for a pairwise image sum.
+    This allows for rounding in the pixel scores and their accumulation. An
+    opaque fit uses its term array sizes to estimate the reduction depth.
+    Try the full Newton step and up to eight halvings. A shortened uphill
+    step and the preceding rejected trial bracket a peak with the starting point.
+    With nonnegative second derivative there is no local curvature scale. Start
+    one amplitude unit along the slope and double up to 40 times while ascending.
+    Refine a bracket with 48 golden-section steps, retaining its best finite point.
+
+    Resolution requires a bracket of width at most 1e-8 * max(1, abs(a)), or a
+    slope within 1e-6 * sqrt(curvature) of zero. At a quadratic peak the slope
+    vanishes and abs(slope) / sqrt(curvature) is the estimated amplitude error
+    in formal standard errors. A stationary flat null also resolves. Forward
+    differentiation lets the likelihood mask NaN template tangents.
     """
     d1 = jax.jacfwd(objective)
     d2 = jax.jacfwd(d1)
+    zero = jnp.zeros((), dtype)
+    null = jnp.asarray(objective(zero))
+    reduction_depth = 1 + (max(1, n_elements) - 1).bit_length()
+    relative_roundoff = 8 * jnp.finfo(null.dtype).eps * reduction_depth
 
-    def step(a, _):
+    def update_if(active, update, state):
+        # A per-item cond under vmap evaluates both branches and batches their
+        # operands, including the renderer. Branch once for all mapped items
+        # and select only the updated scalar results for each active item.
+        def selected():
+            return jax.tree.map(
+                lambda new, old: jnp.where(active, new, old), update(), state
+            )
+
+        return jax.lax.cond(eqx.internal.unvmap_any(active), selected, lambda: state)
+
+    def stationary(g, curvature):
+        return (curvature > 0) & (jnp.abs(g) <= 1e-6 * jnp.sqrt(jnp.abs(curvature)))
+
+    def advance(a, value, g, h, move):
+        newton = h < 0
+        step = jnp.where(newton, -g / jnp.where(newton, h, 1), jnp.sign(g)).astype(
+            dtype
+        )
+        floor = value - relative_roundoff * jnp.maximum(1, jnp.abs(value))
+
+        def acceptable(offset, score):
+            return jnp.isfinite(a + offset) & jnp.isfinite(score) & (score >= floor)
+
+        def halve(_, trial):
+            offset, score = trial
+            return update_if(
+                ~acceptable(offset, score),
+                lambda: (offset / 2, objective(a + offset / 2)),
+                trial,
+            )
+
+        full = objective(a + step)
+        trial = (step, full)
+        offset, score = update_if(
+            move & ~acceptable(step, full),
+            lambda: jax.lax.fori_loop(0, 8, halve, trial),
+            trial,
+        )
+        accepted = acceptable(offset, score)
+        best = jnp.where(accepted, a + offset, a)
+        score = jnp.where(accepted, score, value)
+        shortened = accepted & (offset != step)
+        # A shortened uphill step has a rejected trial just beyond it.
+        # A non-rising unit step can straddle a peak with the starting point.
+        turned = move & ~newton & accepted & (score <= value)
+        right = jnp.where(turned, best, a + 2 * offset)
+        best = jnp.where(turned, a, best)
+        score = jnp.where(turned, value, score)
+        # A rejected trial (downhill or outside the domain) is the far end of a
+        # bracket around the starting point, whatever the amplitude scale.
+        failed = move & ~accepted
+        right = jnp.where(failed, a + step, right)
+        bracketed = turned | (shortened & (score > value)) | failed
+
+        def expand(_, state):
+            left, peak, right, peak_value, bracketed = state
+            trial = a + 2 * (peak - a)
+            trial_value = objective(trial)
+            rising = ~bracketed & jnp.isfinite(trial) & jnp.isfinite(trial_value)
+            rising &= trial_value > peak_value
+            return (
+                jnp.where(rising, peak, left),
+                jnp.where(rising, trial, peak),
+                jnp.where(bracketed, right, trial),
+                jnp.where(rising, trial_value, peak_value),
+                ~rising,
+            )
+
+        bounds = (a, best, right, score, bracketed)
+        left, best, right, score, bracketed = update_if(
+            move & ~newton & accepted & ~shortened & (score > value),
+            lambda: jax.lax.fori_loop(0, 40, expand, bounds),
+            bounds,
+        )
+
+        def refine(_, bounds):
+            left, peak, right, peak_value = bounds
+            go_right = jnp.abs(right - peak) > jnp.abs(left - peak)
+            far = jnp.where(go_right, right, left)
+            near = jnp.where(go_right, left, right)
+            trial = peak + 0.3819660112501051 * (far - peak)
+            trial_value = objective(trial)
+            rising = (
+                jnp.isfinite(trial)
+                & jnp.isfinite(trial_value)
+                & (trial_value > peak_value)
+            )
+            return (
+                jnp.where(rising, peak, near),
+                jnp.where(rising, trial, peak),
+                jnp.where(rising, far, trial),
+                jnp.where(rising, trial_value, peak_value),
+            )
+
+        bounds = (left, best, right, score)
+        left, best, right, score = update_if(
+            move & bracketed, lambda: jax.lax.fori_loop(0, 48, refine, bounds), bounds
+        )
+        closed = bracketed & (jnp.abs(right - left) <= 1e-8 * jnp.maximum(1, abs(best)))
+        return best, score, closed
+
+    def iteration(i, state):
+        a, value, closed = state
         g, h = d1(a), d2(a)
-        ok = h < 0.0
-        return a - jnp.where(ok, g / jnp.where(ok, h, 1.0), 0.0), None
+        move = ~closed & (g != 0) & jnp.isfinite(g) & jnp.isfinite(h)
+        # Always offer the first Newton step, including for a very faint Gaussian.
+        move &= (i == 0) | ~stationary(g, -h)
+        return update_if(move, lambda: advance(a, value, g, h, move), state)
 
-    a0 = jnp.zeros((), dtype)
-    a_hat, _ = jax.lax.scan(step, a0, None, length=n_newton)
-    two_delta = 2.0 * (objective(a_hat) - objective(a0))
-    return a_hat, two_delta, -d2(a_hat)
+    a_hat, value, closed = jax.lax.fori_loop(
+        0, n_newton, iteration, (zero, null, jnp.asarray(False))
+    )
+    g, curvature = d1(a_hat), -d2(a_hat)
+    flat_null = (a_hat == 0) & (g == 0) & (curvature == 0)
+    two_delta = 2 * (value - null)
+    finite = jnp.isfinite(a_hat) & jnp.isfinite(two_delta)
+    resolved = finite & jnp.isfinite(g) & jnp.isfinite(curvature)
+    resolved &= stationary(g, curvature) | closed | flat_null
+    # Apply the subtraction tolerance while both objective values are available.
+    rounding = (
+        2
+        * relative_roundoff
+        * jnp.maximum(1, jnp.maximum(jnp.abs(null), jnp.abs(value)))
+    )
+    rounded_loss = resolved & (two_delta < 0) & (two_delta >= -rounding)
+    two_delta = jnp.where(rounded_loss, 0, two_delta)
+    return a_hat, two_delta, curvature, resolved
 
 
-def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 4):
+def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 8):
     """Maximize ``a -> loglike(base + a * template)`` over the amplitude ``a``.
 
-    Runs ``n_newton`` Newton steps from ``a = 0``, a fixed count with no data-dependent
-    loop, so the function jits and vmaps. A Gaussian log-likelihood is quadratic in
-    ``a`` and is exact after one step; a Huber log-likelihood, which is piecewise
-    quadratic, needs a few. A step is skipped where the curvature is not negative, so
-    a zero template returns ``a_hat = 0`` with no NaN.
+    A fixed number of safeguarded iterations from zero supports jit and vmap.
+    A Gaussian likelihood with fixed variance is quadratic in amplitude and one
+    Newton step is exact. Huber and domain-limited likelihoods such as Poisson
+    can require backtracking or bracketing. The Laplace builder is unsupported.
+    A heavy-tailed likelihood such as Student-t can have several amplitude peaks.
+    The bracket may miss the global maximum and the profile may report an
+    unresolved estimate or a local maximum.
 
-    A likelihood must be curved in the prediction. The Laplace builder is rejected with
-    a ``ValueError`` because its curvature is zero everywhere. Newton steps assume the
-    log-likelihood is concave in ``a`` near the optimum, as it is for the Gaussian and
-    Huber builders; a heavy-tailed density such as Student-t is not guaranteed to
-    converge from ``a = 0``.
-
-    Elements the likelihood masks out may be NaN in ``base`` and ``template``; they
-    contribute nothing to the value or the derivatives.
+    Masked elements of the base and template may be NaN. They contribute
+    nothing to the objective or its forward-mode derivatives.
 
     Args:
         loglike_of_prediction: ``prediction -> scalar log-likelihood``, normally a
             builder from :mod:`photomancy.infer.likelihoods`.
         base: Prediction of the model without the source.
         template: Image of the source at unit amplitude, broadcastable with ``base``.
-        n_newton: Number of Newton steps.
+        n_newton: Number of safeguarded amplitude iterations.
 
     Returns:
-        ``(a_hat, two_delta_loglike, curvature)``: the amplitude estimate, the
-        statistic ``2 [logL(a_hat) - logL(0)]`` (zero or positive), and the negative
-        second derivative of the log-likelihood in ``a`` at ``a_hat``. The formal
-        standard error of ``a_hat`` is ``1 / sqrt(curvature)``.
+        ``(a_hat, two_delta_loglike, curvature, resolved)``. The statistic is
+        twice the gain over the null and curvature is the negative second
+        derivative at the estimate. Its inverse square root is the formal
+        standard error. A finite profile is resolved when the estimated error
+        from the slope is within 1e-6 standard errors, the bracket width is at
+        most 1e-8 times max(1, abs(a_hat)), or the null is flat and stationary.
+        A zero template resolves at zero amplitude with zero gain.
 
     Raises:
         ValueError: If the likelihood is the Laplace density.
@@ -156,11 +291,27 @@ def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 4):
     def objective(a):
         return loglike_of_prediction(base + a * template)
 
-    return _profile(objective, n_newton, dtype)
+    return _profile(
+        objective,
+        n_newton,
+        dtype,
+        prod(jnp.broadcast_shapes(base.shape, template.shape)),
+    )
 
 
-def _summarize(a_hat, two_delta, curvature):
-    z = jnp.sign(a_hat) * jnp.sqrt(jnp.maximum(two_delta, 0.0))
+def _summarize(a_hat, two_delta, curvature, resolved):
+    """Return signed significance for a resolved profile and its curvature error.
+
+    The subtraction in ``_profile`` absorbs losses of up to 16 eps per reduction
+    level times the larger absolute log likelihood, with a unit scale floor.
+    The factor of two comes from doubling the gain. Larger losses give NaN,
+    as does an unresolved profile.
+    """
+    rounding = 16 * jnp.finfo(jnp.asarray(two_delta).dtype).eps
+    gain = jnp.where(
+        resolved & (two_delta >= -rounding), jnp.maximum(two_delta, 0), jnp.nan
+    )
+    z = jnp.sign(a_hat) * jnp.sqrt(gain)
     sigma = jnp.where(curvature > 0.0, jax.lax.rsqrt(jnp.abs(curvature)), jnp.inf)
     return a_hat, z, sigma
 
@@ -175,7 +326,11 @@ def _map_terms(terms, n_newton, position):
         )
 
     dtype = jnp.result_type(*(b for _, b, _ in terms), float)
-    return _summarize(*_profile(objective, n_newton, dtype))
+    n_elements = sum(
+        prod(jnp.broadcast_shapes(b.shape, jnp.shape(t)))
+        for (_, b, _), t in zip(terms, images, strict=True)
+    )
+    return _summarize(*_profile(objective, n_newton, dtype, n_elements))
 
 
 @eqx.filter_jit
@@ -190,7 +345,7 @@ def likelihood_ratio_map(
     terms: Sequence[tuple[Callable, Any, Callable]],
     positions,
     batch_size: int | None = 1,
-    n_newton: int = 4,
+    n_newton: int = 8,
 ) -> DetectionMap:
     """Profile a shared source amplitude at every trial position.
 
@@ -324,7 +479,10 @@ def _profile_split(fit, x, amplitude, shape, n_newton):
         )
         return jnp.asarray(total, jnp.float64)
 
-    a_hat, z, sigma = _summarize(*_profile(objective, n_newton, jnp.float64))
+    n_elements = sum(p.size for p in jax.tree.leaves(base) if eqx.is_array(p))
+    a_hat, z, sigma = _summarize(
+        *_profile(objective, n_newton, jnp.float64, n_elements)
+    )
     model = fit.model_at({**x, amplitude: jnp.reshape(a_hat, shape)})
     actual = tuple(term.split(model)[0] for term in fit.terms)
     linear = tuple(_linear_in(a_hat, p, t) for p, t in zip(base, tangent, strict=True))
@@ -342,7 +500,8 @@ def _profile_render(fit, x, amplitude, shape, n_newton):
         full = {**x, amplitude: jnp.reshape(a, shape)}
         return jnp.asarray(fit.log_likelihood(full), jnp.float64)
 
-    return _summarize(*_profile(objective, n_newton, jnp.float64))
+    n_elements = sum(p.size for p in jax.tree.leaves(fit.terms) if eqx.is_array(p))
+    return _summarize(*_profile(objective, n_newton, jnp.float64, n_elements))
 
 
 @eqx.filter_jit
@@ -365,14 +524,14 @@ def detect(
     trials: dict,
     *,
     amplitude: str,
-    n_newton: int = 4,
+    n_newton: int = 8,
     batch_size: int | None = 1,
 ) -> DetectionMap:
     """Matched-filter map of a source over trial values, from the fit's likelihood.
 
     At each trial the free path ``amplitude`` is profiled: ``a`` maximizes
-    ``fit.log_likelihood`` by Newton steps from ``a = 0`` while every other free entry
-    is held at the trial value, and the map reports ``a_hat``, the signed root
+    ``fit.log_likelihood`` by safeguarded steps from ``a = 0`` with the other entries
+    held at their trial values. The map reports ``a_hat``, the signed root
     ``z = sign(a_hat) sqrt(2 [ell(a_hat) - ell(0)])`` and the formal standard error
     ``1 / sqrt(curvature)``. The noise, the response and the detector come from the
     fit's terms, so there is no second likelihood, and the way coordinates reach the
@@ -380,6 +539,13 @@ def detect(
     part. When the model is linear in ``a`` and the likelihood is Gaussian with fixed
     variance, this is the classical whitened matched filter ``z = t'Wr / sqrt(t'Wt)``.
     Several terms (exposures) constrain one shared amplitude.
+
+    The profiler supports Gaussian, Huber and Poisson likelihoods. Resolution
+    requires a finite profile with a small curvature-scaled slope, a closed
+    bracket or a stationary flat null, as in :func:`profile_amplitude`. An
+    unresolved trial has NaN significance. A heavy-tailed likelihood such as
+    Student-t can have multiple amplitude peaks. Its bracket can miss the
+    global maximum and report an unresolved trial or a local maximum.
 
     When every term offers :meth:`~photomancy.infer.terms.AbstractTerm.split`, each
     trial renders the model once, at ``a = 0`` with its tangent along the amplitude,
@@ -403,8 +569,9 @@ def detect(
             axis on every entry, with exactly the keys of ``fit.free`` except
             ``amplitude``.
         amplitude: The free leaf-law path that is profiled; its leaf has one element.
-        n_newton: Newton steps per trial. A Gaussian likelihood linear in the
-            amplitude is exact after one; a Poisson likelihood needs a few.
+        n_newton: Safeguarded iterations per trial. One step is exact for a
+            linear prediction with fixed-variance Gaussian noise. Poisson
+            and Huber likelihoods can require several iterations.
         batch_size: Trials per batch, which sets peak memory: 1 (the default) runs them
             in sequence, ``None`` runs every trial at once.
 
