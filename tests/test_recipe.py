@@ -148,7 +148,9 @@ def _terms(truth):
             plan=FramePlan(frame_time_s=3000.0, n_frames=2),
         )
         image = cp.observe(jax.random.PRNGKey(10 + i), truth, instrument, exposure)
-        out.append(ImageTerm(image, instrument=instrument, exposure=exposure))
+        out.append(
+            ImageTerm.on_support(truth, image, instrument=instrument, exposure=exposure)
+        )
     return tuple(out)
 
 

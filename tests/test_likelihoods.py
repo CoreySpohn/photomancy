@@ -79,6 +79,24 @@ def test_scalar_sigma_and_no_mask_match_scipy():
     np.testing.assert_allclose(ours, expected, rtol=1e-12, atol=0.0)
 
 
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_gaussian_prediction_broadcasts_only_to_the_observation():
+    """The two observations determine the number of Gaussian densities scored.
+
+    Truth source: two unit Gaussians at their means give -log(2 pi).
+    Tolerance basis: exact-algebra with an absolute float64 tolerance of 1e-9.
+    Fails if: a column prediction expands the two observations to four.
+    """
+    data = jnp.array([1.0, 2.0])
+    score = gaussian_loglike(data, 1.0)
+    np.testing.assert_allclose(score(data), -math.log(2 * math.pi), rtol=0, atol=1e-9)
+    np.testing.assert_allclose(
+        score(1.0), -math.log(2 * math.pi) - 0.5, rtol=0, atol=1e-9
+    )
+    with pytest.raises(ValueError):
+        score(data[:, None])
+
+
 def _huber_at(delta, sigma=1.0, data=0.0):
     like = huber_loglike(jnp.asarray([data]), sigma, delta=delta)
     return lambda x: like(jnp.asarray([x]))

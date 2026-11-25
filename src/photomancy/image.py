@@ -25,15 +25,13 @@ given.
 nothing, and the held exposure is an :class:`optixstuff.Exposure`, which caches no
 scene values, so the term declares no ``reads``.
 
-**What the term refuses.** The coronagraph renders only what its data hold: a detector
-pixel its tables do not cover is zero with ``Rates.supported`` False, and a planet
-outside its source domain contributes zero. A likelihood scored there would compare
-the data with a model that says nothing, so :meth:`ImageTerm.check` raises when the
-mask scores such a pixel or a lit planet is outside the domain, and
-:meth:`ImageTerm.supported_mask` is the boolean to AND into the mask. ``Fit`` calls
-``check`` once at setup, and again at both ends of the prior of any free leaf that
-moves the field of view (the wavelength nodes, the primary, the detector); nothing is
-ever dropped inside ``__call__``.
+**Scored pixels and source coverage.** :meth:`ImageTerm.on_support` stores the
+detector pixels covered at a reference model. An explicit mask can select a subset.
+:meth:`ImageTerm.check` raises if a scored pixel lacks coverage or a lit planet lies
+outside the selected component's source domain at a band centre. ``Fit`` checks at
+setup and at both prior endpoints of any free leaf that moves the field of view
+(the wavelength nodes, the primary, the detector). If a proposal loses coverage
+of a scored pixel, the image log likelihood is NaN.
 
 **Static light beyond a speckle field.** A speckle field ends where its data end and
 the drift beyond it is unknown, so by default the render zeroes those pixels and they
@@ -61,7 +59,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from coronagraphoto import expected
+from coronagraphoto import expected, planet_source_support
 from hwoutils.model_paths import join, resolve
 from optixstuff import Exposure, Instrument, Rates
 from optixstuff.grids import Image, Measure, SkyOrientation
@@ -73,10 +71,6 @@ __all__ = ["ImageModel", "ImageTerm"]
 
 
 _COUNTS = ("electron", "electrons")
-
-
-def _bool(x):
-    return jnp.asarray(x, dtype=bool)
 
 
 def _clipped(rates):
@@ -172,16 +166,6 @@ def _scored_flag(rates, static_beyond_speckle):
     return rates.supported
 
 
-def _used_set(mask, rates, static_beyond_speckle) -> jax.Array:
-    """The scored pixels: the mask, else the render's support, else every pixel."""
-    if mask is not None:
-        return mask
-    flag = _scored_flag(rates, static_beyond_speckle)
-    if flag is not None:
-        return flag
-    return jnp.ones(jnp.shape(rates.total()), bool)
-
-
 @eqx.filter_jit
 def _flags(scene, instrument, exposure):
     """The ``(W, ny, nx)`` support flags ``(supported, static_supported)``.
@@ -204,16 +188,11 @@ def _lit_planets_outside(scene, instrument, exposure):
         return 0
     times = jnp.atleast_1d(exposure.time_d)
     ephemeris = scene.ephemeris(times)
-    east, north = scene.positions(times, ephemeris=ephemeris)[:, :, 0]
-    x, y = SkyOrientation(exposure.roll_deg).sky_to_detector(east, north)
-    frame = instrument.coronagraph.grid.frame
-    outside = np.zeros(np.shape(x), bool)
-    for band in exposure.quadrature.bands:
-        centre = band.center_nm
-        lod = frame.lod_to_arcsec(centre)
-        psfs = instrument.coronagraph.source_psfs(centre, x / lod, y / lod)
-        lit = scene.planet_flux_densities(centre, times, ephemeris=ephemeris)[:, 0] > 0
-        outside |= np.asarray(~psfs.valid & lit)
+    support = planet_source_support(scene, instrument, exposure)
+    outside = np.zeros(support.shape[1], dtype=bool)
+    for band, covered in zip(exposure.quadrature.bands, support, strict=True):
+        flux = scene.planet_flux_densities(band.center_nm, times, ephemeris=ephemeris)
+        outside |= np.any((np.asarray(flux) > 0) & ~covered, axis=1)
     return int(outside.sum())
 
 
@@ -227,23 +206,32 @@ class _ImageScore(eqx.Module):
 
     Attributes:
         observed_e: The observed frame.
-        mask: The pixel mask, or ``None`` for every supported pixel.
+        mask: The fixed boolean mask shared by all frames.
         detector: The detector whose ``log_prob`` scores the frame.
         plan: The frame plan.
         static_beyond_speckle: Whether the beyond-speckle set is static.
     """
 
     observed_e: jax.Array
-    mask: jax.Array | None
+    mask: jax.Array
     detector: eqx.Module
     plan: eqx.Module
     static_beyond_speckle: bool = eqx.field(static=True)
 
     def __call__(self, rates) -> jax.Array:
-        used = _used_set(self.mask, rates, self.static_beyond_speckle)
-        observed = jnp.where(used, self.observed_e, 0.0)
+        shape = jnp.shape(rates.total())
+        if jnp.shape(self.mask) != shape or jnp.shape(self.observed_e)[-3:] != shape:
+            raise ValueError(
+                f"mask {jnp.shape(self.mask)} and observed frames "
+                f"{jnp.shape(self.observed_e)} must match the render's {shape}"
+            )
+        observed = jnp.where(self.mask, self.observed_e, 0.0)
         log_prob = self.detector.log_prob(observed, rates, self.plan)
-        return jnp.sum(jnp.where(used, log_prob, 0.0), dtype=jnp.float64)
+        value = jnp.sum(jnp.where(self.mask, log_prob, 0.0), dtype=jnp.float64)
+        support = _scored_flag(rates, self.static_beyond_speckle)
+        if support is None:
+            return value
+        return jnp.where(jnp.any(self.mask & ~support), jnp.nan, value)
 
 
 class ImageModel(eqx.Module):
@@ -282,14 +270,10 @@ class ImageTerm(AbstractTerm):
             by path and holds no build.
         observed_e: Observed electrons, shape ``(*batch, W, ny, nx)``. Leading batch
             axes are further frames of the same exposure model (scored jointly).
-        mask: Boolean, broadcastable to ``observed_e``; true where a pixel is scored.
-            Observed values at masked pixels are never read; :meth:`check` refuses a
-            mask that scores a pixel the coronagraph data do not cover. ``None``
-            scores the supported pixels: those the render marks
-            ``Rates.supported`` at the model being scored, or
-            ``Rates.static_supported`` when ``static_beyond_speckle`` is set. The
-            scored set then follows the model, so a fit that frees a leaf moving the
-            field of view (:attr:`footprint_paths`) should give an explicit mask.
+        mask: Boolean array of shape ``(W, ny, nx)``, true at the pixels scored
+            in every frame. Use :meth:`on_support` to select the pixels covered by
+            a reference model. A proposal that loses coverage of any scored pixel
+            gives a NaN log likelihood.
         instrument: A held :class:`optixstuff.Instrument`, or ``None``.
         exposure: A held :class:`optixstuff.Exposure` with a ``plan``, or ``None``.
         scene_path: Model path of the :class:`skyscapes.Scene`; ``""`` is the model
@@ -301,12 +285,12 @@ class ImageTerm(AbstractTerm):
         static_beyond_speckle: The assumption that the speckle field does not drift
             beyond its data. False (the default) treats a pixel the speckle field
             does not cover as unknown: the model there is zero, ``check`` refuses a
-            mask that scores it, and a ``None`` mask leaves it out. True passes the
+            mask that scores it, and :meth:`on_support` leaves it out. True passes the
             option to :func:`coronagraphoto.expected`, so the model, ``predict``,
             ``residual``, ``fisher_root`` and ``draw`` there are the static scene: the
             static leakage plus the field's stored samples, zero-filled, under the
             field's own reconstruction, with no drift. ``supported_mask`` is then
-            ``Rates.static_supported``, a ``None`` mask scores it, and ``check``
+            ``Rates.static_supported``, :meth:`on_support` stores it, and ``check``
             refuses only pixels no static product covers. A frame drawn under the
             option has no drift to recover beyond the field. The option changes no
             value for a mask inside the field, but it exists to admit a wider mask,
@@ -319,7 +303,7 @@ class ImageTerm(AbstractTerm):
 
     reads: ClassVar[tuple[str, ...]] = ()
     observed_e: jax.Array
-    mask: jax.Array | None = None
+    mask: jax.Array
     instrument: Instrument | None = None
     exposure: Exposure | None = None
     scene_path: str = eqx.field(static=True, default="")
@@ -330,7 +314,7 @@ class ImageTerm(AbstractTerm):
     def __init__(
         self,
         observed_e,
-        mask=None,
+        mask,
         instrument: Instrument | None = None,
         exposure: Exposure | None = None,
         scene_path: str = "",
@@ -344,8 +328,7 @@ class ImageTerm(AbstractTerm):
         Args:
             observed_e: Observed electrons, an :class:`optixstuff.grids.Image` or an
                 array of shape ``(*batch, W, ny, nx)``.
-            mask: Boolean broadcastable to the frame, or ``None`` to score the
-                supported pixels.
+            mask: Boolean array of shape ``(W, ny, nx)`` shared by all frames.
             instrument: The held instrument, or ``None`` with ``instrument_path``.
             exposure: The held exposure, or ``None`` with ``exposure_path``.
             scene_path: Model path of the scene.
@@ -356,16 +339,21 @@ class ImageTerm(AbstractTerm):
                 concrete 0-d JAX boolean, stored as a Python bool.
 
         Raises:
-            TypeError: When ``static_beyond_speckle`` is not a boolean.
-            ValueError: When an ``Image`` does not hold electrons per pixel, is not
-                on the held detector's grid, or lacks or contradicts the held
-                exposure's roll.
+            TypeError: When the mask or ``static_beyond_speckle`` is not boolean.
+            ValueError: When the mask is None or the observed image has the
+                wrong quantity, detector grid or sky orientation.
         """
         if isinstance(observed_e, Image):
             _check_image(observed_e, instrument, exposure)
             observed_e = observed_e.data
         self.observed_e = jnp.asarray(observed_e)
-        self.mask = None if mask is None else _bool(mask)
+        if mask is None:
+            raise ValueError(
+                "give a boolean mask or use ImageTerm.on_support(model, ...)"
+            )
+        self.mask = jnp.asarray(mask)
+        if self.mask.dtype != jnp.bool_:
+            raise TypeError(f"mask must be boolean, got {self.mask.dtype}")
         self.instrument = instrument
         self.exposure = exposure
         self.scene_path = scene_path
@@ -390,6 +378,23 @@ class ImageTerm(AbstractTerm):
             raise ValueError("the exposure needs a FramePlan: build it with plan=")
         if self.observed_e.ndim < 3:
             raise ValueError("observed_e must have shape (*batch, W, ny, nx)")
+
+    @classmethod
+    def on_support(cls, model, observed_e, **kwargs) -> Self:
+        """Build a term on the pixels covered by a concrete reference model.
+
+        Args:
+            model: Reference model from which to read the support once at setup.
+            observed_e: Observed electrons as an image or a frame array.
+            **kwargs: Instrument, exposure, model paths and options for the term.
+
+        Returns:
+            A term whose mask is ``supported_mask(model)`` at construction.
+        """
+        data = observed_e.data if isinstance(observed_e, Image) else observed_e
+        term = cls(observed_e, jnp.ones(np.shape(data)[-3:], bool), **kwargs)
+        mask = np.asarray(term.supported_mask(model))
+        return eqx.tree_at(lambda t: t.mask, term, jnp.asarray(mask))
 
     @property
     def assumptions(self) -> tuple[str, ...]:
@@ -417,10 +422,6 @@ class ImageTerm(AbstractTerm):
             static_beyond_speckle=self.static_beyond_speckle,
         )
         return instrument.detector, rates, exposure.plan
-
-    def _used(self, rates) -> jax.Array:
-        """The scored pixels: the mask, else the render's support, else every pixel."""
-        return _used_set(self.mask, rates, self.static_beyond_speckle)
 
     @property
     def footprint_paths(self) -> tuple[str, ...]:
@@ -451,20 +452,20 @@ class ImageTerm(AbstractTerm):
             Boolean array of shape ``(W, ny, nx)``, true where the coronagraph data
             cover the pixel.
         """
-        strict, static = self._flags(model)
+        strict, static = _flags(
+            resolve(model, self.scene_path),
+            self._instrument(model),
+            self._exposure(model),
+        )
         return static if self.static_beyond_speckle else strict
-
-    def _flags(self, model):
-        scene = resolve(model, self.scene_path)
-        return _flags(scene, self._instrument(model), self._exposure(model))
 
     def check(self, model) -> None:
         """Raise when the term would score light the coronagraph data do not hold.
 
-        Call it where ``model`` is concrete (``Fit`` does, once, at setup). Only a
-        given ``mask`` is checked against the support; a ``None`` mask scores only
-        supported pixels. The support is ``Rates.supported`` by default and
-        ``Rates.static_supported`` when ``static_beyond_speckle`` is set. The message
+        Call it where ``model`` is concrete. Fit checks the reference model and
+        the prior endpoints of leaves that move the footprint. The support is
+        ``Rates.supported`` by default and ``Rates.static_supported`` when
+        ``static_beyond_speckle`` is set. The message
         gives two counts of scored pixels: those no static product covers, and those
         that lack only the speckle field (refused by default, scored under the
         option).
@@ -474,39 +475,45 @@ class ImageTerm(AbstractTerm):
                 and exposure at their paths when they are not held by the term.
 
         Raises:
-            ValueError: Naming the counts, when ``mask`` is true on a pixel that is
-                not ``supported_mask(model)``, or when a lit planet of the scene is
-                outside the coronagraph's source domain at band centre (it would
-                render zero while the data may show it).
+            ValueError: When the frame or mask shape disagrees with the exposure
+                and detector, a scored pixel lacks support, or a lit planet lies
+                outside the source domain at a band centre.
         """
-        if self.mask is not None:
-            strict, static = (np.asarray(flag) for flag in self._flags(model))
-            scored = np.broadcast_to(np.asarray(self.mask), self.observed_e.shape)
-            scored = scored.reshape(-1, *strict.shape).any(0)
-            no_static = int((scored & ~static).sum())
-            speckle_only = int((scored & static & ~strict).sum())
-            if self.static_beyond_speckle:
-                bad, only = no_static, "scored as static light under the option"
-            else:
-                bad = no_static + speckle_only
-                only = "refused unless static_beyond_speckle=True"
-            if bad:
-                raise ValueError(
-                    f"the mask scores {bad} pixel(s) the coronagraph data do not "
-                    f"cover: {no_static} that no static product covers and "
-                    f"{speckle_only} that lack only the speckle field ({only}); AND "
-                    "ImageTerm.supported_mask(model) into the mask or crop the "
-                    "detector"
-                )
-        planets = _lit_planets_outside(
-            resolve(model, self.scene_path),
-            self._instrument(model),
-            self._exposure(model),
+        scene = resolve(model, self.scene_path)
+        instrument = self._instrument(model)
+        exposure = self._exposure(model)
+        shape = (len(exposure.quadrature.bands), *instrument.detector.shape)
+        if self.observed_e.shape[-3:] != shape:
+            raise ValueError(
+                f"observed_e has shape {self.observed_e.shape}, "
+                f"expected trailing axes {shape}"
+            )
+        if self.mask.shape != shape:
+            raise ValueError(f"mask has shape {self.mask.shape}, expected {shape}")
+        strict, static = (
+            np.asarray(flag) for flag in _flags(scene, instrument, exposure)
         )
+        scored = np.asarray(self.mask)
+        no_static = int((scored & ~static).sum())
+        speckle_only = int((scored & static & ~strict).sum())
+        if self.static_beyond_speckle:
+            bad, only = no_static, "scored as static light under the option"
+        else:
+            bad = no_static + speckle_only
+            only = "refused unless static_beyond_speckle=True"
+        if bad:
+            raise ValueError(
+                f"the mask scores {bad} pixel(s) the coronagraph data do not "
+                f"cover: {no_static} that no static product covers and "
+                f"{speckle_only} that lack only the speckle field ({only}); AND "
+                "ImageTerm.supported_mask(model) into the mask or crop the "
+                "detector"
+            )
+        planets = _lit_planets_outside(scene, instrument, exposure)
         if planets:
             raise ValueError(
                 f"{planets} lit planet(s) lie outside the coronagraph's source domain "
-                "and render as zero; start the fit inside the domain or hold them"
+                "at a band centre. Start the fit inside the domain or hold them"
             )
 
     def __call__(self, model) -> jax.Array:
@@ -517,7 +524,7 @@ class ImageTerm(AbstractTerm):
                 at their paths when they are not held by the term.
 
         Returns:
-            The scalar log likelihood of the scored pixels.
+            The scalar log likelihood, or NaN if a scored pixel lacks support.
         """
         rates, score = self.split(model)
         return score(rates)
@@ -579,11 +586,10 @@ class ImageTerm(AbstractTerm):
             scored or has no residual.
         """
         detector, rates, plan = self._rates(model)
-        used = self._used(rates)
-        observed = jnp.where(used, self.observed_e, 0.0)
+        observed = jnp.where(self.mask, self.observed_e, 0.0)
         mean, variance = detector.mean_and_variance(_clipped(rates), plan)
         defined = jnp.isfinite(detector.log_prob(observed, rates, plan))
-        ok = used & defined & (variance > 0)
+        ok = self.mask & defined & (variance > 0)
         whitened = (observed - mean) / jnp.sqrt(jnp.where(ok, variance, 1.0))
         return jnp.where(ok, whitened, jnp.nan)
 
@@ -608,7 +614,7 @@ class ImageTerm(AbstractTerm):
         detector, rates, plan = self._rates(model)
         root = detector.fisher_root(rates, plan)
         parts = root if root.ndim == 4 else root[None]
-        used = jnp.broadcast_to(self._used(rates), self.observed_e.shape)
+        used = jnp.broadcast_to(self.mask, self.observed_e.shape)
         return jnp.ravel(jnp.where(used[..., None, :, :, :], parts, 0.0))
 
     def draw(self, key, model) -> Self:
@@ -631,5 +637,5 @@ class ImageTerm(AbstractTerm):
         keys = jax.random.split(key, n_frames)
         frames = jax.vmap(lambda k: detector.draw(k, rates, plan))(keys)
         frames = frames.reshape(*batch, *frames.shape[1:])
-        observed = jnp.where(self._used(rates), frames, self.observed_e)
+        observed = jnp.where(self.mask, frames, self.observed_e)
         return eqx.tree_at(lambda term: term.observed_e, self, observed)
