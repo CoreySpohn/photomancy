@@ -376,6 +376,33 @@ def _device_copy(tree):
     return jax.tree.map(lambda x: _strong_copy(x) if eqx.is_array(x) else x, tree)
 
 
+def _line_search_stalled(state):
+    """Whether the last zoom line search ended without meeting its conditions.
+
+    Reads the public ``info`` (``optax.ZoomLinesearchInfo``) of the
+    ``optax.ScaleByZoomLinesearchState`` inside ``optax.lbfgs``: a positive decrease
+    or curvature error means no step length satisfied the sufficient-decrease and
+    curvature conditions. This assumes the zoom search's default tolerance of zero
+    (``optax.scale_by_zoom_linesearch(tol=0.0)``), which the state does not record.
+    A solver without a zoom line search never stalls.
+
+    Args:
+        state: The optax state of a solver stage after a step.
+
+    Returns:
+        True when the search failed to meet its conditions.
+    """
+    found = jax.tree.leaves(
+        state, is_leaf=lambda x: isinstance(x, optax.ScaleByZoomLinesearchState)
+    )
+    for part in found:
+        if isinstance(part, optax.ScaleByZoomLinesearchState):
+            info = part.info
+            error = max(float(info.decrease_error), float(info.curvature_error))
+            return bool(int(info.num_linesearch_steps) > 0 and error > 0.0)
+    return False
+
+
 def map_fit(
     logdensity,
     init,
@@ -730,8 +757,16 @@ def map_fit(
                         metrics={name: float(bufs[name][gi]) for name in metrics},
                     )
                 )
+            # Only a stage with an early-stopping rule ends here: without one the
+            # stage runs its n_steps (a failed search in badly scaled coordinates
+            # can be followed by steps that make progress).
+            stalled = (
+                stopping is not None
+                and solver_state is not None
+                and _line_search_stalled(solver_state)
+            )
             if stopping is not None and (
-                n_run % stopping.check_every == 0 or n_run == stage.n_steps
+                n_run % stopping.check_every == 0 or n_run == stage.n_steps or stalled
             ):
                 window = slice(offset + checked, offset + n_run)
                 fresh = np.asarray(bufs["loss"])[window]
@@ -755,6 +790,14 @@ def map_fit(
                         break
                 if stopped or failed:
                     break
+            if stalled:
+                # The line search ended without meeting its conditions: direct
+                # evidence that the loss has stalled, so the loss half of the
+                # rule is taken as met and only the gradient half is evaluated, at
+                # the last recorded iterate. A small scaled gradient means
+                # converged; otherwise the stage ends not converged.
+                stopped = stopping.grad_tol is None or float(norm) < stopping.grad_tol
+                break
         if not failed and stopping is None and n_run:
             failed = not np.all(
                 np.isfinite(np.asarray(bufs["loss"])[offset : offset + n_run])
