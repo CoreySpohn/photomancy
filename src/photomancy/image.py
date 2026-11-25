@@ -61,8 +61,9 @@ import jax.numpy as jnp
 import numpy as np
 from coronagraphoto import expected, planet_source_support
 from hwoutils.model_paths import join, resolve
-from optixstuff import Exposure, Instrument, Rates
+from optixstuff import AbstractDetector, Exposure, Instrument, Rates
 from optixstuff.grids import Image, Measure, SkyOrientation
+from optixstuff.rates import floor_rate
 from skyscapes.scene import Scene
 
 from photomancy.infer.fit import AbstractTerm
@@ -71,6 +72,52 @@ __all__ = ["ImageModel", "ImageTerm"]
 
 
 _COUNTS = ("electron", "electrons")
+
+
+def _masked_rates(rates, mask, *, preserve_floor=False, only_nonfinite=False):
+    """Give excluded pixels zero source rates before evaluating detector moments.
+
+    The detector laws handle zero mean and variance with safe operands. For the
+    likelihood, preclip tolerated negative totals using the original frame peak
+    (with nonfinite excluded components set to zero). This keeps the detector's
+    floor decision for scored pixels after zeroing the excluded ones. Draws only
+    replace nonfinite excluded inputs so finite rates keep their sampling behavior.
+    """
+    pixel_mask = mask[:, None, :, :] if rates.spectral else mask
+    total = rates.total()
+    if total.ndim != pixel_mask.ndim:
+        return rates
+
+    names = rates.component_names()
+    values = tuple(getattr(rates, name) for name in names)
+    keep = pixel_mask
+    if preserve_floor:
+        magnitude = sum(
+            jnp.abs(jnp.where(pixel_mask | jnp.isfinite(value), value, 0))
+            for value in values
+        )
+        peak = jnp.max(magnitude, axis=tuple(range(1, total.ndim)), keepdims=True)
+        _, bad = floor_rate(total, peak)
+        keep = pixel_mask & ~((total < 0) & ~bad)
+    if only_nonfinite:
+        keep = pixel_mask | jnp.isfinite(total)
+    values = tuple(jnp.where(keep, value, 0) for value in values)
+
+    variance = rates.variance
+    if variance is not None:
+        variance = _masked_rates(
+            variance, mask, preserve_floor=preserve_floor, only_nonfinite=only_nonfinite
+        )
+    n_pix = rates.n_pix
+    if n_pix is not None and n_pix.ndim == pixel_mask.ndim:
+        keep_pixels = pixel_mask | jnp.isfinite(n_pix) if only_nonfinite else pixel_mask
+        n_pix = jnp.where(keep_pixels, n_pix, 1)
+    return eqx.tree_at(
+        lambda r: (*[getattr(r, name) for name in names], r.variance, r.n_pix),
+        rates,
+        (*values, variance, n_pix),
+        is_leaf=lambda value: value is None,
+    )
 
 
 def _clipped(rates):
@@ -219,15 +266,25 @@ class _ImageScore(eqx.Module):
     static_beyond_speckle: bool = eqx.field(static=True)
 
     def __call__(self, rates) -> jax.Array:
-        shape = jnp.shape(rates.total())
+        total = rates.total()
+        shape = total.shape
         if jnp.shape(self.mask) != shape or jnp.shape(self.observed_e)[-3:] != shape:
             raise ValueError(
                 f"mask {jnp.shape(self.mask)} and observed frames "
                 f"{jnp.shape(self.observed_e)} must match the render's {shape}"
             )
         observed = jnp.where(self.mask, self.observed_e, 0.0)
-        log_prob = self.detector.log_prob(observed, rates, self.plan)
+        masked = _masked_rates(
+            rates,
+            self.mask,
+            preserve_floor=type(self.detector).log_prob is AbstractDetector.log_prob,
+        )
+        log_prob = self.detector.log_prob(observed, masked, self.plan)
         value = jnp.sum(jnp.where(self.mask, log_prob, 0.0), dtype=jnp.float64)
+        nan_rate = jnp.isnan(total)
+        if rates.variance is not None:
+            nan_rate = nan_rate | jnp.isnan(rates.variance.total())
+        value = jnp.where(jnp.any(self.mask & nan_rate), jnp.nan, value)
         support = _scored_flag(rates, self.static_beyond_speckle)
         if support is None:
             return value
@@ -587,6 +644,8 @@ class ImageTerm(AbstractTerm):
         """
         detector, rates, plan = self._rates(model)
         observed = jnp.where(self.mask, self.observed_e, 0.0)
+        preserve_floor = type(detector).log_prob is AbstractDetector.log_prob
+        rates = _masked_rates(rates, self.mask, preserve_floor=preserve_floor)
         mean, variance = detector.mean_and_variance(_clipped(rates), plan)
         defined = jnp.isfinite(detector.log_prob(observed, rates, plan))
         ok = self.mask & defined & (variance > 0)
@@ -612,7 +671,7 @@ class ImageTerm(AbstractTerm):
             ``observed_e``, zero where ``mask`` is false.
         """
         detector, rates, plan = self._rates(model)
-        root = detector.fisher_root(rates, plan)
+        root = detector.fisher_root(_masked_rates(rates, self.mask), plan)
         parts = root if root.ndim == 4 else root[None]
         used = jnp.broadcast_to(self.mask, self.observed_e.shape)
         return jnp.ravel(jnp.where(used[..., None, :, :, :], parts, 0.0))
@@ -630,6 +689,7 @@ class ImageTerm(AbstractTerm):
             scored pixels.
         """
         detector, rates, plan = self._rates(model)
+        rates = _masked_rates(rates, self.mask, only_nonfinite=True)
         batch = self.observed_e.shape[:-3]
         n_frames = 1
         for size in batch:
