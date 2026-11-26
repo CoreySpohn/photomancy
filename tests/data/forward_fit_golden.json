@@ -28,10 +28,11 @@
         "pa": 27.0
       }
     },
-    "legacy_log_density": {
-      "init": -84246.54727873544,
-      "truth": -1312.9176351685944,
-      "between": -22939.602336003307
+    "note": "Disk legacy densities adjusted for isotropic inclination in degrees, uniform PA over one turn, and sign-conditioned slopes. PA and slope locations are taken from init.",
+    "log_density": {
+      "init": -84249.52362414627,
+      "truth": -1315.6553518121552,
+      "between": -22942.468810623282
     },
     "n_pixels": 2601
   },

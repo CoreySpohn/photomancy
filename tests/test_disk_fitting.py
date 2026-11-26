@@ -9,10 +9,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.constants import rad2deg
 from hwoutils.epoch import Epoch
 from hwoutils.model_paths import resolve
 from optixstuff.grids import PixelGrid, SkyOrientation
-from priorities import LogNormal, Normal
+from orbix.system import IsotropicInclination
+from priorities import Normal
 
 from photomancy.disk import default_disk_prior, radiance_forward
 from photomancy.infer import MAP, Fit, ForwardTerm, Laplace, run
@@ -52,7 +54,7 @@ def _data(truth, forward, rng_seed=0):
 
 
 def _fit(system, data, sigma, forward, prior_system=None):
-    """The disk fit: laws centered on ``prior_system`` (default ``system``)."""
+    """Build the disk fit from the geometry of ``prior_system`` (default ``system``)."""
     prior = default_disk_prior(system if prior_system is None else prior_system)
     return Fit(system, prior, (ForwardTerm(forward, gaussian_loglike(data, sigma)),))
 
@@ -129,8 +131,11 @@ def test_disk_fit_is_finite_and_differentiable(make_system):
     image = forward(system)
     sigma = 0.02 * float(jnp.max(jnp.abs(image)))
     fit = _fit(system, image, sigma, forward)
+    assert fit.walls == {}
     assert tuple(fit.free) == PATHS
     x0 = _x(system)
+    edge_on = {**x0, "midplane_inc_deg": jnp.asarray(90.0)}
+    assert fit.to_real(edge_on)["midplane_inc_deg"] == 0.0
     assert jnp.isfinite(fit.log_density(x0))
     grad = jax.grad(fit.log_density)(x0)
     assert all(jnp.isfinite(g) for g in grad.values())
@@ -140,15 +145,11 @@ def test_disk_fit_is_finite_and_differentiable(make_system):
 # Medium: the golden needs the disk render at three points.
 @pytest.mark.float64_only(reason="stored float64 V&V reference values")
 @pytest.mark.medium
-def test_fit_density_matches_the_legacy_density_up_to_the_gaussian_constant(
-    make_system,
-):
-    """The fit density minus the Gaussian normalization is the stored legacy density.
+def test_fit_density_matches_the_prior_adjusted_golden(make_system):
+    """Compare the legacy residual sum plus the normalized disk prior at three points.
 
-    The legacy density was the unnormalized Gaussian plus the default prior, captured
-    at three points before the port (``data/forward_fit_golden.json``). ``ForwardTerm``
-    with ``gaussian_loglike`` adds ``-N/2 log(2 pi) - N log(sigma)``, so subtracting it
-    leaves the same prior and the same residual sum.
+    The stored values adjust the legacy densities by the change in log prior.
+    Subtract the Gaussian normalization from the fit to compare in the same measure.
     Tolerance basis: floating-point (rtol 1e-12, float64).
     Fails if: a path, a law, a scale or the forward changed in the port.
     """
@@ -163,7 +164,7 @@ def test_fit_density_matches_the_legacy_density_up_to_the_gaussian_constant(
         x = _x(make_system(**point))
         np.testing.assert_allclose(
             float(fit.log_density(x)) - constant,
-            GOLDEN["legacy_log_density"][name],
+            GOLDEN["log_density"][name],
             rtol=1e-12,
         )
 
@@ -215,32 +216,37 @@ def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
     check({p: weighted_mean(post.log_weights, v) for p, v in post.samples.items()})
 
 
-# Medium: the disk render at four points.
+# Medium: verify the relabelings through the disk renderer.
 @pytest.mark.medium
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_disk_aliases_have_equal_likelihood(make_system):
-    """The relabelings of one disk give the same image and the same log likelihood.
+def test_disk_aliases_have_equal_likelihood_and_equal_or_zero_prior(make_system):
+    """The forward and physical-coordinate prior respect the Grater symmetries.
 
-    Truth source: the symmetry of the model, not a stored number. The image of
-    (i, PA) equals that of (180 - i, PA + 180) and (i + 180, PA), and exchanging the
-    two slopes with both signs flipped is the same radial profile; the four points
-    (55, 30), (125, 210), (235, 30) and slopes (-5, 5) are one disk. Tolerance basis:
-    floating-point, rtol 1e-12 on the log likelihood (the images agree to about
-    3e-15, float64). The log prior differs between them by 11 to 51 nat, which is
-    why a fit can end in an alias.
-    Fails if a forward stops being invariant under one of the relabelings.
+    The (i, PA) mirrors, full turns in PA and exchanged slopes give the same
+    likelihood to rtol 1e-12 (the images agree to about 3e-15 in float64).
+    Fails if a supported mirror has different prior density, an out-of-range
+    label has any density, or a PA half-turn alone preserves the near side.
     """
     forward = radiance_forward(WL, TIME, grid=GRID)
     data, sigma = _data(make_system(), forward)
-    fit = _fit(make_system(), data, sigma, forward)
+    # Put both mirror labels inside the PA interval, away from its endpoints.
+    fit = _fit(make_system(pa=60.0), data, sigma, forward)
     points = [
         make_system(),
         make_system(incl=125.0, pa=210.0),
         make_system(incl=235.0),
+        make_system(pa=390.0),
         make_system(alpha_in=-5.0, alpha_out=5.0),
     ]
     values = [float(fit.log_likelihood(_x(p))) for p in points]
     np.testing.assert_allclose(values, values[0], rtol=1e-12)
+    log_priors = [float(fit.log_prior(_x(p))) for p in points]
+    assert math.isfinite(log_priors[0])
+    assert log_priors[1] == log_priors[0]
+    assert all(p == -math.inf for p in log_priors[2:])
+    # A half-turn alone reverses the near side in this anisotropically scattering disk.
+    half_turn = float(fit.log_likelihood(_x(make_system(pa=210.0))))
+    assert not np.isclose(half_turn, values[0], rtol=1e-12, atol=0)
 
 
 class _Scaled(eqx.Module):
@@ -270,27 +276,36 @@ def test_forward_is_swappable(make_system):
 
 
 # Medium: this consumer can pay for the deferred scene-stack import.
-@pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium
-def test_default_disk_prior_is_keyed_by_path_and_centers_on_system(make_system):
-    """default_disk_prior is one law per path, centered on the system's values."""
-    system = make_system()  # sma=50, ai=5, ao=-5, ksi0=1, incl=55, pa=30
+def test_default_disk_prior_support_and_centers(make_system):
+    """Check the isotropic degree measure, one PA turn and the ordered slopes."""
+    system = make_system(incl=125.0, pa=-340.0)
     prior = default_disk_prior(system)
     assert tuple(prior) == PATHS
-    assert isinstance(prior["disk.sma_AU"], LogNormal)
-    assert isinstance(prior["disk.ksi0_AU"], LogNormal)
-    assert isinstance(prior["midplane_inc_deg"], Normal)
-
-    # the laws are accepted by a Fit over the system and sit on its values: each
-    # median recovers the current value.
-    fit = Fit(system, prior)
-    x0 = _x(system)
-    assert jnp.isfinite(fit.log_prior(x0))
-    for path, law in prior.items():
-        np.testing.assert_allclose(
-            float(law.icdf(jnp.asarray(0.5))), float(x0[path]), rtol=1e-5
-        )
-    # weakly informative: the prior density is higher at the truth than far from it.
-    far = {path: value + 30.0 for path, value in x0.items()}
-    far["disk.sma_AU"] = x0["disk.sma_AU"] * 10.0
-    assert fit.log_prior(x0) > fit.log_prior(far)
+    x = _x(system)
+    assert all(jnp.isfinite(law.log_prob(x[path])) for path, law in prior.items())
+    for path in ("disk.sma_AU", "disk.ksi0_AU"):
+        np.testing.assert_array_max_ulp(prior[path].icdf(jnp.asarray(0.5)), x[path], 2)
+    inc = prior["midplane_inc_deg"]
+    np.testing.assert_array_equal(inc.support(), [0.0, 180.0])
+    assert jnp.all(jnp.isneginf(inc.log_prob(jnp.asarray([0.0, 180.0]))))
+    # One quarter of isotropic orientations lie within 60 degrees of the pole.
+    angles = jnp.asarray([60.0, 90.0])
+    quantiles = jnp.asarray([0.25, 0.5])
+    np.testing.assert_array_max_ulp(inc.icdf(quantiles), angles, 2)
+    np.testing.assert_array_max_ulp(inc.cdf(angles), quantiles, 2)
+    peak = jnp.asarray(math.log(math.pi / 360.0))
+    np.testing.assert_array_max_ulp(inc.log_prob(angles[1]), peak, 2)
+    key = jax.random.key(7)
+    draws = inc.sample(key, (3,), dtype=angles.dtype)
+    assert draws.dtype == angles.dtype
+    np.testing.assert_array_equal(
+        draws, IsotropicInclination().sample(key, (3,), dtype=angles.dtype) * rad2deg
+    )
+    np.testing.assert_array_equal(
+        prior["midplane_position_angle_deg"].support(), [-520.0, -160.0]
+    )
+    for path in ("disk.alpha_in", "disk.alpha_out"):
+        law = prior[path]
+        assert jnp.isneginf(law.log_prob(-x[path]))
+        assert law.log_prob(x[path]) > law.log_prob(2 * x[path])
