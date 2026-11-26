@@ -20,7 +20,7 @@ def masked_mean(values: jnp.ndarray, mask: jnp.ndarray) -> float:
     """
     count = jnp.sum(mask)
     masked_sum = jnp.sum(values * mask)
-    return masked_sum / jnp.maximum(count, 1.0)
+    return masked_sum / jnp.maximum(count, 1)
 
 
 def masked_std(
@@ -45,7 +45,7 @@ def masked_std(
 
     count = jnp.sum(mask)
     residuals = (values - mean) * mask
-    variance = jnp.sum(residuals**2) / jnp.maximum(count - 1, 1.0)
+    variance = jnp.sum(residuals**2) / jnp.maximum(count - 1, 1)
     return jnp.sqrt(variance)
 
 
@@ -86,13 +86,14 @@ def student_t_sf(t: jnp.ndarray, df: jnp.ndarray) -> jnp.ndarray:
     Returns:
         Elementwise survival probability, NaN where df <= 0 or t is NaN.
     """
-    t = jnp.asarray(t, dtype=jnp.result_type(float))
-    df = jnp.asarray(df, dtype=jnp.result_type(float))
+    t, df = jnp.asarray(t), jnp.asarray(df)
+    dtype = jnp.result_type(t, df, 0.0)
+    t, df = t.astype(dtype), df.astype(dtype)
     safe_df = jnp.maximum(df, 1e-6)
     x = safe_df / (safe_df + t**2)
     tail = 0.5 * betainc(safe_df / 2.0, 0.5, x)
     sf = jnp.where(t >= 0, tail, 1.0 - tail)
-    return jnp.where(df > 0, sf, jnp.nan)
+    return jnp.where(df > 0, sf, jnp.asarray(jnp.nan, dtype=dtype))
 
 
 def normal_sf(z: jnp.ndarray) -> jnp.ndarray:
@@ -107,8 +108,9 @@ def normal_sf(z: jnp.ndarray) -> jnp.ndarray:
     Returns:
         Elementwise survival probability, NaN where z is NaN.
     """
-    z = jnp.asarray(z, dtype=jnp.result_type(float))
-    return 0.5 * erfc(z / jnp.sqrt(2.0))
+    z = jnp.asarray(z)
+    z = z.astype(jnp.result_type(z, 0.0))
+    return 0.5 * erfc(z / jnp.sqrt(jnp.asarray(2.0, dtype=z.dtype)))
 
 
 def nanmasked_mean(values: jnp.ndarray, mask: jnp.ndarray) -> jnp.ndarray:
@@ -125,7 +127,8 @@ def nanmasked_mean(values: jnp.ndarray, mask: jnp.ndarray) -> jnp.ndarray:
     Returns:
         Mean of valid values, NaN if none are valid.
     """
-    return jnp.nanmean(jnp.where(mask, values, jnp.nan))
+    nan = jnp.asarray(jnp.nan, dtype=jnp.result_type(values, 0.0))
+    return jnp.nanmean(jnp.where(mask, values, nan))
 
 
 def nanmasked_population_std(
@@ -149,7 +152,9 @@ def nanmasked_population_std(
     """
     if mean is None:
         mean = nanmasked_mean(values, mask)
-    variance = jnp.nanmean(jnp.where(mask, (values - mean) ** 2, jnp.nan))
+    squared = (values - mean) ** 2
+    nan = jnp.asarray(jnp.nan, dtype=jnp.result_type(squared, 0.0))
+    variance = jnp.nanmean(jnp.where(mask, squared, nan))
     return jnp.sqrt(variance)
 
 
@@ -170,13 +175,15 @@ def grubbs_fpf(g: jnp.ndarray, n: jnp.ndarray) -> jnp.ndarray:
     Returns:
         Elementwise false positive fraction in [0, 1], NaN where invalid.
     """
-    g = jnp.asarray(g, dtype=jnp.result_type(float))
-    n = jnp.asarray(n, dtype=jnp.result_type(float))
+    g, n = jnp.asarray(g), jnp.asarray(n)
+    dtype = jnp.result_type(g, n, 0.0)
+    g, n = g.astype(dtype), n.astype(dtype)
     denom = (n - 1.0) ** 2 - n * g**2
     t_sq = n * (n - 2.0) * g**2 / jnp.maximum(denom, 1e-10)
     t = jnp.sqrt(jnp.maximum(t_sq, 0.0))
-    p = jnp.minimum(n * student_t_sf(t, n - 2.0), 1.0)
-    p = jnp.where(g < (n - 1.0) / jnp.sqrt(n), p, 0.0)
-    p = jnp.where(g >= 0, p, 1.0)
-    p = jnp.where(n >= 3, p, jnp.nan)
-    return jnp.where(jnp.isnan(g), jnp.nan, p)
+    zero, one, nan = jnp.asarray([0.0, 1.0, jnp.nan], dtype=dtype)
+    p = jnp.minimum(n * student_t_sf(t, n - 2.0), one)
+    p = jnp.where(g < (n - 1.0) / jnp.sqrt(n), p, zero)
+    p = jnp.where(g >= 0, p, one)
+    p = jnp.where(n >= 3, p, nan)
+    return jnp.where(jnp.isnan(g), nan, p)

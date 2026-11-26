@@ -144,6 +144,7 @@ jobs:
         run: |
           status=0
           pytest README.md docs --markdown-docs --markdown-docs-syntax=superfences \
+            -p hwoutils.precision_guard \
             -p no:cacheprovider --timeout=120 -ra --tb=short \
             --junitxml=junit-docs.xml || status=$?
           # Exit 5 means no Python fences to run, which is not a failure.

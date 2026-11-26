@@ -2,6 +2,8 @@
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
+from hwoutils.testing import assert_precision_closed
 
 from photomancy.postproc.core.detection.significance import (
     AnnulusSigmaTest,
@@ -18,6 +20,16 @@ def _samples(values, n_pad=8):
     samples = jnp.concatenate([values, jnp.zeros(pad)])
     mask = jnp.concatenate([jnp.ones_like(values, dtype=bool), jnp.zeros(pad, bool)])
     return samples, mask
+
+
+@pytest.mark.float64_only(reason="Float32 closure is traced with x64 available.")
+@pytest.mark.parametrize("test_class", [TwoSampleTTest, AnnulusSigmaTest, GrubbsTest])
+def test_significance_is_closed_on_float32_responses(test_class):
+    """Fails if float32 responses produce any float64 intermediate or result."""
+    signal = jnp.asarray(6.0, dtype=jnp.float32)
+    samples = jnp.asarray([1.0, 2.0, 3.0, 4.0], dtype=jnp.float32)
+    mask = jnp.ones(samples.shape, dtype=bool)
+    assert_precision_closed(test_class(), signal, samples, mask)
 
 
 class TestTwoSampleTTest:

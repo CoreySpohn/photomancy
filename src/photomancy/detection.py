@@ -48,9 +48,11 @@ from hwoutils.numerics import roundoff
 from hwoutils.precision import require_float64
 from priorities import AbstractDistribution
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer._scale import information_scale
 from photomancy.infer.backends.staged import (
     STOP_MIN_DELTA,
+    STOP_REL_DELTA,
     default_stage,
     map_fit,
 )
@@ -104,7 +106,7 @@ def _check_curvature(likelihood) -> None:
         )
 
 
-_BRACKET_RTOL = 1e-8  # tol: algorithm, relative width of the amplitude bracket.
+_BRACKET_RTOL = 1e-8  # tol: algorithm, 1e-8 of the amplitude scale (dimensionless)
 
 
 def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
@@ -363,7 +365,7 @@ def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 8):
     _check_curvature(loglike_of_prediction)
     base = jnp.asarray(base)
     template = jnp.asarray(template)
-    dtype = jnp.result_type(base, template, float)
+    dtype = jnp.result_type(base, template, 0.0)
 
     score = getattr(loglike_of_prediction, "detection_score", loglike_of_prediction)
 
@@ -404,7 +406,7 @@ def _map_terms(terms, n_newton, position):
             for (likelihood, base, _), image in zip(terms, images, strict=True)
         )
 
-    dtype = jnp.result_type(*(b for _, b, _ in terms), float)
+    dtype = jnp.result_type(*(b for _, b, _ in terms), 0.0)
     n_elements = sum(
         prod(jnp.broadcast_shapes(b.shape, jnp.shape(t)))
         for (_, b, _), t in zip(terms, images, strict=True)
@@ -545,10 +547,8 @@ def _profile_split(fit, x, amplitude, shape, n_newton):
         holder.append(stat)
         return tuple(p for p, _ in parts), dyn
 
-    zero = jnp.zeros((), jnp.float64)
-    base, tangent, dyn = jax.jvp(
-        render, (zero,), (jnp.ones((), jnp.float64),), has_aux=True
-    )
+    zero = _as_wide(0)
+    base, tangent, dyn = jax.jvp(render, (zero,), (jnp.ones_like(zero),), has_aux=True)
     scores = tuple(eqx.combine(d, s) for d, s in zip(dyn, holder[-1], strict=True))
 
     def objective(a):
@@ -556,12 +556,10 @@ def _profile_split(fit, x, amplitude, shape, n_newton):
             score(_linear_in(a, p, t))
             for score, p, t in zip(scores, base, tangent, strict=True)
         )
-        return jnp.asarray(total, jnp.float64)
+        return _as_wide(total)
 
     n_elements = sum(p.size for p in jax.tree.leaves(base) if eqx.is_array(p))
-    a_hat, z, sigma = _summarize(
-        *_profile(objective, n_newton, jnp.float64, n_elements)
-    )
+    a_hat, z, sigma = _summarize(*_profile(objective, n_newton, zero.dtype, n_elements))
     model = fit.model_at({**x, amplitude: jnp.reshape(a_hat, shape)})
     actual = tuple(term.split(model)[0] for term in fit.terms)
     linear = tuple(_linear_in(a_hat, p, t) for p, t in zip(base, tangent, strict=True))
@@ -577,10 +575,10 @@ def _profile_render(fit, x, amplitude, shape, n_newton):
 
     def objective(a):
         full = {**x, amplitude: jnp.reshape(a, shape)}
-        return jnp.asarray(fit.log_likelihood(full), jnp.float64)
+        return _as_wide(fit.log_likelihood(full))
 
     n_elements = sum(p.size for p in jax.tree.leaves(fit.terms) if eqx.is_array(p))
-    return _summarize(*_profile(objective, n_newton, jnp.float64, n_elements))
+    return _summarize(*_profile(objective, n_newton, _as_wide(0).dtype, n_elements))
 
 
 @eqx.filter_jit
@@ -589,7 +587,7 @@ def _detect(fit, trials, amplitude, n_newton, batch_size, once):
     shape = jnp.shape(resolve(fit.model, amplitude))
 
     def at(x):
-        trial = {**x, amplitude: jnp.zeros(shape, jnp.float64)}
+        trial = {**x, amplitude: jnp.broadcast_to(_as_wide(0), shape)}
         model = fit._require_float64_forward("detect", trial)
         if once and _splits(fit, model):
             return _profile_split(fit, x, amplitude, shape, n_newton)
@@ -778,7 +776,7 @@ class LikelihoodEstimate(eqx.Module):
         return jnp.sqrt(jnp.diag(self.cov))
 
 
-_EIGENVALUE_FLOOR = 1e-8
+_EIGENVALUE_FLOOR = 1e-8  # tol: algorithm, 1e-8 dimensionless scaled eigenvalue
 """Smallest correlation-form eigenvalue of a direction the data constrain."""
 
 _FLAT_GRADIENT = 1e-3
@@ -855,7 +853,7 @@ class _LikelihoodInReal(eqx.Module):
 
     def __call__(self, u):
         x, _ = self.fit.from_real(u)
-        return jnp.asarray(self.fit.log_likelihood(x), jnp.float64)
+        return _as_wide(self.fit.log_likelihood(x))
 
 
 _BACKTRACKS = 8
@@ -1032,7 +1030,7 @@ def measure(
     """
     require_float64("measure")
     _check_entries(start, set(fit.free))
-    start = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), start)
+    start = jax.tree.map(_as_wide, start)
     fit._require_float64_forward("measure", start)
     flat, _ = jax.flatten_util.ravel_pytree(start)
     _admit_information(
@@ -1044,7 +1042,7 @@ def measure(
     labels = jax.tree.map(lambda _: "all", u)
     result = map_fit(_LikelihoodInReal(fit), u, labels, {}, (stage,))
     trace = result.stages[0]
-    u = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), result.params)
+    u = jax.tree.map(_as_wide, result.params)
     width = flat.size
     nan = jnp.full((width, width), jnp.nan)
     if not bool(jnp.all(jnp.isfinite(jax.flatten_util.ravel_pytree(u)[0]))):
@@ -1095,7 +1093,7 @@ def measure(
     cov, corr, positive, min_eig = _correlation_inverse(info)
     grad = _gradient(fit, x)
     grad_norm, decrement, flat_gradient = _stationarity(info, grad)
-    likelihood = jnp.asarray(fit.log_likelihood(x), jnp.float64)
+    likelihood = _as_wide(fit.log_likelihood(x))
     finite = (
         jnp.all(jnp.isfinite(jax.flatten_util.ravel_pytree(x)[0]))
         & jnp.isfinite(likelihood)
@@ -1106,7 +1104,9 @@ def measure(
     reached = -jnp.min(jnp.asarray(trace.loss)) if trace.n_steps else -jnp.inf
     # the loss inside the optimizer and this evaluation sum the pixels in different
     # orders, so they agree to about 1e-12 of the value (1.3e-7 nat at 6.5e4)
-    below = likelihood < reached - jnp.maximum(STOP_MIN_DELTA, 1e-10 * jnp.abs(reached))
+    scale = jnp.abs(reached)
+    stall_delta = jnp.maximum(STOP_MIN_DELTA, STOP_REL_DELTA * scale)
+    below = likelihood < reached - jnp.maximum(stall_delta, roundoff(scale))
     converged = (
         (decrement <= max_decrement)
         & (flat_gradient < _FLAT_GRADIENT)

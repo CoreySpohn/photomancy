@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.backends.base import (
     AbstractBackend,
@@ -119,7 +120,7 @@ class NestedSampling(AbstractBackend):
         results = ns.run(key=key).to_result().trim()
         flat = jnp.asarray(results.X_samples["x"]).reshape(-1, dim)
         converged = jnp.asarray(results.termination_reason) == 0
-        nan = jnp.asarray(jnp.nan, jnp.float64)
+        nan = _as_wide(jnp.nan)
         return BackendDraws(
             samples=jax.vmap(unravel_x)(flat),
             log_weights=jnp.asarray(results.log_dp),

@@ -33,9 +33,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock
+from hwoutils.precision import PrecisionError
 from jax.flatten_util import ravel_pytree
 from priorities import AbstractDistribution, Mixture, MultivariateNormal
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.diagnostics import kish_ess, mc_se, pareto_khat, weighted_mean
 from photomancy.infer.evidence import importance_evidence
 from photomancy.infer.fit import Fit, _check_draws, _wide_coordinates, _write_block
@@ -143,8 +145,8 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
     support swap) cannot refuse the slice: the gate counts NaN and ``+inf`` at live
     draws only.
     """
-    lw = jnp.asarray(log_weights, jnp.float64)
-    ratio = jnp.asarray(log_ratio, jnp.float64)
+    lw = _as_wide(log_weights)
+    ratio = _as_wide(log_ratio)
     live = ~jnp.isneginf(lw)
     bad = jnp.any(jnp.isnan(lw)) | jnp.any(jnp.isnan(ratio) & live)
     bad = bad | jnp.any(jnp.isposinf(ratio) & live)
@@ -161,7 +163,7 @@ def _reweight_slice(log_weights, log_ratio, min_n_eff, max_khat):
     khat = pareto_khat(new)
     khat_fails = jnp.isfinite(max_khat) & ~(khat <= max_khat)
     refuse = bad | no_support | ~(n_eff >= min_n_eff) | khat_fails
-    nan = jnp.asarray(jnp.nan, jnp.float64)
+    nan = _as_wide(jnp.nan)
     return (
         jnp.where(refuse, nan, new),
         jnp.where(refuse, nan, log_z_new - log_z_old),
@@ -314,7 +316,7 @@ def _support_swap(old_fit, new_fit, moved):
         x = _wide_coordinates(x)
         model = old_fit.model_at(x)
         x_new = dict(x)
-        logdet = jnp.zeros((), jnp.float64)
+        logdet = _as_wide(0)
         finite = jnp.asarray(True)
         for key in moved:
             old_block, new_block = old_fit.free[key], new_fit.free[key]
@@ -396,7 +398,9 @@ class Posterior(eqx.Module):
         """Refuse a malformed posterior on the host.
 
         Raises:
-            ValueError: For a wrong ``kind``, key set, dtype or shape.
+            ValueError: For a wrong ``kind``, key set or shape.
+            PrecisionError: For a log weight, target or evidence that is not
+                float64.
         """
         if self.kind not in _KINDS:
             raise ValueError(f"kind must be one of {_KINDS}, got {self.kind!r}")
@@ -404,7 +408,7 @@ class Posterior(eqx.Module):
         for name in ("log_weights", "log_target", "log_evidence", "log_evidence_se"):
             dtype = jnp.asarray(getattr(self, name)).dtype
             if dtype != jnp.float64:
-                raise ValueError(f"{name} must be float64, got {dtype}")
+                raise PrecisionError(f"{name} must be float64, got {dtype}")
         shape = jnp.shape(self.log_weights)
         if not shape:
             raise ValueError("log_weights needs a draw axis")
@@ -489,7 +493,7 @@ class Posterior(eqx.Module):
         weights = jnp.full(size, jnp.where(none, jnp.nan, -math.log(size)))
         return Posterior(
             samples=take_draws(self.samples, idx),
-            log_weights=weights.astype(jnp.float64),
+            log_weights=_as_wide(weights),
             log_target=jnp.take(self.log_target, idx, axis=0),
             log_evidence=self.log_evidence,
             log_evidence_se=self.log_evidence_se,
@@ -548,7 +552,7 @@ class Posterior(eqx.Module):
         )
         if support_covered is not None:
             covered = jnp.asarray(support_covered)
-            nan = jnp.asarray(jnp.nan, jnp.float64)
+            nan = _as_wide(jnp.nan)
             new_lw = jnp.where(covered, new_lw, nan)
             increment = jnp.where(covered, increment, nan)
             increment_se = jnp.where(covered, increment_se, nan)
@@ -562,7 +566,7 @@ class Posterior(eqx.Module):
         if quadrature:
             refused = jnp.any(jnp.isnan(new_lw))
             increment_se = jnp.where(refused, jnp.nan, 0.0)
-            nan = jnp.asarray(jnp.nan, jnp.float64)
+            nan = _as_wide(jnp.nan)
             info = ReweightInfo(
                 nan, nan, refused, info.support_covered, info.log_mass_ratio
             )
@@ -570,7 +574,7 @@ class Posterior(eqx.Module):
         return Posterior(
             samples=self.samples if samples is None else samples,
             log_weights=new_lw,
-            log_target=jnp.asarray(self.log_target, jnp.float64) + target_ratio,
+            log_target=_as_wide(self.log_target) + target_ratio,
             log_evidence=self.log_evidence + increment,
             log_evidence_se=jnp.sqrt(self.log_evidence_se**2 + increment_se**2),
             fit=new_fit,
@@ -725,10 +729,8 @@ class Posterior(eqx.Module):
 
         def one(x):
             model = fit.model_at(x)
-            ratio = jnp.asarray(term(model), jnp.float64)
-            return (
-                ratio if old is None else ratio - jnp.asarray(old(model), jnp.float64)
-            )
+            ratio = _as_wide(term(model))
+            return ratio if old is None else ratio - _as_wide(old(model))
 
         dead = jnp.isneginf(self.log_weights)
         ratio = fit._over_batch(
@@ -865,10 +867,10 @@ class Posterior(eqx.Module):
             means, variances = jax.vmap(one)(samples)
         else:
             means, variances = jax.lax.map(one, samples, batch_size=batch_size)
-        w = jnp.exp(jnp.asarray(self.log_weights, jnp.float64))
+        w = jnp.exp(_as_wide(self.log_weights))
 
         def average(a):
-            return jnp.tensordot(w, jnp.asarray(a, jnp.float64), axes=(0, 0))
+            return jnp.tensordot(w, _as_wide(a), axes=(0, 0))
 
         mean = jax.tree.map(average, means)
         noise = jax.tree.map(average, variances)

@@ -21,6 +21,7 @@ from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Resolution, Transmission
 from orbix.system import System
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.fit import AbstractTerm
 from photomancy.measurements._observables import (
     _band_contrasts,
@@ -557,9 +558,9 @@ def system_separation_dmag(system, time_d, *, albedo_area_AU2=None):
 def _fixed_noise_null(alpha_pred, dMag_pred, data):
     """Score censored photometry in units of planet-free noise."""
     dmag0 = interpolate_contrast_curve(
-        jnp.asarray(alpha_pred, jnp.float64),
-        jnp.asarray(data.sep_grid, jnp.float64),
-        jnp.asarray(data.dmag0_grid, jnp.float64),
+        _as_wide(alpha_pred),
+        _as_wide(data.sep_grid),
+        _as_wide(data.dmag0_grid),
     )
     # Clip the exponent when the sampler proposes an implausibly bright orbit.
     exp_arg = jnp.clip(-0.4 * (dMag_pred - dmag0), max=200.0)
@@ -604,12 +605,12 @@ def loglike_dmag(alpha_pred, dMag_pred, data):
     require_float64("Magnitude log likelihood")
     mask = data.valid  # boolean
 
-    dMag_pred = jnp.asarray(dMag_pred, jnp.float64)
+    dMag_pred = _as_wide(dMag_pred)
     ll_null = _fixed_noise_null(alpha_pred, dMag_pred, data)
 
     # --- Detection branch: Gaussian on measured dMag ---
-    residual = dMag_pred - jnp.asarray(data.dmag_obs, jnp.float64)
-    error = jnp.asarray(data.dmag_err, jnp.float64)
+    residual = dMag_pred - _as_wide(data.dmag_obs)
+    error = _as_wide(data.dmag_err)
     safe_err = jnp.where(error > 0, error, 1.0)
     ll_det = -0.5 * (residual / safe_err) ** 2 - jnp.log(
         safe_err * jnp.sqrt(2.0 * jnp.pi)
@@ -729,9 +730,9 @@ class PhotometryTerm(AbstractTerm):
         """
         require_float64("Photometry log likelihood")
         prediction, data = self._prediction_and_data(model)
-        observed = jnp.asarray(data.contrast, jnp.float64)
-        error = jnp.asarray(data.contrast_err, jnp.float64)
-        z = (observed - jnp.asarray(prediction, jnp.float64)) / error
+        observed = _as_wide(data.contrast)
+        error = _as_wide(data.contrast_err)
+        z = (observed - _as_wide(prediction)) / error
         detection = -0.5 * z**2 - jnp.log(error * jnp.sqrt(2.0 * jnp.pi))
         rows = jnp.where(data.is_upper_limit, norm.logcdf(z), detection)
         return jnp.sum(jnp.where(data.valid, rows, 0.0))
