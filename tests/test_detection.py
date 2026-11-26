@@ -683,6 +683,20 @@ def test_curvature_block_matches_closed_form_and_finite_difference():
     np.testing.assert_allclose(single, [[a_mat[2, 2]]], rtol=1e-12)
 
 
+@pytest.mark.float64_only(reason="float64 curvature of selected coordinates")
+def test_curvature_block_checks_only_selected_coordinates():
+    """A float32 metadata leaf has no effect on a unit quadratic in a wide leaf."""
+    params = {"value": jnp.float64(1), "metadata": jnp.float32(2)}
+
+    def density(p):
+        return -0.5 * p["value"] ** 2
+
+    block = curvature_block(density, params, lambda p: p["value"])
+    np.testing.assert_array_equal(block, [[1.0]])
+    with pytest.raises(PrecisionError, match=r"curvature_block.*float32"):
+        curvature_block(density, params, lambda p: p["metadata"])
+
+
 # ----- detect and measure over an ImageTerm ---------------------------------------
 
 _VARIANCE = 100.0
@@ -794,6 +808,30 @@ def _image_problem(kind, seed=11):
         exposure=exposure,
     )
     return _fit(_SkyImage(image)), mean, mask
+
+
+@pytest.mark.float64_only(reason="formal errors require a float64 image forward")
+def test_detect_checks_the_nested_image_owner():
+    """The wrapper checks its held image instrument even with a wide sky model."""
+    detector = make_detector("constant")
+    instrument = make_instrument(detector)
+    exposure = make_exposure(make_scene(contrast=0.0), instrument)
+    shape = (1, *detector.shape)
+    image = ImageTerm(
+        jnp.zeros(shape, jnp.float32),
+        jnp.ones(shape, bool),
+        instrument=instrument,
+        exposure=exposure,
+    )
+    fit = _fit(_SkyImage(image))
+
+    def diameter(f):
+        return f.terms[0].image.instrument.primary.circumscribed_diameter_m
+
+    fit = eqx.tree_at(diameter, fit, jnp.asarray(diameter(fit), jnp.float32))
+    path = r"terms\[0\]\.image\.instrument\.primary\.circumscribed_diameter_m"
+    with pytest.raises(PrecisionError, match=rf"detect.*{path}"):
+        detect(fit, {"pa_deg": _PAS}, amplitude="amplitude")
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")

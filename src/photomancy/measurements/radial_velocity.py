@@ -308,10 +308,12 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
 
     # Total variance: measurement + jitter
     inst_ids = jnp.where(mask, inst_ids, 0)
-    err = jnp.where(mask, rv_err, 1.0)
-    jitter = jnp.where(mask, jitters[inst_ids], 0.0)
+    err = jnp.where(mask, jnp.asarray(rv_err, jnp.float64), 1.0)
+    jitter = jnp.where(mask, jnp.asarray(jitters, jnp.float64)[inst_ids], 0.0)
     var = err**2 + jitter**2
     w = jnp.where(mask, 1.0 / var, 0.0)
+    rv_obs = jnp.asarray(rv_obs, jnp.float64)
+    rv_model = jnp.asarray(rv_model, jnp.float64)
     shifted = _centered_rv_residual(rv_obs, rv_model, inst_ids, mask, n_inst)
     A = jax.ops.segment_sum(w, inst_ids, num_segments=n_inst)
     B = jax.ops.segment_sum(w * shifted, inst_ids, num_segments=n_inst)
@@ -356,6 +358,7 @@ class RadialVelocityTerm(AbstractTerm):
             read.
         jitters: Fixed per-instrument jitter (m/s), shape ``(data.n_inst,)``, or None.
         jitter_path: Model path of the jitter leaf (m/s), or None.
+        forward_fields: Empty tuple because the term differentiates no stored fields.
         reads: Model paths a held build cached. Empty: the term reads the model
             directly.
     """
@@ -364,6 +367,7 @@ class RadialVelocityTerm(AbstractTerm):
     system_path: str = eqx.field(static=True, default="")
     jitters: jnp.ndarray | None = None
     jitter_path: str | None = eqx.field(static=True, default=None)
+    forward_fields = ()
     reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):

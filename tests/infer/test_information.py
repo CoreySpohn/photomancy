@@ -1,17 +1,21 @@
 """``Fit.information``: the observed Hessian and the Fisher matrix of a fit."""
 
+from functools import partial
+
 import equinox as eqx
 import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.leaves import canonical
 from hwoutils.memory import MemoryLimit
 from hwoutils.precision import PrecisionError
 from priorities import Normal, Uniform
 from scipy import integrate
 
-from photomancy.infer import AbstractTerm, Fit, ForwardTerm
+from photomancy.detection import curvature_block, measure
+from photomancy.infer import MAP, AbstractTerm, Fit, ForwardTerm, Laplace, run
 from photomancy.infer._scale import SCALE_SPAN, information_scale
 from photomancy.infer.likelihoods import (
     _KERNELS,
@@ -321,3 +325,175 @@ def test_information_scale_is_the_root_norm_in_unconstrained_coordinates():
     np.testing.assert_allclose(custom["other"], 10.0 * got["flux"], rtol=1e-12)
     rootless = Fit(base, laws, (term, _NoRoot()))
     assert information_scale(rootless, u, include_prior=True) is None
+
+
+@pytest.mark.float64_only(reason="float64 coordinates with a float32 forward owner")
+@pytest.mark.parametrize(
+    ("owner", "path"),
+    [
+        (lambda f: f.model, r"model\.mu"),
+        (lambda f: f.terms[0].forward, r"terms\[0\]\.forward\.matrix"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("operation", "evaluate"),
+    [
+        ("Fit.information", lambda f, x: f.information(x, kind="observed")),
+        ("Fisher scale", lambda f, x: information_scale(f, x, include_prior=True)),
+        ("measure", measure),
+        (
+            "curvature_block",
+            lambda f, x: curvature_block(f.log_density, x, lambda p: p["mu"]),
+        ),
+        ("Laplace", lambda f, x: run(f, Laplace(init=x), jax.random.key(0))),
+    ],
+)
+def test_curvature_names_the_narrow_owner(operation, evaluate, owner, path):
+    """Every curvature entry reports the first narrow array of the model or forward."""
+    fit = _fit(np.eye(3), gaussian_loglike(np.zeros(3), 1.0))
+    fit = eqx.tree_at(owner, fit, canonical(owner(fit), precision="float32"))
+    with pytest.raises(PrecisionError, match=rf"{operation}.*{path}"):
+        evaluate(fit, {"mu": jnp.ones(3)})
+
+
+@pytest.mark.float64_only(reason="float64 curvature checks held forward objects")
+@pytest.mark.parametrize(
+    "wrapper", ["partial", "eqx_partial", "unbound", "closure", "opaque_method"]
+)
+def test_curvature_block_checks_wrapped_density(wrapper):
+    """Bound densities expose their fit; a closure supplies its fit explicitly."""
+    fit = _fit(np.eye(2, dtype=np.float32), gaussian_loglike(np.zeros(2), 1.0))
+    owner = None
+    if wrapper == "closure":
+
+        def density(x):
+            return fit.log_density(x)
+
+        owner = fit
+    elif wrapper == "opaque_method":
+
+        class Adapter:
+            def __init__(self, forward_fit):
+                self.fit = forward_fit
+
+            def evaluate(self, x):
+                return self.fit.log_density(x)
+
+        density = Adapter(fit).evaluate
+        owner = fit
+    elif wrapper == "unbound":
+        density = partial(Fit.log_density, fit)
+    else:
+        wrap = partial if wrapper == "partial" else eqx.Partial
+        density = wrap(fit.log_density, batch_size=1)
+    with pytest.raises(
+        PrecisionError, match=r"curvature_block.*terms\[0\]\.forward\.matrix"
+    ):
+        curvature_block(density, {"mu": jnp.ones(2)}, lambda p: p["mu"], owner=owner)
+
+
+@pytest.mark.float64_only(reason="float64 curvature checks bound forward arguments")
+@pytest.mark.parametrize("wrap", [partial, eqx.Partial])
+@pytest.mark.parametrize("argument", ["module", "explicit_array", "unused_metadata"])
+def test_curvature_block_checks_partial_arguments(wrap, argument):
+    """A bound gain or response can set the precision of a generic density."""
+    params = _Model(jnp.ones(2))
+    owner = None
+    if argument == "unused_metadata":
+
+        def quadratic(model, metadata):
+            return -0.5 * jnp.sum(model.mu**2)
+
+        density = wrap(quadratic, metadata=jnp.float32(1))
+        np.testing.assert_array_equal(
+            curvature_block(density, params, lambda model: model.mu), np.eye(2)
+        )
+        return
+    if argument == "module":
+
+        def evaluate(response, model):
+            return -jnp.sum(response(model) ** 2)
+
+        density = wrap(evaluate, _Linear(jnp.eye(2, dtype=jnp.float32)))
+        path = r"args\[0\]\.matrix"
+    else:
+
+        def evaluate(model, *, gain):
+            return -jnp.sum((model.mu * gain) ** 2)
+
+        owner = jnp.float32(1)
+        density = wrap(evaluate, gain=owner)
+        path = "owner"
+    with pytest.raises(PrecisionError, match=rf"curvature_block.*{path}"):
+        curvature_block(density, params, lambda model: model.mu, owner=owner)
+
+
+@pytest.mark.float64_only(reason="float64 information with narrow observations")
+@pytest.mark.parametrize("forward_dtype", [jnp.float32, jnp.float64])
+def test_nested_term_declares_owners_through_module(forward_dtype):
+    """Only the forward response of a nested term controls curvature precision."""
+
+    class Holder(eqx.Module):
+        term: ForwardTerm
+
+    class Wrapped(_NoRoot):
+        holder: Holder
+
+        def __call__(self, model):
+            return self.holder.term(model)
+
+    like = gaussian_loglike(jnp.zeros(2, jnp.float32), jnp.float32(1))
+    inner = ForwardTerm(_Linear(jnp.eye(2, dtype=forward_dtype)), like)
+    fit = Fit(_Model(jnp.zeros(2)), {"mu": Normal(0.0, 1.0)}, (Wrapped(Holder(inner)),))
+    x = {"mu": jnp.ones(2)}
+    if forward_dtype == jnp.float32:
+        with pytest.raises(
+            PrecisionError, match=r"terms\[0\]\.holder\.term\.forward\.matrix"
+        ):
+            fit.information(x, kind="observed")
+    else:
+        np.testing.assert_array_equal(
+            fit.information(x, kind="observed"), 2 * np.eye(2)
+        )
+
+
+@pytest.mark.float64_only(reason="float64 curvature checks declared forward arrays")
+def test_term_can_declare_raw_array_as_forward_owner():
+    """An array outside a module may set the working precision of a custom forward."""
+
+    class Response(_NoRoot):
+        gain: jax.Array
+        forward_fields = ("gain",)
+
+        def __call__(self, model):
+            return -0.5 * jnp.sum((self.gain * model.mu) ** 2)
+
+    fit = Fit(
+        _Model(jnp.zeros(1)), {"mu": Normal(0.0, 1.0)}, (Response(jnp.float32(1)),)
+    )
+    with pytest.raises(PrecisionError, match=r"Fit.information.*terms\[0\]\.gain"):
+        fit.information({"mu": jnp.ones(1)}, kind="observed")
+
+
+@pytest.mark.float64_only(reason="MAP Fisher scaling requires float64")
+@pytest.mark.parametrize("phase", ["shape", "derivative"])
+def test_map_propagates_fisher_root_precision_error(phase):
+    """A refusal in the wide Fisher root or its derivative must reach the caller."""
+
+    @jax.custom_jvp
+    def root(x):
+        return x
+
+    @root.defjvp
+    def root_jvp(primals, tangents):
+        raise PrecisionError("Fisher derivative precision failure")
+
+    class RefusesRoot(_NoRoot):
+        def fisher_root(self, model):
+            if phase == "shape":
+                raise PrecisionError("Fisher shape precision failure")
+            return root(model.mu)
+
+    fit = Fit(_Model(jnp.zeros(1)), {"mu": Normal(0.0, 1.0)}, (RefusesRoot(),))
+    with pytest.raises(PrecisionError, match=f"Fisher {phase} precision failure"):
+        run(fit, MAP(init={"mu": jnp.zeros(1)}, n_steps=1), jax.random.key(0))

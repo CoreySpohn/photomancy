@@ -81,9 +81,12 @@ def loglike_pm_anomaly(anom_pred, data):
         PrecisionError: If float64 is unavailable.
     """
     require_float64("Proper motion log likelihood")
-    resid = data.pm_anomaly - anom_pred
-    prec = jnp.linalg.inv(data.pm_anomaly_cov)
-    _, logdet = jnp.linalg.slogdet(data.pm_anomaly_cov)
+    resid = jnp.asarray(data.pm_anomaly, jnp.float64) - jnp.asarray(
+        anom_pred, jnp.float64
+    )
+    covariance = jnp.asarray(data.pm_anomaly_cov, jnp.float64)
+    prec = jnp.linalg.inv(covariance)
+    _, logdet = jnp.linalg.slogdet(covariance)
     ll = -0.5 * resid @ prec @ resid - 0.5 * logdet - jnp.log(2.0 * jnp.pi)
     return jnp.where(data.valid, ll, 0.0)
 
@@ -124,12 +127,14 @@ class ProperMotionAnomalyTerm(AbstractTerm):
     Attributes:
         data: The observed anomaly, its covariance and the mission epochs.
         system_path: Model path of the system whose ``star_reflex(time_d)`` is read.
+        forward_fields: Empty tuple because the term differentiates no stored fields.
         reads: Model paths a held build cached. Empty: the term reads the model
             directly.
     """
 
     data: ProperMotionAnomalyData
     system_path: str = eqx.field(static=True, default="")
+    forward_fields = ()
     reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):

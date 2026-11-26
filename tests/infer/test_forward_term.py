@@ -41,6 +41,12 @@ class _Drawable(eqx.Module):
         return _Drawable(predicted + jax.random.normal(key, predicted.shape))
 
 
+class _GaussianResidual(_Drawable):
+    def residual(self, predicted):
+        assert self.data.dtype == predicted.dtype == np.float64
+        return self.data - predicted
+
+
 def _term(likelihood=None):
     data = jnp.array([1.0, 2.0, 3.0])
     return ForwardTerm(
@@ -134,6 +140,22 @@ def test_residuals_come_from_the_likelihood_and_a_fit_names_a_term_without_one()
         ForwardTerm(_Scale(weights), _Drawable(data)).residual(_Model(mu))
 
 
+@pytest.mark.float64_only(reason="float64 custom residual with float32 operands")
+def test_custom_residual_preserves_sub_spacing_difference():
+    """Both a scorer and its residual see the exact difference 1 + 2**-25."""
+    forward = _Scale(jnp.ones(1, jnp.float32))
+    model = _Model(jnp.ones(1, jnp.float32))
+    term = ForwardTerm(
+        forward, _GaussianResidual(jnp.array([-(2.0**-25)], jnp.float32))
+    )
+    expected = -(1 + 2.0**-25)
+    assert term.predict(model).dtype == np.float32
+    residual = term.residual(model)
+    assert residual.dtype == np.float64
+    np.testing.assert_array_equal(residual, [expected])
+    assert float(term(model)) == -0.5 * expected**2
+
+
 def test_draw_replaces_only_the_data():
     """Draw returns a term whose likelihood holds a draw around the prediction."""
     model = _Model(jnp.array([0.9, 1.1, 5.0]))
@@ -185,6 +207,7 @@ def test_fit_density_adds_the_prior_to_the_term_value():
 @pytest.mark.float32_only(reason="inference log densities require float64")
 def test_forward_term_refuses_before_evaluating_the_forward():
     """A custom likelihood obeys the term's precision boundary as well."""
-    term = _term(_Drawable(jnp.zeros(3)))
-    with pytest.raises(PrecisionError, match=r"ForwardTerm.*enable_x64"):
-        term(None)
+    term = _term(_GaussianResidual(jnp.zeros(3)))
+    for call in (term, term.residual):
+        with pytest.raises(PrecisionError, match=r"ForwardTerm.*enable_x64"):
+            call(None)

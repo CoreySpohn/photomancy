@@ -34,7 +34,9 @@ from photomancy import (
     RelativeAstrometryTerm,
     StellarAstrometryTerm,
 )
-from photomancy.infer import AbstractTerm, Fit
+from photomancy.detection import detect, measure
+from photomancy.infer import MAP, AbstractTerm, Fit, ForwardTerm, Laplace, run
+from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.measurements import (
     AstrometryData,
     PhotometryData,
@@ -1314,31 +1316,145 @@ class _Written(eqx.Module):
     c: jax.Array
 
 
-@pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_values_written_by_a_block_enter_the_model_as_strong_float_arrays():
-    """A float32 or Python-float value from a block is stored as a strong float64.
+class _Payload(eqx.Module):
+    fields: dict
+    label: str = eqx.field(static=True)
 
-    Truth source: definitional (``hwoutils.leaves.canonical``: floats become strong
-    arrays of the active dtype). The first block writes a float32 array and a Python
-    float; the second block records the dtype and weak type of both as it sees them in
-    ``log_density``, ``sample_prior`` and ``from_unit``, and ``model_at`` returns the
-    model. Fails if any of the four paths holds a float32 or weak leaf, or a Python
-    float, in the running model.
+
+class _PayloadBlock(_FloatWritingBlock):
+    writes = ("a",)
+
+    def forward(self, x, model):
+        fields = {"value": 2 * x["u"], "optional": 1.5, "added": 3.0, "count": 1.5}
+        return {"a": _Payload(fields, "updated")}
+
+    def inverse(self, model):
+        return {"u": model.a.fields["value"] / 2}
+
+
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_block_node_replacement_matches_destination_by_path():
+    """Updated nodes keep matched array widths and carry their own static metadata.
+
+    For the stored value v = 2u, the score -v**2 / 2 has derivative -4u.
+    At u = 1/4 every multiply, cast and derivative is exact at either width.
+    """
+    node = _Payload(
+        {
+            "value": jnp.zeros((), jnp.float32),
+            "optional": None,
+            "removed": 2.0,
+            "count": 1,
+        },
+        "original",
+    )
+    fit = Fit(_Written(node, jnp.zeros(()), jnp.zeros(())), {"a": _PayloadBlock()})
+
+    def write(u):
+        return fit.model_at({"a": {"u": u}}).a
+
+    u = jnp.asarray(0.25, jnp.float64)
+    updated = write(u)
+    assert updated.label == "updated"
+    assert updated.fields.keys() == {"value", "optional", "added", "count"}
+    assert updated.fields["value"].dtype == jnp.float32
+    for name, expected in (("optional", 1.5), ("added", 3.0), ("count", 1.5)):
+        leaf = updated.fields[name]
+        assert leaf.dtype == jnp.float64 and not leaf.weak_type and leaf == expected
+    gradient = jax.grad(lambda u: -0.5 * write(u).fields["value"] ** 2)(u)
+    assert gradient.dtype == jnp.float64 and gradient == -1.0
+
+
+@pytest.mark.float64_only(reason="curvature and MAP use float64 coordinates")
+@pytest.mark.parametrize(
+    "operation", ["observed", "fisher", "MAP", "detect", "measure", "Laplace"]
+)
+def test_curvature_checks_layer_installed_by_block(operation):
+    """A block installs a narrow response only when a draw is written."""
+
+    class InstallLayer(_PayloadBlock):
+        layer: eqx.nn.Linear
+
+        def forward(self, x, model):
+            fields = {"value": x["u"], "optional": self.layer}
+            return {"a": _Payload(fields, "installed")}
+
+    def predict(model):
+        return model.a.fields["optional"](jnp.reshape(model.b, (1,)))
+
+    node = _Payload({"value": jnp.float64(0), "optional": None}, "empty")
+    model = _Written(node, jnp.float64(0), jnp.float64(0))
+    key = jax.random.key(0)
+    block = InstallLayer(eqx.nn.Linear(1, 1, dtype=jnp.float32, key=key))
+    term = ForwardTerm(eqx.Partial(predict), gaussian_loglike(jnp.zeros(1), 1.0))
+    fit = Fit(model, {"a": block, "b": Normal(0.0, 1.0)}, (term,))
+    start = {"a": {"u": jnp.float64(0)}, "b": jnp.float64(0)}
+    path = r"model\.a\.fields\['optional'\]\.weight"
+    if operation == "MAP":
+        with pytest.warns(UserWarning, match=rf"unscaled.*{path}"):
+            post = run(fit, MAP(n_steps=1, init=start), key)
+        assert "model.a.fields['optional'].weight" in post.info.scale_fallback_reason
+        assert np.isfinite(post.log_target).all()
+        return
+    name = "Fit.information" if operation in ("observed", "fisher") else operation
+    with pytest.raises(PrecisionError, match=rf"{name}.*{path}"):
+        if operation == "detect":
+            detect(fit, {"a": {"u": jnp.zeros(1)}}, amplitude="b")
+        elif operation == "measure":
+            measure(fit, start)
+        elif operation == "Laplace":
+            run(fit, Laplace(init=start), key)
+        else:
+            fit.information(start, kind=operation)
+
+
+class _LayerBlock(_FloatWritingBlock):
+    writes = ("a",)
+
+    def forward(self, x, model):
+        weight = jnp.reshape(x["u"], (1, 1))
+        return {"a": eqx.tree_at(lambda layer: layer.weight, model.a, weight)}
+
+    def inverse(self, model):
+        return {"u": model.a.weight[0, 0]}
+
+
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_block_node_replacement_preserves_foreign_layer_weight_dtype():
+    """A whole-layer write assigns the sampled weight at its destination width."""
+    layer = eqx.nn.Linear(1, 1, key=jax.random.key(0), dtype=jnp.float32)
+    fit = Fit(_Written(layer, jnp.zeros(()), jnp.zeros(())), {"a": _LayerBlock()})
+    updated = fit.model_at({"a": {"u": jnp.asarray(0.25, jnp.float64)}}).a
+    assert updated.weight.dtype == jnp.float32 and not updated.weight.weak_type
+    np.testing.assert_array_equal(updated.weight, [[0.25]])
+    np.testing.assert_array_equal(updated.bias, layer.bias)
+
+
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+def test_values_written_by_a_block_enter_the_model_as_strong_float_arrays(dtype):
+    """Each block sees the dtypes of the leaves the preceding block replaced.
+
+    The block writes a float32 array and a Python float at either width. Both writes
+    must be strongly typed through density evaluation, prior sampling, the unit
+    cube and model reconstruction.
     """
     seen = []
     probe = _DtypeProbeBlock()
     object.__setattr__(probe, "seen", seen)
-    model = _Written(jnp.asarray(0.0), jnp.asarray(0.0), jnp.asarray(0.0))
+    model = _Written(jnp.asarray(0.0, dtype), jnp.asarray(0.0), jnp.asarray(0.0, dtype))
     fit = Fit(model, {"a": _FloatWritingBlock(), "b": probe})
     x = {"a": {"u": jnp.asarray(0.25)}, "b": {"u": jnp.asarray(0.5)}}
     fit.log_density(x)
-    fit.sample_prior(jax.random.key(0))
-    fit.from_unit({"a": jnp.asarray([0.6]), "b": jnp.asarray([0.7])})
+    prior = fit.sample_prior(jax.random.key(0))
+    unit = fit.from_unit({"a": jnp.asarray([0.6]), "b": jnp.asarray([0.7])})
+    for record in (prior, unit, fit.draw_schema()):
+        assert all(s.dtype == jnp.float64 for s in jax.tree.leaves(record))
     assert len(seen) == 3
-    assert all(row == ((jnp.float64, False),) * 2 for row in seen), seen
+    assert all(row == ((dtype, False), (dtype, False)) for row in seen), seen
     at = fit.model_at(x)
     for leaf in (at.a, at.c):
-        assert isinstance(leaf, jax.Array) and leaf.dtype == jnp.float64
+        assert isinstance(leaf, jax.Array) and leaf.dtype == dtype
         assert not leaf.weak_type
 
 

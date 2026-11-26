@@ -33,6 +33,7 @@ prediction and a template function, an ``eqx.Module``, so the model that produce
 """
 
 from collections.abc import Callable, Sequence
+from functools import partial
 from math import prod
 from typing import Any
 
@@ -53,7 +54,14 @@ from photomancy.infer.backends.staged import (
     default_stage,
     map_fit,
 )
-from photomancy.infer.fit import Fit, _admit_information, _mapped, observed_hessian
+from photomancy.infer.fit import (
+    AbstractTerm,
+    Fit,
+    _admit_information,
+    _mapped,
+    _require_wide_owner,
+    observed_hessian,
+)
 
 __all__ = [
     "DetectionMap",
@@ -468,11 +476,11 @@ def _check_entries(entries, who):
         )
 
 
-def _splits(fit) -> bool:
+def _splits(fit, model) -> bool:
     """Whether every term of ``fit`` offers ``AbstractTerm.split``."""
     try:
         for term in fit.terms:
-            eqx.filter_eval_shape(lambda m, t=term: t.split(m)[0], fit.model)
+            eqx.filter_eval_shape(lambda m, t=term: t.split(m)[0], model)
     except NotImplementedError:
         return False
     return True
@@ -581,7 +589,9 @@ def _detect(fit, trials, amplitude, n_newton, batch_size, once):
     shape = jnp.shape(resolve(fit.model, amplitude))
 
     def at(x):
-        if once:
+        trial = {**x, amplitude: jnp.zeros(shape, jnp.float64)}
+        model = fit._require_float64_forward("detect", trial)
+        if once and _splits(fit, model):
             return _profile_split(fit, x, amplitude, shape, n_newton)
         return (*_profile_render(fit, x, amplitude, shape, n_newton), jnp.asarray(True))
 
@@ -653,14 +663,17 @@ def detect(
     Raises:
         ValueError: If ``amplitude`` is not a free leaf law of one element, or the
             keys of ``trials`` are not the other free paths.
+        PrecisionError: If float64 is unavailable or a forward owner is narrow.
+            The formal standard error differentiates the forward twice.
     """
+    require_float64("detect")
     entry = fit.free.get(amplitude)
     if not isinstance(entry, AbstractDistribution):
         raise ValueError(f"amplitude {amplitude!r} must be a free leaf-law path")
     if jnp.size(resolve(fit.model, amplitude)) != 1:
         raise ValueError(f"the leaf at {amplitude!r} must have one element")
     _check_entries(trials, set(fit.free) - {amplitude})
-    found, linear = _detect(fit, trials, amplitude, n_newton, batch_size, _splits(fit))
+    found, linear = _detect(fit, trials, amplitude, n_newton, batch_size, True)
     if isinstance(linear, jax.core.Tracer):
         # inside a transformation the check cannot choose a path on the host
         return _detect(fit, trials, amplitude, n_newton, batch_size, False)[0]
@@ -1014,12 +1027,13 @@ def measure(
 
     Raises:
         ValueError: If the keys of ``start`` are not the free paths.
-        PrecisionError: If float64 is unavailable.
+        PrecisionError: If float64 is unavailable or a forward owner is narrow.
         MemoryLimit: If the information matrix does not fit ``max_bytes``.
     """
     require_float64("measure")
     _check_entries(start, set(fit.free))
     start = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), start)
+    fit._require_float64_forward("measure", start)
     flat, _ = jax.flatten_util.ravel_pytree(start)
     _admit_information(
         flat.size, flat.size * 8, 2 * flat.size * flat.size * 8, batch_size, max_bytes
@@ -1118,7 +1132,9 @@ def measure(
     )
 
 
-def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:
+def curvature_block(
+    logdensity: Callable, params, where: Callable, *, owner=None
+) -> jax.Array:
     """Negative Hessian of ``logdensity`` over one selected group of leaves.
 
     The group is chosen with a selector ``where(params) -> leaf | sequence of leaves``,
@@ -1136,18 +1152,52 @@ def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:
     inverse is the formal covariance of the group.
 
     Args:
-        logdensity: ``params -> scalar``.
+        logdensity: ``params -> scalar``. A callable Equinox module, or its bound
+            method, exposes its owner. Both ``functools.partial`` and
+            ``equinox.Partial`` expose their wrapped callable and any bound
+            Equinox modules. Bound raw arrays are not inferred to be owners.
         params: The PyTree to differentiate at.
-        where: Selector of the group.
+        where: Selector of the group. Its floating coordinates must be float64.
+        owner: Additional forward state to precision-check, such as a Fit, term
+            or model. Supply this for state captured by a closure, an opaque
+            bound instance outside Equinox, or an array used as a forward owner.
+            For a Fit, ``params`` supplies its stored coordinates.
 
     Returns:
         A ``(n, n)`` matrix, ``n`` the number of scalars in the group.
 
     Raises:
-        PrecisionError: If float64 is unavailable or the parameters are not float64.
+        PrecisionError: If float64 is unavailable or a selected coordinate or
+            forward owner contains a narrow floating leaf.
     """
+    require_float64("curvature_block")
+    states = []
+    density = logdensity
+    while isinstance(density, (partial, eqx.Partial)):
+        states.extend(
+            (arg, f"logdensity.args[{i}]")
+            for i, arg in enumerate(density.args)
+            if isinstance(arg, eqx.Module)
+        )
+        states.extend(
+            (arg, f"logdensity.keywords[{key!r}]")
+            for key, arg in density.keywords.items()
+            if isinstance(arg, eqx.Module)
+        )
+        density = density.func
+    bound = getattr(density, "__self__", density)
+    if isinstance(bound, eqx.Module):
+        states.append((bound, "logdensity"))
+    states.append((owner, "owner"))
+    for state, name in states:
+        if isinstance(state, Fit):
+            state._require_float64_forward("curvature_block", params)
+        elif isinstance(state, AbstractTerm):
+            state._check_forward_precision("curvature_block", "term")
+        elif state is not None:
+            _require_wide_owner("curvature_block", state, name)
     selected = where(params)
-    require_float64("curvature_block", selected)
+    _require_wide_owner("curvature_block", selected, "where(params)")
     flat, unravel = jax.flatten_util.ravel_pytree(selected)
 
     def negative(vector):

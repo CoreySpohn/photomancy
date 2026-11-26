@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.leaves import canonical
 from hwoutils.model_paths import resolve
 from hwoutils.precision import PrecisionError
 from hwoutils.testing import ulps
@@ -25,13 +26,13 @@ from optixstuff.coronagraph import MultiBandCoronagraph
 from optixstuff.exposure import FramePlan
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
 from optixstuff.spectral import Band, Quadrature
-from priorities import LogUniform
+from priorities import LogUniform, Normal
 from scipy import stats
 from skyscapes.physical_model import LambertianPhysicalModel
 
 from photomancy import detection
 from photomancy.image import ImageModel, ImageTerm, _ImageScore
-from photomancy.infer.fit import Fit
+from photomancy.infer import MAP, Fit, run
 from photomancy.orbit.sheets import SheetSum
 
 _PATHS = {"scene_path": "scene", "instrument_path": "instrument"}
@@ -118,6 +119,45 @@ def test_gaussian_value_is_the_summed_density_of_the_detector_moments():
         np.asarray(term.mask)
     ].sum()
     np.testing.assert_allclose(term(model), want, rtol=1e-12)
+
+
+@pytest.mark.float64_only(reason="Fit residuals and image log densities require x64")
+def test_subpixel_count_difference_survives_a_float32_detector(monkeypatch):
+    """One pixel differs by one electron, a quarter of a float32 spacing.
+
+    A Gaussian detector with variance three gives residual 1/sqrt(3) and
+    log density -1/6 - log(6 pi)/2. Four double-precision roundings cover the
+    square root, division, logarithm and addition. Standalone counts
+    retain their precision, and a whole-spacing offset tests Fit's
+    whitening precision when all detector and observation inputs are narrow.
+    """
+    model, exposure = _setup("constant")
+    detector = canonical(make_detector("constant", variance_e2=3), precision="float32")
+    plan = FramePlan(jnp.float32(1), 1)
+    shape = (1, *detector.shape)
+    rates = Rates(BANDS, "electron", planet=jnp.full(shape, 2**25, jnp.float32))
+    monkeypatch.setattr(
+        ImageTerm, "_rates", lambda self, model: (detector, rates, plan)
+    )
+    pixel = (0, shape[1] // 2, shape[2] // 2)
+    mask = jnp.zeros(shape, bool).at[pixel].set(True)
+    mean, variance = detector.mean_and_variance(rates, plan)
+    assert mean.dtype == variance.dtype == jnp.float32
+    observed = mean.astype(jnp.float64) + 1
+    assert observed[pixel].astype(jnp.float32) == mean[pixel]
+    term = ImageTerm(observed, mask, exposure=exposure, **_PATHS)
+    np.testing.assert_array_max_ulp(term(model), -1 / 6 - np.log(6 * np.pi) / 2, 4)
+    np.testing.assert_array_max_ulp(term.residual(model)[pixel], 1 / np.sqrt(3), 4)
+
+    narrow = eqx.tree_at(lambda t: t.observed_e, term, mean + jnp.float32(4))
+    assert narrow.residual(model).dtype == jnp.float32
+    fit = Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (narrow,))
+    point = {_CONTRAST: _contrast(model)}
+    (residual,) = fit.residuals(point)
+    assert residual.dtype == jnp.float64
+    np.testing.assert_array_max_ulp(residual[pixel], 4 / np.sqrt(3), 4)
+    with jax.enable_x64(False), pytest.raises(PrecisionError, match=r"Fit.residuals"):
+        fit.residuals(point)
 
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
@@ -1193,3 +1233,61 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
             ValueError, match=rf"scores {count} pixel\(s\).*: {no_static} that no"
         ):
             loose.check(wide)
+
+
+@pytest.mark.float64_only(reason="MAP uses float64 coordinates with a narrow detector")
+@pytest.mark.medium(reason="two MAP fits of rendered pixel data")
+@vv.case("scene-fits", "code-verification", basis="spike")
+def test_map_fits_flux_scale_with_a_narrow_instrument(monkeypatch):
+    """A noise-free image fixes the linear flux scale at one in both instruments.
+
+    The measured MAP displacement after eight steps is 1.786e-7 in flux scale.
+    The spike bound is two float32 spacings at the unit injected scale.
+    """
+    model, exposure = _setup("constant")
+    term = _scored(model, exposure, _mean(model, exposure))
+    path = "instrument.flux_scale"
+    free = {path: Normal(1.0, 1.0)}
+    narrow = eqx.tree_at(
+        lambda m: m.instrument, model, canonical(model.instrument, precision="float32")
+    )
+    start = {path: jnp.asarray(0.9)}
+    backend = MAP(n_steps=8, init=start)
+    key = jax.random.key(0)
+    wide = run(Fit(model, free, (term,)), backend, key)
+    term = eqx.tree_at(
+        lambda t: t.exposure, term, canonical(exposure, precision="float32")
+    )
+    fit = Fit(narrow, free, (term,))
+    detector_type = type(narrow.instrument.detector)
+    moments = detector_type.mean_and_variance
+    mean_dtypes = set()
+
+    def record_moments(detector, rates, plan, **kwargs):
+        mean, variance = moments(detector, rates, plan, **kwargs)
+        mean_dtypes.add(mean.dtype)
+        return mean, variance
+
+    monkeypatch.setattr(detector_type, "mean_and_variance", record_moments)
+    leaf = r"model\.instrument\.primary\.circumscribed_diameter_m"
+    with pytest.warns(UserWarning, match=rf"unscaled.*{leaf}"):
+        post = run(fit, backend, key)
+    assert (
+        "model.instrument.primary.circumscribed_diameter_m"
+        in post.info.scale_fallback_reason
+    )
+    assert mean_dtypes == {np.dtype("float32")}
+    density = fit.log_density(post.samples)
+    assert density.dtype == post.samples[path].dtype == jnp.float64
+    assert np.all(np.isfinite(density))
+    assert fit.model_at(start).instrument.flux_scale.dtype == jnp.float32
+    assert fit.draw_schema()[path].dtype == jnp.float64
+    with pytest.raises(PrecisionError, match=rf"Fit\.information.*{leaf}"):
+        fit.information(start, kind="fisher")
+    with pytest.raises(PrecisionError, match=rf"measure.*{leaf}"):
+        detection.measure(fit, start)
+    bound = float(np.spacing(np.float32(1)))
+    np.testing.assert_allclose(wide.samples[path], 1.0, rtol=0, atol=bound)
+    np.testing.assert_allclose(
+        post.samples[path], wide.samples[path], rtol=0, atol=2 * bound
+    )

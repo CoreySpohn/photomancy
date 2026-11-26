@@ -11,6 +11,7 @@ import pytest
 from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, d2s
 from hwoutils.epoch import Epoch
 from hwoutils.leaves import canonical
+from hwoutils.precision import PrecisionError
 from hwoutils.testing import ulps
 from kinematics import (
     predict_pm_anomaly,
@@ -20,7 +21,7 @@ from kinematics import (
 )
 from optixstuff.spectral import Band, Quadrature, Resolution, Transmission
 from priorities import Normal
-from scipy import integrate
+from scipy import integrate, stats
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
@@ -38,8 +39,12 @@ from photomancy.infer import AbstractTerm, Fit, ForwardTerm
 from photomancy.infer.likelihoods import gaussian_loglike
 from photomancy.measurements import (
     AstrometryData,
+    DMagData,
+    DMagTerm,
     PhotometryData,
+    ProperMotionAnomalyData,
     RadialVelocityData,
+    loglike_dmag,
     loglike_pm_anomaly,
     loglike_relative_astrom,
     loglike_rv_marginalized,
@@ -735,7 +740,9 @@ class _SamplingSystem(eqx.Module):
         return time_d * 0.01
 
     def band_contrasts(self, quadrature, time_d, *, transmission=None, resolution=None):
-        return jnp.full((len(quadrature.bands), 1, time_d.size), 1e-10)
+        return jnp.full(
+            (len(quadrature.bands), 1, time_d.size), 1e-10, dtype=time_d.dtype
+        )
 
 
 @pytest.mark.parametrize("kind", ["relative", "stellar", "rv", "pma", "photometry"])
@@ -991,13 +998,132 @@ def test_a_traced_planet_count_and_a_late_epoch_model_pass_check(precision):
     assert system is not None
 
 
+@pytest.mark.float64_only(reason="float64 density of float32 measurement operands")
+@pytest.mark.parametrize("kind", ["relative", "stellar", "pma"])
+def test_narrow_bivariate_measurement_density(kind):
+    """The east residual 1 + 2**-25 rounds to 1 if subtracted in float32.
+
+    The independent bivariate normal uses the exact stored covariance. Eight
+    float64 ULPs allow its factorization, quadratic form and normalization.
+    """
+    small = 2.0**-25
+    observed = jnp.array([-small, 0.5], jnp.float32)
+    predicted = jnp.array([1.0, -0.75], jnp.float32)
+    sx, sy, rho = 0.75, 1.5, 0.25
+    covariance = np.array([[sx**2, rho * sx * sy], [rho * sx * sy, sy**2]])
+    if kind == "pma":
+        data = replace(
+            ProperMotionAnomalyData.zeros(),
+            pm_anomaly=observed,
+            pm_anomaly_cov=jnp.asarray(covariance, jnp.float32),
+            valid=jnp.array(True),
+        )
+        value = loglike_pm_anomaly(predicted, data)
+    else:
+        data = replace(
+            AstrometryData.zeros(1),
+            east_arcsec=observed[:1],
+            north_arcsec=observed[1:],
+            east_err_arcsec=jnp.array([sx], jnp.float32),
+            north_err_arcsec=jnp.array([sy], jnp.float32),
+            corr=jnp.array([rho], jnp.float32),
+            valid=jnp.array([True]),
+        )
+        score = (
+            loglike_relative_astrom if kind == "relative" else loglike_stellar_astrom
+        )
+        value = score(predicted[:1], predicted[1:], data)
+    expected = stats.multivariate_normal.logpdf(
+        np.asarray(observed, np.float64), np.asarray(predicted, np.float64), covariance
+    )
+    assert value.dtype == np.float64
+    np.testing.assert_allclose(value, expected, rtol=0, atol=float(ulps(8, expected)))
+
+
+@pytest.mark.float64_only(reason="float64 density of float32 measurement operands")
+def test_narrow_rv_series_are_centered_in_float64():
+    """For two equal-noise velocities only the normalized contrast is observed.
+
+    The projected residual is sqrt(2) * (1 + 2**-25). Eight float64 ULPs
+    cover the two segment means, quadratic and Gaussian log normalization.
+    """
+    small = 2.0**-25
+    observed = jnp.array([-small, 1.0], jnp.float32)
+    model = -observed
+    errors = jnp.full(2, 0.75, jnp.float32)
+    jitter = jnp.array([1.0], jnp.float32)
+    value = loglike_rv_marginalized(
+        observed, model, errors, jnp.zeros(2, int), 1, jitter, jnp.ones(2, bool)
+    )
+    expected = stats.norm.logpdf(np.sqrt(2) * (1 + small), scale=1.25)
+    assert value.dtype == np.float64
+    np.testing.assert_allclose(value, expected, rtol=0, atol=float(ulps(8, expected)))
+
+
+@pytest.mark.float64_only(reason="float64 density of float32 measurement operands")
+@pytest.mark.parametrize("upper", [False, True])
+def test_narrow_photometric_measurement_density(upper):
+    """Compare the density and censored mass to SciPy at the float64 residual.
+
+    The negative observation is below a float32 half-ULP at the prediction.
+    Eight float64 ULPs allow standardization and the normal log PDF or CDF.
+    """
+    term = canonical(_new_term("photometry"), precision="float32")
+    data = jax.tree.map(lambda x: x[:1], term.data)
+    observed = jnp.array([-(2.0**-60)], jnp.float32)
+    sigma = jnp.array([1e-10], jnp.float32)
+    term = eqx.tree_at(
+        lambda t: t.data,
+        term,
+        replace(
+            data,
+            contrast=observed,
+            contrast_err=sigma,
+            is_upper_limit=jnp.array([upper]),
+        ),
+    )
+    prediction = term.predict(_SamplingSystem())
+    assert prediction.dtype == np.float32
+    value = term(_SamplingSystem())
+    law = stats.norm(loc=float(prediction[0]), scale=float(sigma[0]))
+    expected = (law.logcdf if upper else law.logpdf)(float(observed[0]))
+    assert value.dtype == np.float64
+    np.testing.assert_allclose(value, expected, rtol=0, atol=float(ulps(8, expected)))
+
+
+@pytest.mark.float64_only(reason="float64 density of float32 measurement operands")
+@pytest.mark.parametrize("detected", [False, True])
+def test_narrow_magnitude_measurement_density(detected):
+    """The null interpolates the limiting magnitude and scores in flux space.
+
+    A quarter float32 ULP in both the observation and the curve intercept
+    survives the float64 Gaussian calculation. Sixteen ULPs cover the
+    interpolation, base-10 exponential and normal log CDF.
+    """
+    small = 2.0**-25
+    data = replace(
+        DMagData.zeros(1),
+        sep_grid=jnp.array([[0.0, 2.0]], jnp.float32),
+        dmag0_grid=jnp.array([[-small, 1.0]], jnp.float32),
+        dmag_obs=jnp.array([-small], jnp.float32),
+        dmag_err=jnp.array([0.75], jnp.float32),
+        is_detected=jnp.array([detected]),
+        valid=jnp.array([True]),
+    )
+    one = jnp.ones(1, jnp.float32)
+    value = loglike_dmag(one, one, data)
+    if detected:
+        expected = stats.norm.logpdf(-small, loc=1.0, scale=0.75)
+    else:
+        limit_mag = (1.0 - small) / 2
+        expected = stats.norm.logcdf(5.0 * (1 - 10.0 ** (-0.4 * (1 - limit_mag))))
+    assert value.dtype == np.float64
+    np.testing.assert_allclose(value, expected, rtol=0, atol=float(ulps(16, expected)))
+
+
 @pytest.mark.float32_only(reason="measurement densities require float64")
 def test_measurement_densities_refuse_single_precision():
     """Each measurement score refuses before the forward model is evaluated."""
-    from hwoutils.precision import PrecisionError
-
-    from photomancy.measurements import DMagData, DMagTerm, loglike_dmag
-
     relative = RelativeAstrometryTerm(_data())
     rv = _new_term("rv")
     pma = _new_term("pma")
@@ -1079,3 +1205,23 @@ def test_photometry_draw_uses_the_common_threshold_grid(monkeypatch, precision):
             np.testing.assert_array_equal(
                 sampled.contrast, np.full(data.valid.shape, 1 if censored else expected)
             )
+
+
+@pytest.mark.float64_only(reason="curvature checks forward owners in float64")
+def test_measurement_curvature_owners_exclude_data_and_include_band_response():
+    """Narrow measurements are admissible when the model and calibrations are wide."""
+    terms = (
+        RelativeAstrometryTerm(_data()),
+        DMagTerm(DMagData.zeros(1)),
+        *(_new_term(kind) for kind in ("stellar", "rv", "pma", "photometry")),
+    )
+    for term in terms:
+        narrow_data = canonical(term.data, precision="float32")
+        term = eqx.tree_at(lambda t: t.data, term, narrow_data)
+        term._check_forward_precision("curvature", "term")
+
+    photometry = _new_term("photometry")
+    bands = canonical(photometry.transmissions, precision="float32")
+    narrow = eqx.tree_at(lambda t: t.transmissions, photometry, bands)
+    with pytest.raises(PrecisionError, match=r"term\.transmissions\[0\]"):
+        narrow._check_forward_precision("curvature", "term")

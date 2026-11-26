@@ -35,13 +35,14 @@ Available densities:
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
 import numpy as np
-from hwoutils.precision import like, require_float64
+from hwoutils.precision import float_dtype, like, require_float64
 
 __all__ = [
     "LowRankGaussianLogLikelihood",
@@ -101,7 +102,99 @@ def _information_constant(kind, shape_param):
     return core / (core + 2.0 * math.exp(-0.5 * delta**2) / delta)
 
 
-class MaskedLogLikelihood(eqx.Module):
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class _Covariance:
+    """Fixed noise and its inference and detection factors, all dynamic leaves.
+
+    JAX reconstructs registered dataclasses after a tree map. When a precision
+    conversion narrows the inference normalizer, refactor from the converted
+    noise here. Ordinary flattening, partitioning and scoring reuse the cache.
+
+    Attributes:
+        sigma: Diagonal noise scales, one outside the mask.
+        mask: Boolean array indicating which elements are used.
+        basis: Optional masked low-rank covariance basis in flattened element order.
+        log_const: Per-element log normalization constant, or None for a fixed total.
+        inference: Cached inference normalization and any low-rank factors.
+        detection: Cached normalization and any low-rank factors in detection precision.
+    """
+
+    sigma: jax.Array
+    mask: jax.Array
+    basis: jax.Array | None
+    log_const: float | None = field(metadata={"static": True})
+    inference: tuple = ()
+    detection: tuple = ()
+
+    def __post_init__(self):
+        if self.log_const is None:
+            return  # A directly supplied total normalization.
+        if self.inference:
+            norm = self.inference[-1]
+            if not eqx.is_array(norm) or norm.dtype != np.float32:
+                return
+            if isinstance(norm, jax.core.Tracer) and float_dtype() == np.float32:
+                return  # Detection in a float32-only trace cannot use inference.
+
+        # Concrete low-rank preparation also works in a float32-only process.
+        # A traced diagonal builder can still be used in a detection program.
+        traced = any(
+            isinstance(x, jax.core.Tracer) for x in (self.sigma, self.mask, self.basis)
+        )
+        device_dtype = float_dtype()
+        xp = jnp if traced or device_dtype == np.float64 else np
+        dtype = device_dtype if traced else np.float64
+        sigma = xp.asarray(self.sigma, dtype)
+        norm = xp.sum(xp.asarray(self.mask), dtype=dtype) * self.log_const - xp.sum(
+            xp.log(sigma)
+        )
+        factors = ()
+        if self.basis is not None:
+            # Factor concrete matrices on the host, even with x64 disabled.
+            linalg = jnp if traced else np
+            w = (
+                linalg.asarray(self.basis, dtype)
+                / linalg.asarray(self.sigma, dtype).ravel()[:, None]
+            )
+            chol = linalg.linalg.cholesky(linalg.eye(w.shape[1], dtype=dtype) + w.T @ w)
+            norm = norm - linalg.log(linalg.diag(chol)).sum()
+            factors = (w, chol)
+        factors = (*factors, norm)
+        if device_dtype == np.float64:
+            factors = tuple(jnp.asarray(f) for f in factors)
+        object.__setattr__(self, "inference", factors)
+        object.__setattr__(
+            self, "detection", tuple(jnp.asarray(f, self.sigma.dtype) for f in factors)
+        )
+
+    @property
+    def working(self):
+        """Select the matching factors even after widening a stored likelihood."""
+        return self.inference if self.sigma.dtype == jnp.float64 else self.detection
+
+
+class _FixedNoiseLikelihood(eqx.Module):
+    data: jax.Array
+    _noise: _Covariance
+
+    @property
+    def sigma(self):
+        """Diagonal noise scales, one outside the mask."""
+        return self._noise.sigma
+
+    @property
+    def mask(self):
+        """Pixels used in the score."""
+        return self._noise.mask
+
+    @property
+    def log_norm(self):
+        """Total normalization in the detection precision."""
+        return self._noise.working[-1]
+
+
+class MaskedLogLikelihood(_FixedNoiseLikelihood):
     """Normalized log-likelihood of a standardized-residual density over used elements.
 
     Built by :func:`gaussian_loglike`, :func:`laplace_loglike`,
@@ -110,21 +203,33 @@ class MaskedLogLikelihood(eqx.Module):
     them as traced inputs rather than baking them into the compiled program.
 
     Attributes:
-        data: Observed values with excluded elements set to zero.
-        sigma: Scale at every element, with excluded elements set to one.
-        mask: Boolean array, True where the element is used.
-        log_norm: Total normalization over the used elements,
-            ``n_used * log_const - sum(log sigma)``.
         kind: Density name, a key of the kernel table.
         shape_param: ``delta`` for Huber, ``nu`` for Student-t, unused otherwise.
     """
 
-    data: jax.Array
-    sigma: jax.Array
-    mask: jax.Array
-    log_norm: jax.Array
     kind: str = eqx.field(static=True)
     shape_param: float = eqx.field(static=True)
+
+    def __init__(self, data, sigma, mask, log_norm, kind, shape_param):
+        """Store a supplied total normalization or prepare it from the masked noise.
+
+        Args:
+            data: Observed values with excluded elements set to zero.
+            sigma: Scale at every element, with excluded elements set to one.
+            mask: Boolean array, True where the element is used.
+            log_norm: Total log normalization, or None to compute it from the noise.
+            kind: Density name, a key of the kernel table.
+            shape_param: ``delta`` for Huber, ``nu`` for Student-t, unused otherwise.
+        """
+        self.data = data
+        self.kind = kind
+        self.shape_param = shape_param
+        if log_norm is None:
+            self._noise = _Covariance(
+                sigma, mask, None, _kernel_log_const(kind, shape_param)
+            )
+        else:
+            self._noise = _Covariance(sigma, mask, None, None, (log_norm,), (log_norm,))
 
     def __call__(self, predicted):
         """Return the log-likelihood of ``predicted`` (broadcastable to ``data``).
@@ -136,10 +241,13 @@ class MaskedLogLikelihood(eqx.Module):
             Scalar normalized log likelihood over the unmasked elements.
 
         Raises:
-            PrecisionError: When float64 inference is unavailable or the data is narrow.
+            PrecisionError: When float64 inference is unavailable.
         """
-        require_float64("masked log density", self)
-        return self.detection_score(predicted)
+        require_float64("masked log density")
+        data = self.data.astype(jnp.float64)
+        sigma = self.sigma.astype(jnp.float64)
+        norm = self._noise.inference[-1]
+        return self._score(jnp.asarray(predicted, jnp.float64), data, sigma, norm)
 
     def detection_score(self, predicted):
         """Evaluate the profile-detection objective in the data precision.
@@ -150,11 +258,15 @@ class MaskedLogLikelihood(eqx.Module):
         Returns:
             Scalar objective over the unmasked elements.
         """
-        predicted = jnp.broadcast_to(like(predicted, self.data), self.data.shape)
-        z = (predicted - self.data) / self.sigma
+        return self._score(
+            like(predicted, self.data), self.data, self.sigma, self.log_norm
+        )
+
+    def _score(self, predicted, data, sigma, log_norm):
+        z = (jnp.broadcast_to(predicted, data.shape) - data) / sigma
         z = jnp.where(self.mask, z, 0)
         kernel = _KERNELS[self.kind](z, self.shape_param)
-        return self.log_norm - jnp.sum(jnp.where(self.mask, kernel, 0))
+        return log_norm - jnp.sum(jnp.where(self.mask, kernel, 0))
 
     def residual(self, predicted):
         """Return ``(data - predicted) / sigma``, NaN at excluded elements.
@@ -176,7 +288,9 @@ class MaskedLogLikelihood(eqx.Module):
             raise NotImplementedError(
                 f"the {self.kind} likelihood has no residual with a unit-variance null"
             )
-        predicted = jnp.broadcast_to(jnp.asarray(predicted), self.data.shape)
+        predicted = jnp.broadcast_to(
+            jnp.asarray(predicted, float_dtype()), self.data.shape
+        )
         return jnp.where(self.mask, (self.data - predicted) / self.sigma, jnp.nan)
 
     def fisher_root(self, predicted):
@@ -196,12 +310,14 @@ class MaskedLogLikelihood(eqx.Module):
         Returns:
             Flat Fisher root, shape ``(data.size,)``, zero at excluded elements.
         """
-        predicted = jnp.broadcast_to(jnp.asarray(predicted), self.data.shape)
+        predicted = jnp.broadcast_to(
+            jnp.asarray(predicted, float_dtype()), self.data.shape
+        )
         scale = math.sqrt(_information_constant(self.kind, self.shape_param))
         return jnp.ravel(jnp.where(self.mask, scale * predicted / self.sigma, 0.0))
 
 
-class LowRankGaussianLogLikelihood(eqx.Module):
+class LowRankGaussianLogLikelihood(_FixedNoiseLikelihood):
     """Masked Gaussian with covariance ``diag(sigma**2) + U @ U.T``.
 
     The model is ``data = predicted + U @ a + noise``, with independent diagonal
@@ -216,29 +332,27 @@ class LowRankGaussianLogLikelihood(eqx.Module):
     lemmas. The quadratic is evaluated as a sum of squares to avoid cancellation.
 
     Construct outside JAX tracing: the fixed covariance is factored on the host
-    in double precision, then stored in the input dtype. For large, strongly
-    dependent basis columns, use float64 inputs with JAX x64 enabled. All arrays
+    in double precision. Scoring reuses the double-precision factors. Detection
+    and inverse-covariance operations use factors in the input dtype. All arrays
     are Module leaves, so passing this object as
     a ``filter_jit`` argument keeps them as traced inputs. Excluded pixels
     contribute neither density nor gradient, even when their inputs are NaN.
-
-    Attributes:
-        data: Observations, zero outside the mask.
-        sigma: Diagonal noise standard deviations, one outside the mask.
-        mask: Boolean array, True where the pixel is used.
-        U: Basis of shape ``(data.size, rank)``, zero outside the mask.
-        whitened: Basis divided by the flattened diagonal noise scale.
-        cholesky: Lower Cholesky factor of ``I + whitened.T @ whitened``.
-        log_norm: Gaussian log normalization over the used pixels.
     """
 
-    data: jax.Array
-    sigma: jax.Array
-    mask: jax.Array
-    U: jax.Array
-    whitened: jax.Array
-    cholesky: jax.Array
-    log_norm: jax.Array
+    @property
+    def U(self):
+        """Basis in the storage precision, zero outside the mask."""
+        return self._noise.basis
+
+    @property
+    def whitened(self):
+        """Whitened basis for detection and inverse-covariance operations."""
+        return self._noise.working[0]
+
+    @property
+    def cholesky(self):
+        """Cholesky factor for detection and inverse-covariance operations."""
+        return self._noise.working[1]
 
     def __init__(self, data, sigma, basis, mask=None):
         """Prepare a fixed covariance from observations and a flattened basis.
@@ -269,19 +383,12 @@ class LowRankGaussianLogLikelihood(eqx.Module):
             np.isfinite(basis[mask.ravel()])
         ):
             raise ValueError("data and basis must be finite on the mask")
-        self.mask = jnp.asarray(mask)
         self.data = jnp.asarray(np.where(mask, data, 0), dtype)
-        self.sigma = jnp.asarray(np.where(mask, sigma, 1), dtype)
-        self.U = jnp.asarray(np.where(mask.ravel()[:, None], basis, 0), dtype)
-        self.whitened = self.U / self.sigma.ravel()[:, None]
-        # Factor on the host in double precision, including for float32 inputs.
-        w = np.asarray(self.whitened, dtype=np.float64)
-        chol = np.linalg.cholesky(np.eye(basis.shape[1]) + w.T @ w)
-        self.cholesky = jnp.asarray(chol, dtype)
-        self.log_norm = (
-            jnp.sum(self.mask).astype(dtype) * -_LOG_SQRT_2PI
-            - jnp.sum(jnp.log(self.sigma))
-            - jnp.asarray(np.log(np.diag(chol)).sum(), dtype)
+        self._noise = _Covariance(
+            jnp.asarray(np.where(mask, sigma, 1), dtype),
+            jnp.asarray(mask),
+            jnp.asarray(np.where(mask.ravel()[:, None], basis, 0), dtype),
+            -_LOG_SQRT_2PI,
         )
 
     def _whiten(self, image):
@@ -334,10 +441,14 @@ class LowRankGaussianLogLikelihood(eqx.Module):
             Scalar normalized log density of ``data`` given ``predicted``.
 
         Raises:
-            PrecisionError: When float64 inference is unavailable or the data is narrow.
+            PrecisionError: When float64 inference is unavailable.
         """
-        require_float64("low-rank Gaussian log density", self)
-        return self.detection_score(predicted)
+        require_float64("low-rank Gaussian log density")
+        predicted = jnp.asarray(jnp.where(self.mask, predicted, 0), jnp.float64)
+        data = self.data.astype(jnp.float64)
+        sigma = self.sigma.astype(jnp.float64)
+        z = (predicted - data) / sigma
+        return self._score(z.ravel(), *self._noise.inference)
 
     def detection_score(self, predicted):
         """Evaluate the profile-detection objective in the data precision.
@@ -350,13 +461,15 @@ class LowRankGaussianLogLikelihood(eqx.Module):
         """
         predicted = like(predicted, self.data)
         z = self._whiten(jnp.where(self.mask, predicted, 0) - self.data)
-        if not self.U.shape[1]:
-            return self.log_norm - jnp.sum(0.5 * z**2)
-        a = self._coefficients(z)
+        return self._score(z, self.whitened, self.cholesky, self.log_norm)
+
+    @staticmethod
+    def _score(z, whitened, chol, log_norm):
+        if not whitened.shape[1]:
+            return log_norm - jnp.sum(0.5 * z**2)
+        a = jsp.linalg.cho_solve((chol, True), whitened.T @ z)
         # Avoid subtracting two large quadratic forms for strongly aligned images.
-        return self.log_norm - 0.5 * (
-            jnp.sum((z - self.whitened @ a) ** 2) + jnp.sum(a**2)
-        )
+        return log_norm - 0.5 * (jnp.sum((z - whitened @ a) ** 2) + jnp.sum(a**2))
 
 
 def residual_basis(residuals, rank, mask=None):
@@ -407,7 +520,22 @@ def residual_basis(residuals, rank, mask=None):
     return basis, singular
 
 
-def _build(data, sigma, mask, kind, log_const, shape_param=0.0):
+def _kernel_log_const(kind, shape):
+    if kind == "gaussian":
+        return -_LOG_SQRT_2PI
+    if kind == "laplace":
+        return -math.log(2.0)
+    if kind == "huber":
+        core = math.sqrt(2.0 * math.pi) * math.erf(shape / math.sqrt(2.0))
+        return -math.log(core + 2.0 * math.exp(-0.5 * shape**2) / shape)
+    return (
+        math.lgamma(0.5 * (shape + 1.0))
+        - math.lgamma(0.5 * shape)
+        - 0.5 * math.log(shape * math.pi)
+    )
+
+
+def _build(data, sigma, mask, kind, shape_param=0.0):
     data = jnp.asarray(data)
     sigma = jnp.asarray(sigma)
     dtype = jnp.result_type(data, sigma, float)
@@ -421,13 +549,11 @@ def _build(data, sigma, mask, kind, log_const, shape_param=0.0):
 
     data = jnp.where(mask, data, 0)
     sigma = jnp.where(mask, sigma, 1)
-    n_used = jnp.sum(mask).astype(dtype)
-    log_norm = n_used * log_const - jnp.sum(jnp.log(sigma))
     return MaskedLogLikelihood(
         data=data,
         sigma=sigma,
         mask=mask,
-        log_norm=log_norm,
+        log_norm=None,
         kind=kind,
         shape_param=float(shape_param),
     )
@@ -444,7 +570,7 @@ def gaussian_loglike(data, sigma, mask=None) -> Callable:
     Returns:
         A callable summing ``log N(predicted; data, sigma)`` over used elements.
     """
-    return _build(data, sigma, mask, "gaussian", -_LOG_SQRT_2PI)
+    return _build(data, sigma, mask, "gaussian")
 
 
 def low_rank_gaussian_loglike(
@@ -488,7 +614,7 @@ def laplace_loglike(data, sigma, mask=None) -> Callable:
         A callable summing ``-|predicted - data| / sigma - log(2 sigma)`` over used
         elements.
     """
-    return _build(data, sigma, mask, "laplace", -math.log(2.0))
+    return _build(data, sigma, mask, "laplace")
 
 
 def huber_loglike(data, sigma, mask=None, *, delta: float = 1.345) -> Callable:
@@ -517,11 +643,7 @@ def huber_loglike(data, sigma, mask=None, *, delta: float = 1.345) -> Callable:
     delta = float(delta)
     if not delta > 0.0:
         raise ValueError(f"delta must be positive, got {delta}")
-    z_norm = (
-        math.sqrt(2.0 * math.pi) * math.erf(delta / math.sqrt(2.0))
-        + 2.0 * math.exp(-0.5 * delta**2) / delta
-    )
-    return _build(data, sigma, mask, "huber", -math.log(z_norm), delta)
+    return _build(data, sigma, mask, "huber", delta)
 
 
 def student_t_loglike(data, sigma, mask=None, *, nu: float = 4.0) -> Callable:
@@ -541,9 +663,4 @@ def student_t_loglike(data, sigma, mask=None, *, nu: float = 4.0) -> Callable:
     nu = float(nu)
     if not nu > 0.0:
         raise ValueError(f"nu must be positive, got {nu}")
-    log_const = (
-        math.lgamma(0.5 * (nu + 1.0))
-        - math.lgamma(0.5 * nu)
-        - 0.5 * math.log(nu * math.pi)
-    )
-    return _build(data, sigma, mask, "student_t", log_const, nu)
+    return _build(data, sigma, mask, "student_t", nu)

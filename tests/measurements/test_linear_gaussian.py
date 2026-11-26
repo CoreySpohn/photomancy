@@ -8,6 +8,7 @@ import numpy as np
 import priorities
 import pytest
 from golden_systems import model_at, systems
+from hwoutils.leaves import canonical
 from hwoutils.model_paths import assign
 from orbix.system import (
     ClassicalChart,
@@ -120,9 +121,11 @@ def test_relative_form_is_the_term_on_the_golden_system():
 
 @pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_relative_form_on_a_bare_system_with_records_of_its_row():
-    """Fails if a single-row bare system is not exact, or another planet is accepted."""
+    """The form scores float32 astrometry in float64 and rejects another planet."""
     system = _system()
-    term = RelativeAstrometryTerm(_relative_data([0] * 5))
+    term = RelativeAstrometryTerm(
+        canonical(_relative_data([0] * 5), precision="float32")
+    )
     _assert_pinned(term, system, "", 1.0)
     mixed = RelativeAstrometryTerm(_relative_data([0, 1, 0, 0, 0]))
     with pytest.raises(Exception, match="another planet"):

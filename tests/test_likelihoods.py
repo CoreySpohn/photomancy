@@ -13,8 +13,10 @@ from hwoutils.numerics import roundoff
 from hwoutils.precision import PrecisionError
 from hwoutils.testing import assert_precision_closed, precision_pair, ulps
 from jax.test_util import check_grads
+from priorities import Normal
 from scipy import integrate, stats
 
+from photomancy.infer import MAP, Fit, run
 from photomancy.infer.likelihoods import (
     LowRankGaussianLogLikelihood,
     gaussian_loglike,
@@ -322,24 +324,66 @@ def test_shape_parameters_must_be_positive(name):
 
 
 @pytest.mark.float64_only(reason="inference log density")
-def test_low_rank_dense_density_and_conditional_mean():
+@pytest.mark.parametrize("storage", ["float32", "float64", "wide_to_narrow"])
+def test_low_rank_dense_density_and_conditional_mean(storage, monkeypatch):
     """Fails if the determinant, inverse covariance, or conditional mean is wrong."""
     data, sigma, predicted, mask = (v[:2] for v in _problem())
     basis = np.random.default_rng(0).normal(size=(data.size, 3))
-    like = LowRankGaussianLogLikelihood(data, sigma, basis, mask)
+    dtype = np.float32 if storage == "float32" else np.float64
+    like = LowRankGaussianLogLikelihood(
+        data.astype(dtype), sigma.astype(dtype), basis.astype(dtype), mask
+    )
+    if storage == "wide_to_narrow":
+        like = canonical(like, precision="float32")
+        dtype = np.float32
+    assert like.data.dtype == like.sigma.dtype == like.U.dtype == dtype
+    data, sigma, basis = (x.astype(dtype) for x in (data, sigma, basis))
+
+    def refactor(*args, **kwargs):
+        pytest.fail("a score must reuse the fixed covariance factor")
+
+    monkeypatch.setattr(jnp.linalg, "cholesky", refactor)
+    monkeypatch.setattr(np.linalg, "cholesky", refactor)
+    sigma, basis = sigma.astype(np.float64), basis.astype(np.float64)
     used_basis = basis[mask.ravel()]
     cov = np.diag(sigma[mask] ** 2) + used_basis @ used_basis.T
     expected = stats.multivariate_normal.logpdf(
         data[mask], mean=predicted[mask], cov=cov
     )
-    np.testing.assert_allclose(like(predicted), expected, rtol=1e-10)
+    masked_prediction = jnp.asarray(np.where(mask, predicted, np.nan))
+    with jax.debug_nans(True):
+        np.testing.assert_allclose(like(masked_prediction), expected, rtol=1e-12)
     solved = np.linalg.solve(cov, data[mask] - predicted[mask])
-    np.testing.assert_allclose(like.solve(data - predicted)[mask], solved, rtol=1e-10)
+    # The inverse and conditional mean use the data precision.
+    tolerance = 8 * np.finfo(dtype).eps * np.linalg.cond(cov)
+    np.testing.assert_allclose(
+        like.solve(data - predicted)[mask], solved, rtol=tolerance
+    )
     np.testing.assert_allclose(
         like.posterior_term(predicted)[mask],
         used_basis @ used_basis.T @ solved,
-        rtol=1e-10,
+        rtol=tolerance,
     )
+
+
+@pytest.mark.float64_only(reason="inference normalization requires float64")
+@pytest.mark.parametrize("narrow_copy", [False, True])
+def test_masked_normalization_is_prepared_from_stored_noise(monkeypatch, narrow_copy):
+    """A Gaussian scored at its mean equals the sum of its log normalizers."""
+    data, sigma, _, mask = _problem()
+    if narrow_copy:
+        like = canonical(gaussian_loglike(data, sigma, mask), precision="float32")
+    else:
+        like = gaussian_loglike(data.astype(np.float32), sigma.astype(np.float32), mask)
+    noise = sigma[mask].astype(np.float32).astype(np.float64)
+    expected = stats.norm.logpdf(np.zeros_like(noise), scale=noise).sum()
+
+    def unexpected_log(*args, **kwargs):
+        pytest.fail("Gaussian scoring recomputed a fixed noise normalization")
+
+    monkeypatch.setattr(jnp, "log", unexpected_log)
+    assert like.data.dtype == like.sigma.dtype == np.float32
+    np.testing.assert_array_max_ulp(like(like.data), expected, maxulp=4)
 
 
 @pytest.mark.float64_only(reason="inference log density")
@@ -518,8 +562,12 @@ def test_detection_score_uses_the_observation_precision(low_rank):
     prediction = jnp.array([0.25, 0.5])
     narrow_data = canonical(data, precision="float32")
     narrow = build(narrow_data)
-    if not low_rank:
-        assert_precision_closed(build, narrow_data)
+    # This displacement is lost if a float64 prediction is scored on the data grid.
+    offset = data + jnp.array([0.25 + 2.0**-25, 0.5])
+    expected = build(data)(offset)
+    density = narrow(offset)
+    assert density.dtype == jnp.float64
+    np.testing.assert_array_max_ulp(density, expected, maxulp=4)
     assert narrow.detection_score(prediction).dtype == np.float32
     assert_precision_closed(
         lambda obj, x: obj.detection_score(x), narrow, prediction.astype(jnp.float32)
@@ -528,4 +576,42 @@ def test_detection_score_uses_the_observation_precision(low_rank):
         lambda x, y: build(x).detection_score(y),
         (data, prediction),
         bound=float(ulps(16, np.float32(1))),
+    )
+
+
+@pytest.mark.float64_only(reason="MAP uses float64 coordinates and log densities")
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_map_with_a_float32_forward():
+    """An identity forward rounds once at mu, with unit slope back to the coordinate.
+
+    The posterior is a unit-variance observation times a unit-variance prior.
+    Allow four float32 roundings at the data scale for the write, its gradient,
+    the optimizer step and the comparison of the two MAP coordinates.
+    """
+    data = jnp.array([1.7, -0.9])
+    term = ForwardTerm(_Mu(), gaussian_loglike(data, 1.0))
+    fit = Fit(_ToyScene(jnp.zeros_like(data)), {"mu": Normal(0.0, 1.0)}, (term,))
+    model = eqx.tree_at(
+        lambda m: m.mu, fit.model, canonical(fit.model.mu, precision="float32")
+    )
+    narrow = Fit(model, fit.free, fit.terms)
+    start = {"mu": jnp.zeros_like(data)}
+    backend = MAP(n_steps=16, init=start)
+    expected = run(fit, backend, jax.random.key(0)).samples["mu"]
+    with pytest.warns(UserWarning, match=r"unscaled.*model\.mu"):
+        post = run(narrow, backend, jax.random.key(0))
+    assert "model.mu" in post.info.scale_fallback_reason
+    point = {"mu": post.samples["mu"][0]}
+    prediction = term.predict(narrow.model_at(point))
+    assert prediction.dtype == jnp.float32
+    assert narrow.draw_schema()["mu"].dtype == post.samples["mu"].dtype == jnp.float64
+    assert narrow.check_draws(post.samples) == (1,)
+    # At zero the unit normal prior has zero slope. The observation score
+    # contributes data - mu, rounded once on the return through the model leaf.
+    value, gradient = jax.value_and_grad(narrow.log_density)(start)
+    np.testing.assert_array_equal(gradient["mu"], data.astype(jnp.float32))
+    assert value.dtype == gradient["mu"].dtype == jnp.float64
+    assert np.isfinite(value) and np.all(np.isfinite(gradient["mu"]))
+    np.testing.assert_allclose(
+        post.samples["mu"], expected, rtol=0, atol=float(ulps(4, np.float32(1.7)))
     )

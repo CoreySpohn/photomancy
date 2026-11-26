@@ -260,7 +260,7 @@ class _ImageScore(eqx.Module):
         require_float64("image log likelihood")
         total = rates.total()
         _check_score_shape(self.mask, self.observed_e, total.shape)
-        observed = jnp.where(self.mask, self.observed_e, 0.0)
+        observed = jnp.where(self.mask, self.observed_e.astype(jnp.float64), 0.0)
         masked = _masked_rates(
             rates,
             self.mask,
@@ -310,6 +310,7 @@ class ImageTerm(AbstractTerm):
     model the roll is not checked.
 
     Attributes:
+        forward_fields: Forward differentiation uses ``instrument``, ``exposure``.
         reads: Model paths a held build cached. Empty: the term reads the model
             by path and holds no build.
         observed_e: Observed electrons, shape ``(*batch, W, ny, nx)``. Leading batch
@@ -345,6 +346,7 @@ class ImageTerm(AbstractTerm):
             :attr:`assumptions`.
     """
 
+    forward_fields = ("instrument", "exposure")
     reads: ClassVar[tuple[str, ...]] = ()
     observed_e: jax.Array
     mask: jax.Array
@@ -623,7 +625,8 @@ class ImageTerm(AbstractTerm):
         where it is not scored, where ``log_prob`` is ``-inf`` (a total below the
         floor's tolerance, or a count a zero mean cannot produce) and where the
         variance is zero. The NaN entries have a zero derivative, so the residual is
-        safe to differentiate.
+        safe to differentiate. Standalone whitening uses the common precision of
+        the observations and detector moments. Fit residuals whiten in float64.
 
         Args:
             model: The model PyTree holding the scene, and the instrument and exposure
@@ -634,11 +637,13 @@ class ImageTerm(AbstractTerm):
             scored or has no residual.
         """
         detector, rates, plan = self._rates(model)
-        observed = jnp.where(self.mask, self.observed_e, 0.0)
+        observed = jnp.where(self.mask, self.observed_e, 0)
         preserve_floor = type(detector).log_prob is AbstractDetector.log_prob
         rates = _masked_rates(rates, self.mask, preserve_floor=preserve_floor)
         floored, bad = _floored(rates)
         mean, variance = detector.mean_and_variance(floored, plan)
+        dtype = jnp.result_type(observed, mean, variance)
+        mean, variance = mean.astype(dtype), variance.astype(dtype)
         if preserve_floor:
             # A residual needs the domain and moments, without a log density.
             defined = ~bad & jnp.isfinite(observed) & jnp.isfinite(mean)
@@ -653,6 +658,12 @@ class ImageTerm(AbstractTerm):
         ok = self.mask & defined & (variance > 0)
         whitened = (observed - mean) / jnp.sqrt(jnp.where(ok, variance, 1.0))
         return jnp.where(ok, whitened, jnp.nan)
+
+    def _fit_residual(self, model):
+        wide = eqx.tree_at(
+            lambda term: term.observed_e, self, self.observed_e.astype(jnp.float64)
+        )
+        return wide.residual(model)
 
     def fisher_root(self, model) -> jax.Array:
         """Return the detector's Fisher root of the expected rates, flat and masked.
