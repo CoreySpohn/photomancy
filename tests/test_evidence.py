@@ -3,10 +3,12 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+from hwoutils.precision import PrecisionError
 from scipy.optimize import brentq
 from scipy.special import erfc, erfcinv, log_ndtr, ndtri_exp
 
-from photomancy.infer import sigma_from_log_bayes_factor
+from photomancy.infer import importance_evidence, sigma_from_log_bayes_factor
 
 
 def test_benneke_seager_table(precision):
@@ -86,3 +88,10 @@ def test_extreme_tail_reference(precision):
     )
     expected = -ndtri_exp(log_p - np.log(2))
     np.testing.assert_allclose(actual, expected, atol=1e-3, rtol=0)
+
+
+@pytest.mark.float32_only(reason="evidence requires float64")
+def test_importance_evidence_refuses_float32():
+    """Unnormalized log weights cannot produce inference evidence in this lane."""
+    with pytest.raises(PrecisionError, match=r"importance evidence.*enable_x64"):
+        importance_evidence([0.0, 1.0])

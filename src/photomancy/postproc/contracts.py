@@ -18,6 +18,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.epoch import Epoch
+from hwoutils.leaves import HostGrid, as_float_leaf
+from hwoutils.numerics import COARSEST
 from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
 
@@ -30,6 +32,28 @@ def _asarray_or_none(value):
     return None if value is None else _asarray(value)
 
 
+# A host roll series is static metadata: keep its original values through jit.
+# A JAX series stays a dynamic leaf so callers can scan or vmap over rolls.
+class _HostRolls(np.ndarray):
+    """Read-only roll angles with float64 host precision."""
+
+
+jax.tree_util.register_pytree_node(
+    _HostRolls,
+    lambda angles: ((), HostGrid(angles)),
+    lambda grid, _: grid.values.view(_HostRolls),
+)
+
+
+def _roll_angles(value):
+    if any(isinstance(leaf, jax.Array) for leaf in jax.tree.leaves(value)):
+        return as_float_leaf(jnp.asarray(value))
+    return HostGrid(value).values.view(_HostRolls)
+
+
+_ROLL_TOLERANCE_DEG = 1e-6  # tol: physical, degrees of roll for coaddition.
+
+
 class FrameSet(eqx.Module):
     """A time series of detector frames plus the metadata detection needs.
 
@@ -37,7 +61,8 @@ class FrameSet(eqx.Module):
         frames: (n_frames, ny, nx) detector electrons per frame.
         time_d: (n_frames,) frame start offsets in days from epoch.
         frame_time_s: (n_frames,) per-frame exposure times, seconds.
-        telescope_pa_deg: (n_frames,) telescope position angle (roll), degrees.
+        telescope_pa_deg: (n_frames,) telescope position angles in degrees.
+            Host input is immutable float64 metadata. JAX input stays dynamic.
         fwhm_px: Scalar resolution element (lambda/D) in pixels.
         band: Static wavelength interval in nanometers.
         epoch: Static host epoch defining the zero of time_d.
@@ -54,7 +79,7 @@ class FrameSet(eqx.Module):
     frames: jnp.ndarray = eqx.field(converter=_asarray)
     time_d: jnp.ndarray = eqx.field(converter=_asarray)
     frame_time_s: jnp.ndarray = eqx.field(converter=_asarray)
-    telescope_pa_deg: jnp.ndarray = eqx.field(converter=_asarray)
+    telescope_pa_deg: jax.Array | np.ndarray = eqx.field(converter=_roll_angles)
     fwhm_px: jnp.ndarray = eqx.field(converter=_asarray)
     band: Band = eqx.field(static=True)
     epoch: Epoch = eqx.field(static=True)
@@ -106,13 +131,10 @@ class FrameSet(eqx.Module):
     def single_orientation(self) -> jnp.ndarray:
         """Check for a common telescope orientation modulo 360 degrees.
 
-        Each angle is first reduced to a signed remainder in [-180, 180] by
-        subtracting the nearest multiple of 360 degrees, which is exact in the
-        angles' dtype, so a full turn cannot absorb a small difference. The
-        offsets of the remainders from the first frame are wrapped the same
-        way, and the span (maximum minus minimum) of the wrapped offsets is
-        compared with a tolerance of 1e-6 degrees. Traced angles return a
-        boolean without raising, allowing callers to mask invalid results.
+        The permitted span is 1e-6 degrees. Both host and dynamic roll series
+        use the float32 decision grid, with signed offsets about zero or the
+        half turn to preserve separations across the wrap. Host metadata keeps
+        its original values.
 
         Returns:
             Scalar bool indicating whether all frames share one orientation.
@@ -122,19 +144,27 @@ class FrameSet(eqx.Module):
                 360; the message includes the angles and their spread.
         """
         angles = self.telescope_pa_deg
-        # Closed-over angles can be checked eagerly even inside a jitted arm.
+        host = isinstance(angles, np.ndarray)
+        xp = np if host else jnp
         with jax.ensure_compile_time_eval():
-            reduced = angles - 360.0 * jnp.round(angles / 360.0)
-            offsets = reduced - reduced[0]
-            offsets = offsets - 360.0 * jnp.round(offsets / 360.0)
-            spread = jnp.max(offsets) - jnp.min(offsets)
-            same = spread <= 1e-6
+            values = xp.asarray(angles, dtype=COARSEST)
+            reduced = xp.fmod(values, 360.0)
+            signed = xp.where(
+                reduced > 180,
+                reduced - 360,
+                xp.where(reduced < -180, reduced + 360, reduced),
+            )
+            # Near +/-180, subtract each endpoint before taking differences.
+            half_turn = xp.where(reduced < 0, reduced + 180, reduced - 180)
+            offsets = xp.where(xp.abs(signed[0]) <= 90, signed, half_turn)
+            spread = xp.max(offsets) - xp.min(offsets)
+            same = spread <= COARSEST(_ROLL_TOLERANCE_DEG)
         if not isinstance(angles, jax.core.Tracer) and not bool(same):
             raise ValueError(
                 f"telescope_pa_deg angles {np.asarray(angles).tolist()} must share "
                 f"one orientation; spread {float(spread)} degrees"
             )
-        return same
+        return jnp.asarray(same)
 
     def coadd(self) -> jnp.ndarray:
         """Detector-frame sum: total electrons / total time, (ny, nx) e-/s.

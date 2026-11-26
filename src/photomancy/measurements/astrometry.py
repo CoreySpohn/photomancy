@@ -18,6 +18,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.model_paths import resolve
+from hwoutils.precision import require_float64
 from orbix.system import System, sky_design
 
 from photomancy.infer.fit import (
@@ -206,6 +207,7 @@ def _radec_bivariate_loglike(ra_pred, dec_pred, data):
     north offsets to measured ones with per-epoch errors ``east_err_arcsec`` and
     ``north_err_arcsec`` and correlation ``corr``, masked by ``valid``.
     """
+    require_float64("Astrometry log likelihood")
     mask = data.valid  # boolean
 
     dx = data.east_arcsec - ra_pred
@@ -239,6 +241,9 @@ def loglike_relative_astrom(ra_pred, dec_pred, data):
 
     Returns:
         Scalar log-likelihood value.
+
+    Raises:
+        PrecisionError: If float64 is unavailable.
     """
     return _radec_bivariate_loglike(ra_pred, dec_pred, data)
 
@@ -257,6 +262,9 @@ def loglike_stellar_astrom(ra_pred, dec_pred, data):
 
     Returns:
         Scalar log-likelihood value.
+
+    Raises:
+        PrecisionError: If float64 is unavailable.
     """
     return _radec_bivariate_loglike(ra_pred, dec_pred, data)
 
@@ -265,7 +273,9 @@ def _sample_radec(key, term, prediction):
     """Sample correlated east/north errors without changing padded payloads."""
     data = term.data
     valid = data.valid
-    eps = jax.random.normal(key, (2, data.time_d.size), dtype=jnp.float64)
+    eps = jax.random.normal(
+        key, (2, data.time_d.size), dtype=data.east_err_arcsec.dtype
+    )
     sx = jnp.where(valid, data.east_err_arcsec, 1.0)
     sy = jnp.where(valid, data.north_err_arcsec, 1.0)
     rho = jnp.where(valid, data.corr, 0.0)
@@ -350,7 +360,7 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
             self.data.time_d,
         )
 
-    def _score(self, model):
+    def _prediction_and_data(self, model):
         valid = self.data.valid
         # Sanitize before propagation and division: masking a NaN result alone
         # does not prevent NaN derivatives from flowing through its operands.
@@ -367,8 +377,7 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
         system = resolve(model, self.system_path)
         prediction = _relative_positions(system, data.time_d, data.planet)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
-        east, north = prediction
-        return loglike_relative_astrom(east, north, data), prediction
+        return prediction, data
 
     def __call__(self, model):
         """Return the scalar log-likelihood.
@@ -378,8 +387,13 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
 
         Returns:
             Scalar log-likelihood of the valid rows.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
-        return self._score(model)[0]
+        require_float64("Relative astrometry log likelihood")
+        prediction, data = self._prediction_and_data(model)
+        return loglike_relative_astrom(*prediction, data)
 
     def predict(self, model):
         """Return each row's planet offset at its own epoch, ``(2, T)``.
@@ -392,7 +406,7 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
             invalid
             rows. Shape ``(2, T)``.
         """
-        return self._score(model)[1]
+        return self._prediction_and_data(model)[0]
 
     def draw(self, key, model) -> Self:
         """Copy with correlated Gaussian positions at the same epochs.
@@ -426,7 +440,11 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
         Returns:
             The linear Gaussian form of the term in the four sky constants, with the
             design in arcsec per AU.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
+        require_float64("Astrometry linear Gaussian form")
         dynamics = _dynamics(resolve(model, self.system_path))
         shape = jax.tree.map(lambda a: a[planet], dynamics.orbits)
         valid = self.data.valid
@@ -465,7 +483,7 @@ class StellarAstrometryTerm(AbstractTerm):
     system_path: str = eqx.field(static=True, default="")
     reads: ClassVar[tuple[str, ...]] = ()
 
-    def _score(self, model):
+    def _prediction_and_data(self, model):
         valid = self.data.valid
         data = AstrometryData(
             time_d=jnp.where(valid, self.data.time_d, 0.0),
@@ -480,7 +498,7 @@ class StellarAstrometryTerm(AbstractTerm):
         system = resolve(model, self.system_path)
         prediction = _stellar_reflex(system, data.time_d)
         prediction = jnp.where(valid[None, :], prediction, 0.0)
-        return loglike_stellar_astrom(*prediction, data), prediction
+        return prediction, data
 
     def __call__(self, model):
         """Return the scalar log-likelihood.
@@ -490,8 +508,13 @@ class StellarAstrometryTerm(AbstractTerm):
 
         Returns:
             Scalar log-likelihood of the valid rows.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
-        return self._score(model)[0]
+        require_float64("Stellar astrometry log likelihood")
+        prediction, data = self._prediction_and_data(model)
+        return loglike_stellar_astrom(*prediction, data)
 
     def predict(self, model):
         """Return the stellar east/north path, ``(2, T)``.
@@ -504,7 +527,7 @@ class StellarAstrometryTerm(AbstractTerm):
             rows.
             Shape ``(2, T)``.
         """
-        return self._score(model)[1]
+        return self._prediction_and_data(model)[0]
 
     def draw(self, key, model) -> Self:
         """Copy with correlated Gaussian positions at the same epochs.

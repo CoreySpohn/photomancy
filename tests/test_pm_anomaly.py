@@ -81,6 +81,7 @@ def test_pm_anomaly_scales_linearly_with_mass():
     assert 0.02 < mas_per_yr < 2.0
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_pm_anomaly_likelihood_masks_invalid():
     """The placeholder channel (valid False) contributes zero log-likelihood."""
     placeholder = ProperMotionAnomalyData.zeros()
@@ -88,6 +89,7 @@ def test_pm_anomaly_likelihood_masks_invalid():
     assert float(ll) == 0.0
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_pm_anomaly_likelihood_peaks_at_truth():
     """The likelihood is maximized at the true anomaly."""
     anom_true = _anom(317.8 * Mearth2kg)

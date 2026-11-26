@@ -122,7 +122,7 @@ class MCLMC(AbstractBackend):
 
     def _run(self, fit, key, *, batch_size=None):
         """Tune and sample every chain; return flat draws with uniform weights."""
-        require_no_walls(fit, "MCLMC")
+        key = require_no_walls(fit, "MCLMC", key)
         key_init, key_run = jax.random.split(key)
         starts = start_points(fit, self.init, key_init, self.n_chains)
         positions, energy, length, step = _mclmc_chains(

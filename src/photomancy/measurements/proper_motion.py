@@ -10,6 +10,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from hwoutils.model_paths import resolve
+from hwoutils.precision import require_float64
 
 from photomancy.infer.fit import AbstractTerm
 from photomancy.measurements._observables import _stellar_reflex
@@ -75,7 +76,11 @@ def loglike_pm_anomaly(anom_pred, data):
     Returns:
         Scalar log-likelihood (zero when ``data.valid`` is False, for the
         placeholder channel during model tracing).
+
+    Raises:
+        PrecisionError: If float64 is unavailable.
     """
+    require_float64("Proper motion log likelihood")
     resid = data.pm_anomaly - anom_pred
     prec = jnp.linalg.inv(data.pm_anomaly_cov)
     _, logdet = jnp.linalg.slogdet(data.pm_anomaly_cov)
@@ -132,7 +137,7 @@ class ProperMotionAnomalyTerm(AbstractTerm):
         if self.data.n_epochs < 2:
             raise ValueError("n_epochs must be at least two")
 
-    def _score(self, model):
+    def _prediction_and_data(self, model):
         valid = self.data.valid
         data = ProperMotionAnomalyData(
             t_hip=jnp.where(valid, self.data.t_hip, 0.0),
@@ -155,7 +160,7 @@ class ProperMotionAnomalyTerm(AbstractTerm):
             ),
             0.0,
         )
-        return loglike_pm_anomaly(prediction, data), prediction
+        return prediction, data
 
     def __call__(self, model):
         """Return the scalar log-likelihood.
@@ -165,8 +170,13 @@ class ProperMotionAnomalyTerm(AbstractTerm):
 
         Returns:
             Scalar log-likelihood, zero when the data are invalid.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
-        return self._score(model)[0]
+        require_float64("Proper motion log likelihood")
+        prediction, data = self._prediction_and_data(model)
+        return loglike_pm_anomaly(prediction, data)
 
     def predict(self, model):
         """Return the proper-motion anomaly, ``(2,)``.
@@ -178,7 +188,7 @@ class ProperMotionAnomalyTerm(AbstractTerm):
             Predicted anomaly (east, north) in arcsec/day, zero when the data are
             invalid.
         """
-        return self._score(model)[1]
+        return self._prediction_and_data(model)[0]
 
     def draw(self, key, model) -> Self:
         """Copy with a full-covariance Gaussian proper-motion anomaly.
@@ -191,8 +201,9 @@ class ProperMotionAnomalyTerm(AbstractTerm):
             The term with the anomaly drawn about the prediction using the covariance.
         """
         valid = self.data.valid
-        covariance = jnp.where(valid, self.data.pm_anomaly_cov, jnp.eye(2))
-        eps = jax.random.normal(key, (2,), dtype=jnp.float64)
+        covariance = self.data.pm_anomaly_cov
+        covariance = jnp.where(valid, covariance, jnp.eye(2, dtype=covariance.dtype))
+        eps = jax.random.normal(key, (2,), dtype=self.data.pm_anomaly.dtype)
         draw = self.predict(model) + jnp.linalg.cholesky(covariance) @ eps
         data = eqx.tree_at(
             lambda d: d.pm_anomaly,

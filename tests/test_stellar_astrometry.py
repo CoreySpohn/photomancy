@@ -71,6 +71,7 @@ def test_stellar_forward_is_scaled_relative():
     assert jnp.max(jnp.abs(ra_star)) < jnp.max(jnp.abs(ra_rel))
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_stellar_and_relative_likelihoods_share_form():
     """The two astrometry likelihoods are the same bivariate Gaussian on (ra, dec)."""
     n = 5

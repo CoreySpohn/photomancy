@@ -112,7 +112,7 @@ class NUTS(AbstractBackend):
 
     def _run(self, fit, key, *, batch_size=None):
         """Adapt and sample every chain; return flat draws with uniform weights."""
-        require_no_walls(fit, "NUTS")
+        key = require_no_walls(fit, "NUTS", key)
         key_init, key_run = jax.random.split(key)
         starts = start_points(fit, self.init, key_init, self.n_chains)
         positions, divergent, depth, step = _nuts_chains(

@@ -43,6 +43,8 @@ import jax.numpy as jnp
 import optax
 from hwoutils.memory import DEFAULT_MAX_BYTES
 from hwoutils.model_paths import resolve
+from hwoutils.numerics import roundoff
+from hwoutils.precision import require_float64
 from priorities import AbstractDistribution
 
 from photomancy.infer._scale import information_scale
@@ -94,6 +96,9 @@ def _check_curvature(likelihood) -> None:
         )
 
 
+_BRACKET_RTOL = 1e-8  # tol: algorithm, relative width of the amplitude bracket.
+
+
 def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
     """Maximize a scalar objective from zero with forward-mode derivatives.
 
@@ -105,14 +110,14 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
     step and the preceding rejected trial bracket a peak with the starting point.
     With nonnegative second derivative there is no local curvature scale. Start
     one amplitude unit along the slope and double up to 40 times while ascending.
-    Refine a bracket with 48 golden-section steps, retaining its best finite point.
+    Bisect slope brackets; use golden-section steps for the remaining score brackets.
 
-    Resolution requires a bracket of width at most 1e-8 * max(1, abs(a)), or a
-    stationary point. With positive curvature, abs(slope) / sqrt(curvature)
-    estimates the amplitude error in formal standard errors. A point is
-    stationary if this error is at most 1e-6 or its square (the Newton
-    decrement) is within eps * max(1, abs(objective)). A stationary flat
-    null also resolves. Forward differentiation lets the likelihood mask NaN
+    Resolution requires a stationary point or a peak bracket no wider
+    than max(1e-8, eps) times the amplitude scale max(1, abs(a)). With
+    positive curvature, abs(slope) / sqrt(curvature) estimates the error
+    in formal standard errors. Allow 1e-6 standard errors or one rounding
+    at the amplitude scale, whichever is larger. A stationary flat null
+    also resolves. Forward differentiation lets the likelihood mask NaN
     template tangents.
     """
     d1 = jax.jacfwd(objective)
@@ -120,7 +125,6 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
     zero = jnp.zeros((), dtype)
     null = jnp.asarray(objective(zero))
     reduction_depth = 1 + (max(1, n_elements) - 1).bit_length()
-    relative_roundoff = 8 * jnp.finfo(null.dtype).eps * reduction_depth
 
     def update_if(active, update, state):
         # A per-item cond under vmap evaluates both branches and batches their
@@ -133,20 +137,20 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
 
         return jax.lax.cond(eqx.internal.unvmap_any(active), selected, lambda: state)
 
-    def roundoff(value):
-        return relative_roundoff * jnp.maximum(1, jnp.abs(value))
+    def score_roundoff(value):
+        return roundoff(jnp.maximum(1, jnp.abs(value)), n_ops=8 * reduction_depth)
 
     def small_slope(g, curvature, tolerance):
         return (curvature > 0) & (
             jnp.abs(g) <= tolerance * jnp.sqrt(jnp.abs(curvature))
         )
 
-    def advance(a, value, g, h, move):
+    def advance(a, value, g, h, move, allow_newton_bracket):
         newton = h < 0
         step = jnp.where(newton, -g / jnp.where(newton, h, 1), jnp.sign(g)).astype(
             dtype
         )
-        floor = value - roundoff(value)
+        floor = value - score_roundoff(value)
 
         def acceptable(offset, score):
             return jnp.isfinite(a + offset) & jnp.isfinite(score) & (score >= floor)
@@ -170,9 +174,20 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
         best = jnp.where(accepted, a + offset, a)
         score = jnp.where(accepted, score, value)
         shortened = accepted & (offset != step)
+
         # A shortened uphill step has a rejected trial just beyond it.
         # A non-rising unit step can straddle a peak with the starting point.
-        turned = move & ~newton & accepted & (score <= value)
+        def uphill(candidate, candidate_score, previous_score):
+            # On a rounded tie the derivative still distinguishes an ascending
+            # tail from a plateau or a step past the maximum.
+            tie = ~newton & (candidate_score == previous_score)
+            ascending_tie = update_if(
+                tie, lambda: jnp.sign(d1(candidate)) == jnp.sign(g), jnp.zeros_like(tie)
+            )
+            return (candidate_score > previous_score) | ascending_tie
+
+        increasing = uphill(best, score, value)
+        turned = move & ~newton & accepted & ~increasing
         right = jnp.where(turned, best, a + 2 * offset)
         best = jnp.where(turned, a, best)
         score = jnp.where(turned, value, score)
@@ -187,7 +202,7 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
             trial = a + 2 * (peak - a)
             trial_value = objective(trial)
             rising = ~bracketed & jnp.isfinite(trial) & jnp.isfinite(trial_value)
-            rising &= trial_value > peak_value
+            rising &= uphill(trial, trial_value, peak_value)
             return (
                 jnp.where(rising, peak, left),
                 jnp.where(rising, trial, peak),
@@ -198,10 +213,44 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
 
         bounds = (a, best, right, score, bracketed)
         left, best, right, score, bracketed = update_if(
-            move & ~newton & accepted & ~shortened & (score > value),
+            move & ~newton & accepted & ~shortened & increasing,
             lambda: jax.lax.fori_loop(0, 40, expand, bounds),
             bounds,
         )
+
+        # A Newton correction across a rounded optimum can alternate between
+        # the two attainable slopes. Use those points as a signed bracket.
+        crossed = update_if(
+            allow_newton_bracket & newton & accepted & ~bracketed,
+            lambda: d1(best) * jnp.sign(g) < 0,
+            jnp.zeros_like(bracketed),
+        )
+        right = jnp.where(crossed, best, right)
+        bracketed |= crossed
+
+        low, high = jnp.minimum(left, right), jnp.maximum(left, right)
+
+        def encloses_peak():
+            left_ok = (d1(low) >= 0) | ~jnp.isfinite(objective(low))
+            right_ok = (d1(high) <= 0) | ~jnp.isfinite(objective(high))
+            return (low < high) & left_ok & right_ok
+
+        signed = update_if(bracketed, encloses_peak, jnp.zeros_like(bracketed))
+
+        def bisect(_, bounds):
+            low, peak, high, peak_value = bounds
+            trial = low + 0.5 * (high - low)
+            trial_value = objective(trial)
+            slope = d1(trial)
+            valid = jnp.isfinite(trial_value) & jnp.isfinite(slope)
+            raise_low = jnp.where(valid, slope >= 0, trial < peak)
+            lower_high = jnp.where(valid, slope <= 0, trial > peak)
+            return (
+                jnp.where(raise_low, trial, low),
+                jnp.where(valid, trial, peak),
+                jnp.where(lower_high, trial, high),
+                jnp.where(valid, trial_value, peak_value),
+            )
 
         def refine(_, bounds):
             left, peak, right, peak_value = bounds
@@ -210,10 +259,14 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
             near = jnp.where(go_right, left, right)
             trial = peak + 0.3819660112501051 * (far - peak)
             trial_value = objective(trial)
+            tie = jnp.isfinite(trial_value) & (trial_value == peak_value)
+            rising_on_tie = update_if(
+                tie, lambda: d1(trial) * jnp.sign(far - peak) >= 0, jnp.zeros_like(tie)
+            )
             rising = (
                 jnp.isfinite(trial)
                 & jnp.isfinite(trial_value)
-                & (trial_value > peak_value)
+                & ((trial_value > peak_value) | rising_on_tie)
             )
             return (
                 jnp.where(rising, peak, near),
@@ -222,11 +275,18 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
                 jnp.where(rising, trial_value, peak_value),
             )
 
-        bounds = (left, best, right, score)
-        left, best, right, score = update_if(
-            move & bracketed, lambda: jax.lax.fori_loop(0, 48, refine, bounds), bounds
+        bounds = (low, best, high, score)
+        bounds = update_if(
+            signed, lambda: jax.lax.fori_loop(0, 48, bisect, bounds), bounds
         )
-        closed = bracketed & (jnp.abs(right - left) <= 1e-8 * jnp.maximum(1, abs(best)))
+        left, best, right, score = update_if(
+            bracketed & ~signed,
+            lambda: jax.lax.fori_loop(0, 48, refine, bounds),
+            bounds,
+        )
+        scale = jnp.maximum(1, abs(best))
+        width = jnp.maximum(_BRACKET_RTOL * scale, roundoff(scale))
+        closed = signed & (jnp.abs(right - left) <= width)
         return best, score, closed
 
     def iteration(i, state):
@@ -235,7 +295,7 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
         move = ~closed & (g != 0) & jnp.isfinite(g) & jnp.isfinite(h)
         # Always offer the first Newton step, including for a very faint Gaussian.
         move &= (i == 0) | ~small_slope(g, -h, 1e-6)
-        return update_if(move, lambda: advance(a, value, g, h, move), state)
+        return update_if(move, lambda: advance(a, value, g, h, move, i > 0), state)
 
     a_hat, value, closed = jax.lax.fori_loop(
         0, n_newton, iteration, (zero, null, jnp.asarray(False))
@@ -245,14 +305,13 @@ def _profile(objective: Callable, n_newton: int, dtype, n_elements: int = 1):
     two_delta = 2 * (value - null)
     finite = jnp.isfinite(a_hat) & jnp.isfinite(two_delta)
     resolved = finite & jnp.isfinite(g) & jnp.isfinite(curvature)
-    # The score can resolve to roundoff while further steps still refine a_hat.
-    # One eps of the objective (not the summation bound) caps the admitted
-    # amplitude error at sqrt(eps * abs(value)) standard errors.
-    eps = jnp.finfo(null.dtype).eps
-    tolerance = jnp.maximum(1e-6, jnp.sqrt(eps * jnp.maximum(1, jnp.abs(value))))
+    # A large, rounded score can be flat even while the amplitude is moving.
+    # Resolve the slope in standard errors or to one rounding of the amplitude.
+    amplitude_floor = roundoff(jnp.maximum(1, jnp.abs(a_hat)))
+    tolerance = jnp.maximum(1e-6, amplitude_floor * jnp.sqrt(jnp.abs(curvature)))
     resolved &= small_slope(g, curvature, tolerance) | closed | flat_null
     # Apply the subtraction tolerance while both objective values are available.
-    rounding = 2 * roundoff(jnp.maximum(jnp.abs(null), jnp.abs(value)))
+    rounding = 2 * score_roundoff(jnp.maximum(jnp.abs(null), jnp.abs(value)))
     rounded_loss = resolved & (two_delta < 0) & (two_delta >= -rounding)
     two_delta = jnp.where(rounded_loss, 0, two_delta)
     return a_hat, two_delta, curvature, resolved
@@ -286,8 +345,9 @@ def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 8):
         standard error. A finite profile is resolved when the estimated error
         from the slope is within 1e-6 standard errors, the Newton decrement is
         within eps * max(1, abs(log likelihood)) at positive curvature, the bracket
-        width is at most 1e-8 times max(1, abs(a_hat)), or the null is flat and
-        stationary. A zero template resolves at zero amplitude with zero gain.
+        width is at most max(1e-8, eps) times max(1, abs(a_hat)), or the
+        null is flat and stationary. A zero template resolves at zero amplitude
+        with zero gain.
 
     Raises:
         ValueError: If the likelihood is the Laplace density.
@@ -297,8 +357,10 @@ def profile_amplitude(loglike_of_prediction, base, template, n_newton: int = 8):
     template = jnp.asarray(template)
     dtype = jnp.result_type(base, template, float)
 
+    score = getattr(loglike_of_prediction, "detection_score", loglike_of_prediction)
+
     def objective(a):
-        return loglike_of_prediction(base + a * template)
+        return score(base + a * template)
 
     return _profile(
         objective,
@@ -316,7 +378,7 @@ def _summarize(a_hat, two_delta, curvature, resolved):
     The factor of two comes from doubling the gain. Larger losses give NaN,
     as does an unresolved profile.
     """
-    rounding = 16 * jnp.finfo(jnp.asarray(two_delta).dtype).eps
+    rounding = roundoff(jnp.ones_like(two_delta), n_ops=16)
     gain = jnp.where(
         resolved & (two_delta >= -rounding), jnp.maximum(two_delta, 0), jnp.nan
     )
@@ -330,7 +392,7 @@ def _map_terms(terms, n_newton, position):
 
     def objective(a):
         return sum(
-            likelihood(base + a * image)
+            getattr(likelihood, "detection_score", likelihood)(base + a * image)
             for (likelihood, base, _), image in zip(terms, images, strict=True)
         )
 
@@ -703,14 +765,6 @@ class LikelihoodEstimate(eqx.Module):
         return jnp.sqrt(jnp.diag(self.cov))
 
 
-def _require_float64(flat):
-    if not jax.config.jax_enable_x64 or flat.dtype != jnp.float64:
-        raise RuntimeError(
-            "curvature needs float64 (jax_enable_x64 on and float64 parameters); "
-            "a float32 Hessian is too noisy to invert"
-        )
-
-
 _EIGENVALUE_FLOOR = 1e-8
 """Smallest correlation-form eigenvalue of a direction the data constrain."""
 
@@ -960,13 +1014,13 @@ def measure(
 
     Raises:
         ValueError: If the keys of ``start`` are not the free paths.
-        RuntimeError: If ``jax_enable_x64`` is off.
+        PrecisionError: If float64 is unavailable.
         MemoryLimit: If the information matrix does not fit ``max_bytes``.
     """
+    require_float64("measure")
     _check_entries(start, set(fit.free))
     start = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), start)
     flat, _ = jax.flatten_util.ravel_pytree(start)
-    _require_float64(flat)
     _admit_information(
         flat.size, flat.size * 8, 2 * flat.size * flat.size * 8, batch_size, max_bytes
     )
@@ -1088,12 +1142,15 @@ def curvature_block(logdensity: Callable, params, where: Callable) -> jax.Array:
 
     Returns:
         A ``(n, n)`` matrix, ``n`` the number of scalars in the group.
+
+    Raises:
+        PrecisionError: If float64 is unavailable or the parameters are not float64.
     """
     selected = where(params)
+    require_float64("curvature_block", selected)
     flat, unravel = jax.flatten_util.ravel_pytree(selected)
 
     def negative(vector):
         return -logdensity(eqx.tree_at(where, params, unravel(vector)))
 
-    _require_float64(flat)
     return observed_hessian(negative, flat, batch_size=1)

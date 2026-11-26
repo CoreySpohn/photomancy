@@ -9,7 +9,9 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pytest
+from hwoutils import PrecisionError
 from hwoutils.leaves import check_tree
+from hwoutils.testing import ulps
 from priorities import Normal
 
 from photomancy.infer.backends.staged import (
@@ -17,6 +19,7 @@ from photomancy.infer.backends.staged import (
     UNLABELED,
     EarlyStopping,
     MAPStage,
+    _line_search_stalled,
     group_labels,
     map_fit,
     rescaled_transform,
@@ -80,7 +83,8 @@ def test_rescaled_transform_is_adam_on_the_scaled_variable():
 
     Truth source: ``optax.adam`` on ``q`` with the gradient ``s * dL/dp``, the
     definition of a fit in the scaled units.
-    Tolerance basis: floating-point (rtol 1e-12, float64; the algebra is exact).
+    Tolerance basis: floating-point. Three steps each round a scaled update
+    and its addition, with one initial division and one final multiplication.
     Fails if: the gradient or the update is not scaled, so epsilon acts in leaf
     units and the steps differ from a fit in meters and radians.
     """
@@ -96,7 +100,8 @@ def test_rescaled_transform_is_adam_on_the_scaled_variable():
         p = p + update
         q_update, q_state = base.update(g * s, q_state, q)
         q = q + q_update
-    np.testing.assert_allclose(p, q * s, rtol=1e-12)
+    expected = q * s
+    assert jnp.all(jnp.abs(p - expected) <= ulps(2 * len(grads) + 2, expected))
 
 
 class _Toy(eqx.Module):
@@ -125,6 +130,7 @@ def _toy_transforms():
     return {"a": optax.adam(0.05), "b": optax.adam(0.02)}
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_hold_leaves_frozen_leaves_and_moments_bitwise_unchanged():
     """A group that is not free keeps its values and Adam moments, bit for bit.
@@ -135,10 +141,19 @@ def test_hold_leaves_frozen_leaves_and_moments_bitwise_unchanged():
     Fails if: a frozen group is updated on stale momentum or its moments keep
     accumulating gradients while frozen (the failure of zeroed-gradient freezing).
     """
-    init = _toy_init()
+    init = jax.tree.map(lambda x: x.astype(jnp.float32), _toy_init())
     labels = group_labels(init, _TOY_GROUPS)
     kwargs = dict(labels=labels, transforms=_toy_transforms(), freeze="hold")
+    with pytest.raises(PrecisionError, match="map_fit log density"):
+        map_fit(
+            lambda p: _toy_logdensity(p).astype(jnp.float32),
+            init,
+            stages=[MAPStage(1, ("a",))],
+            **kwargs,
+        )
     after_a = map_fit(_toy_logdensity, init, stages=[MAPStage(20, ("a",))], **kwargs)
+    assert after_a.params.a.dtype == after_a.params.b.dtype == jnp.float64
+    assert after_a.params.fixed.dtype == jnp.float32
     np.testing.assert_array_equal(after_a.params.b, init.b)
     np.testing.assert_array_equal(after_a.params.fixed, init.fixed)
     fresh_b_state = _toy_transforms()["b"].init(init.b)
@@ -169,6 +184,7 @@ def test_hold_leaves_frozen_leaves_and_moments_bitwise_unchanged():
     assert not np.array_equal(both.params.a, mid.params.a)
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_map_fit_does_not_consume_init_and_reaches_the_optimum():
     """``init`` stays valid after a fit and a long fit lands on the toy maximum.
@@ -242,6 +258,7 @@ def _hand_written_loop(init, policy):
     return params, np.asarray(losses)
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize("policy", ["zero_gradient", "drop_update"])
 def test_legacy_freeze_policies_match_a_hand_written_optax_loop(policy):
@@ -275,6 +292,7 @@ def test_legacy_freeze_policies_match_a_hand_written_optax_loop(policy):
     np.testing.assert_array_equal(again.params.b, got.params.b)
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_freeze_policies_differ_where_they_should():
     """A later stage that frees ``b`` moves ``a`` only under ``zero_gradient``.
@@ -337,6 +355,7 @@ def _q_init():
 _Q_GROUPS = {"x": lambda t: t.x}
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_closed_form_sees_the_pre_step_aux_and_runs_after_the_update():
     """``closed_form`` receives the aux scored before the step, on updated params.
@@ -370,6 +389,7 @@ class _SqrtLoss(eqx.Module):
         return -jnp.sum(jnp.sqrt(p.x))
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_early_stopping_ends_a_stage_at_the_expected_step():
     """Patience 3 on a one-step quadratic stops after step 5, or 6 with a 3-step check.
@@ -461,6 +481,7 @@ class _Parabola(eqx.Module):
         return -0.5 * jnp.sum(p.x**2)
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_a_stage_reports_the_loss_at_the_point_it_returns():
     """The last step is evaluated: a rise is ``regressed`` and a NaN is ``failed``.
@@ -496,6 +517,7 @@ def test_a_stage_reports_the_loss_at_the_point_it_returns():
     assert left.failed and not left.stopped_early
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_callbacks_metrics_scale_and_stage_logdensity():
     """Callbacks get pre-step device copies; metrics, scale and stage densities apply.
@@ -563,6 +585,7 @@ def test_callbacks_metrics_scale_and_stage_logdensity():
     assert [r.step for r in predicate] == [1, 3]
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @pytest.mark.parametrize("solver_stage", [False, True])
 def test_prepare_uses_current_host_parameters_and_reuses_the_step(
     monkeypatch, solver_stage
@@ -624,6 +647,7 @@ def test_prepare_uses_current_host_parameters_and_reuses_the_step(
     )
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_first_step_group_rates_match_the_analytic_adam_step():
     """The first Adam step of each group is ``-lr g / (|g| + eps)``, rescaled or not.
@@ -654,6 +678,7 @@ def test_first_step_group_rates_match_the_analytic_adam_step():
     np.testing.assert_allclose(got.params.y, want_y, rtol=1e-12)
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_one_compile_per_stage_configuration_and_fresh_transforms():
     """Four stages over three configurations trace thrice; fresh transforms restart.
@@ -881,6 +906,7 @@ def _optax_lbfgs_loop(x, n_steps):
     return np.asarray(x)
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="mutation")
 def test_solver_stage_reaches_the_mode_of_an_ill_conditioned_coupled_quadratic():
     """An L-BFGS stage over two groups reaches the mode; per-group Adam does not.
@@ -932,6 +958,7 @@ def test_solver_stage_reaches_the_mode_of_an_ill_conditioned_coupled_quadratic()
     assert solved.stages[0].loss[-1] < solved.stages[0].loss[0]
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_solver_stage_leaves_other_groups_and_their_transform_states_untouched():
     """A solver stage moves only its free groups; the group transforms resume after it.
@@ -978,6 +1005,7 @@ def test_solver_stage_leaves_other_groups_and_their_transform_states_untouched()
     assert int(resumed.opt_states["a"][0].count) == 15
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 def test_solver_stage_rejects_a_closed_form_transforms_or_an_unknown_group():
     """Fails if incompatible stage options or unknown groups are silently accepted."""
     with pytest.raises(ValueError, match="either prepare or fit"):
@@ -1006,8 +1034,9 @@ def test_rescaled_solver_is_lbfgs_on_the_scaled_variable():
     Truth source: the same solver run directly on the scaled problem
     ``g(q) = f(q * s)``, a quadratic whose scales differ by 1e8 in ``p`` and are
     equal in ``q``.
-    Tolerance basis: floating-point (rtol 1e-9 on ``p / s`` after 8 steps; the two
-    runs do the same arithmetic up to the multiplications by ``s``).
+    Tolerance basis: floating-point. In each of eight steps a coordinate
+    conversion rounds the parameter, gradient, objective input and update.
+    Compare in scaled units at the larger of the starting and final magnitude.
     Fails if: the solver's line search is handed the gradient or the objective in
     the unscaled variable, which mixes units inside the zoom line search.
     """
@@ -1041,7 +1070,8 @@ def test_rescaled_solver_is_lbfgs_on_the_scaled_variable():
     q0 = jnp.asarray([1.0, 1.0, 1.0])
     direct = run(optax.lbfgs(), g, q0)
     scaled = run(rescaled_transform(optax.lbfgs(), s), f, q0 * s)
-    np.testing.assert_allclose(scaled / np.asarray(s), direct, rtol=1e-9, atol=0)
+    scale = jnp.maximum(jnp.abs(q0), jnp.abs(direct))
+    assert jnp.all(jnp.abs(scaled / s - direct) <= ulps(4 * 8, scale))
 
 
 _RIPPLE_MODE = np.asarray([1.0, 2.0, 3.0, 0.0, 0.0])
@@ -1123,68 +1153,60 @@ def _rule_converged(loss, patience, min_delta):
 
 @pytest.mark.float64_only(reason="float64 rounding-scale perturbation")
 @vv.case("scene-fits", "code-verification", basis="mutation")
-def test_solver_stage_ends_at_the_first_stalled_line_search_near_the_optimum():
-    """A stage ends at the first step whose zoom line search fails, near the optimum.
+def test_subroundoff_line_search_error_preserves_the_patience_count():
+    """A subroundoff Wolfe error near the optimum leaves the patience rule in charge.
 
-    Truth source: the plain optax L-BFGS loop on the same objective, ended by hand at
-    the first step whose line search reports a positive decrease or curvature error
-    (optax's public ``info``); the objective is a quadratic with a rounding-scale
-    ripple (amplitude 1e-13, frequency 1e6), whose mode is known.
-    Tolerance basis: mutation and floating-point. The stage takes the oracle's 12
-    steps and 44 objective evaluations (pinned: the ripple path is chaotic, so the
-    pins hold for float64 on CPU); a stage that ignores the stall takes 14 steps and
-    67 evaluations and fails both pins. The estimate is within 1e-5 of the mode. The
-    stall counts as the loss half of the stopping rule (the patience count alone has
-    not been reached on this trace, so without the stall the stage would run on).
-    Fails if: a failed line search does not end the stage (also at a host check
-    interval of 5), or does not report it stopped.
+    A plain Optax loop reports its first positive error at step 12 on the
+    rounding-scale ripple. The decrease error is zero and the curvature
+    error is below one rounding of the loss even across the full step.
+    The loss then reaches its third consecutive nonimproving step at step 14.
+    The stage must terminate at that exact host check, or the following
+    five-step check. Tolerance basis: the mode bound follows the maximum
+    ripple gradient, 1e-13 times 1e6 per coordinate, with three terms on b0.
+    Fails if the stage treats the sign of a Wolfe error as a failed search
+    without resolving it, or ignores the loss-stall rule.
     """
     amplitude, frequency = 1e-13, 1e6
     x0 = jnp.concatenate([_toy_init().a, _toy_init().b])
-    patience, min_delta = 3, 0.0
-    x, n_steps, stalls = _stalling_oracle(
+    _, first_positive, stalls = _stalling_oracle(
         _rippled_quadratic(amplitude, frequency, []), x0, 80, True
     )
-    assert stalls[-1] and not any(stalls[:-1]) and n_steps == 12
-    for check_every in (1, 5):
+    assert stalls[-1] and not any(stalls[:-1]) and first_positive == 12
+    for check_every, expected_steps, evaluations in ((1, 14, 67), (5, 15, 69)):
         calls = []
         result = _ripple_stage(
             _rippled_quadratic(amplitude, frequency, calls),
-            EarlyStopping(patience, min_delta=min_delta, check_every=check_every),
+            EarlyStopping(3, min_delta=0.0, check_every=check_every),
             80,
         )
         trace = result.stages[0]
-        assert trace.n_steps == n_steps
-        assert len(calls) == 44
-        got = np.concatenate([result.params.a, result.params.b])
-        np.testing.assert_allclose(got, x, rtol=0, atol=1e-10)
-        np.testing.assert_allclose(got, _RIPPLE_MODE, rtol=0, atol=1e-5)
-        # the stall is evidence the loss stalled: with no gradient gate it stops
-        # the stage as converged although the patience count was not reached
-        assert not _rule_converged(trace.loss, patience, min_delta)
+        assert trace.n_steps == expected_steps and len(calls) == evaluations
+        assert _rule_converged(trace.loss, 3, 0.0)
+        assert not _rule_converged(trace.loss[:13], 3, 0.0)
         assert trace.stopped_early and not trace.failed
+        got = np.concatenate([result.params.a, result.params.b])
+        np.testing.assert_allclose(
+            got, _RIPPLE_MODE, rtol=0, atol=3 * amplitude * frequency
+        )
 
 
 @pytest.mark.float64_only(reason="float64 rounding-scale perturbation")
 def test_stall_with_a_small_gradient_stops_the_gated_stage_as_converged():
-    """A stall near the optimum passes a scaled-gradient gate; the stage is converged.
+    """A resolved failed search ends at the same step on either side of the gate.
 
-    Same fixture as the near-optimum test with ``grad_tol`` 1e-3: the scaled gradient
-    at the stall is far below it, so the stage reports ``stopped_early`` (what keeps
-    ``measure`` from rerunning it). With the gate shut (1e-30) the stall ends the stage
-    not converged.
+    The ripple slope is at most 1e-10 times 1e8 per term. The 0.25 gate
+    admits the gradient close to the quadratic mode; the 1e-6 gate rejects
+    it. Patience exceeds the expected eight steps, so only the failed
+    search can stop either run. Fails if a stall alone declares convergence.
     """
     scale = {"a": (1.0,), "b": (1.0,)}
-    stops = []
-    for tol in (1e-3, 1e-30):
+    for tol, converged in ((0.25, True), (1e-6, False)):
         result = _ripple_stage(
-            _rippled_quadratic(1e-13, 1e6, []),
-            EarlyStopping(3, check_every=1, grad_tol=tol, grad_scale=scale),
-            80,
+            _rippled_quadratic(1e-10, 1e8, []),
+            EarlyStopping(60, check_every=1, grad_tol=tol, grad_scale=scale),
         )
-        assert result.stages[0].n_steps == 12
-        stops.append(result.stages[0].stopped_early)
-    assert stops == [True, False]
+        trace = result.stages[0]
+        assert trace.n_steps == 8 and trace.stopped_early == converged
 
 
 @pytest.mark.float64_only(reason="float64 rounding-scale perturbation")
@@ -1221,6 +1243,7 @@ def test_stalled_line_search_far_from_the_optimum_reports_not_converged():
     assert distance > 1e-3
 
 
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 def test_solver_stage_without_a_stall_runs_as_before():
     """A smooth quadratic reports no failed search, so the stage runs to the rule."""
     x0 = jnp.concatenate([_toy_init().a, _toy_init().b])
@@ -1236,11 +1259,70 @@ def test_solver_stage_without_a_stall_runs_as_before():
     assert result.stages[0].stopped_early
 
 
+def test_zoom_at_a_tiny_step_still_reports_a_curvature_failure(precision):
+    """A constant unit slope violates Wolfe curvature at any step length.
+
+    Optax uses a curvature factor of 0.9. Its error of 0.1 allows two
+    roundings at unit slope for the product and subtraction. Fails if even
+    a resolved slope violation is ignored because the recorded step is tiny.
+    """
+    zoom = optax.scale_by_zoom_linesearch(
+        max_linesearch_steps=2, max_learning_rate=2.0**-54
+    )
+
+    def objective(x):
+        return 1 + x
+
+    def search(x):
+        value, grad = jax.value_and_grad(objective)(x)
+        _, state = zoom.update(
+            -grad, zoom.init(x), x, value=value, grad=grad, value_fn=objective
+        )
+        return state
+
+    for run_search in (search, jax.jit(search)):
+        state = run_search(jnp.asarray(0, dtype=precision))
+        assert state.value == 1 and state.info.decrease_error == 0
+        np.testing.assert_allclose(
+            state.info.curvature_error, 0.1, rtol=0, atol=float(ulps(2, state.value))
+        )
+        assert _line_search_stalled(state)
+
+    if precision == np.float64:
+        init = {"x": jnp.zeros(1)}
+        labels = group_labels(init, {"x": lambda p: p["x"]})
+        result = map_fit(
+            lambda p: -objective(p["x"][0]),
+            init,
+            labels,
+            {"x": optax.identity()},
+            [
+                MAPStage(
+                    5,
+                    ("x",),
+                    solver=optax.lbfgs(linesearch=zoom),
+                    early_stopping=EarlyStopping(
+                        2,
+                        check_every=1,
+                        grad_tol=0.5,
+                        grad_scale={"x": (1.0,)},
+                    ),
+                )
+            ],
+        )
+        trace = result.stages[0]
+        assert trace.n_steps == 1 and not trace.stopped_early and not trace.failed
+
+
+@pytest.mark.float64_only(reason="MAP coordinates and log densities require float64")
 def test_stall_read_ignores_group_names_and_other_line_searches():
     """A group called ``info`` and a backtracking line search both run unharmed.
 
     Fails if the stall is read by key name from the whole solver state, or assumes
-    every line search records a curvature error.
+    every line search records a curvature error, or an objective error at its
+    roundoff floor is classified differently in eager and compiled states.
+    One epsilon at unit loss is the roundoff of a stored value, also used at
+    the unit line-search-parameter scale for curvature error.
     """
     init = _toy_init()
     stopping = EarlyStopping(3, check_every=1)
@@ -1257,3 +1339,33 @@ def test_stall_read_ignores_group_names_and_other_line_searches():
             [MAPStage(5, ("info", "b"), solver=solver, early_stopping=stopping)],
         )
         assert result.stages[0].n_steps >= 1
+
+    zoom = optax.scale_by_zoom_linesearch(max_linesearch_steps=5).init(jnp.zeros(1))
+
+    def with_error(decrease, curvature):
+        return zoom._replace(
+            learning_rate=jnp.asarray(0.5),
+            value=jnp.asarray(1.0),
+            info=zoom.info._replace(
+                decrease_error=decrease,
+                curvature_error=curvature,
+                num_linesearch_steps=jnp.asarray(1),
+            ),
+        )
+
+    floor = np.finfo(np.float64).eps
+    above = np.nextafter(floor, np.inf)
+    assert np.float32(floor) == np.float32(above)
+    for make_state in (with_error, jax.jit(with_error)):
+        assert not _line_search_stalled(make_state(floor, 0.0))
+        assert _line_search_stalled(make_state(above, 0.0))
+        assert not _line_search_stalled(make_state(0.0, floor))
+        assert _line_search_stalled(make_state(0.0, above))
+
+
+@pytest.mark.float32_only(reason="MAP coordinates require float64")
+def test_map_fit_refuses_float32_coordinates_when_float64_is_unavailable():
+    """Fails if a staged fit begins evaluating a float32 density."""
+    init = _toy_init()
+    with pytest.raises(PrecisionError, match=r"map_fit.*float64"):
+        map_fit(_toy_logdensity, init, group_labels(init, _TOY_GROUPS), {}, ())

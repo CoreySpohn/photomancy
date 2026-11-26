@@ -9,7 +9,9 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.leaves import as_float_leaf, canonical
 from hwoutils.model_paths import resolve
+from hwoutils.precision import require_float64
 from orbix.system import System
 
 from photomancy.infer.fit import AbstractTerm
@@ -27,6 +29,36 @@ def _instrument_names(instruments):
     return tuple(instruments)
 
 
+def _cast_references(references, dtype):
+    original = np.asarray(references, dtype=np.float64)
+    with np.errstate(over="ignore", under="ignore"):
+        stored = original.astype(dtype)
+    if np.any(~np.isfinite(stored) | ((original != 0) & (stored == 0))):
+        raise ValueError(f"Absolute RVs do not fit {dtype}; rescale the velocities")
+    return stored
+
+
+def _instrument_ids_and_mask(ids, valid, n_inst):
+    message = f"inst_ids of valid rows must lie in [0, {n_inst})"
+    if _concrete(ids, valid):
+        kept = np.asarray(ids)[np.asarray(valid, dtype=bool)]
+        if np.any((kept < 0) | (kept >= n_inst)):
+            raise ValueError(f"{message}; got {np.unique(kept).tolist()}")
+        with jax.ensure_compile_time_eval():
+            return jnp.asarray(ids), jnp.asarray(valid)
+    ids, valid = jnp.asarray(ids), jnp.asarray(valid)
+    bad = jnp.any(valid & ((ids < 0) | (ids >= n_inst)))
+    return eqx.error_if(ids, bad, message), valid
+
+
+def _shift_host(values, origins, shifts=0.0):
+    with np.errstate(over="ignore"):
+        shifted = (values - origins) + shifts
+    if np.any(np.isfinite(values) & np.isfinite(shifts) & ~np.isfinite(shifted)):
+        raise ValueError("Finite RV offsets overflow; rescale the velocities")
+    return shifted
+
+
 class RadialVelocityData(eqx.Module):
     """Radial velocity observations from one or more named instruments.
 
@@ -36,20 +68,102 @@ class RadialVelocityData(eqx.Module):
 
     Attributes:
         time_d: Observation epochs (days). Shape ``(N,)``.
-        rv: Measured radial velocities (m/s). Shape ``(N,)``.
+        rv_offset: Measured velocities relative to each instrument reference (m/s).
         rv_err: RV measurement uncertainties (m/s). Shape ``(N,)``.
         inst_ids: Integer index into ``instruments`` per observation. Shape ``(N,)``.
             Every valid row lies in ``[0, n_inst)``; padded rows keep their sentinel.
         valid: Boolean validity mask. Shape ``(N,)``.
         instruments: Unique instrument names (static); ``n_inst`` is its length.
+        rv_reference: Host reference velocities, one per instrument (m/s).
     """
 
     time_d: jnp.ndarray
-    rv: jnp.ndarray
+    rv_offset: jnp.ndarray
     rv_err: jnp.ndarray
     inst_ids: jnp.ndarray
     valid: jnp.ndarray
     instruments: tuple[str, ...] = eqx.field(static=True)
+    rv_reference: tuple[float, ...] = eqx.field(static=True)
+
+    def __init__(
+        self,
+        time_d,
+        rv=None,
+        rv_err=None,
+        inst_ids=None,
+        valid=None,
+        instruments=None,
+        *,
+        rv_offset=None,
+        rv_reference=None,
+    ):
+        """Anchor each instrument to its first finite, valid host observation.
+
+        Args:
+            time_d: Observation epochs in days.
+            rv: Absolute velocities in m/s. Pass host observations before narrowing.
+                Device arrays already have their working precision.
+            rv_err: Measurement uncertainties in m/s.
+            inst_ids: Instrument indices per observation.
+            valid: Boolean validity mask per observation.
+            instruments: Tuple of unique calibration names.
+            rv_offset: Already conditioned velocities for rebuilding the data.
+            rv_reference: Host velocity origin in m/s for each instrument when
+                rebuilding from offsets. A new absolute ``rv`` replaces both.
+
+        Raises:
+            ValueError: If inputs for conditioning are missing, or an observation
+                or offset cannot be represented in the storage precision.
+        """
+        self.time_d = jnp.asarray(time_d)
+        self.rv_err = jnp.asarray(rv_err)
+        self.inst_ids, self.valid = _instrument_ids_and_mask(
+            inst_ids, valid, len(instruments)
+        )
+        self.instruments = instruments
+        if rv is None:
+            if rv_offset is None or rv_reference is None:
+                raise ValueError(
+                    "Supply absolute RVs or offsets and instrument references"
+                )
+            self.rv_reference = tuple(rv_reference)
+            with jax.ensure_compile_time_eval():
+                self.rv_offset = as_float_leaf(rv_offset)
+        elif isinstance(rv, jax.Array) or not _concrete(rv):
+            self.rv_reference = (0.0,) * len(instruments)
+            self.rv_offset = as_float_leaf(rv)
+        else:
+            if not _concrete(valid, inst_ids):
+                raise ValueError(
+                    "Condition host RVs with concrete instrument IDs and validity"
+                )
+            values = np.asarray(rv, dtype=np.float64)
+            offsets = values.copy()
+            references = []
+            ids, keep = np.asarray(inst_ids), np.asarray(valid, dtype=bool)
+            for instrument in range(len(instruments)):
+                rows = keep & (ids == instrument)
+                finite = rows & np.isfinite(values)
+                origin = float(values[finite][0]) if np.any(finite) else 0.0
+                offsets[rows] = _shift_host(values[rows], origin)
+                references.append(origin)
+            self.rv_reference = tuple(references)
+            with jax.ensure_compile_time_eval():
+                self.rv_offset = as_float_leaf(offsets)
+
+    @property
+    def rv(self):
+        """Absolute velocities in m/s including padding, at storage precision."""
+        dtype = self.rv_offset.dtype
+        if not any(self.rv_reference):
+            return self.rv_offset
+        origins = jnp.asarray(_cast_references(self.rv_reference, dtype))
+        absolute = self.rv_offset + jnp.where(self.valid, origins[self.inst_ids], 0.0)
+        return eqx.error_if(
+            absolute,
+            jnp.any(jnp.isfinite(self.rv_offset) & ~jnp.isfinite(absolute)),
+            f"Absolute RVs do not fit {dtype}; rescale the velocities",
+        )
 
     def __check_init__(self):
         """Require unique string names and, when concrete, in-range valid-row ids."""
@@ -63,13 +177,21 @@ class RadialVelocityData(eqx.Module):
             raise ValueError(
                 f"instruments must be a nonempty tuple of unique strings: {names!r}"
             )
-        leaves = (self.inst_ids, self.valid)
-        if not any(isinstance(x, jax.core.Tracer) for x in leaves):
-            ids = np.asarray(self.inst_ids)[np.asarray(self.valid)]
-            if np.any((ids < 0) | (ids >= self.n_inst)):
+        if len(self.rv_reference) != len(names):
+            raise ValueError("RV references must match the instrument names")
+        dtype = self.rv_offset.dtype
+        origins = _cast_references(self.rv_reference, dtype)
+        if any(self.rv_reference) and _concrete(
+            self.inst_ids, self.valid, self.rv_offset
+        ):
+            valid = np.asarray(self.valid)
+            offsets = np.asarray(self.rv_offset)[valid]
+            ids = np.asarray(self.inst_ids)[valid]
+            with np.errstate(over="ignore"):
+                absolute = offsets + origins[ids]
+            if np.any(np.isfinite(offsets) & ~np.isfinite(absolute)):
                 raise ValueError(
-                    f"inst_ids of valid rows must lie in [0, {self.n_inst}) for "
-                    f"instruments {self.instruments}; got {np.unique(ids).tolist()}"
+                    f"Absolute RVs do not fit {dtype}; rescale the velocities"
                 )
 
     @property
@@ -93,13 +215,21 @@ class RadialVelocityData(eqx.Module):
             The data padded to shape ``(max_n,)``, with ``valid`` true for the first N
             rows.
         """
-        n = jnp.asarray(time_d).shape[0]
+        n = len(time_d)
+        host = not isinstance(rv, jax.Array) and _concrete(rv)
+        if host and not _concrete(inst_ids):
+            raise ValueError("Condition host RVs with concrete instrument IDs")
+        concrete_ids = _concrete(inst_ids)
         return cls(
             time_d=_pad_1d(time_d, max_n),
-            rv=_pad_1d(rv, max_n),
+            rv=np.pad(np.asarray(rv), (0, max_n - n)) if host else _pad_1d(rv, max_n),
             rv_err=_pad_1d(rv_err, max_n, fill=1.0),
-            inst_ids=_pad_1d(inst_ids, max_n).astype(int),
-            valid=_valid_mask(n, max_n),
+            inst_ids=(
+                np.pad(np.asarray(inst_ids, dtype=int), (0, max_n - n))
+                if concrete_ids
+                else _pad_1d(inst_ids, max_n).astype(int)
+            ),
+            valid=np.arange(max_n) < n,
             instruments=_instrument_names(instruments),
         )
 
@@ -122,6 +252,22 @@ class RadialVelocityData(eqx.Module):
             valid=jnp.zeros(max_n, dtype=bool),
             instruments=_instrument_names(instruments),
         )
+
+
+def _centered_rv_residual(rv_obs, rv_model, inst_ids, mask, n_inst):
+    # Difference each series before subtracting them. Their zero points can
+    # differ by more than either series' resolved velocity contrasts.
+    rows = jnp.arange(mask.size)
+    first = jax.ops.segment_min(
+        jnp.where(mask, rows, mask.size), inst_ids, num_segments=n_inst
+    )
+
+    def centered(series):
+        safe = jnp.where(mask, series, 0.0)
+        anchor = jnp.concatenate((safe, jnp.zeros(1, dtype=safe.dtype)))[first]
+        return jnp.where(mask, safe - anchor[inst_ids], 0.0)
+
+    return centered(rv_obs) - centered(rv_model)
 
 
 def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters, valid):
@@ -152,7 +298,11 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
 
     Returns:
         Scalar log-likelihood value.
+
+    Raises:
+        PrecisionError: If float64 is unavailable.
     """
+    require_float64("Radial velocity log likelihood")
     # Mask invalid entries -- use jnp.where for gradient safety
     mask = valid  # boolean
 
@@ -162,25 +312,14 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
     jitter = jnp.where(mask, jitters[inst_ids], 0.0)
     var = err**2 + jitter**2
     w = jnp.where(mask, 1.0 / var, 0.0)
-    r = jnp.where(mask, rv_obs, 0.0) - jnp.where(mask, rv_model, 0.0)
-
-    # Segment sums collapse the matrix algebra to O(N)
-    # The weighted spread about each instrument's weighted mean. Residuals are first
-    # anchored to the instrument's first valid row, so a large common offset never
-    # enters the sums and a one-row instrument contributes exactly zero.
-    rows = jnp.arange(r.size)
-    first = jax.ops.segment_min(
-        jnp.where(mask, rows, r.size), inst_ids, num_segments=n_inst
-    )
-    anchor = jnp.where(first < r.size, r[jnp.minimum(first, r.size - 1)], 0.0)
-    shifted = jnp.where(mask, r - anchor[inst_ids], 0.0)
+    shifted = _centered_rv_residual(rv_obs, rv_model, inst_ids, mask, n_inst)
     A = jax.ops.segment_sum(w, inst_ids, num_segments=n_inst)
     B = jax.ops.segment_sum(w * shifted, inst_ids, num_segments=n_inst)
     centre = B / jnp.where(A > 0, A, 1.0)
     spread = jnp.where(mask, shifted - centre[inst_ids], 0.0)
     C_centred = jax.ops.segment_sum(w * spread**2, inst_ids, num_segments=n_inst)
 
-    counts = jax.ops.segment_sum(mask.astype(float), inst_ids, num_segments=n_inst)
+    counts = jax.ops.segment_sum(mask.astype(w.dtype), inst_ids, num_segments=n_inst)
 
     # Marginalized log-likelihood -- only count valid observations
     N_valid = jnp.sum(mask)
@@ -306,22 +445,58 @@ class RadialVelocityTerm(AbstractTerm):
         remap = np.array([instruments.index(n) for n in theirs], dtype=int)
         a, b = self.data, other.data
         keep_a, keep_b = np.asarray(a.valid), np.asarray(b.valid)
-        rows = {
-            "time_d": np.concatenate(
-                [np.asarray(a.time_d)[keep_a], np.asarray(b.time_d)[keep_b]]
+        ids_a = np.asarray(a.inst_ids)[keep_a]
+        ids_b = np.asarray(b.inst_ids)[keep_b]
+        offsets_a = np.asarray(a.rv_offset, dtype=np.float64)[keep_a]
+        offsets_b = np.asarray(b.rv_offset, dtype=np.float64)[keep_b]
+        origins = {}
+        for data, ids, values in ((a, ids_a, offsets_a), (b, ids_b, offsets_b)):
+            for i, name in enumerate(data.instruments):
+                finite = (ids == i) & np.isfinite(values)
+                if name not in origins and np.any(finite):
+                    # Read one absolute observation to choose the common origin.
+                    # All delivered contrasts below stay in their offset form.
+                    origins[name] = float(
+                        _shift_host(values[finite][0], -data.rv_reference[i])
+                    )
+        references = tuple(origins.get(name, 0.0) for name in instruments)
+
+        def offsets(data, ids, values):
+            # Shift each old origin before adding offsets so neither batch is
+            # reconstructed at the scale of the absolute velocities.
+            old = np.asarray(data.rv_reference)[ids]
+            new = np.asarray([origins.get(name, 0.0) for name in data.instruments])[ids]
+            return _shift_host(old, new, values)
+
+        rv_offset = np.concatenate(
+            [offsets(a, ids_a, offsets_a), offsets(b, ids_b, offsets_b)]
+        )
+        n = rv_offset.size
+        capacity = max(a.valid.shape[0], n)
+        data = RadialVelocityData(
+            time_d=_pad_1d(
+                np.concatenate(
+                    [np.asarray(a.time_d)[keep_a], np.asarray(b.time_d)[keep_b]]
+                ),
+                capacity,
             ),
-            "rv": np.concatenate([np.asarray(a.rv)[keep_a], np.asarray(b.rv)[keep_b]]),
-            "rv_err": np.concatenate(
-                [np.asarray(a.rv_err)[keep_a], np.asarray(b.rv_err)[keep_b]]
+            rv_offset=canonical(
+                np.pad(rv_offset, (0, capacity - n)),
+                precision=np.result_type(a.rv_offset.dtype, b.rv_offset.dtype),
             ),
-            "inst_ids": np.concatenate(
-                [np.asarray(a.inst_ids)[keep_a], remap[np.asarray(b.inst_ids)[keep_b]]]
+            rv_reference=references,
+            rv_err=_pad_1d(
+                np.concatenate(
+                    [np.asarray(a.rv_err)[keep_a], np.asarray(b.rv_err)[keep_b]]
+                ),
+                capacity,
+                fill=1.0,
             ),
-        }
-        data = RadialVelocityData.pad(
+            inst_ids=_pad_1d(np.concatenate([ids_a, remap[ids_b]]), capacity).astype(
+                int
+            ),
+            valid=_valid_mask(n, capacity),
             instruments=instruments,
-            max_n=max(a.valid.shape[0], rows["rv"].shape[0]),
-            **{k: jnp.asarray(v) for k, v in rows.items()},
         )
         return type(self)(
             data=data,
@@ -341,35 +516,6 @@ class RadialVelocityTerm(AbstractTerm):
             raise ValueError("jitters must have shape (data.n_inst,)")
         return jitters
 
-    def _score(self, model):
-        valid = self.data.valid
-        data = RadialVelocityData(
-            time_d=jnp.where(valid, self.data.time_d, 0.0),
-            rv=jnp.where(valid, self.data.rv, 0.0),
-            rv_err=jnp.where(valid, self.data.rv_err, 1.0),
-            inst_ids=jnp.where(valid, self.data.inst_ids, 0),
-            valid=valid,
-            instruments=self.data.instruments,
-        )
-        system = resolve(model, self.system_path)
-        if isinstance(system, System):
-            prediction = system.solve(data.time_d).radial_velocity_m_per_s(
-                0, "barycenter"
-            )
-        else:
-            prediction = system.star_radial_velocity(time_d=data.time_d)
-        prediction = jnp.where(valid, prediction, 0.0)
-        value = loglike_rv_marginalized(
-            data.rv,
-            prediction,
-            data.rv_err,
-            data.inst_ids,
-            data.n_inst,
-            self._jitters(model),
-            valid,
-        )
-        return value, prediction
-
     def __call__(self, model):
         """Score RVs with the jitter of ``jitters`` or ``jitter_path`` (m/s).
 
@@ -379,8 +525,21 @@ class RadialVelocityTerm(AbstractTerm):
 
         Returns:
             Scalar log-likelihood with the instrument offsets marginalized.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
-        return self._score(model)[0]
+        require_float64("Radial velocity log likelihood")
+        data = self.data
+        return loglike_rv_marginalized(
+            data.rv_offset,
+            self.predict(model),
+            data.rv_err,
+            data.inst_ids,
+            data.n_inst,
+            self._jitters(model),
+            data.valid,
+        )
 
     def predict(self, model):
         """Return the stellar radial velocity at each epoch (m/s), invalid rows zero.
@@ -391,7 +550,14 @@ class RadialVelocityTerm(AbstractTerm):
         Returns:
             Stellar radial velocity (m/s) at each epoch, shape ``(T,)``.
         """
-        return self._score(model)[1]
+        valid = self.data.valid
+        time_d = jnp.where(valid, self.data.time_d, 0.0)
+        system = resolve(model, self.system_path)
+        if isinstance(system, System):
+            prediction = system.solve(time_d).radial_velocity_m_per_s(0, "barycenter")
+        else:
+            prediction = system.star_radial_velocity(time_d=time_d)
+        return jnp.where(valid, prediction, 0.0)
 
     def draw(self, key, model) -> Self:
         """Draw Gaussian RV noise with zero instrument offsets.
@@ -416,7 +582,14 @@ class RadialVelocityTerm(AbstractTerm):
         jitter = self._jitters(model)
         sigma = jnp.sqrt(jnp.where(valid, data.rv_err, 1.0) ** 2 + jitter[ids] ** 2)
         draw = self.predict(model) + sigma * jax.random.normal(
-            key, data.rv.shape, dtype=jnp.float64
+            key, data.rv_offset.shape, dtype=sigma.dtype
         )
-        sampled = eqx.tree_at(lambda d: d.rv, data, jnp.where(valid, draw, data.rv))
+        sampled = RadialVelocityData(
+            data.time_d,
+            jnp.where(valid, draw, data.rv_offset),
+            data.rv_err,
+            data.inst_ids,
+            valid,
+            data.instruments,
+        )
         return eqx.tree_at(lambda t: t.data, self, sampled)

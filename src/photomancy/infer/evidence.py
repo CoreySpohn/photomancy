@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+from hwoutils.precision import float_dtype, require_float64
 from jax.scipy.special import log_ndtr, logsumexp, ndtri
 
 __all__ = ["importance_evidence", "sigma_from_log_bayes_factor"]
@@ -32,7 +33,8 @@ def importance_evidence(log_weights):
         ``log_evidence`` is the log of the mean unnormalized weight and
         ``standard_error`` is its delta-method standard error, both scalars.
     """
-    log_weights = jnp.asarray(log_weights)
+    require_float64("importance evidence")
+    log_weights = jnp.asarray(log_weights, dtype=float_dtype())
     n = log_weights.shape[-1]
     log_z = logsumexp(log_weights) - jnp.log(n)
     norm = jax.nn.softmax(log_weights)

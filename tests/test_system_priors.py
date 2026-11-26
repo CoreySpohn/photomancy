@@ -7,6 +7,7 @@ float64 floor for the small sums here. Support and masks are exact.
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from priorities import HalfNormal, LogUniform
 from scipy import integrate, stats
 from system_helpers import BOUNDS
@@ -20,6 +21,7 @@ def _check(label, actual, expected):
     np.testing.assert_allclose(actual, expected, rtol=0, atol=ATOL)
 
 
+@pytest.mark.float64_only(reason="quadrature of inference prior densities")
 def test_scalar_cdfs_and_support():
     """Integrate in physical units; check a partial CDF as well as total mass."""
     for name, (lo, hi) in BOUNDS.items():

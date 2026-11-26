@@ -7,11 +7,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.precision import PrecisionError
 
 from photomancy.infer import (
     diagnostics,
     khat_threshold,
     kish_ess,
+    kish_temperature,
     mc_se,
     normalize_log_weights,
     pareto_khat,
@@ -19,6 +21,10 @@ from photomancy.infer import (
     weighted_cov,
     weighted_mean,
     weighted_quantile,
+)
+
+_INFERENCE = pytest.mark.float64_only(
+    reason="posterior log weights and reported widths"
 )
 
 
@@ -73,6 +79,7 @@ def _near_plateau(seed, n=1000, jitter=1e-4):
     return np.log(w)
 
 
+@_INFERENCE
 @pytest.mark.parametrize("xi", [0.2, 0.6, 1.1])
 def test_pareto_khat_matches_reference_fit(xi):
     """Khat equals an independent Zhang-Stephens fit of the same tail.
@@ -87,6 +94,7 @@ def test_pareto_khat_matches_reference_fit(xi):
     np.testing.assert_allclose(got, _reference_khat(log_w), rtol=0, atol=1e-9)
 
 
+@_INFERENCE
 def test_the_max_bound_clears_a_near_plateau_of_bounded_weights(monkeypatch):
     """Bounded weights with the cutoff inside a plateau pass the gate.
 
@@ -100,6 +108,7 @@ def test_the_max_bound_clears_a_near_plateau_of_bounded_weights(monkeypatch):
     assert float(diagnostics._khat(log_w)) > 1.0
 
 
+@_INFERENCE
 def test_khat_equals_the_pareto_max_bound_where_the_bound_binds():
     """The reported value is ``(lw_max - lw_cut) / -log(1 - 1e-3**(1/n))``.
 
@@ -111,6 +120,7 @@ def test_khat_equals_the_pareto_max_bound_where_the_bound_binds():
     )
 
 
+@_INFERENCE
 def test_a_heavy_tail_behind_a_plateau_is_still_refused():
     """Pareto k = 1.2 ratios floored at their 0.95 quantile still fail the gate.
 
@@ -124,6 +134,7 @@ def test_a_heavy_tail_behind_a_plateau_is_still_refused():
     assert float(pareto_khat(jnp.asarray(log_w))) > khat_threshold(1000)
 
 
+@_INFERENCE
 def test_the_max_bound_misses_a_true_pareto_tail_rarely():
     """For exact Pareto k = 0.8 ratios the bound is below 0.8 in at most 2 of 200 seeds.
 
@@ -137,6 +148,7 @@ def test_the_max_bound_misses_a_true_pareto_tail_rarely():
     assert np.all(khat <= bound + 1e-12)
 
 
+@_INFERENCE
 def test_khat_edge_cases_with_the_max_bound():
     """Flat weights give -inf, a short tail NaN, an exact plateau a finite value."""
     assert pareto_khat(jnp.zeros(200)) == -jnp.inf
@@ -153,6 +165,7 @@ def test_khat_edge_cases_with_the_max_bound():
     )
 
 
+@_INFERENCE
 def test_khat_jits_and_batches_on_the_near_plateau():
     """``jit`` and a vmapped batch equal the eager value."""
     log_w = jnp.asarray(_near_plateau(0))
@@ -165,6 +178,7 @@ def test_khat_jits_and_batches_on_the_near_plateau():
 _EXAMPLES = Path(__file__).parents[1] / "data" / "khat_examples"
 
 
+@_INFERENCE
 @pytest.mark.parametrize(("star", "want"), [(29, 0.147), (125, 0.152), (0, -0.204)])
 def test_khat_on_the_consumer_example_weights(star, want):
     """Three combined weight vectors from a 150-star survey (1,000 draws each).
@@ -180,6 +194,7 @@ def test_khat_on_the_consumer_example_weights(star, want):
     assert got <= 0.7
 
 
+@_INFERENCE
 def test_pareto_khat_recovers_known_shape():
     """A large Pareto sample returns its true tail shape."""
     rng = np.random.default_rng(5)
@@ -187,6 +202,7 @@ def test_pareto_khat_recovers_known_shape():
     assert abs(float(pareto_khat(jnp.asarray(log_w))) - 0.5) < 0.08
 
 
+@_INFERENCE
 def test_heavy_tail_trips_threshold_and_light_does_not():
     """A shape above the limit is flagged and a light tail is not."""
     rng = np.random.default_rng(11)
@@ -199,12 +215,14 @@ def test_heavy_tail_trips_threshold_and_light_does_not():
     assert khat_threshold(100) == pytest.approx(0.5)
 
 
+@_INFERENCE
 def test_pareto_khat_edge_cases():
     """Too few entries give NaN and a bounded tail gives -inf."""
     assert jnp.isnan(pareto_khat(jnp.array([0.0, -jnp.inf, -jnp.inf, 1.0])))
     assert pareto_khat(jnp.zeros(200)) == -jnp.inf
 
 
+@_INFERENCE
 def test_mc_se_known_variance_importance_case():
     """Target N(0,1) from a N(0,s^2) proposal: the delta-method error is known."""
     s, n, reps = 1.5, 4000, 150
@@ -225,6 +243,7 @@ def _cloud(key, batch=(2,), n=64, d=3):
     return jax.random.normal(k1, (*batch, n)), jax.random.normal(k2, (*batch, n, d))
 
 
+@_INFERENCE
 def test_batch_prefix_equals_per_slice_loop():
     """Batched, vmapped and per-slice results agree."""
     log_w, vals = _cloud(jax.random.key(1))
@@ -253,6 +272,7 @@ def test_batch_prefix_equals_per_slice_loop():
     assert norm.shape == log_w.shape and total.shape == none.shape == (2,)
 
 
+@_INFERENCE
 def test_weighted_quantile_matches_numpy_with_repetition(precision):
     """Integer weights reproduce the repeated-sample quantile exactly."""
     rng = np.random.default_rng(2)
@@ -269,13 +289,14 @@ def test_weighted_quantile_matches_numpy_with_repetition(precision):
     np.testing.assert_array_equal(got, want)
 
 
+@_INFERENCE
 def test_weighted_moments_match_numpy_and_offsets():
     """Weighted mean and covariance match NumPy at a large weight offset."""
     rng = np.random.default_rng(4)
     values = rng.normal(size=(50, 3))
     w = rng.uniform(size=50)
     # The offset rounds each log weight by about 2e-12, which sets the tolerances.
-    log_w = jnp.log(w) + 1e4
+    log_w = np.log(w) + 1e4
     mean = np.average(values, axis=0, weights=w)
     cov = np.cov(values.T, aweights=w, ddof=0)
     np.testing.assert_allclose(weighted_mean(log_w, values), mean, rtol=1e-9)
@@ -283,6 +304,7 @@ def test_weighted_moments_match_numpy_and_offsets():
     np.testing.assert_allclose(weighted_cov(log_w, values[:, 0]), cov[0, 0], rtol=1e-10)
 
 
+@_INFERENCE
 def test_no_support_gives_nan_and_zero_weight_values_are_ignored():
     """No support gives NaN; zero-weight draws cannot poison a result."""
     log_w = jnp.full(5, -jnp.inf)
@@ -296,6 +318,7 @@ def test_no_support_gives_nan_and_zero_weight_values_are_ignored():
     assert weighted_mean(log_w, poisoned) == 2.0
 
 
+@_INFERENCE
 def test_ratio_mc_se_matches_stand_in_form():
     """The error is the ratio-estimator form and inf without condition mass."""
     rng = np.random.default_rng(8)
@@ -323,6 +346,7 @@ def test_ratio_mc_se_matches_stand_in_form():
     np.testing.assert_allclose(both, [want, want], rtol=1e-12)
 
 
+@_INFERENCE
 def test_khat_rounding_flat_weights_are_flat():
     """Weights that differ only by logsumexp rounding return -inf."""
     rng = np.random.default_rng(6)
@@ -333,6 +357,7 @@ def test_khat_rounding_flat_weights_are_flat():
     assert pareto_khat(jnp.asarray(log_w)) > -jnp.inf
 
 
+@_INFERENCE
 @pytest.mark.parametrize("levels", [2, 3, 4])
 def test_khat_discrete_weight_levels_fail_closed_or_pass(levels):
     """A few discrete levels leave fewer than five distinct exceedances: NaN."""
@@ -344,6 +369,7 @@ def test_khat_discrete_weight_levels_fail_closed_or_pass(levels):
     assert not bool(out <= 0.7) or out == -jnp.inf
 
 
+@_INFERENCE
 def test_khat_bin_probability_reweight_levels():
     """Reweighting by a per-bin probability ratio (few levels, big plateau)."""
     rng = np.random.default_rng(9)
@@ -354,3 +380,71 @@ def test_khat_bin_probability_reweight_levels():
     # A continuous perturbation on top restores a fittable, light tail.
     noisy = log_w + 0.05 * rng.normal(size=2000)
     assert float(pareto_khat(jnp.asarray(noisy))) < 0.7
+
+
+@pytest.mark.float32_only(reason="posterior weights require float64")
+@pytest.mark.parametrize(
+    ("fn", "other_args"),
+    [
+        (pareto_khat, ()),
+        (kish_ess, ()),
+        (normalize_log_weights, ()),
+        (weighted_mean, ([1.0, 2.0],)),
+        (weighted_cov, ([1.0, 2.0],)),
+        (weighted_quantile, ([1.0, 2.0], 0.5)),
+        (mc_se, ([1.0, 2.0],)),
+        (ratio_mc_se, ([1.0, 2.0], [1.0, 1.0])),
+        (kish_temperature, ([0.0, 1.0], 0.0, 0.5)),
+    ],
+)
+def test_posterior_weights_refuse_before_narrowing(fn, other_args):
+    """Two distinct host weights would become identical in float32."""
+    host = np.array([1e4, 1e4 + 1e-5])
+    assert host[0] != host[1] and np.float32(host[0]) == np.float32(host[1])
+    with pytest.raises(PrecisionError, match="enable_x64"):
+        fn(host, *other_args)
+
+
+def test_host_log_weight_offsets_retain_sub_ulp_contrasts(precision):
+    """One storage cast rounds at the contrast scale after host differencing.
+
+    The contrasts and their float64 reference are exact binary fractions.
+    Two host deliveries that coincide on the absolute float32 grid must
+    remain distinct after the same preparation used by the weighted moments.
+    A negative overflow is exact log zero; the dominant weight gives its
+    value with zero variance. Fails if host subtraction warns or loses it.
+    """
+    contrast = np.array([[0.0, -(2.0**-14)], [-(2.0**-15), 0.0]])
+    delivery = np.array([[1e4], [-2e4]]) + contrast
+    offsets, peak, invalid = diagnostics._shift_log_weights(delivery)
+    assert offsets.dtype == precision
+    np.testing.assert_array_equal(offsets, contrast)
+    np.testing.assert_array_equal(peak, [1e4, -2e4])
+    np.testing.assert_array_equal(invalid, False)
+
+    extreme = np.array([1e308, -1e308])
+
+    def offsets_only():
+        shifted, _, unsupported = diagnostics._shift_log_weights(extreme)
+        return shifted, unsupported
+
+    for evaluate in (offsets_only, jax.jit(offsets_only)):
+        shifted, unsupported = evaluate()
+        np.testing.assert_array_equal(shifted, [0.0, -np.inf])
+        assert not unsupported
+        if precision == np.float64:
+
+            def moments(weights):
+                return (
+                    normalize_log_weights(weights)[0],
+                    weighted_mean(weights, [4.0, 2.0]),
+                    weighted_cov(weights, [4.0, 2.0]),
+                )
+
+            def host_moments():
+                return moments(extreme)
+
+            call = host_moments if evaluate is offsets_only else jax.jit(host_moments)
+            normalized, mean, variance = call()
+            np.testing.assert_array_equal(normalized, [0.0, -np.inf])
+            assert mean == 4.0 and variance == 0.0

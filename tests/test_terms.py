@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, d2s
 from hwoutils.epoch import Epoch
+from hwoutils.leaves import canonical
+from hwoutils.testing import ulps
 from kinematics import (
     predict_pm_anomaly,
     predict_relative_astrometry,
@@ -89,7 +91,8 @@ def _system(elements=_ELEMENTS, mass=_MASS, *, epoch=_EPOCH):
 def test_sign_anchor(pa_deg, axis):
     """Truth source: PA is measured east of north; node sets periastron's PA.
 
-    Tolerance basis: 1e-14 absolute for the vanishing trigonometric component;
+    Floating-point basis: 16 eps of the nonzero component for angle conversion,
+    the trigonometric factors and rotation of the projected position;
     only the positive sign is asserted on the nonzero axis, independent of scale.
     Fails if: either conversion or system-term prediction flips or swaps axes.
     """
@@ -105,7 +108,7 @@ def test_sign_anchor(pa_deg, axis):
     prediction = RelativeAstrometryTerm(data).predict(system)
     for position in (observed, np.asarray(prediction)[:, 0]):
         assert position[axis] > 0
-        assert abs(position[1 - axis]) < 1e-14
+        assert abs(position[1 - axis]) < float(ulps(16, position[axis]))
 
 
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
@@ -148,11 +151,11 @@ def test_sep_pa_covariance(max_n):
 
 @vv.case("scene-fits", "code-verification", basis="equivalence")
 @vv.seam("skyscapes", "photomancy")
-def test_system_element_parity():
+def test_system_element_parity(precision):
     """Truth source: element-based relative astrometry scored by the same likelihood.
 
-    Tolerance basis: rtol 1e-9 in x64 allows floating-point differences between
-    Markley and differentiable Kepler solvers and the angular-unit conversions.
+    Floating-point basis: 64 eps of apparent semimajor axis for the independent
+    mean-anomaly, Kepler and sky rotations. Scoring retains its x64 bound.
     Fails if: system and element paths disagree in epoch, mass, scale or axes.
     """
     data = _data()
@@ -171,16 +174,14 @@ def test_system_element_parity():
         dist_pc=10.0,
         Mp=_MASS * Mearth2kg,
     )
-    expected = loglike_relative_astrom(*expected_positions, data)
-    actual, prediction = both(RelativeAstrometryTerm(data), _system())
-    difference = float(actual - expected)
-    print(
-        f"parity: loglike difference={difference:.17g}; expected={float(expected):.17g}"
+    term, system = RelativeAstrometryTerm(data), _system()
+    prediction = term.predict(system)
+    np.testing.assert_allclose(
+        prediction, expected_positions, rtol=0, atol=float(ulps(64, a / 10.0))
     )
-    position_difference = np.max(np.abs(prediction - jnp.stack(expected_positions)))
-    print(f"parity: max position difference={position_difference:.17g} arcsec")
-    np.testing.assert_allclose(actual, expected, rtol=1e-9, atol=0)
-    np.testing.assert_allclose(prediction, expected_positions, rtol=1e-9, atol=1e-14)
+    if precision == np.float64:
+        expected = loglike_relative_astrom(*expected_positions, data)
+        np.testing.assert_allclose(term(system), expected, rtol=1e-9, atol=0)
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
@@ -310,12 +311,14 @@ def test_mixed_terms_sum_in_a_fit():
 @vv.case("scene-fits", "code-verification", basis="equivalence")
 @vv.seam("skyscapes", "photomancy")
 @pytest.mark.parametrize("kind", ["stellar", "rv", "pma"])
-def test_reflex_system_element_parity(kind):
+def test_reflex_system_element_parity(kind, precision):
     """Truth source: existing element-array predictors with the same finite mass.
 
-    Tolerance basis: x64 rtol 1e-12, likelihood atol 1e-12; prediction absolute
-    floors are 1e-18 arcsec, 1e-12 m/s, and 1e-20 arcsec/day. These allow only
-    floating-point solver and unit-conversion differences, not model changes.
+    Floating-point basis: 64 eps of peak observable for mean anomaly, the
+    Kepler solve, mass weighting and rotation. For a fitted slope the scale
+    is the reflex semimajor axis times 3/window + 2/baseline, bounding the
+    sum of absolute regression and differencing weights. Scores retain
+    their independent x64 roundoff check.
     Fails if: the system seam changes mass, sign, units, epoch or window model.
     """
     term = _new_term(kind)
@@ -323,8 +326,8 @@ def test_reflex_system_element_parity(kind):
     args = _element_args()
     if kind == "stellar":
         prediction = jnp.stack(predict_stellar_astrometry(data.time_d, **args))
-        expected = loglike_stellar_astrom(*prediction, data)
-        atol = 1e-18
+        if precision == np.float64:
+            expected = loglike_stellar_astrom(*prediction, data)
     elif kind == "rv":
         a, e, _, inc, peri, mean, epoch = _ELEMENTS
         motion = np.sqrt(G * (Msun2kg + _MASS * Mearth2kg) / a**3)
@@ -339,16 +342,16 @@ def test_reflex_system_element_parity(kind):
             epoch - mean / motion,
             Mp=_MASS * Mearth2kg,
         ) * (AU2m / d2s)
-        expected = loglike_rv_marginalized(
-            data.rv,
-            prediction,
-            data.rv_err,
-            data.inst_ids,
-            data.n_inst,
-            term.jitters,
-            data.valid,
-        )
-        atol = 1e-12
+        if precision == np.float64:
+            expected = loglike_rv_marginalized(
+                data.rv,
+                prediction,
+                data.rv_err,
+                data.inst_ids,
+                data.n_inst,
+                term.jitters,
+                data.valid,
+            )
     else:
         prediction = predict_pm_anomaly(
             data.t_hip,
@@ -357,15 +360,18 @@ def test_reflex_system_element_parity(kind):
             data.n_epochs,
             **args,
         )
-        expected = loglike_pm_anomaly(prediction, data)
-        atol = 1e-20
-    actual, result = both(term, _system())
-    print(
-        f"{kind} parity: likelihood difference={float(actual - expected):.17g}; "
-        f"max prediction difference={float(jnp.max(jnp.abs(result - prediction))):.17g}"
+        if precision == np.float64:
+            expected = loglike_pm_anomaly(prediction, data)
+    scale = jnp.max(jnp.abs(prediction))
+    if kind == "pma":
+        reflex = args["a"] / args["dist_pc"] * args["Mp"] / (args["Mp"] + args["Ms"])
+        scale = reflex * (3 / data.gaia_window + 2 / (data.t_gaia - data.t_hip))
+    system = _system()
+    np.testing.assert_allclose(
+        term.predict(system), prediction, rtol=0, atol=float(ulps(64, scale))
     )
-    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(result, prediction, rtol=1e-12, atol=atol)
+    if precision == np.float64:
+        np.testing.assert_allclose(term(system), expected, rtol=1e-12, atol=1e-12)
 
 
 def _element_args():
@@ -388,12 +394,14 @@ def _element_args():
 
 @vv.case("scene-fits", "code-verification", basis="equivalence")
 @pytest.mark.parametrize("n_epochs", [2, 25])
-def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
+def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch, precision):
     """Fails if sharing a solve changes the PM anomaly or solves more than once.
 
     Truth is three independent scene calls: window, Hipparcos and Gaia.
-    The 1e-12 relative tolerance permits only x64 rounding for both the slope
-    and likelihood. Two samples and the standard window cover slice endpoints.
+    The same elementwise ephemeris operations give identical values in either
+    batching. The relative 1e-12 score tolerance allows float64 roundoff in
+    the ephemeris and covariance reduction. Two samples and the standard window
+    cover slice endpoints.
     """
     term = ProperMotionAnomalyTerm(replace(_new_term("pma").data, n_epochs=n_epochs))
     system = _system()
@@ -406,9 +414,12 @@ def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
 
     with monkeypatch.context() as patch:
         patch.setattr(Scene, "ephemeris", record)
-        actual = term(system)
-    assert len(calls) == 1
-    prediction = term.predict(system)
+        prediction = term.predict(system)
+        assert len(calls) == 1
+        if precision == np.float64:
+            calls.clear()
+            score = term(system)
+            assert len(calls) == 1
     data = term.data
     ts = jnp.linspace(
         data.t_gaia - 0.5 * data.gaia_window,
@@ -419,9 +430,10 @@ def test_pm_anomaly_shared_ephemeris(n_epochs, monkeypatch):
     p_hip = system.star_reflex(time_d=jnp.atleast_1d(data.t_hip))[:, 0]
     p_gaia = system.star_reflex(time_d=jnp.atleast_1d(data.t_gaia))[:, 0]
     expected_prediction = mu_gaia - (p_gaia - p_hip) / (data.t_gaia - data.t_hip)
-    expected = loglike_pm_anomaly(expected_prediction, data)
-    np.testing.assert_allclose(prediction, expected_prediction, rtol=1e-12, atol=0)
-    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=0)
+    np.testing.assert_array_equal(prediction, expected_prediction)
+    if precision == np.float64:
+        expected = loglike_pm_anomaly(expected_prediction, data)
+        np.testing.assert_allclose(score, expected, rtol=1e-12, atol=0)
 
 
 @eqx.filter_jit
@@ -495,6 +507,7 @@ def test_new_term_gradients_and_padding(kind):
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_contrast_detection_and_limits():
     """Truth source: Gaussian density in contrast at the system band prediction.
 
@@ -540,7 +553,8 @@ def test_contrast_detection_and_limits():
 def test_photometry_band_planet_epoch_routing():
     """Truth source: separate system calls for two bands, planets and epochs.
 
-    Tolerance basis: x64 rtol 1e-13 for repeated quadrature and orbit propagation.
+    Floating-point basis: 32 eps for orbital phase, Lambert factors, band
+    weights and the weighted-sum division in batched versus scalar evaluation.
     Wavelength-dependent albedos make the bands distinguishable.
     Fails if: any band, planet or epoch index is broadcast, swapped or reused.
     """
@@ -607,7 +621,12 @@ def test_photometry_band_planet_epoch_routing():
         )[0, p, 0]
         for b, p, t in zip(band_ids, planet_ids, _TIMES, strict=True)
     ]
-    np.testing.assert_allclose(prediction, expected, rtol=1e-13, atol=0)
+    np.testing.assert_allclose(
+        prediction,
+        expected,
+        rtol=float(ulps(32, jnp.ones((), prediction.dtype))),
+        atol=0,
+    )
 
 
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
@@ -616,14 +635,19 @@ def test_dmag_contrast_error_propagation():
 
     Tolerance basis: sigma_dmag=0.002 makes curvature negligible; std sampling
     error 1/sqrt(2*N)=0.00158, so 1% relative exceeds six standard errors.
-    The central contrast matches to 1e-14 relative in x64.
+    The central contrast allows two eps for magnitude scaling and exponentiation.
     Fails if: the magnitude sign, base, first-order error or padding is wrong.
     """
     data = PhotometryData.from_dmag(
         time_d=[1.0], dmag=[15.0], dmag_err=[0.002], band_id=[1], max_n=3
     )
     draws = 10 ** (-0.4 * np.random.default_rng(0).normal(15.0, 0.002, 200_000))
-    np.testing.assert_allclose(data.contrast[0], 1e-6, rtol=1e-14)
+    np.testing.assert_allclose(
+        data.contrast[0],
+        1e-6,
+        rtol=float(ulps(2, jnp.ones((), data.contrast.dtype))),
+        atol=0,
+    )
     np.testing.assert_allclose(data.contrast_err[0], draws.std(ddof=1), rtol=0.01)
     np.testing.assert_array_equal(data.valid, [True, False, False])
     np.testing.assert_array_equal(data.planet, [0, 0, 0])
@@ -631,6 +655,7 @@ def test_dmag_contrast_error_propagation():
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_rv_default_jitter_and_selection():
     """Truth source: explicit zero jitters versus the default with a model path.
 
@@ -650,6 +675,7 @@ def test_rv_default_jitter_and_selection():
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_rv_marginal_integrates_to_one_over_the_contrast():
     """Truth source: the flat-offset marginal is a density of the data modulo a shift.
 
@@ -713,14 +739,15 @@ class _SamplingSystem(eqx.Module):
 
 
 @pytest.mark.parametrize("kind", ["relative", "stellar", "rv", "pma", "photometry"])
-def test_term_sampling_laws(kind):
+def test_term_sampling_laws(kind, precision):
     """Fails if sampling loses masks, padding, jitter, covariance or censoring.
 
     Each of five measurement types needs its own sampler structure. With n=2000
     keys the Gaussian means and variances use 4/sqrt(n) and
     4*sqrt(2/(n-1)); cross moments use 4/sqrt(n). This resolves mean biases
     of about 0.09 sigma. Censoring fractions use four binomial standard errors.
-    JIT/eager differences allow 32 x64 eps from fused arithmetic.
+    Floating-point basis: 32 eps of the signal scale for coordinate propagation
+    and the arithmetic of a correlated draw, including near-zero components.
     """
     from jax.scipy.special import ndtr
 
@@ -754,8 +781,14 @@ def test_term_sampling_laws(kind):
     for a, b in zip(
         jax.tree.leaves(one.data), jax.tree.leaves(compiled_one.data), strict=True
     ):
-        np.testing.assert_allclose(a, b, rtol=32 * np.finfo(float).eps, atol=1e-20)
-    assert np.isfinite(one(model))
+        if jnp.issubdtype(a.dtype, jnp.floating):
+            scale = jnp.nanmax(jnp.abs(a), initial=0.0)
+            np.testing.assert_allclose(a, b, rtol=0, atol=float(ulps(32, scale)))
+        else:
+            np.testing.assert_array_equal(a, b)
+
+    if precision == np.float64:
+        assert np.isfinite(one(model))
     np.testing.assert_array_equal(one.data.valid, term.data.valid)
     for a, b in zip(jax.tree.leaves(one.data), jax.tree.leaves(term.data), strict=True):
         assert a.shape == b.shape
@@ -813,8 +846,7 @@ def test_term_sampling_laws(kind):
     assert np.all(np.abs(z.var(axis=0, ddof=1) - 1) < 4 * np.sqrt(2 / 1999))
 
 
-@pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check():
+def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check(precision):
     """Planet 1 or -1 on a one-planet system raises in ``check`` for both selectors.
 
     Truth: the system has one planet, so valid selectors are ``[0, 1)``; negative
@@ -828,8 +860,9 @@ def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check():
         row = eqx.tree_at(lambda d: d.planet, astrometry, jnp.full(4, planet))
         with pytest.raises(ValueError, match="planet"):
             RelativeAstrometryTerm(row).check(system)
-        with pytest.raises(ValueError, match="planet"):
-            Fit(system, {}, (RelativeAstrometryTerm(row),))
+        if precision == np.float64:
+            with pytest.raises(ValueError, match="planet"):
+                Fit(system, {}, (RelativeAstrometryTerm(row),))
         data = eqx.tree_at(lambda d: d.planet, photometry.data, jnp.full(4, planet))
         with pytest.raises(ValueError, match="planet"):
             eqx.tree_at(lambda t: t.data, photometry, data).check(system)
@@ -843,8 +876,9 @@ def test_a_valid_row_selecting_a_missing_planet_is_refused_by_check():
     RelativeAstrometryTerm(padded).check(system)
 
 
-@pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_selector_checks_skip_traced_inputs_and_a_band_only_model_is_accepted():
+def test_selector_checks_skip_traced_inputs_and_a_band_only_model_is_accepted(
+    precision,
+):
     """Traced selectors skip ``check``; a model with only ``band_contrasts`` fits.
 
     Truth: under ``jit`` the indices are unknown, so no check can run and none may
@@ -876,14 +910,14 @@ def test_selector_checks_skip_traced_inputs_and_a_band_only_model_is_accepted():
 
     model = BandOnly(jnp.asarray(1e-10))
     photometry.check(model)
-    Fit(model, {}, (photometry,))
+    if precision == np.float64:
+        Fit(model, {}, (photometry,))
     bad = eqx.tree_at(lambda d: d.planet, photometry.data, jnp.ones(4, int))
     with pytest.raises(ValueError, match="planet"):
         eqx.tree_at(lambda t: t.data, photometry, bad).check(model)
 
 
-@pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check():
+def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check(precision):
     """Band -1 or 1 with one band raises; band 0 and padded rows pass.
 
     Truth: one band, so valid indices are ``[0, 1)``; JAX would clamp -1 and 1 to
@@ -897,8 +931,9 @@ def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check():
         bad = eqx.tree_at(lambda t: t.data, term, data)
         with pytest.raises(ValueError, match="band"):
             bad.check(system)
-        with pytest.raises(ValueError, match="band"):
-            Fit(system, {}, (bad,))
+        if precision == np.float64:
+            with pytest.raises(ValueError, match="band"):
+                Fit(system, {}, (bad,))
     padded = eqx.tree_at(
         lambda d: (d.band_id, d.valid),
         term.data,
@@ -907,8 +942,7 @@ def test_a_valid_band_id_outside_the_quadrature_is_refused_by_check():
     eqx.tree_at(lambda t: t.data, term, padded).check(system)
 
 
-@pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_a_traced_planet_count_and_a_late_epoch_model_pass_check():
+def test_a_traced_planet_count_and_a_late_epoch_model_pass_check(precision):
     """A traced ``n_planets`` skips the check; a model covering only later days fits.
 
     Truth: under ``jit`` the count is unknown, so nothing can be tested and nothing may
@@ -950,7 +984,98 @@ def test_a_traced_planet_count_and_a_late_epoch_model_pass_check():
     )
     term = eqx.tree_at(lambda t: t.data, photometry, late)
     term.check(Late(jnp.asarray(1e-10)))
-    Fit(Late(jnp.asarray(1e-10)), {}, (term,))
+    if precision == np.float64:
+        Fit(Late(jnp.asarray(1e-10)), {}, (term,))
     unused = eqx.tree_at(lambda d: d.valid, late, jnp.zeros(4, bool))
     eqx.tree_at(lambda t: t.data, term, unused).check(Late(jnp.asarray(1e-10)))
     assert system is not None
+
+
+@pytest.mark.float32_only(reason="measurement densities require float64")
+def test_measurement_densities_refuse_single_precision():
+    """Each measurement score refuses before the forward model is evaluated."""
+    from hwoutils.precision import PrecisionError
+
+    from photomancy.measurements import DMagData, DMagTerm, loglike_dmag
+
+    relative = RelativeAstrometryTerm(_data())
+    rv = _new_term("rv")
+    pma = _new_term("pma")
+    magnitude = DMagTerm(DMagData.zeros(1))
+    for term in (
+        relative,
+        _new_term("stellar"),
+        rv,
+        pma,
+        magnitude,
+        _new_term("photometry"),
+    ):
+        with pytest.raises(PrecisionError, match="Enable x64"):
+            term(None)
+    for call in (
+        lambda: loglike_relative_astrom(None, None, None),
+        lambda: loglike_stellar_astrom(None, None, None),
+        lambda: loglike_pm_anomaly(None, None),
+        lambda: loglike_rv_marginalized(None, None, None, None, 1, None, None),
+        lambda: loglike_dmag(None, None, None),
+        lambda: relative.linear_gaussian(None),
+    ):
+        with pytest.raises(PrecisionError, match="Enable x64"):
+            call()
+
+
+def test_narrow_proper_motion_draw_keeps_the_covariance_dtype():
+    """A narrow forward stays narrow even with float64 available.
+
+    Fails if the masked fallback covariance widens the Cholesky and draw.
+    Working dtype and preservation of an invalid row are exact.
+    """
+    term = canonical(_new_term("pma"), precision="float32")
+    model = canonical(_system(), precision="float32")
+    key = jax.random.key(0)
+    invalid = eqx.tree_at(lambda t: t.data.valid, term, jnp.array(False))
+    assert term.predict(model).dtype == np.float32
+    compiled = eqx.filter_jit(lambda t, m: t.draw(key, m))
+    for test_term in (term, invalid):
+        for evaluate in (lambda t, m: t.draw(key, m), compiled):
+            value = evaluate(test_term, model).data.pm_anomaly
+            assert value.dtype == np.float32
+            if test_term is invalid:
+                np.testing.assert_array_equal(value, invalid.data.pm_anomaly)
+
+
+def test_photometry_draw_uses_the_common_threshold_grid(monkeypatch, precision):
+    """A draw that rounds to its upper limit becomes a measured detection.
+
+    Zero noise isolates the comparison. The previous float32 value stays
+    censored. Fails if the wide draw below its limit rounds to equality but
+    retains the upper-limit flag, or if deciding on the grid rounds the sample.
+    """
+    term = _new_term("photometry")
+    data = eqx.tree_at(
+        lambda d: (d.contrast, d.is_upper_limit),
+        term.data,
+        (jnp.ones_like(term.data.contrast), term.data.valid),
+    )
+    term = eqx.tree_at(lambda t: t.data, term, data)
+    monkeypatch.setattr(
+        jax.random, "normal", lambda key, shape, dtype: jnp.zeros(shape, dtype)
+    )
+    monkeypatch.setattr(
+        type(term), "predict", lambda self, value: jnp.full_like(data.contrast, value)
+    )
+
+    def draw(value):
+        return term.draw(jax.random.key(0), value).data
+
+    last = np.nextafter(np.float32(1), np.float32(-np.inf))
+    for evaluate in (draw, jax.jit(draw)):
+        for value, censored in ((1.0, False), (1 - 2**-26, False), (last, True)):
+            expected = jnp.asarray(value, dtype=precision)
+            sampled = evaluate(expected)
+            np.testing.assert_array_equal(
+                sampled.is_upper_limit, np.full(data.valid.shape, censored)
+            )
+            np.testing.assert_array_equal(
+                sampled.contrast, np.full(data.valid.shape, 1 if censored else expected)
+            )

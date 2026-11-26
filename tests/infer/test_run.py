@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.precision import PrecisionError
 from jax.flatten_util import ravel_pytree
 from priorities import Normal, Uniform
 from test_fit import (
@@ -575,8 +576,8 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     Fails if: the default stage is not rescaled, the scale is wrong by a Jacobian or
     a square root, a fit without roots is scaled, the scaled stage stops on a loss
     stall without the gradient gate, the unscaled stage stops early, or ``measure``
-    stops on a stall alone (with the gate shut it then ends at its step-44 failed
-    search, not at 200; the runs use ``n_newton=0``, so the polish cannot hide it;
+    stops on a stall alone (with the gate shut both paths must run exactly
+    200 steps; the runs use ``n_newton=0``, so the polish cannot hide it;
     the scaled run's gap is asserted under 1e-9 nat). The unscaled rootless run is
     30 nat short at 200 steps and ``measure`` says so (``converged`` false) until the
     Newton polish.
@@ -595,13 +596,11 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     assert abs(unscaled) < 1e-9 and not trace.stopped_early and trace.n_steps == 600
     cut, trace = gap(MAP(n_steps=40, init=start, scale=False))
     assert cut > 1.0 and not trace.stopped_early
-    # the gate is the scaled gradient norm: below 1e-30 it is never met, so the
-    # scaled stage that stops at 35 steps on the loss stall is not converged; it
-    # runs on until the line search fails at the rounding floor (step 42) and ends
-    # there, still not converged (before the stall end it ran all 200 steps)
+    # Near the optimum the Wolfe residual is smaller than the rounding of
+    # the loss. A closed gradient gate must then run to the exact budget.
     monkeypatch.setattr("photomancy.infer.backends.staged._GRAD_TOL", 1e-30)
     _, trace = gap(MAP(n_steps=200, init=start))
-    assert not trace.stopped_early and trace.n_steps == 42
+    assert not trace.stopped_early and trace.n_steps == 200
     monkeypatch.undo()
     rootless, start_r, _ = _badly_scaled_fit(rootless=True)
     a = run(rootless, MAP(n_steps=10, init=start_r), jax.random.key(0))
@@ -609,7 +608,7 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     np.testing.assert_array_equal(a.samples["mu"], b.samples["mu"])
 
     # ``measure`` runs the same stage: scaled it stops at the same step, and with the
-    # gradient gate shut (1e-30) it runs on to the failed line search (step 44) and
+    # gradient gate shut (1e-30) it runs its full budget and
     # reports no stop, which a stall-only rule would not;
     # unscaled it runs every step and never reports a stop (unscaled L-BFGS stalls 30
     # nat short here, so the Newton polish brings it to the optimum)
@@ -618,7 +617,7 @@ def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     assert bool(est.stopped_early) and int(est.n_steps) == 35 and bool(est.converged)
     monkeypatch.setattr("photomancy.infer.backends.staged._GRAD_TOL", 1e-30)
     shut = measure(fit, start, n_steps=200, n_newton=0)
-    assert int(shut.n_steps) == 44 and not bool(shut.stopped_early)
+    assert int(shut.n_steps) == 200 and not bool(shut.stopped_early)
     monkeypatch.undo()
     rootless, start_r, best_r = _badly_scaled_fit(rootless=True)
     top_r = float(rootless.log_likelihood({"mu": jnp.asarray(best_r)}))
@@ -1080,11 +1079,13 @@ def test_laplace_with_no_surviving_mode_returns_a_nan_slice():
     assert np.isnan(float(post.log_evidence))
 
 
-@pytest.mark.float32_only(reason="Fit must refuse a float32 process")
-def test_run_refuses_a_fit_built_without_x64():
-    """Fit refuses float32 mode at construction, so ``run`` never sees one."""
-    with pytest.raises(RuntimeError, match="jax_enable_x64"):
-        _leaf_fit()
+@pytest.mark.float32_only(reason="posterior sampling requires float64")
+def test_run_refuses_when_float64_is_unavailable():
+    """A fit created under x64 refuses to start a backend in a float32 process."""
+    with jax.enable_x64():
+        fit = _leaf_fit()
+    with pytest.raises(PrecisionError, match=r"run.*enable_x64"):
+        run(fit, MAP(n_steps=1), jax.random.key(0))
 
 
 def _golden_fit():

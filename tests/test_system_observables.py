@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg
+from hwoutils.testing import ulps
 from orbix.system import Body, System
 from skyscapes.scene import Scene
 from system_helpers import (
@@ -297,7 +298,9 @@ def test_jacobi_predictions(two_planets):
     """Fails if a term silently reverts to pair masses or a star-centred reflex.
 
     Reference the orbix ephemeris at the actual Jacobi masses and times.
-    Prediction rtol is 1e-12, with atol in m/s, arcsec, arcsec and arcsec/day.
+    Floating-point basis: 32 eps of peak signal for the orbital solve, mass
+    weighting and projection under fusion. For the window slope, use the
+    maximum position times sum(abs(dt))/sum(dt**2), its sensitivity.
     """
     data, pairs, scene = two_planets
     jacobi = scene.dynamics
@@ -325,19 +328,21 @@ def test_jacobi_predictions(two_planets):
     actual = eqx.filter_jit(lambda model: tuple(t.predict(model) for t in terms))(
         jacobi
     )
-    for name, prediction, target, floor in zip(
-        DYNAMICAL, actual, expected, (1e-12, 1e-14, 1e-18, 1e-20), strict=True
-    ):
+    for name, prediction, target in zip(DYNAMICAL, actual, expected, strict=True):
         observed = prediction if name == "pm_anomaly" else prediction[..., :-1]
-        error = np.max(np.abs(observed - target))
-        print(f"Jacobi {name}: max_error={error:.7g}, atol={floor:g}, rtol=1e-12")
-        np.testing.assert_allclose(observed, target, rtol=1e-12, atol=floor)
+        scale = jnp.max(jnp.abs(target))
+        if name == "pm_anomaly":
+            dt = window_times - pm.t_gaia
+            scale += jnp.max(jnp.abs(window)) * jnp.sum(jnp.abs(dt)) / jnp.sum(dt**2)
+        np.testing.assert_allclose(
+            observed, target, rtol=0, atol=float(ulps(32, scale))
+        )
     scene_ids = 1 - data.relative_astrom.planet[:-1]
     np.testing.assert_allclose(
         terms[1].predict(scene)[:, :-1],
         relative[:, scene_ids, jnp.arange(time_d.size - 1)],
-        rtol=1e-12,
-        atol=1e-14,
+        rtol=0,
+        atol=float(ulps(32, jnp.max(jnp.abs(relative)))),
     )
     pair_positions = terms[1].predict(pairs)
     assert (
@@ -345,9 +350,10 @@ def test_jacobi_predictions(two_planets):
     )  # arcsec, resolved physics change
     for term in (DMagTerm(data.null), DMagTerm(data.imaging)):
         with pytest.raises(ValueError, match=r"(?i)multi-planet"):
-            _lit(term.data)(_Lit(jacobi, jnp.asarray(1e-8)))
+            _lit(term.data).predict(_Lit(jacobi, jnp.asarray(1e-8)))
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_radiative_padding_and_dark_limit(data):
     """Fails if invalid curves affect gradients, or a dark planet yields infinite dMag.
 
@@ -397,7 +403,8 @@ def test_planet_flux_scale_shifts_predicted_dmag_exactly(area):
     """Fails if the scene planet's ``flux_scale`` never reaches the dMag prediction.
 
     A scale of two doubles the contrast, so dMag drops by 2.5 log10(2) at every
-    epoch (rtol 1e-12, float64) and the separation does not move. The scene
+    epoch and the separation does not move. Floating-point basis: four eps
+    of input dMag for two scaled logarithms and their subtraction. The scene
     reflector and an explicit albedo-area product are the two routes.
     """
     orbit = jax.tree.map(lambda x: x[0], _orbits(23.0))
@@ -407,4 +414,17 @@ def test_planet_flux_scale_shifts_predicted_dmag_exactly(area):
     sep, dmag = system_separation_dmag(scene, times, albedo_area_AU2=area)
     sep2, dmag2 = system_separation_dmag(scaled, times, albedo_area_AU2=area)
     np.testing.assert_array_equal(sep2, sep)
-    np.testing.assert_allclose(dmag2 - dmag, -2.5 * np.log10(2.0), rtol=1e-12)
+    np.testing.assert_allclose(
+        dmag2 - dmag,
+        -2.5 * np.log10(2.0),
+        rtol=0,
+        atol=float(ulps(4, jnp.max(jnp.abs(dmag)))),
+    )
+
+
+def test_dark_reflector_has_a_finite_magnitude_in_both_precisions():
+    """A zero contrast reaches the 750 magnitude reporting ceiling exactly."""
+    orbit = jax.tree.map(lambda x: x[0], _orbits(23.0))
+    scene = _scene(orbit, mass_Mearth=23.0, radius_AU=0.00012, albedo=0.32)
+    _, dmag = system_separation_dmag(scene, jnp.array([31.0]), albedo_area_AU2=0.0)
+    np.testing.assert_array_equal(dmag, [750.0])

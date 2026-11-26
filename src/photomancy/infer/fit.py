@@ -36,8 +36,9 @@ edge can be read, so ``Fit`` also stores the walls it finds when it is built on 
 host, as static data, and a stacked or jitted fit reports those. The edits
 (``with_priors``, ``append_term``, ``replace_term``) store the walls of the entries they
 keep; a fit built anew inside a transformation from traced laws counts an unmapped edge
-whose value is traced as a wall, and a fit edited with ``eqx.tree_at`` inside a
-transformation keeps the walls stored before the edit. A leaf law is assumed to have
+whose value is traced as a wall. Gradient sampler admission uses the current
+predicates of blocks that expose ``wall_flags()``, including traced edits. A leaf law
+is assumed to have
 none: every ``bounds`` kind of ``priorities.to_real`` maps onto the real line, and a law
 whose support has an interior gap (a mixture of disjoint bounded components) is not
 detected.
@@ -62,6 +63,7 @@ from hwoutils.leaves import (
 )
 from hwoutils.memory import DEFAULT_MAX_BYTES, MemoryLimit, largest_batch
 from hwoutils.model_paths import assign, paths_overlap, resolve
+from hwoutils.precision import require_float64
 from jax.flatten_util import ravel_pytree
 from jax.scipy.special import log_ndtr, logsumexp
 from priorities import AbstractDistribution, from_real, to_real
@@ -685,7 +687,11 @@ class Fit(eqx.Module):
                 ``((key, walls), ...)``; evaluated from the blocks when omitted. The
                 edits pass the walls of the entries they keep, and
                 ``dataclasses.replace`` passes the stored value.
+
+        Raises:
+            PrecisionError: When float64 is unavailable.
         """
+        require_float64("Fit")
         kept, rest = _split_python_scalars(model)
         self.model = eqx.combine(kept, canonical(rest))
         self.free = free
@@ -698,7 +704,6 @@ class Fit(eqx.Module):
         """Refuse an inconsistent fit on the host.
 
         Raises:
-            RuntimeError: When ``jax_enable_x64`` is off.
             TypeError: For an entry that is neither a distribution nor a block, or a
                 term that is not an :class:`AbstractTerm`.
             ValueError: For an unknown path, a leaf law that does not fit its leaf, an
@@ -711,11 +716,6 @@ class Fit(eqx.Module):
                 a postcondition of the conversion in ``__init__``; kept Python ``int``
                 and ``bool`` scalars are exempt).
         """
-        if not jax.config.jax_enable_x64:
-            raise RuntimeError(
-                "Fit needs jax_enable_x64 (float64 log densities); "
-                "call jax.config.update('jax_enable_x64', True) first"
-            )
         leaf_paths, blocks = [], {}
         for path, entry in self.free.items():
             if isinstance(entry, AbstractDistribution):
@@ -854,9 +854,17 @@ class Fit(eqx.Module):
         built are returned. Leaf laws contribute none (see the module docstring for
         the assumption).
         """
-        if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(self.blocks)):
-            return dict(self._walls)
-        return dict(_block_walls(self.free))
+        cached = dict(self._walls)
+        walls = {}
+        for key, block in self.blocks.items():
+            names = (
+                cached.get(key, ())
+                if any(isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(block))
+                else block.walls
+            )
+            if names:
+                walls[key] = tuple(names)
+        return walls
 
     @property
     def block_order(self) -> tuple[str, ...]:
@@ -1206,16 +1214,14 @@ class Fit(eqx.Module):
             The symmetric ``(P, P)`` float64 matrix.
 
         Raises:
-            RuntimeError: When ``jax_enable_x64`` is off (a float32 curvature is too
-                ill conditioned to invert).
+            PrecisionError: When float64 is unavailable.
             ValueError: For an unknown ``kind``.
             NotImplementedError: For ``kind="fisher"`` when a term has no root.
             MemoryLimit: When the estimate is above ``max_bytes``.
         """
         if kind not in ("observed", "fisher"):
             raise ValueError(f"kind must be 'observed' or 'fisher', got {kind!r}")
-        if not jax.config.jax_enable_x64:
-            raise RuntimeError("information needs jax_enable_x64 (float64 curvature)")
+        require_float64("Fit.information")
         x = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), x)
         n_param = sum(int(np.size(a)) for a in jax.tree.leaves(x))
         if kind == "observed":
@@ -1618,7 +1624,7 @@ class Fit(eqx.Module):
 def _block_walls(free) -> tuple[tuple[str, tuple[str, ...]], ...]:
     """The non-empty walls of the block entries, as ``((key, walls), ...)``."""
     return tuple(
-        (key, tuple(entry.walls))
+        (key, tuple(walls))
         for key, entry in free.items()
-        if isinstance(entry, AbstractBlock) and entry.walls
+        if isinstance(entry, AbstractBlock) and (walls := entry.walls)
     )

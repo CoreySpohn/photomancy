@@ -41,6 +41,7 @@ import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
 import numpy as np
+from hwoutils.precision import like, require_float64
 
 __all__ = [
     "LowRankGaussianLogLikelihood",
@@ -133,12 +134,27 @@ class MaskedLogLikelihood(eqx.Module):
 
         Returns:
             Scalar normalized log likelihood over the unmasked elements.
+
+        Raises:
+            PrecisionError: When float64 inference is unavailable or the data is narrow.
         """
-        predicted = jnp.broadcast_to(jnp.asarray(predicted), self.data.shape)
+        require_float64("masked log density", self)
+        return self.detection_score(predicted)
+
+    def detection_score(self, predicted):
+        """Evaluate the profile-detection objective in the data precision.
+
+        Args:
+            predicted: Model prediction, broadcastable to the observations.
+
+        Returns:
+            Scalar objective over the unmasked elements.
+        """
+        predicted = jnp.broadcast_to(like(predicted, self.data), self.data.shape)
         z = (predicted - self.data) / self.sigma
-        z = jnp.where(self.mask, z, 0.0)
+        z = jnp.where(self.mask, z, 0)
         kernel = _KERNELS[self.kind](z, self.shape_param)
-        return self.log_norm - jnp.sum(jnp.where(self.mask, kernel, 0.0))
+        return self.log_norm - jnp.sum(jnp.where(self.mask, kernel, 0))
 
     def residual(self, predicted):
         """Return ``(data - predicted) / sigma``, NaN at excluded elements.
@@ -263,7 +279,7 @@ class LowRankGaussianLogLikelihood(eqx.Module):
         chol = np.linalg.cholesky(np.eye(basis.shape[1]) + w.T @ w)
         self.cholesky = jnp.asarray(chol, dtype)
         self.log_norm = (
-            jnp.sum(self.mask) * -_LOG_SQRT_2PI
+            jnp.sum(self.mask).astype(dtype) * -_LOG_SQRT_2PI
             - jnp.sum(jnp.log(self.sigma))
             - jnp.asarray(np.log(np.diag(chol)).sum(), dtype)
         )
@@ -316,7 +332,23 @@ class LowRankGaussianLogLikelihood(eqx.Module):
 
         Returns:
             Scalar normalized log density of ``data`` given ``predicted``.
+
+        Raises:
+            PrecisionError: When float64 inference is unavailable or the data is narrow.
         """
+        require_float64("low-rank Gaussian log density", self)
+        return self.detection_score(predicted)
+
+    def detection_score(self, predicted):
+        """Evaluate the profile-detection objective in the data precision.
+
+        Args:
+            predicted: Model prediction, broadcastable to the observations.
+
+        Returns:
+            Scalar objective over the unmasked elements.
+        """
+        predicted = like(predicted, self.data)
         z = self._whiten(jnp.where(self.mask, predicted, 0) - self.data)
         if not self.U.shape[1]:
             return self.log_norm - jnp.sum(0.5 * z**2)
@@ -387,9 +419,9 @@ def _build(data, sigma, mask, kind, log_const, shape_param=0.0):
     sigma = jnp.broadcast_to(sigma, shape)
     mask = jnp.broadcast_to(mask, shape)
 
-    data = jnp.where(mask, data, 0.0)
-    sigma = jnp.where(mask, sigma, 1.0)
-    n_used = jnp.sum(mask)
+    data = jnp.where(mask, data, 0)
+    sigma = jnp.where(mask, sigma, 1)
+    n_used = jnp.sum(mask).astype(dtype)
     log_norm = n_used * log_const - jnp.sum(jnp.log(sigma))
     return MaskedLogLikelihood(
         data=data,

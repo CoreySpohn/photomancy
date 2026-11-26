@@ -7,6 +7,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils import PrecisionError
+from hwoutils.testing import ulps
 from jax.scipy.stats import norm
 from nmc_reference import (
     class_mi_mc,
@@ -25,11 +27,17 @@ from photomancy.infer.eig import (
     eig_alias_breaking,
     eig_alias_breaking_from_covariances,
     eig_class,
+    eig_contrastive,
     eig_detectability,
     eig_detection_channel,
     eig_detection_class,
     eig_geometric,
     eig_linearized,
+    eig_nested,
+)
+
+_posterior_information = pytest.mark.float64_only(
+    reason="posterior weights, moments and information gain require float64"
 )
 
 
@@ -51,6 +59,7 @@ def _two_mode_posterior():
     )
 
 
+@_posterior_information
 def test_geometric_eig_matches_analytic_gaussian_update():
     """The log-det shrinkage equals the 1-D conjugate-Gaussian information gain."""
     eig, cov_new = eig_geometric(jnp.array([[4.0]]), jnp.array([[1.0]]), 1.0)
@@ -58,6 +67,7 @@ def test_geometric_eig_matches_analytic_gaussian_update():
     assert float(cov_new[0, 0]) < 4.0
 
 
+@_posterior_information
 def test_alias_breaking_eig_zero_when_modes_agree():
     """Zero when modes predict the same observable; positive when they differ."""
     weights = jnp.array([0.5, 0.5])
@@ -67,6 +77,7 @@ def test_alias_breaking_eig_zero_when_modes_agree():
     assert eig_alias_breaking(weights, jnp.array([[1.0], [5.0]]), 1.0) > 0.0
 
 
+@_posterior_information
 def test_detectability_eig_zero_when_modes_agree():
     """Zero when all modes agree on detectability; positive when split."""
     weights = jnp.array([0.5, 0.5])
@@ -74,6 +85,7 @@ def test_detectability_eig_zero_when_modes_agree():
     assert eig_detectability(weights, jnp.array([1.0, 0.0])) > 0.0
 
 
+@_posterior_information
 def test_eig_linearized_linear_forward_more_informative_scores_higher():
     """A larger Jacobian and wider mode disagreement give more information."""
     posterior = _two_mode_posterior()
@@ -89,6 +101,7 @@ def test_eig_linearized_linear_forward_more_informative_scores_higher():
     assert res.predictions.shape == (2, 2, 1)
 
 
+@_posterior_information
 def test_eig_linearized_detectable_splits_modes():
     """A detectable callback that splits the modes drives the detectability output."""
     posterior = _two_mode_posterior()
@@ -114,6 +127,7 @@ def test_eig_linearized_detectable_splits_modes():
 LN2 = float(jnp.log(2.0))
 
 
+@_posterior_information
 def test_detectability_eig_exact_at_deterministic_split():
     """A deterministic 50/50 detection split carries exactly ln 2 nats.
 
@@ -125,6 +139,7 @@ def test_detectability_eig_exact_at_deterministic_split():
     assert jnp.allclose(eig_detectability(weights, det), LN2)
 
 
+@_posterior_information
 def test_detectability_eig_bounded_by_mode_entropy():
     """I(D; M) <= H(w): the detection bit cannot exceed the mode uncertainty."""
     weights = jnp.array([0.9, 0.1])
@@ -135,6 +150,7 @@ def test_detectability_eig_bounded_by_mode_entropy():
     assert val > 0.0
 
 
+@_posterior_information
 def test_detectability_eig_soft_probabilities_match_direct_sum():
     """The binary-entropy form equals the direct double-sum mutual information."""
     weights = jnp.array([0.3, 0.5, 0.2])
@@ -150,6 +166,7 @@ def test_detectability_eig_soft_probabilities_match_direct_sum():
     assert jnp.allclose(eig_detectability(weights, det), direct, rtol=1e-10)
 
 
+@_posterior_information
 def test_alias_breaking_eig_capped_at_mode_entropy():
     """Two perfectly resolved 50/50 modes are worth ln 2 nats, not log(separation).
 
@@ -167,6 +184,7 @@ def test_alias_breaking_eig_capped_at_mode_entropy():
     assert jnp.allclose(val, 0.5 * jnp.log1p(0.0625), rtol=1e-10)
 
 
+@_posterior_information
 def test_alias_breaking_eig_uses_per_mode_predictive_widths():
     """(K, n_obs) obs_variance = per-mode predictive J Sigma J^T + R.
 
@@ -183,6 +201,7 @@ def test_alias_breaking_eig_uses_per_mode_predictive_widths():
     assert jnp.allclose(wide, expected, rtol=1e-10)
 
 
+@_posterior_information
 def test_alias_breaking_eig_distinguishes_unequal_widths():
     """Modes with equal means but different predictive widths are informative."""
     weights = jnp.array([0.5, 0.5])
@@ -191,6 +210,7 @@ def test_alias_breaking_eig_distinguishes_unequal_widths():
     assert eig_alias_breaking(weights, y_preds, pred_var) > 0.1
 
 
+@_posterior_information
 def test_geometric_eig_qoi_projection_ignores_nuisance_gain():
     """A nuisance-only observation shows zero marginal gain on the QoI block.
 
@@ -209,6 +229,7 @@ def test_geometric_eig_qoi_projection_ignores_nuisance_gain():
     assert cov_new.shape == (2, 2)  # update itself stays full-space
 
 
+@_posterior_information
 def test_geometric_eig_identity_projection_matches_full():
     """Phi = I reproduces the unprojected gain."""
     cov = jnp.array([[2.0, 0.3], [0.3, 1.0]])
@@ -218,6 +239,7 @@ def test_geometric_eig_identity_projection_matches_full():
     assert jnp.allclose(eig_full, eig_proj, rtol=1e-10)
 
 
+@_posterior_information
 def test_geometric_eig_correlated_qoi_marginal_gain_positive():
     """A correlated nuisance measurement still informs the QoI marginal."""
     cov = jnp.array([[1.0, 0.8], [0.8, 1.0]])
@@ -233,6 +255,7 @@ def test_geometric_eig_correlated_qoi_marginal_gain_positive():
 # ---------------------------------------------------------------------------
 
 
+@_posterior_information
 def test_alias_bound_upper_bounds_true_mixture_mi():
     """The capped alias term is a valid upper bound on the exact I(M; Y).
 
@@ -249,6 +272,7 @@ def test_alias_bound_upper_bounds_true_mixture_mi():
         assert bound >= mc - 4.0 * se - 1e-12, f"bound violated at sep={sep}"
 
 
+@_posterior_information
 def test_alias_cap_tight_in_resolved_limit():
     """At full separation the MC truth reaches H(w) and the cap is exact."""
     weights = jnp.array([0.5, 0.5])
@@ -260,6 +284,7 @@ def test_alias_cap_tight_in_resolved_limit():
     assert jnp.abs(mc - LN2) < 4.0 * se + 1e-3
 
 
+@_posterior_information
 def test_detectability_eig_matches_binary_channel_limits():
     """Exact detection MI hits both closed-form limits of the binary channel."""
     weights = jnp.array([0.5, 0.5])
@@ -275,6 +300,7 @@ def test_detectability_eig_matches_binary_channel_limits():
 # ---------------------------------------------------------------------------
 
 
+@_posterior_information
 def test_detection_class_eig_identity_classes_equals_detectability():
     """With C = M (identity class map) the closed form reduces to I(D; M)."""
     weights = jnp.array([0.3, 0.7])
@@ -283,6 +309,7 @@ def test_detection_class_eig_identity_classes_equals_detectability():
     assert jnp.allclose(val, eig_detectability(weights, det), rtol=1e-10)
 
 
+@_posterior_information
 def test_detection_class_eig_merged_classes_lose_information():
     """Merging modes into one class destroys the detection information (DPI)."""
     weights = jnp.array([0.5, 0.5])
@@ -300,6 +327,7 @@ def test_detection_class_eig_merged_classes_lose_information():
     )
 
 
+@_posterior_information
 def test_detection_class_eig_certain_detection_is_uninformative():
     """All modes surely detected -> the detection bit carries nothing."""
     weights = jnp.array([0.5, 0.5])
@@ -307,6 +335,7 @@ def test_detection_class_eig_certain_detection_is_uninformative():
     assert jnp.allclose(eig_detection_class(weights, det, jnp.eye(2)), 0.0, atol=1e-12)
 
 
+@_posterior_information
 def test_class_eig_saturates_at_class_prior_entropy():
     """I(C; Y) <= H(C): a huge-separation observation yields H(C), not more."""
     weights = jnp.array([0.5, 0.5])
@@ -320,6 +349,7 @@ def test_class_eig_saturates_at_class_prior_entropy():
     assert jnp.allclose(val, LN2, atol=5e-3)
 
 
+@_posterior_information
 def test_class_eig_identical_predictions_zero():
     """Modes that predict identically cannot classify: I(C; Y) ~ 0."""
     weights = jnp.array([0.5, 0.5])
@@ -334,6 +364,7 @@ def test_class_eig_identical_predictions_zero():
     assert jnp.allclose(val, 0.0, atol=1e-9)
 
 
+@_posterior_information
 def test_class_eig_matches_nmc_reference_mid_separation():
     """The stratified estimator agrees with brute-force nested MC of I(C; Y)."""
     weights = jnp.array([0.4, 0.35, 0.25])
@@ -354,6 +385,7 @@ def test_class_eig_matches_nmc_reference_mid_separation():
     assert jnp.abs(val - mc) < 4.0 * se + 5e-3
 
 
+@_posterior_information
 def test_class_eig_dpi_under_capped_alias():
     """Class-pure modes: I(C; Y) <= I(M; Y) <= capped alias bound (DPI chain)."""
     weights = jnp.array([0.5, 0.5])
@@ -371,6 +403,7 @@ def test_class_eig_dpi_under_capped_alias():
     assert val <= bound + 5e-3
 
 
+@_posterior_information
 def test_class_eig_wider_separation_more_informative():
     """Monotone in mode separation for class-pure modes."""
     weights = jnp.array([0.5, 0.5])
@@ -403,6 +436,7 @@ def test_probit_gaussian_mass_matches_mc():
     assert jnp.abs(mass - mc_mass) < 5.0e-3
 
 
+@_posterior_information
 def test_ep_probit_update_matches_mc_tilted_moments():
     """The EP site update returns the exact tilted mean and covariance."""
     mean = jnp.array([0.4, -0.2])
@@ -417,6 +451,7 @@ def test_ep_probit_update_matches_mc_tilted_moments():
     assert jnp.all(jnp.abs(cov_new - mc_cov) < 2.0e-2)
 
 
+@_posterior_information
 def test_ep_probit_update_hard_truncation_limit():
     """A steep site reproduces the truncated-Gaussian Mills-ratio moments.
 
@@ -438,6 +473,7 @@ def test_ep_probit_update_hard_truncation_limit():
     assert jnp.allclose(jnp.exp(log_mass), norm.cdf(alpha), rtol=1.0e-3)
 
 
+@_posterior_information
 def test_ep_probit_update_flat_site_is_identity():
     """A site that is ~1 over the bulk leaves mass and moments unchanged."""
     mean = jnp.array([0.0])
@@ -448,6 +484,7 @@ def test_ep_probit_update_flat_site_is_identity():
     assert jnp.allclose(cov_new, cov, rtol=1.0e-3)
 
 
+@_posterior_information
 def test_null_update_kills_the_detectable_mode():
     """After an observed null, the solidly detectable mode loses its weight.
 
@@ -465,6 +502,7 @@ def test_null_update_kills_the_detectable_mode():
     assert jnp.allclose(m_new[1], means[1], atol=1.0e-3)
 
 
+@_posterior_information
 def test_null_update_shaves_a_mode_cut_by_the_limit():
     """A mode straddling the detection boundary is shifted and narrowed."""
     weights = jnp.array([1.0])
@@ -476,6 +514,7 @@ def test_null_update_shaves_a_mode_cut_by_the_limit():
     assert c_new[0, 0, 0] < 1.0  # tail shaved
 
 
+@_posterior_information
 def test_detection_channel_eig_reduces_to_detectability_eig_at_zero_width():
     """With vanishing within-mode spread the channel MI is the discrete I(D; M)."""
     weights = jnp.array([0.4, 0.6])
@@ -487,6 +526,7 @@ def test_detection_channel_eig_reduces_to_detectability_eig_at_zero_width():
     assert jnp.allclose(val, eig_detectability(weights, d_k), atol=1.0e-6)
 
 
+@_posterior_information
 def test_detection_channel_eig_adds_within_mode_information():
     """The chain rule adds a nonnegative within-mode term to the smeared I(D; M)."""
     weights = jnp.array([0.5, 0.5])
@@ -500,6 +540,7 @@ def test_detection_channel_eig_adds_within_mode_information():
     assert val > discrete_only + 1.0e-3  # boundary cuts both modes: strictly more
 
 
+@_posterior_information
 def test_detection_channel_eig_matches_nmc():
     """The Gauss-Hermite channel MI agrees with brute-force nested MC."""
     weights = jnp.array([0.35, 0.65])
@@ -514,6 +555,7 @@ def test_detection_channel_eig_matches_nmc():
     assert jnp.abs(val - mc) < 4.0 * se + 2.0e-3
 
 
+@_posterior_information
 def test_fisher_is_blind_to_the_null_but_the_channel_mi_is_not():
     """The sec-8.1 counterexample: Bernoulli FIM ~ 0 at both modes, MI = ln 2.
 
@@ -558,6 +600,7 @@ def _opposite_correlation_posterior():
     )
 
 
+@_posterior_information
 def test_mode_information_invariant_under_observable_rotation():
     """Rotating the observables of one physical experiment preserves every term.
 
@@ -587,6 +630,7 @@ def test_mode_information_invariant_under_observable_rotation():
     assert original.alias[0] >= mc - 4.0 * se
 
 
+@_posterior_information
 def test_covariance_bound_closed_form_for_opposite_correlations():
     """The moment-matched bound uses full determinants.
 
@@ -601,6 +645,7 @@ def test_covariance_bound_closed_form_for_opposite_correlations():
     assert jnp.allclose(val, 0.5 * jnp.log(1.21 / 0.4), rtol=1e-12)
 
 
+@_posterior_information
 def test_covariance_bound_rotation_invariant_with_offset_means():
     """An orthogonal change of observable basis leaves the bound unchanged."""
     weights = jnp.array([0.2, 0.5, 0.3])
@@ -621,6 +666,7 @@ def test_covariance_bound_rotation_invariant_with_offset_means():
     assert jnp.allclose(base, turned, rtol=1e-12)
 
 
+@_posterior_information
 def test_covariance_bound_upper_bounds_full_covariance_mc():
     """The bound sits above the exact I(M; Y) and is not equal to it.
 
@@ -640,6 +686,7 @@ def test_covariance_bound_upper_bounds_full_covariance_mc():
     assert bound > mc + 4.0 * se  # an upper bound here, not the exact value
 
 
+@_posterior_information
 def test_covariance_bound_zero_for_identical_distributions():
     """Identical means and full covariances carry no mode information."""
     cov = jnp.array([[1.0, 0.7], [0.7, 2.0]])
@@ -651,6 +698,7 @@ def test_covariance_bound_zero_for_identical_distributions():
     assert jnp.allclose(val, 0.0, atol=1e-12)
 
 
+@_posterior_information
 def test_covariance_bound_matches_variance_interface_in_one_dimension():
     """In one dimension the covariance form equals the variance form and closed form."""
     weights = jnp.array([0.5, 0.5])
@@ -665,6 +713,7 @@ def test_covariance_bound_matches_variance_interface_in_one_dimension():
     assert jnp.allclose(from_cov, expected, rtol=1e-12)
 
 
+@_posterior_information
 def test_variance_interface_is_the_diagonal_covariance_case():
     """Per-mode variances mean diagonal predictive covariances, in any dimension.
 
@@ -690,6 +739,7 @@ def test_variance_interface_is_the_diagonal_covariance_case():
     )
 
 
+@_posterior_information
 def test_covariance_bound_capped_at_mode_entropy():
     """Resolved correlated components are worth H(w), not the Gaussian bound."""
     weights = jnp.array([0.2, 0.3, 0.5])
@@ -700,6 +750,7 @@ def test_covariance_bound_capped_at_mode_entropy():
     assert jnp.allclose(val, h_w, rtol=1e-12)
 
 
+@_posterior_information
 def test_covariance_bound_ignores_zero_mass_components():
     """A zero-weight component is absent: adding one leaves the bound unchanged."""
     weights = jnp.array([0.4, 0.6])
@@ -714,6 +765,7 @@ def test_covariance_bound_ignores_zero_mass_components():
     assert jnp.allclose(base, padded, rtol=1e-12)
 
 
+@_posterior_information
 def test_covariance_bound_rejects_non_positive_definite_input():
     """Indefinite, singular, or nonfinite covariances give NaN, not a clipped number."""
     weights = jnp.array([0.5, 0.5])
@@ -730,6 +782,7 @@ def test_covariance_bound_rejects_non_positive_definite_input():
         assert jnp.isnan(val)
 
 
+@_posterior_information
 def test_covariance_bound_rejects_mismatched_shapes():
     """Shapes must be (K,), (K, n_obs), (K, n_obs, n_obs); no 2-D covariance guess."""
     weights = jnp.array([0.5, 0.5])
@@ -755,63 +808,56 @@ def _float64_covariance_bound(weights, means, covs):
     return min(bound, entropy)
 
 
-def test_covariance_bound_never_returns_a_wrong_finite_value_in_float32():
-    """Near-singular float32 predictives give NaN or the float64 value.
+@_posterior_information
+def test_covariance_bound_on_elongated_gaussians():
+    """Strongly elongated components agree with independent NumPy log determinants.
 
-    Never a negative or otherwise wrong upper bound. Each component is a
-    strongly elongated Gaussian (condition number up to about 1e9), which
-    float32 cannot factor faithfully.
+    The error in a log determinant scales as the dimension times the condition
+    number times the relative error in the matrix. Allow 16 roundings for
+    centering, the two rank-one updates, scaling, Cholesky and log subtraction.
+    Fails if elongated but positive-definite modes return NaN or negative gain.
     """
     rng = np.random.default_rng(3)
     weights = np.array([0.5, 0.5])
-    finite = 0
     for trial in range(200):
         scale = 10.0 ** rng.uniform(1.0, 4.5)
-        # Half the components share one elongation axis, where the float32
-        # rounding of the dominant direction swamps the unit noise floor.
+        # Alternate coincident and independent elongation axes.
         v = rng.normal(size=(2, 2))
         v /= np.linalg.norm(v, axis=1, keepdims=True)
         if trial % 2:
             v[1] = v[0]
         covs = scale**2 * np.einsum("ki,kj->kij", v, v) + np.eye(2)
         means = rng.normal(size=(2, 2)) * (trial % 3 > 0)
-        val = float(
-            eig_alias_breaking_from_covariances(
-                jnp.asarray(weights, jnp.float32),
-                jnp.asarray(means, jnp.float32),
-                jnp.asarray(covs, jnp.float32),
-            )
-        )
-        if np.isnan(val):
-            continue
-        finite += 1
-        # Compare against float64 on the float32-rounded inputs the function saw.
-        ref = _float64_covariance_bound(
-            weights,
-            np.asarray(means, np.float32),
-            np.asarray(covs, np.float32),
-        )
-        assert 0.0 <= val <= np.log(2.0) + 1e-6
-        assert val == pytest.approx(ref, abs=1e-2), (scale, val, ref)
-    # The well-conditioned half of the ensemble must still be scored.
-    assert finite >= 50
+        val = eig_alias_breaking_from_covariances(weights, means, covs)
+        ref = _float64_covariance_bound(weights, means, covs)
+        # The spectral norm is at most scale**2 + 1 and the unit noise
+        # floor bounds the inverse norm by one.
+        assert 0 <= val <= np.log(2.0)
+        assert abs(val - ref) <= ulps(16 * 2, scale**2 + 1.0)
 
 
-def test_covariance_bound_is_exact_for_mixed_units_in_float32():
-    """Observables in very different units are not an ill-conditioning problem."""
+@_posterior_information
+def test_covariance_bound_is_exact_for_mixed_units():
+    """Changing the units of two observables preserves their mode information.
+
+    Sixteen roundings cover the two unit conversions, mixture rescaling,
+    two-dimensional Cholesky and subtraction at unit log-determinant scale.
+    Fails if a spread in observable units is mistaken for a singular covariance.
+    """
     scales = np.array([1e-4, 1e3])  # e.g. arcsec astrometry beside m/s RV
     base = np.array([[[1.0, 0.6], [0.6, 1.0]], [[1.0, -0.6], [-0.6, 1.0]]])
     covs = base * np.outer(scales, scales)
     means = np.zeros((2, 2))
     weights = np.array([0.5, 0.5])
-    val = eig_alias_breaking_from_covariances(
-        jnp.asarray(weights, jnp.float32),
-        jnp.asarray(means, jnp.float32),
-        jnp.asarray(covs, jnp.float32),
-    )
+    for bound in (
+        eig_alias_breaking_from_covariances,
+        jax.jit(eig_alias_breaking_from_covariances),
+    ):
+        with pytest.raises(PrecisionError, match="canonical"):
+            bound(weights, means, jnp.asarray(covs, jnp.float32))
+    val = eig_alias_breaking_from_covariances(weights, means, covs)
     ref = _float64_covariance_bound(weights, means, base)
-    assert jnp.isfinite(val)
-    assert float(val) == pytest.approx(ref, rel=1e-4)
+    assert abs(val - ref) <= ulps(16, np.float64(1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -832,6 +878,7 @@ def _entropy(p):
     return -jnp.sum(jnp.where(p > 0.0, p * jnp.log(jnp.where(p > 0.0, p, 1.0)), 0.0))
 
 
+@_posterior_information
 def test_always_null_record_carries_no_information():
     """A record that is never reported is identical under every mode: zero gain.
 
@@ -850,6 +897,7 @@ def test_always_null_record_carries_no_information():
         assert jnp.allclose(getattr(res, name), 0.0, rtol=0.0, atol=1e-12), name
 
 
+@_posterior_information
 def test_always_reported_record_recovers_the_continuous_score():
     """Detection probability one everywhere reproduces the score without reporting."""
     posterior = _opposite_correlation_posterior()
@@ -867,6 +915,7 @@ def test_always_reported_record_recovers_the_continuous_score():
         ), name
 
 
+@_posterior_information
 def test_deterministic_binary_split_is_worth_ln2_of_mode_information():
     """One mode always reported, the other never: the report alone names the mode.
 
@@ -911,6 +960,7 @@ def _score_reporting(posterior, obs_var):
     )
 
 
+@_posterior_information
 def test_informative_nondetection_matches_direct_enumeration():
     """With an uninformative value, the mode gain is exactly the report bit I(M; D).
 
@@ -943,6 +993,7 @@ def test_informative_nondetection_matches_direct_enumeration():
     assert jnp.abs(res.alias[0] - mc) < 4.0 * se
 
 
+@_posterior_information
 def test_resolved_reports_match_direct_enumeration():
     """Resolved modes: a report names its mode, a null leaves the null posterior.
 
@@ -973,6 +1024,7 @@ def test_resolved_reports_match_direct_enumeration():
     assert jnp.abs(res.alias[0] - mc) < 4.0 * se
 
 
+@_posterior_information
 def test_mixed_reporting_bounds_the_monte_carlo_mode_information():
     """Overlapping modes with mixed reporting: the score bounds the exact MI.
 
@@ -1044,3 +1096,26 @@ def test_eig_linearized_matches_golden_of_the_legacy_input(name):
             rtol=1e-12,
             atol=1e-13,
         )
+
+
+@pytest.mark.float32_only(reason="float64 posterior information refuses this process")
+def test_posterior_information_refuses_a_float32_process():
+    """Fails if an estimator reduces weights or solves a covariance in float32."""
+    w = jnp.ones(1)
+    y = jnp.ones((1, 1))
+    covs = y[None, :, :]
+    key = jax.random.key(0)
+    for fn, args, kwargs in [
+        (eig_geometric, (y, y, 1.0), {}),
+        (eig_alias_breaking_from_covariances, (w, y, covs), {}),
+        (eig_alias_breaking, (w, y, 1.0), {}),
+        (eig_detectability, (w, w), {}),
+        (eig_detection_class, (w, w, y), {}),
+        (eig_class, (w, y, y, 1.0), {"key": key}),
+        (eig_detection_channel, (w, y, covs, 0.0, w), {}),
+        (eig_linearized, (_two_mode_posterior(), w, _golden_forward, 1.0), {}),
+        (eig_contrastive, (None, None, key), {"n_outer": 1}),
+        (eig_nested, (None, None, key), {"n_outer": 1, "n_inner": 1, "min_n_eff": 1}),
+    ]:
+        with pytest.raises(PrecisionError, match=fn.__name__):
+            fn(*args, **kwargs)

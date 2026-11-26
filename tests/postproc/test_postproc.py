@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import J2000_JD
 from hwoutils.epoch import Epoch
+from hwoutils.testing import ulps
 from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
 
@@ -291,7 +292,7 @@ def test_excluded_candidate_value_is_irrelevant(value):
 
 @pytest.mark.parametrize("kind", ["mawet", "template"])
 def test_all_valid_mask_matches_no_mask_and_the_recorded_base(kind):
-    """An all-ones mask equals no mask bitwise; both match the base within 1e-12.
+    """An all-ones mask equals no mask bitwise and matches the recorded base.
 
     The reference ring at radius 14 on a 33-pixel detector crosses the kernel
     half-width from the edge, so an implementation that erodes a fully valid
@@ -301,9 +302,9 @@ def test_all_valid_mask_matches_no_mask_and_the_recorded_base(kind):
     Oracles: valid=None in the same run (exact algebra: an all-ones mask must
     take the same arithmetic path, so equality is bitwise on any platform), and
     statistics recorded from the pre-change implementation on an x86-64 Linux
-    CPU in float64. Tolerance basis for the recorded values: floating-point;
-    other CPU math libraries differ in the last few units in the last place
-    (about 1e-16 relative), so rtol is 1e-12. The dof are integers and exact.
+    CPU in float64. At unit t/probability scale, allow 25 filter terms, 16
+    cubic interpolation terms, two six-level reductions and eight operations
+    for the t statistic and tail evaluation. Degrees of freedom are exact.
     """
     science = _small_science()
     positions = jnp.array([[16.0, 30.0], [9.25, 21.5]])
@@ -327,7 +328,10 @@ def test_all_valid_mask_matches_no_mask_and_the_recorded_base(kind):
     for field, literals in zip(("statistic", "fpf"), recorded[kind], strict=True):
         expected = np.array([float.fromhex(v) for v in literals])
         np.testing.assert_allclose(
-            np.asarray(getattr(masked, field)), expected, rtol=1e-12, atol=0
+            np.asarray(getattr(masked, field)),
+            expected,
+            rtol=0,
+            atol=float(ulps(61, jnp.ones_like(masked.statistic[0]))),
         )
     np.testing.assert_array_equal(np.asarray(masked.dof), [32.0, 18.0])
 
@@ -416,12 +420,15 @@ def test_arm_resolution_comes_from_science(kind):
 
 @pytest.mark.parametrize("where", ["near_center", "stencil_fringe"])
 def test_reference_footprint_exclusion_matches_numpy_t(where):
-    """NumPy box support and Bessel t formula are the oracle; roundoff is <1e-10.
+    """NumPy box support and the Bessel t formula give the reference.
 
-    The excluded pixel is either one column from the reference centre (caught
-    only by a footprint test, not by the raw centre pixel) or on the outer edge
+    At unit t scale, allow the filter size in multiply-adds, four
+    interpolation products, two six-level sums and six normalization steps.
+
+    The excluded pixel is either one column from the reference center (caught
+    only by a footprint test, not by the raw center pixel) or on the outer edge
     of the reference's bilinear stencil (caught only when every interpolation
-    node's footprint is checked, not by the footprint at the nearest centre).
+    node's footprint is checked, not by the footprint at the nearest center).
     """
     from scipy.ndimage import map_coordinates as numpy_sample
     from scipy.signal import convolve2d
@@ -461,7 +468,8 @@ def test_reference_footprint_exclusion_matches_numpy_t(where):
     expected = (signal - samples.mean()) / (
         samples.std(ddof=1) * np.sqrt(1 + 1 / len(samples))
     )
-    np.testing.assert_allclose(result.statistic[0], expected, rtol=0, atol=1e-10)
+    floor = ulps(estimator.filter.kernel.size + 22, jnp.ones_like(result.statistic[0]))
+    np.testing.assert_allclose(result.statistic[0], expected, rtol=0, atol=float(floor))
 
 
 def test_mawet_arm_jit_with_uncached_kernel():
@@ -483,12 +491,20 @@ def test_mawet_arm_jit_with_uncached_kernel():
 
 
 def test_mawet_arm_jits_as_an_argument():
-    """Direct evaluation is the oracle; same arithmetic, so equality is exact."""
+    """Direct and fused evaluation agree to filter and interpolation roundoff.
+
+    At unit t scale allow one multiply-add per kernel cell, 16 cubic weights,
+    two six-level reductions and six arithmetic steps for normalization.
+    """
     science = _small_science()
     positions = jnp.array([[16.0, 26.0]])
     arm = MawetArm(aperture_fwhm=1.5)
     jitted = jax.jit(lambda a: a.detect(science, positions).statistic)(arm)
-    np.testing.assert_array_equal(jitted, arm.detect(science, positions).statistic)
+    n_ops = arm.estimator(science).filter.kernel.size + 34
+    floor = float(ulps(n_ops, jnp.ones_like(jitted[0])))
+    np.testing.assert_allclose(
+        jitted, arm.detect(science, positions).statistic, rtol=0, atol=floor
+    )
 
 
 @pytest.mark.parametrize("kind", ["mawet", "template"])

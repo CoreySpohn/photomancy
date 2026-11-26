@@ -7,6 +7,7 @@ function: the likelihood of a forward model's output.
 from typing import Self
 
 import equinox as eqx
+from hwoutils.precision import require_float64
 
 from photomancy.infer.fit import AbstractTerm
 
@@ -82,6 +83,7 @@ class ForwardTerm(AbstractTerm):
         Returns:
             Scalar log likelihood of the held data at ``model``.
         """
+        require_float64("ForwardTerm log likelihood")
         return self.likelihood(self.forward(model))
 
     def fisher_root(self, model):

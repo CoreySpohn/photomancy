@@ -1,6 +1,7 @@
 """``run``: the one constructor of a :class:`~photomancy.infer.posterior.Posterior`."""
 
 import jax.numpy as jnp
+from hwoutils.precision import require_float64
 from jax.scipy.special import logsumexp
 
 from photomancy.infer.backends.base import AbstractBackend
@@ -37,8 +38,7 @@ def run(
     second pass: a backend with no evidence gives NaN. When the evidence is refused,
     the draws and weights are still returned; what a finite ``log_evidence`` means is
     stated once, on :attr:`~photomancy.infer.posterior.Posterior.log_evidence`.
-    ``Fit`` already refuses to
-    be built with ``jax_enable_x64`` off, so the float64 fields are guaranteed.
+    The active process must support float64 when evaluating the backend.
 
     The function is traceable. A stack of worlds is a stacked ``Fit`` mapped with
     ``eqx.filter_vmap``; the stack of posteriors is the same type with a leading batch
@@ -59,7 +59,11 @@ def run(
 
     Returns:
         A :class:`Posterior` over ``fit``.
+
+    Raises:
+        PrecisionError: If float64 is unavailable.
     """
+    require_float64("run")
     draws = backend._run(fit, key, batch_size=batch_size)
     log_target = (
         fit.log_density(draws.samples, batch_size=batch_size)

@@ -8,6 +8,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.leaves import canonical
+from hwoutils.numerics import roundoff
+from hwoutils.precision import PrecisionError
+from hwoutils.testing import assert_precision_closed, precision_pair, ulps
 from jax.test_util import check_grads
 from scipy import integrate, stats
 
@@ -43,6 +47,7 @@ class _ToyScene(eqx.Module):
     mu: jnp.ndarray
 
 
+@pytest.mark.float64_only(reason="inference log density")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize(
     ("name", "logpdf"),
@@ -66,6 +71,7 @@ def test_closed_forms_match_scipy_logpdf_sums(name, logpdf):
     assert mask.sum() < mask.size
 
 
+@pytest.mark.float64_only(reason="inference log density")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 def test_scalar_sigma_and_no_mask_match_scipy():
     """A scalar sigma with no mask sums every element (Student-t, nu=2.5).
@@ -79,6 +85,7 @@ def test_scalar_sigma_and_no_mask_match_scipy():
     np.testing.assert_allclose(ours, expected, rtol=1e-12, atol=0.0)
 
 
+@pytest.mark.float64_only(reason="inference log density")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_gaussian_prediction_broadcasts_only_to_the_observation():
     """The two observations determine the number of Gaussian densities scored.
@@ -134,6 +141,7 @@ def test_huber_pieces_and_smooth_join(delta):
     np.testing.assert_allclose(df(outside), -delta, atol=1e-12)
 
 
+@pytest.mark.float64_only(reason="inference log density")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize("delta", [0.5, 1.345, 3.0])
 def test_huber_density_integrates_to_one(delta):
@@ -157,6 +165,7 @@ def test_huber_density_integrates_to_one(delta):
     np.testing.assert_allclose(total, 1.0, rtol=1e-9, atol=0.0)
 
 
+@pytest.mark.float64_only(reason="inference log density")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 @pytest.mark.parametrize("name", [*BUILDERS, "low_rank"])
 def test_masked_elements_are_inert_even_when_nan(name):
@@ -194,6 +203,7 @@ def test_masked_elements_are_inert_even_when_nan(name):
     assert float(like(moved)) == float(value)
 
 
+@pytest.mark.float64_only(reason="inference log density")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.parametrize("name", [*BUILDERS, "low_rank"])
 def test_jit_equals_eager(name):
@@ -278,7 +288,8 @@ def test_gaussian_residual_recovers_the_injected_offsets_and_robust_kinds_refuse
 
     Truth source: data built as ``predicted + sigma * k`` with known offsets ``k``,
     so the residual must return ``k`` (sign and scale), NaN off the mask.
-    Tolerance basis: exact-algebra (rtol 1e-12).
+    Tolerance basis: six rounding operations for forming the observation, casting
+    both operands, subtracting and dividing, at their scale in sigma units.
     Fails if: the residual is signed the wrong way, divides by a variance instead of
     a scale, leaks a masked element, or a robust or low-rank density reports a
     residual that has no unit-variance null.
@@ -287,7 +298,9 @@ def test_gaussian_residual_recovers_the_injected_offsets_and_robust_kinds_refuse
     k = np.random.default_rng(5).normal(size=predicted.shape)
     data = predicted + sigma * k
     out = np.asarray(gaussian_loglike(data, sigma, mask).residual(predicted))
-    np.testing.assert_allclose(out[mask], k[mask], rtol=1e-12)
+    scale = (np.abs(data) + np.abs(predicted)) / sigma + np.abs(k)
+    bound = roundoff(scale, n_ops=6, dtype=out.dtype)
+    assert np.all(np.abs(out[mask] - k[mask]) <= np.asarray(bound)[mask])
     assert np.all(np.isnan(out[~mask]))
     for name in ("laplace", "huber", "student_t"):
         with pytest.raises(NotImplementedError, match="unit-variance"):
@@ -308,6 +321,7 @@ def test_shape_parameters_must_be_positive(name):
         BUILDERS[name](np.zeros(2), 1.0, **{key: 0.0})
 
 
+@pytest.mark.float64_only(reason="inference log density")
 def test_low_rank_dense_density_and_conditional_mean():
     """Fails if the determinant, inverse covariance, or conditional mean is wrong."""
     data, sigma, predicted, mask = (v[:2] for v in _problem())
@@ -328,6 +342,7 @@ def test_low_rank_dense_density_and_conditional_mean():
     )
 
 
+@pytest.mark.float64_only(reason="inference log density")
 def test_low_rank_zero_is_diagonal_gaussian():
     """Fails if rank zero changes the Gaussian density, precision, or residual mean."""
     data, sigma, predicted, mask = (v[:2] for v in _problem())
@@ -358,7 +373,7 @@ def test_low_rank_float32_large_aligned_residual(data, basis):
     basis = np.array(basis, dtype=np.float32)
     sigma = np.ones(2, dtype=np.float32)
     like = low_rank_gaussian_loglike(data, sigma, basis)
-    value = like(np.zeros_like(data))
+    value = like.detection_score(np.zeros_like(data))
     variance = 1 + np.sum(basis.astype(float) ** 2, axis=1)
     expected = stats.norm.logpdf(data, scale=np.sqrt(variance)).sum()
     np.testing.assert_allclose(value, expected, rtol=1e-6)
@@ -441,6 +456,7 @@ class _Mu(eqx.Module):
         return scene.mu
 
 
+@pytest.mark.float64_only(reason="inference log density")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_forward_term_scores_the_builder_on_the_forward():
     """A ForwardTerm is the builder applied to the forward, mask and sigma included.
@@ -462,3 +478,54 @@ def test_forward_term_scores_the_builder_on_the_forward():
     masked = ForwardTerm(_Mu(), huber_loglike(obs, sigma, mask))
     moved = _ToyScene(mu=scene.mu.at[2].set(1e6))
     assert float(masked(moved)) == float(masked(scene))
+
+
+@pytest.mark.float32_only(reason="inference log density requires float64")
+@pytest.mark.parametrize("name", [*BUILDERS, "low_rank"])
+def test_log_density_refuses_in_float32(name):
+    """Detection objectives remain finite where inference densities refuse."""
+    data = np.zeros(2)
+    like = (
+        low_rank_gaussian_loglike(data, 1.0, np.zeros((2, 1)))
+        if name == "low_rank"
+        else BUILDERS[name](data, 1.0)
+    )
+    assert np.isfinite(like.detection_score(data))
+    with pytest.raises(PrecisionError, match=r"log density.*enable_x64"):
+        like(data)
+
+
+@pytest.mark.float64_only(reason="precision_pair and jaxpr audit require x64")
+@pytest.mark.parametrize("low_rank", [False, True])
+def test_detection_score_uses_the_observation_precision(low_rank):
+    """A two-pixel Gaussian objective follows its observations inside an x64 process.
+
+    The unit basis changes one diagonal variance from one to two. Allow 16
+    rounded operations along the longer rank-one path: whitening, two triangular
+    divisions, prediction of the nuisance amplitude, two squared residuals,
+    log normalization and the final sum. The objective has no cancellation here.
+    """
+
+    def build(data):
+        sigma = jnp.ones_like(data)
+        if low_rank:
+            return low_rank_gaussian_loglike(
+                data, sigma, jnp.eye(2, 1, dtype=data.dtype)
+            )
+        return gaussian_loglike(data, sigma)
+
+    data = jnp.array([1.0, 2.0])
+    prediction = jnp.array([0.25, 0.5])
+    narrow_data = canonical(data, precision="float32")
+    narrow = build(narrow_data)
+    if not low_rank:
+        assert_precision_closed(build, narrow_data)
+    assert narrow.detection_score(prediction).dtype == np.float32
+    assert_precision_closed(
+        lambda obj, x: obj.detection_score(x), narrow, prediction.astype(jnp.float32)
+    )
+    precision_pair(
+        lambda x, y: build(x).detection_score(y),
+        (data, prediction),
+        bound=float(ulps(16, np.float32(1))),
+    )

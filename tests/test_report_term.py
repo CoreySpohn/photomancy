@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
+from hwoutils.testing import ulps
 from optixstuff.spectral import Band, Quadrature, Resolution, Transmission
 from scipy.special import ndtr
 from scipy.stats import norm
@@ -76,17 +77,22 @@ def report_case():
     return model, term
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_normalization():
     """Fails if selection is conditioned twice or the null uses the wrong tail.
 
     Fixed 256-node Gauss-Legendre quadrature integrates standard-normal counts
-    from threshold through at least 12 sigma, leaving <2e-33 tail mass. The
-    1e-9 absolute bound allows quadrature and floating-point rounding.
+    from the midpoint below the threshold grid point through at least 12 sigma,
+    leaving <2e-33 tail mass. The 1e-9 absolute bound allows quadrature and
+    floating-point rounding.
     """
     rule = ReportRule()
     nodes, weights = np.polynomial.legendre.leggauss(256)
     for counts, s, limit in ((0.0, 0.5, 2.0), (10.0, 4.0, 2.0), (100.0, 10.0, 2.0)):
-        a = (rule.threshold * limit - counts) / s
+        edge = np.float32(rule.threshold * limit)
+        previous = np.nextafter(edge, np.float32(-np.inf))
+        boundary = (float(edge) + float(previous)) / 2
+        a = (boundary - counts) / s
         upper = max(a, 0.0) + 12
         z = (nodes + 1) * (upper - a) / 2 + a
         prediction = ReportPrediction(
@@ -101,13 +107,14 @@ def test_normalization():
             ReportRule(**kwargs)
 
 
-def test_sampler_law(report_case):
+def test_sampler_law(report_case, precision):
     """Fails if counts selection or observable-dependent covariance is wrong.
 
     n=2000 draws resolve fraction errors of about 0.045 at four binomial
     sigma. The truncated mean uses its analytic variance / detection count.
     Whitened position means/variances use 4/sqrt(m), 4*sqrt(2/(m-1)); the
-    covariance uses 4*sqrt((1+rho^2)/m). Error-law parity allows 16 x64 eps.
+    covariance uses 4*sqrt((1+rho^2)/m). Floating-point basis: eight eps for
+    the count sum, square root, products and quotient in the centroid error.
     """
     model, term = report_case
     # Move row zero's count mean near threshold to exercise both outcomes.
@@ -141,7 +148,8 @@ def test_sampler_law(report_case):
     np.testing.assert_allclose(
         np.asarray(samples.east_err_arcsec[:, 0])[detected],
         sigma,
-        rtol=16 * np.finfo(float).eps,
+        rtol=float(ulps(8, jnp.ones((), samples.east_err_arcsec.dtype))),
+        atol=0,
     )
     np.testing.assert_array_equal(samples.east_err_arcsec, samples.north_err_arcsec)
     x = (
@@ -167,14 +175,16 @@ def test_sampler_law(report_case):
         np.testing.assert_array_equal(
             np.asarray(getattr(samples, name))[:, 0][~detected], 0.0
         )
-    assert np.isfinite(term.draw(keys[0], model)(model))
+    if precision == np.float64:
+        assert np.isfinite(term.draw(keys[0], model)(model))
 
 
-def test_surrogate_and_routing(report_case):
+def test_surrogate_and_routing(report_case, precision):
     """Fails if the surrogate changes the rule, data, units or mode/planet routing.
 
     Identical predictors agree exactly (0 ulp); independent rate arithmetic
-    allows 8 x64 eps. Both paths use the same band-integrated contrast reader.
+    allows eight eps for interpolation, rate scaling, and exposure multiplication.
+    Both paths use the same band-integrated contrast reader.
     """
     model, planned = report_case
     table = planned.predictor.table
@@ -188,8 +198,12 @@ def test_surrogate_and_routing(report_case):
     surrogate = exact.surrogate(table, 1)
     assert surrogate.data is exact.data
     assert surrogate.rule is exact.rule
-    np.testing.assert_array_equal(exact(model), surrogate(model))
-    np.testing.assert_array_equal(exact.log_ratio(model, surrogate), 0.0)
+    np.testing.assert_array_equal(
+        exact.predict(model).counts, surrogate.predict(model).counts
+    )
+    if precision == np.float64:
+        np.testing.assert_array_equal(exact(model), surrogate(model))
+        np.testing.assert_array_equal(exact.log_ratio(model, surrogate), 0.0)
     prediction = surrogate.predict(model)
     east = 0.15 + 0.01 * np.asarray(term.data.time_d)
     rates = [
@@ -208,7 +222,8 @@ def test_surrogate_and_routing(report_case):
     np.testing.assert_allclose(
         prediction.counts,
         contrast * np.asarray(rates) * term.data.science_s,
-        rtol=8 * np.finfo(float).eps,
+        rtol=float(ulps(8, jnp.ones((), prediction.counts.dtype))),
+        atol=0,
     )
     np.testing.assert_array_equal(prediction.east_arcsec, east)
     np.testing.assert_array_equal(prediction.north_arcsec, -east)
@@ -252,14 +267,21 @@ def test_surrogate_and_routing(report_case):
         ]
     )
     expected = contrasts[term.data.mode, 0, jnp.arange(3)] * rate * term.data.science_s
-    np.testing.assert_allclose(actual.counts, expected, rtol=8 * np.finfo(float).eps)
+    np.testing.assert_allclose(
+        actual.counts,
+        expected,
+        rtol=float(ulps(8, jnp.ones((), prediction.counts.dtype))),
+        atol=0,
+    )
     np.testing.assert_allclose(
         actual.east_arcsec,
         system.positions(term.data.time_d)[0, 0],
-        rtol=8 * np.finfo(float).eps,
+        rtol=float(ulps(8, jnp.ones((), prediction.counts.dtype))),
+        atol=0,
     )
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_variance_log_ratio(report_case):
     """Fails if log ratios use the other data or silently omit extra variance.
 
@@ -305,6 +327,7 @@ def test_variance_log_ratio(report_case):
     assert np.all(np.abs(expected) > 0)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_masks_and_edges(report_case):
     """Fails if padding leaks, null NaNs disappear, or the rate leaks past a grid.
 
@@ -370,6 +393,7 @@ def test_masks_and_edges(report_case):
     assert jnp.isnan(term.draw(jax.random.key(0), broken)(model))
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_transformations_and_gradient(report_case):
     """Fails if JIT, vmap key routing or a null/detection gradient is unsafe.
 
@@ -423,12 +447,76 @@ def test_transformations_and_gradient(report_case):
     np.testing.assert_allclose(gradient, central, rtol=1e-6)
 
 
-def test_epoch_mismatch_raises(report_case):
+def test_epoch_mismatch_raises(report_case, precision):
     """Fails if a table is paired with a model on a different time origin."""
     model, term = report_case
     other = Epoch(2460000.5)
     bad = _Scene(model.contrast, other)
     with pytest.raises(ValueError, match="epoch"):
-        term(bad)
+        term.predict(bad)
     same = _Scene(model.contrast, Epoch())
-    assert float(term(same)) == float(term(model))
+    np.testing.assert_array_equal(term.predict(same).counts, term.predict(model).counts)
+    if precision == np.float64:
+        with pytest.raises(ValueError, match="epoch"):
+            term(bad)
+        assert float(term(same)) == float(term(model))
+
+
+def test_report_draw_uses_the_common_threshold_grid(monkeypatch, precision):
+    """A report detects at equality on the grid but censors the previous point.
+
+    No noise is added, so the exact float32 neighbors determine membership.
+    The supplied NumPy threshold is just above one and also rounds to one.
+    Fails if the wide draw censors a count rounding to its own limit.
+    """
+
+    class Predictor(AbstractReportPredictor):
+        def __call__(self, counts, rows):
+            counts = jnp.broadcast_to(counts, rows.time_d.shape)
+            zeros = jnp.zeros_like(counts)
+            return ReportPrediction.from_limit(counts, rows.limit_counts, zeros, zeros)
+
+    monkeypatch.setattr(
+        jax.random, "normal", lambda key, shape, dtype: jnp.zeros(shape, dtype)
+    )
+    rows = ReportData.planned([0.0], [1.0], [1.0], [0])
+    term = ReportTerm(
+        ReportRule(threshold=np.float64(1 + 2**-26)),
+        rows,
+        Predictor(),
+        lod_arcsec=jnp.ones(1),
+    )
+
+    def draw(count):
+        return term.draw(jax.random.key(0), count).data
+
+    last = np.nextafter(np.float32(1), np.float32(-np.inf))
+    for evaluate in (draw, jax.jit(draw)):
+        for value, detected in ((1.0, True), (1 - 2**-26, True), (last, False)):
+            count = jnp.asarray(value, dtype=precision)
+            sampled = evaluate(count)
+            np.testing.assert_array_equal(sampled.is_detected, [detected])
+            if detected:
+                np.testing.assert_array_equal(sampled.counts, jnp.atleast_1d(count))
+            if precision == np.float64:
+                scored = eqx.tree_at(lambda t: t.data, term, sampled)
+                assert np.isfinite(scored(count))
+
+
+@pytest.mark.float32_only(
+    reason="report log densities and proposal weights require float64"
+)
+def test_report_inference_refuses_single_precision(report_case):
+    """The report rule, likelihood ratio and leaf proposal require float64."""
+    from hwoutils.precision import PrecisionError
+
+    model, term = report_case
+    for call in (
+        lambda: term(model),
+        lambda: term.log_ratio(model, term),
+        lambda: term.leaf_proposal(model),
+        lambda: term.rule.log_counts_density(None, None, None),
+        lambda: term.rule.log_null_probability(None, None),
+    ):
+        with pytest.raises(PrecisionError, match="Enable x64"):
+            call()

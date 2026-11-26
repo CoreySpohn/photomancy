@@ -449,7 +449,8 @@ def test_update_merges_epochs_of_one_instrument_into_one_term(rv_cloud):
     assert len(posterior.fit.terms) == 2
     held = posterior.fit.terms[1]
     assert int(held.data.valid.sum()) == 4
-    np.testing.assert_allclose(held.data.rv, rvs, rtol=0, atol=0)
+    assert held.data.rv_reference == (rvs[0],)
+    np.testing.assert_array_equal(held.data.rv_offset, np.asarray(rvs) - rvs[0])
     np.testing.assert_allclose(
         posterior.log_weights, once.log_weights, rtol=0, atol=1e-9
     )

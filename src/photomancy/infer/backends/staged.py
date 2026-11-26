@@ -24,6 +24,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from hwoutils.leaves import canonical
+from hwoutils.numerics import roundoff
+from hwoutils.precision import require_float64
 
 from photomancy.infer._scale import information_scale
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
@@ -361,9 +364,9 @@ _POLICIES = ("hold", "zero_gradient", "drop_update")
 def _value_and_aux(logdensity, params):
     """``(value, aux)`` from ``value_and_aux`` when present, else a plain callable."""
     method = getattr(logdensity, "value_and_aux", None)
-    if method is not None:
-        return method(params)
-    return logdensity(params), None
+    value, aux = method(params) if method is not None else (logdensity(params), None)
+    require_float64("map_fit log density", jnp.asarray(value))
+    return value, aux
 
 
 def _strong_copy(x):
@@ -381,8 +384,11 @@ def _line_search_stalled(state):
 
     Reads the public ``info`` (``optax.ZoomLinesearchInfo``) of the
     ``optax.ScaleByZoomLinesearchState`` inside ``optax.lbfgs``: a positive decrease
-    or curvature error means no step length satisfied the sufficient-decrease and
-    curvature conditions. This assumes the zoom search's default tolerance of zero
+    must exceed objective roundoff to resolve a stall. The curvature error is
+    the slope excess per unit of the dimensionless line-search parameter.
+    Compare that unit-step scale to objective roundoff independently of the
+    final learning rate, which may come from a different trial.
+    This assumes the zoom search's default tolerance of zero
     (``optax.scale_by_zoom_linesearch(tol=0.0)``), which the state does not record.
     A solver without a zoom line search never stalls.
 
@@ -398,8 +404,14 @@ def _line_search_stalled(state):
     for part in found:
         if isinstance(part, optax.ScaleByZoomLinesearchState):
             info = part.info
-            error = max(float(info.decrease_error), float(info.curvature_error))
-            return bool(int(info.num_linesearch_steps) > 0 and error > 0.0)
+            decrease = float(info.decrease_error)
+            curvature = float(info.curvature_error)
+            if int(info.num_linesearch_steps) == 0 or (decrease == curvature == 0.0):
+                return False
+            if not np.isfinite(decrease) or not np.isfinite(curvature):
+                return True
+            floor = float(roundoff(jnp.abs(part.value)))
+            return max(decrease, curvature) > floor
     return False
 
 
@@ -416,6 +428,9 @@ def map_fit(
     callback_every=1,
 ):
     """Run a staged MAP fit of ``logdensity`` over the PyTree ``init``.
+
+    Optimized coordinates use float64. Narrower labeled leaves are widened at
+    entry. Unlabeled leaves retain their original dtype.
 
     Each stage optimizes the groups it frees (``MAPStage.groups``) with the group's
     transform for ``n_steps`` steps, minimizing ``-objective_scale * logdensity``.
@@ -487,6 +502,7 @@ def map_fit(
         sets ``failed``, and worse than the trace's best by more than the stall
         tolerance sets ``regressed``.
     """
+    require_float64("map_fit")
     if freeze not in _POLICIES:
         raise ValueError(f"freeze must be one of {_POLICIES}, got {freeze!r}")
     if callable(callback_every):
@@ -512,6 +528,7 @@ def map_fit(
     for k, name in enumerate(lab):
         if name != UNLABELED:
             members.setdefault(name, []).append(k)
+            leaves[k] = canonical(leaves[k], precision="float64")
 
     def check_table(table, where):
         for name in table:

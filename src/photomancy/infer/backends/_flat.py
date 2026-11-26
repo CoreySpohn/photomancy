@@ -28,7 +28,7 @@ def draw_template(fit):
     return jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype), shapes)
 
 
-def require_no_walls(fit, name) -> None:
+def require_no_walls(fit, name, key=None):
     """Refuse a fit whose density has walls, for a backend that needs a gradient.
 
     Against a wall every rejected step is flagged as a divergence, so the sampler's
@@ -37,23 +37,59 @@ def require_no_walls(fit, name) -> None:
     Args:
         fit: The fit to check.
         name: Name of the backend, for the message.
+        key: Sampler key to carry runtime support checks for traced blocks.
+
+    Returns:
+        The key, with any traced wall checks attached.
 
     Raises:
         ValueError: Naming each entry and its walls, and the ways out.
     """
+
+    def message(walls):
+        entries = "; ".join(
+            f"free[{entry!r}] does not map the bounds of {', '.join(names)} onto its "
+            "coordinates"
+            for entry, names in walls.items()
+        )
+        return (
+            f"{name} needs a density with no wall. {entries}: use a block whose "
+            "coordinates carry them, a law without those bounds, or Importance or "
+            "NestedSampling."
+        )
+
     walls = fit.walls
-    if not walls:
-        return
-    entries = "; ".join(
-        f"free[{key!r}] does not map the bounds of {', '.join(names)} onto its "
-        "coordinates"
-        for key, names in walls.items()
-    )
-    raise ValueError(
-        f"{name} needs a density with no wall. {entries}: use a block whose "
-        "coordinates carry them, a law without those bounds, or Importance or "
-        "NestedSampling."
-    )
+    for entry, block in fit.blocks.items():
+        flags = getattr(block, "wall_flags", None)
+        if flags is None or not any(
+            isinstance(x, jax.core.Tracer) for x in jax.tree.leaves(block)
+        ):
+            continue
+        walls.pop(entry, None)
+        current = flags()
+        if not current:
+            continue
+        names = tuple(current)
+        masks = range(1 << len(names))
+        messages = [
+            message({entry: tuple(n for i, n in enumerate(names) if mask & (1 << i))})
+            for mask in masks
+        ]
+        index = sum(
+            flag.astype(jnp.int32) << i for i, flag in enumerate(current.values())
+        )
+        # Equinox's runtime callback accepts raw key data, not typed keys.
+        typed = jax.dtypes.issubdtype(key.dtype, jax.dtypes.prng_key)
+        data = jax.random.key_data(key)
+        data = eqx.branched_error_if(data, index != 0, index, messages)
+        key = (
+            jax.random.wrap_key_data(data, impl=jax.random.key_impl(key))
+            if typed
+            else data
+        )
+    if walls:
+        raise ValueError(message(walls))
+    return key
 
 
 def flat_problem(fit):

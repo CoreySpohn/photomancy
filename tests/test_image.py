@@ -10,6 +10,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.model_paths import resolve
+from hwoutils.precision import PrecisionError
+from hwoutils.testing import ulps
 from image_scene import (
     BANDS,
     GaussianCoronagraph,
@@ -18,13 +20,14 @@ from image_scene import (
     make_instrument,
     make_scene,
 )
-from optixstuff import AbstractSpeckleField, Rates
+from optixstuff import AbstractSpeckleField, Detector, Rates
 from optixstuff.coronagraph import MultiBandCoronagraph
 from optixstuff.exposure import FramePlan
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
-from optixstuff.spectral import Band
+from optixstuff.spectral import Band, Quadrature
 from priorities import LogUniform
 from scipy import stats
+from skyscapes.physical_model import LambertianPhysicalModel
 
 from photomancy import detection
 from photomancy.image import ImageModel, ImageTerm, _ImageScore
@@ -51,6 +54,21 @@ def _mean(model, exposure):
     return ImageTerm(
         jnp.zeros(shape), jnp.ones(shape, bool), exposure=exposure, **_PATHS
     ).predict(model)
+
+
+@pytest.mark.float32_only(reason="image log densities require float64")
+def test_image_log_density_refuses_float32():
+    """Both the direct term and the reusable scorer refuse float32 reductions."""
+    model, exposure = _setup()
+    shape = (1, *model.instrument.detector.shape)
+    term = ImageTerm(
+        jnp.zeros(shape), jnp.ones(shape, bool), exposure=exposure, **_PATHS
+    )
+    with pytest.raises(PrecisionError, match=r"image log likelihood.*Enable x64"):
+        term(model)
+    rates, score = term.split(model)
+    with pytest.raises(PrecisionError, match=r"image log likelihood.*Enable x64"):
+        score(rates)
 
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
@@ -241,10 +259,10 @@ def test_residual_reads_the_floored_rates_and_is_safe_to_differentiate():
     peak), where ``log_prob`` scores a rate of zero.
     Truth source: there the mean is 0 and the variance is the read noise squared
     (9, typed from primitives), so the residual of 2 electrons is ``2 / 3``; the
-    Jacobian against a central difference in the planet's contrast scale.
-    Tolerance basis: floating-point (rtol 1e-12 for ``2 / 3``; for the central
-    difference at a step of 1e-4, 1e-6 of the largest derivative, above both the
-    truncation error and the rounding of order-one residuals divided by the step).
+    Jacobian at the noiseless observation is minus the planet counts divided
+    by the noise, since the residual numerator is zero. Tolerance basis: one
+    division for the floored residual, and eight operations at the full mean
+    over noise scale for two rendered means, subtraction and whitening.
     Fails if: the residual whitens the unfloored (negative) mean, a masked or
     undefined pixel puts NaN into ``jax.jacfwd``, or a photon-counter pixel whose
     total is a tenth of the dark rate below zero (``log_prob`` is ``-inf``, the
@@ -265,22 +283,23 @@ def test_residual_reads_the_floored_rates_and_is_safe_to_differentiate():
     out = np.asarray(
         eqx.tree_at(lambda t: t.observed_e, term, observed).residual(negative)
     )
-    np.testing.assert_allclose(out[peak], 2.0 / 3.0, rtol=1e-12)
+    np.testing.assert_allclose(
+        out[peak], 2.0 / 3.0, rtol=float(ulps(1, jnp.ones_like(out[peak])))
+    )
 
     def residual_at(s):
         return term.residual(eqx.tree_at(_contrast, model, s * grid))
 
     jac = np.asarray(jax.jacfwd(residual_at)(1.0))
     assert np.all(np.isfinite(jac))
-    step = 1e-4
-    central = np.asarray(residual_at(1.0 + step)) - np.asarray(residual_at(1.0 - step))
+    noise = np.sqrt(lit + 9.0)
     used = np.asarray(term.mask)
     assert np.all(np.isnan(np.asarray(residual_at(1.0))[~used]))
     np.testing.assert_allclose(
         jac[used],
-        central[used] / (2 * step),
+        -planet[used] / noise[used],
         rtol=0,
-        atol=1e-6 * np.max(np.abs(jac[used])),
+        atol=float(ulps(8, jnp.max(jnp.asarray(lit[used] / noise[used])))),
     )
 
     counter, counter_exposure = _setup("poisson")
@@ -294,6 +313,78 @@ def test_residual_reads_the_floored_rates_and_is_safe_to_differentiate():
     undefined = counted.residual(eqx.tree_at(_contrast, counter, below * grid))
     assert np.isnan(np.asarray(undefined)[peak])
     assert np.isfinite(jax.grad(chi_square)(below))
+
+
+@pytest.mark.parametrize("kind", ["poisson", "read", "custom"])
+def test_residual_domain_agrees_with_detector_density(kind, monkeypatch, precision):
+    """Positive variance and finite detector log density define a residual.
+
+    A separate shot-variance rate tests both rate floors, even for a counter
+    with a zero mean and positive variance. A custom two-point readout assigns
+    equal probability to the two values one standard deviation from its mean.
+    Membership of the density domain is exact. The default detectors exercise
+    adjacent values at the float32 floor with a peak of 13, where the product
+    rounds. Fails if the residual or score uses a working-dtype threshold.
+    """
+
+    class TwoPoint(Detector):
+        def log_prob(self, observed, rates, plan):
+            mean, variance = self.mean_and_variance(rates, plan)
+            return jnp.where(
+                (observed - mean) ** 2 == variance, -jnp.log(2.0), -jnp.inf
+            )
+
+    detector = (
+        TwoPoint(pixel_scale_arcsec=1.0, shape=(1, 8))
+        if kind == "custom"
+        else make_detector(kind)
+    )
+    observed = jnp.asarray([[[0, 1, 2, 2, 13, 2, -1, -0.5]]])
+    mean = jnp.asarray([[[0, 0, 1, 1, 13, -1, 1, 1]]], dtype=precision)
+    variance = jnp.asarray([[[1, 1, 1, 1, 1, 1, 1, 1]]], dtype=precision)
+    if kind == "custom":
+        mean = mean.at[0, 0, 4].set(12)
+        variance = variance.at[0, 0, 3].set(-1)
+    if kind == "poisson":
+        observed = observed.at[0, 0, 5].set(0)
+    plan = FramePlan(1.0, 1)
+    term = ImageTerm(
+        observed,
+        jnp.ones(observed.shape, bool),
+        instrument_path="det",
+        exposure_path="exp",
+    )
+    monkeypatch.setattr(
+        ImageTerm, "_rates", lambda self, rates: (detector, rates, plan)
+    )
+
+    def residual_valid(rates):
+        return jnp.isfinite(term.residual(rates))
+
+    floor = np.float32(-0.0013)
+    for rate, admitted in (
+        (floor, True),
+        (np.nextafter(floor, np.float32(-np.inf)), False),
+    ):
+        rates = Rates(
+            BANDS,
+            "electron",
+            planet=mean.at[0, 0, 5].set(rate if kind != "custom" else -1),
+            variance=Rates(BANDS, "electron", planet=variance),
+        )
+        # At a floored zero the Poisson density admits only a zero count.
+        # The readout with nonzero read noise can also admit a positive count.
+        expected = {
+            "poisson": [True, False, True, True, True, admitted, False, True],
+            "read": [True, True, True, True, True, admitted, True, True],
+            "custom": [False, True, True, False, True, False, False, False],
+        }[kind]
+        for evaluate in (residual_valid, eqx.filter_jit(residual_valid)):
+            np.testing.assert_array_equal(evaluate(rates).ravel(), expected)
+        if kind == "custom" or precision == np.float64:
+            np.testing.assert_array_equal(
+                jnp.isfinite(detector.log_prob(observed, rates, plan)).ravel(), expected
+            )
 
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
@@ -656,6 +747,81 @@ def test_a_lit_planet_outside_the_source_domain_is_refused():
                 term.check(model)
         else:
             term.check(model)
+
+
+@pytest.mark.parametrize(
+    "nodes", [[[550, 551]], [[550.0, 551.0]]], ids=["int", "float"]
+)
+def test_source_domain_uses_fractional_center_with_integer_nodes(nodes):
+    """Integer endpoint nodes retain the fractional observing-band center.
+
+    At 550.5 nm, truncating the center to 550 nm moves a 9.995 lambda/D
+    source beyond 10 lambda/D. A second host center differs by one quarter
+    of a float32 spacing, so both centers round to the same float32 value.
+    An explicit wavelength edge admits both of those centers and rejects the
+    next float32 grid point. Host admission must match both render paths for
+    sources inside and outside the spatial edge. The template is flat so flux
+    on the detector is positive exactly when its source is admitted.
+    """
+
+    class Bounded(GaussianCoronagraph):
+        band_averaged: bool = eqx.field(static=True, default=True)
+
+        def source_psfs(self, wavelength_nm, x_lod, y_lod, *, grid=None):
+            psfs = super().source_psfs(wavelength_nm, x_lod, y_lod, grid=grid)
+            covered = Band(550.0, 550.5).contains_wavelength(wavelength_nm)
+            return type(psfs)(psfs.image, psfs.valid & covered)
+
+        def _native_source_psfs(self, x_lod, y_lod):
+            psfs = super()._native_source_psfs(x_lod, y_lod)
+            flat = eqx.tree_at(
+                lambda image: image.data, psfs.image, jnp.ones_like(psfs.image.data)
+            )
+            return type(psfs)(flat, jnp.hypot(x_lod, y_lod) <= 10)
+
+    coronagraph = Bounded()
+    instrument = eqx.tree_at(
+        lambda i: i.coronagraph, make_instrument(make_detector()), coronagraph
+    )
+    scale = float(coronagraph.grid.frame.lod_to_arcsec(550.5))
+    scene = make_scene(
+        separation_arcsec=9.995 * scale, model=LambertianPhysicalModel(jnp.ones(1))
+    )
+    outside = make_scene(
+        separation_arcsec=10.005 * scale, model=scene.planets[0].physical_model
+    )
+    template = make_exposure(scene, instrument)
+    observed = jnp.zeros((1, *instrument.detector.shape))
+
+    def rendered(system, exposure):
+        return jnp.any(cp.expected(system, instrument, exposure).planet > 0)
+
+    compiled = eqx.filter_jit(rendered)
+    for high, admitted in (
+        (551.0, True),
+        (551.0 + 2**-15, True),
+        (551.0 + 2**-13, False),
+    ):
+        band = Band(550.0, high)
+        exposure = eqx.tree_at(
+            lambda e: e.quadrature,
+            template,
+            Quadrature((band,), nodes, [[0.5, 0.5]]),
+        )
+        model = ImageModel(scene, instrument)
+        term = _scored(model, exposure, observed)
+        if admitted:
+            term.check(model)
+        else:
+            with pytest.raises(
+                ValueError, match="outside the coronagraph's source domain"
+            ):
+                term.check(model)
+        with pytest.raises(ValueError, match="outside the coronagraph's source domain"):
+            term.check(ImageModel(outside, instrument))
+        for evaluate in (rendered, compiled):
+            assert bool(evaluate(scene, exposure)) == admitted
+            assert not bool(evaluate(outside, exposure))
 
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
