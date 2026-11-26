@@ -300,6 +300,8 @@ class Laplace(AbstractBackend):
         k_start, k_draw = jax.random.split(key)
         density = flat_density(fit)
         starts = start_points(fit, self.init, k_start, self.n_modes)
+        # All vmapped starts have the same reconstructed leaf dtypes and structure.
+        fit._require_float64_forward("Laplace evidence", fit.from_flat(starts[0])[0])
         means, covs, log_z, min_eig, grad_norm, decrement = jax.vmap(
             lambda z0: _laplace_mode(density, z0, self.n_steps, self.min_eigenvalue)
         )(starts)

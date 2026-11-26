@@ -33,14 +33,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.blocks import AbstractBlock
-from hwoutils.leaves import canonical
-from hwoutils.model_paths import assign
 from jax.flatten_util import ravel_pytree
 from priorities import AbstractDistribution, Mixture, MultivariateNormal
 
 from photomancy.infer.diagnostics import kish_ess, mc_se, pareto_khat, weighted_mean
 from photomancy.infer.evidence import importance_evidence
-from photomancy.infer.fit import Fit, _check_draws
+from photomancy.infer.fit import Fit, _check_draws, _wide_coordinates, _write_block
 from photomancy.infer.particles import (
     categorical_indices,
     systematic_indices,
@@ -313,20 +311,19 @@ def _support_swap(old_fit, new_fit, moved):
     """
 
     def one(x):
+        x = _wide_coordinates(x)
         model = old_fit.model_at(x)
         x_new = dict(x)
         logdet = jnp.zeros((), jnp.float64)
         finite = jnp.asarray(True)
         for key in moved:
             old_block, new_block = old_fit.free[key], new_fit.free[key]
-            x_new[key] = new_block.inverse(model)
+            x_new[key] = _wide_coordinates(new_block.inverse(model))
             flat, unravel = ravel_pytree(x[key])
 
             def to_new(v, old_block=old_block, new_block=new_block, unravel=unravel):
-                mapped = model
-                for path, value in old_block.forward(unravel(v), model).items():
-                    mapped = assign(mapped, path, canonical(value))
-                return ravel_pytree(new_block.inverse(mapped))[0]
+                mapped = _write_block(model, old_block.forward(unravel(v), model))
+                return ravel_pytree(_wide_coordinates(new_block.inverse(mapped)))[0]
 
             logdet = logdet + jnp.linalg.slogdet(jax.jacfwd(to_new)(flat))[1]
             finite = finite & jnp.all(jnp.isfinite(ravel_pytree(x_new[key])[0]))

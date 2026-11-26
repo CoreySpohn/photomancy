@@ -23,8 +23,10 @@ from test_fit import (
     _block,
     _chart_coords,
     _coords,
+    _FloatWritingBlock,
     _relative,
     _scene,
+    _Written,
 )
 
 from photomancy.detection import measure
@@ -47,6 +49,7 @@ from photomancy.infer import (
     run,
 )
 from photomancy.infer.backends._flat import draw_template, start_points
+from photomancy.infer.backends.base import AbstractBackend, BackendDraws
 from photomancy.infer.backends.grid import gauss_legendre_rule, midpoint_rule
 from photomancy.infer.backends.laplace import _merge_modes
 from photomancy.infer.diagnostics import khat_threshold, pareto_khat
@@ -110,6 +113,36 @@ def _check_contract(post, fit, n=None):
 
 
 # ----- the Posterior type --------------------------------------------------------
+
+
+class _Float32Backend(AbstractBackend):
+    def _run(self, fit, key, *, batch_size=None):
+        samples = jax.tree.map(
+            lambda a: a.astype(jnp.float32), fit.sample_prior(key, (2,))
+        )
+        return BackendDraws(
+            samples, jnp.zeros(2), jnp.nan, jnp.nan, None, "monte_carlo"
+        )
+
+
+@pytest.mark.float64_only(reason="float64 posterior coordinates")
+def test_run_stores_native_backend_samples_at_schema_precision():
+    """New posterior coordinates have the schema dtype, including block entries."""
+    model = _Written(jnp.zeros(()), jnp.zeros(()), jnp.zeros(()))
+    fit = Fit(model, {"a": _FloatWritingBlock(), "b": Normal(0.0, 1.0)})
+    backend, key = _Float32Backend(), jax.random.key(17)
+    native = backend._run(fit, key).samples
+    assert fit.check_draws(native) == (2,)
+    post = run(fit, backend, key)
+    for stored, original, spec in zip(
+        jax.tree.leaves(post.samples),
+        jax.tree.leaves(native),
+        jax.tree.leaves(fit.draw_schema()),
+        strict=True,
+    ):
+        assert stored.dtype == spec.dtype and original.dtype == jnp.float32
+        np.testing.assert_array_equal(stored, original)
+    np.testing.assert_array_equal(post.log_target, fit.log_density(post.samples))
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")

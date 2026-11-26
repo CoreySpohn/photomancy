@@ -6,7 +6,7 @@ is absent from ``free`` is held at the value of ``model``. A free entry is one o
 kinds, and ``isinstance`` is the only dispatch:
 
 * a ``priorities`` distribution over one whole array leaf of the model (a *leaf law*),
-  written with ``assign`` unchanged;
+  written at the dtype of the destination leaf;
 * an :class:`hwoutils.blocks.AbstractBlock`, which owns a node of the model, carries its
   own unconstrained coordinates and normalized density, and writes the node.
 
@@ -46,6 +46,7 @@ detected.
 
 import hashlib
 from abc import abstractmethod
+from dataclasses import fields
 from typing import ClassVar, Self
 
 import equinox as eqx
@@ -55,15 +56,15 @@ import numpy as np
 from hwoutils.blocks import AbstractBlock, block_order, check_ties, check_writers
 from hwoutils.constants import two_pi
 from hwoutils.leaves import (
-    FOREIGN_PACKAGES,
     as_float_leaf,
     canonical,
+    is_foreign,
     is_param,
     require_tree,
 )
 from hwoutils.memory import DEFAULT_MAX_BYTES, MemoryLimit, largest_batch
 from hwoutils.model_paths import assign, paths_overlap, resolve
-from hwoutils.precision import require_float64
+from hwoutils.precision import PrecisionError, require_float64
 from jax.flatten_util import ravel_pytree
 from jax.scipy.special import log_ndtr, logsumexp
 from priorities import AbstractDistribution, from_real, to_real
@@ -104,10 +105,32 @@ class AbstractTerm(eqx.Module):
             write that meets one, because the likelihood would no longer see the change.
         marginalizes: Names of the latents the term sums over inside itself; empty by
             default.
+        forward_fields: Field names holding the objects differentiated by the
+            forward calculation. By default, Equinox modules held directly or in
+            containers are checked for narrow floating leaves. Declare names when
+            the forward uses a raw array or when a module holds only observations.
+            A held term applies its own declaration recursively.
     """
 
     reads: eqx.AbstractVar[tuple[str, ...]]
     marginalizes: ClassVar[tuple[str, ...]] = ()
+
+    forward_fields: ClassVar[tuple[str, ...] | None] = None
+
+    def _check_forward_precision(self, operation, path):
+        declared = self.forward_fields
+        names = (field.name for field in fields(self)) if declared is None else declared
+        for name in names:
+            value = getattr(self, name)
+            leaves = jax.tree_util.tree_leaves_with_path(
+                value, is_leaf=lambda node: isinstance(node, eqx.Module)
+            )
+            for keys, owner in leaves:
+                location = f"{path}.{name}" + jax.tree_util.keystr(keys)
+                if isinstance(owner, AbstractTerm):
+                    owner._check_forward_precision(operation, location)
+                elif declared is not None or isinstance(owner, eqx.Module):
+                    _require_wide_owner(operation, owner, location)
 
     @abstractmethod
     def __call__(self, model) -> jax.Array:
@@ -202,6 +225,10 @@ class AbstractTerm(eqx.Module):
             is not scored.
         """
         raise NotImplementedError(f"{type(self).__name__} has no whitened residual")
+
+    def _fit_residual(self, model):
+        """Evaluate the term's residual at Fit precision."""
+        return self.residual(model)
 
     @property
     def footprint_paths(self) -> tuple[str, ...]:
@@ -564,22 +591,76 @@ def _fisher_information(fit, x, include_prior, batch_size, forward, n_root):
     return 0.5 * (info + info.T)
 
 
-def _is_python_int_or_bool(x) -> bool:
-    # int subclasses (bool, IntEnum) included: under filter_jit they are static
-    return isinstance(x, int)
+class _Float32OwnerError(PrecisionError):
+    """A forward owner has a float32 or complex64 leaf in an x64 process."""
 
 
-def _is_third_party_module(x) -> bool:
-    """A Module the conversion leaves whole (rebuilding it would copy it)."""
-    if not isinstance(x, eqx.Module) or isinstance(x, eqx.Partial):
-        return False
-    name = type(x).__module__
-    return any(name == f or name.startswith(f + ".") for f in FOREIGN_PACKAGES)
+def _require_wide_owner(operation, owner, name):
+    """Check the owner, including narrow bulk and weak leaves, with their path."""
+    require_float64(operation)
+    leaves = jax.tree_util.tree_leaves_with_path(
+        owner, is_leaf=lambda node: isinstance(node, AbstractTerm)
+    )
+    for path, leaf in leaves:
+        if isinstance(leaf, AbstractTerm):
+            leaf._check_forward_precision(operation, name + jax.tree_util.keystr(path))
+            continue
+        if is_param(leaf) and jnp.finfo(leaf.dtype).dtype != np.float64:
+            location = name + jax.tree_util.keystr(path)
+            error = (
+                _Float32OwnerError
+                if jnp.finfo(leaf.dtype).dtype == np.float32
+                else PrecisionError
+            )
+            raise error(
+                f"{operation} requires float64. {location} has dtype {leaf.dtype}. "
+                "Use canonical(tree, precision='float64')."
+            )
+    require_float64(operation, [leaf for _, leaf in leaves if is_param(leaf)])
 
 
-def _split_python_scalars(model):
-    """Split a model into its Python ``int`` and ``bool`` leaves and the rest."""
-    return eqx.partition(model, _is_python_int_or_bool, is_leaf=_is_third_party_module)
+def _keep_model_leaf(x):
+    """Keep Python shape/flag constants and explicitly narrow working arrays."""
+    return isinstance(x, int) or (
+        isinstance(x, jax.Array)
+        and x.dtype in (jnp.float32, jnp.complex64)
+        and not x.weak_type
+    )
+
+
+def _block_node(previous, value):
+    """Cast matching leaves by path, using the replacement's tree and metadata."""
+    destinations = dict(jax.tree.leaves_with_path(previous))
+    leaves, tree = jax.tree.flatten_with_path(value)
+    converted = None
+    result = []
+    for key, leaf in leaves:
+        destination = destinations.get(key)
+        if eqx.is_array(destination) and eqx.is_array_like(leaf):
+            leaf = jnp.asarray(leaf, destination.dtype)
+        else:
+            # Canonicalize the node in context, respecting bulk and foreign fields.
+            if converted is None:
+                converted = dict(jax.tree.leaves_with_path(canonical(value)))
+            leaf = converted[key]
+        result.append(leaf)
+    return jax.tree.unflatten(tree, result)
+
+
+def _write_block(model, writes):
+    """Apply a block's replacement nodes at their destination leaf dtypes."""
+    for path, value in writes.items():
+        node = _block_node(resolve(model, path), value)
+        model = assign(model, path, node)
+    return model
+
+
+def _wide_coordinates(x):
+    return jax.tree.map(
+        lambda a: as_float_leaf(a).astype(jnp.float64),
+        x,
+        is_leaf=lambda a: isinstance(a, list | tuple),
+    )
 
 
 def _check_keys(x, schema, path):
@@ -676,7 +757,8 @@ class Fit(eqx.Module):
             model: The base model. Its leaves are converted with
                 :func:`hwoutils.leaves.canonical` (Python floats and complex numbers,
                 NumPy arrays and weakly typed arrays become JAX arrays in the active
-                precision; static fields and third-party Modules are left alone).
+                precision; explicitly typed float32 and complex64 JAX leaves keep
+                their precision, as do bulk tables and third-party Modules).
                 Python ``int`` and ``bool`` scalars are kept: under ``eqx.filter_jit``
                 they are compile-time constants, which a model may use as a shape or
                 in a Python ``if``, and an array would break that. ``fit.model`` is
@@ -692,8 +774,10 @@ class Fit(eqx.Module):
             PrecisionError: When float64 is unavailable.
         """
         require_float64("Fit")
-        kept, rest = _split_python_scalars(model)
-        self.model = eqx.combine(kept, canonical(rest))
+        kept, rest = eqx.partition(model, _keep_model_leaf, is_leaf=is_foreign)
+        rest = canonical(rest)
+        require_tree(rest)
+        self.model = eqx.combine(kept, rest, is_leaf=is_foreign)
         self.free = free
         self.terms = terms
         self._walls = _block_walls(free) if _walls is None else _walls
@@ -711,10 +795,6 @@ class Fit(eqx.Module):
                 path, a block cycle, a free path or block write that meets a term's
                 ``reads``, or two terms that marginalize the same latent
                 (``AbstractTerm.marginalizes``), named in the message.
-            TypeError: Also when the converted model still holds a leaf that is not a
-                JAX array of the active precision (:func:`hwoutils.leaves.require_tree`,
-                a postcondition of the conversion in ``__init__``; kept Python ``int``
-                and ``bool`` scalars are exempt).
         """
         leaf_paths, blocks = [], {}
         for path, entry in self.free.items():
@@ -728,7 +808,6 @@ class Fit(eqx.Module):
                     f"free[{path!r}] is a {type(entry).__name__}; "
                     "expected a priorities distribution or a block"
                 )
-        require_tree(_split_python_scalars(self.model)[1])
         for key, block in blocks.items():
             for path in (*block.reads, *block.writes):
                 self._require_path(path, f"block {key!r}")
@@ -792,7 +871,7 @@ class Fit(eqx.Module):
                     moved = assign(
                         self.model,
                         path,
-                        as_float_leaf(jnp.broadcast_to(end, leaf.shape)),
+                        jnp.broadcast_to(end, leaf.shape).astype(leaf.dtype),
                     )
                     term.check(moved)
 
@@ -881,12 +960,15 @@ class Fit(eqx.Module):
         return tuple(sorted({name for term in self.terms for name in term.assumptions}))
 
     def _schema_of(self, key):
-        """Shape and dtype record of one free entry, from the current model."""
+        """Stored coordinate shape from the current model, at the draw precision."""
         entry = self.free[key]
         if isinstance(entry, AbstractBlock):
-            return jax.eval_shape(lambda: entry.inverse(self.model))
+            spec = jax.eval_shape(lambda: entry.inverse(self.model))
+            return jax.tree.map(
+                lambda s: jax.ShapeDtypeStruct(s.shape, jnp.float64), spec
+            )
         leaf = resolve(self.model, key)
-        return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype)
+        return jax.ShapeDtypeStruct(leaf.shape, jnp.float64)
 
     @property
     def _schema(self) -> dict:
@@ -990,11 +1072,12 @@ class Fit(eqx.Module):
 
     def _assign_leaf_laws(self, x, model):
         for path in self.leaf_laws:
-            value = as_float_leaf(x[path])
-            expected = resolve(model, path).shape
+            value = x[path]
+            leaf = resolve(model, path)
+            expected = leaf.shape
             if value.shape != expected:
                 raise ValueError(f"{path} has shape {value.shape}, expected {expected}")
-            model = assign(model, path, value)
+            model = assign(model, path, value.astype(leaf.dtype))
         return model
 
     def _walk(self, x):
@@ -1003,6 +1086,7 @@ class Fit(eqx.Module):
         Leaf laws are assigned first and scored, then each block in order scores its
         ``log_prob`` on the running model before its writes are applied.
         """
+        x = _wide_coordinates(x)
         model = self._assign_leaf_laws(x, self.model)
         total = jnp.zeros(())
         for path, dist in self.leaf_laws.items():
@@ -1012,8 +1096,7 @@ class Fit(eqx.Module):
         for key in self.block_order:
             block = blocks[key]
             total = total + block.log_prob(x[key], model)
-            for path, value in block.forward(x[key], model).items():
-                model = assign(model, path, canonical(value))
+            model = _write_block(model, block.forward(x[key], model))
         return model, total
 
     def model_at(self, x: dict) -> eqx.Module:
@@ -1092,14 +1175,16 @@ class Fit(eqx.Module):
             Tuple of whitened residuals, one per term.
 
         Raises:
+            PrecisionError: When float64 is unavailable.
             NotImplementedError: When a term has no whitened residual (a robust or
                 correlated law), naming the term.
         """
+        require_float64("Fit.residuals")
         model = self.model_at(x)
         out = []
         for i, term in enumerate(self.terms):
             try:
-                out.append(term.residual(model))
+                out.append(term._fit_residual(model))
             except NotImplementedError as err:
                 raise NotImplementedError(f"terms[{i}]: {err}") from err
         return tuple(out)
@@ -1135,7 +1220,7 @@ class Fit(eqx.Module):
         ]
         return jnp.concatenate(parts) if parts else jnp.zeros((0,), dtype)
 
-    def _root_length(self):
+    def _root_length(self, model):
         """Length of :meth:`_root_vector`, from shapes only.
 
         Raises:
@@ -1144,7 +1229,7 @@ class Fit(eqx.Module):
         total = 0
         for i, term in enumerate(self.terms):
             try:
-                shape = eqx.filter_eval_shape(term.fisher_root, self.model)
+                shape = eqx.filter_eval_shape(term.fisher_root, model)
             except NotImplementedError as err:
                 raise NotImplementedError(
                     f"terms[{i}] ({type(term).__name__}) has no Fisher root, so "
@@ -1153,6 +1238,15 @@ class Fit(eqx.Module):
                 ) from err
             total += int(np.prod(shape.shape, dtype=int))
         return total
+
+    def _require_float64_forward(self, operation, x):
+        """Return the checked forward model after applying all writes at one draw."""
+        require_float64(operation)
+        model = self.model_at(x)
+        _require_wide_owner(operation, model, "model")
+        for i, term in enumerate(self.terms):
+            term._check_forward_precision(operation, f"terms[{i}]")
+        return model
 
     def information(
         self,
@@ -1214,14 +1308,14 @@ class Fit(eqx.Module):
             The symmetric ``(P, P)`` float64 matrix.
 
         Raises:
-            PrecisionError: When float64 is unavailable.
+            PrecisionError: When float64 is unavailable or a forward owner is narrow.
             ValueError: For an unknown ``kind``.
             NotImplementedError: For ``kind="fisher"`` when a term has no root.
             MemoryLimit: When the estimate is above ``max_bytes``.
         """
         if kind not in ("observed", "fisher"):
             raise ValueError(f"kind must be 'observed' or 'fisher', got {kind!r}")
-        require_float64("Fit.information")
+        model = self._require_float64_forward("Fit.information", x)
         x = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), x)
         n_param = sum(int(np.size(a)) for a in jax.tree.leaves(x))
         if kind == "observed":
@@ -1229,7 +1323,7 @@ class Fit(eqx.Module):
                 n_param, n_param * 8, 2 * n_param * n_param * 8, batch_size, max_bytes
             )
             return _observed_information(self, x, include_prior, batch_size)
-        n_root = self._root_length()
+        n_root = self._root_length(model)
         forward = n_root > n_param
         _admit_information(
             n_param if forward else n_root,
@@ -1254,6 +1348,7 @@ class Fit(eqx.Module):
         Returns:
             Entry dict in unconstrained coordinates, with the shapes of ``x``.
         """
+        x = _wide_coordinates(x)
         return {
             key: to_real(entry, x[key])
             if isinstance(entry, AbstractDistribution)
@@ -1277,6 +1372,7 @@ class Fit(eqx.Module):
             ``x`` is the entry dict in the stored coordinates and ``volume`` is the log
             volume of the map, with the batch shape of ``u``.
         """
+        u = _wide_coordinates(u)
         x, volume = {}, jnp.zeros(())
         for key, entry in self.free.items():
             if isinstance(entry, AbstractDistribution):
@@ -1425,14 +1521,15 @@ class Fit(eqx.Module):
         for path, dist in self.leaf_laws.items():
             shape = jnp.shape(resolve(self.model, path))
             own = dist.support()[0].shape
-            x[path] = dist.sample(subkeys[path], shape if own == () else ())
+            x[path] = _wide_coordinates(
+                dist.sample(subkeys[path], shape if own == () else ())
+            )
         model = self._assign_leaf_laws(x, self.model)
         blocks = self.blocks
         for bkey in self.block_order:
             block = blocks[bkey]
-            x[bkey] = block.sample(subkeys[bkey], model)
-            for path, value in block.forward(x[bkey], model).items():
-                model = assign(model, path, canonical(value))
+            x[bkey] = _wide_coordinates(block.sample(subkeys[bkey], model))
+            model = _write_block(model, block.forward(x[bkey], model))
         return x
 
     def sample_prior(self, key, sample_shape: tuple[int, ...] = ()) -> dict:
@@ -1498,13 +1595,16 @@ class Fit(eqx.Module):
             Entry dict of one draw in the stored coordinates, keyed like ``free``.
         """
         self.unit_template()
-        x = {key: entry.icdf(u[key]) for key, entry in self.leaf_laws.items()}
+        u = _wide_coordinates(u)
+        x = {
+            key: _wide_coordinates(entry.icdf(u[key]))
+            for key, entry in self.leaf_laws.items()
+        }
         model = self._assign_leaf_laws(x, self.model)
         blocks = self.blocks
         for key in self.block_order:
-            x[key] = blocks[key].from_unit(u[key], model)
-            for path, value in blocks[key].forward(x[key], model).items():
-                model = assign(model, path, canonical(value))
+            x[key] = _wide_coordinates(blocks[key].from_unit(u[key], model))
+            model = _write_block(model, blocks[key].forward(x[key], model))
         return {key: x[key] for key in self.free}
 
     # ----- edits -----------------------------------------------------------------

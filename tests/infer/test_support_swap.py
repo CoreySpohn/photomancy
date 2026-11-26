@@ -15,7 +15,7 @@ from orbix.equations.orbit import mean_motion
 from orbix.system import EccentricityVectorChart, OrbitLaw, SkyPositionBlock
 from orbix.system.core import enclosed_mu
 from priorities import Beta, LogUniform, Uniform
-from test_fit import _block, _scene
+from test_fit import _block, _FloatWritingBlock, _scene, _Written
 
 from photomancy.infer import AbstractTerm, Fit, Posterior
 from photomancy.infer.evidence import importance_evidence
@@ -74,6 +74,55 @@ def _check_target(post):
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+class _ExponentialBlock(_FloatWritingBlock):
+    scale: int = eqx.field(static=True)
+    writes = ("a",)
+
+    def forward(self, x, model):
+        return {"a": jnp.exp(self.scale * x["u"])}
+
+    def inverse(self, model):
+        return {"u": jnp.log(model.a) / self.scale}
+
+    def same_map(self, other):
+        return self.scale == other.scale
+
+    def support_contains(self, other):
+        return isinstance(other, _ExponentialBlock) and self.scale * other.scale != 0
+
+
+def test_support_swap_widens_legacy_coordinates_before_the_jacobian():
+    """exp(100) is finite in float64. Halving u adds -log(2) to the weight.
+
+    The Gaussian target changes by (100**2 - 50**2)/2. Both energies are
+    exactly representable; two float64 ulps cover rounding of the log weight.
+    """
+    model = _Written(jnp.ones(()), jnp.zeros(()), jnp.zeros(()))
+    fit = Fit(model, {"a": _ExponentialBlock(1)})
+    samples = {"a": {"u": jnp.asarray([100.0], jnp.float32)}}
+    assert fit.check_draws(samples) == (1,)
+    cloud = Posterior(
+        samples=samples,
+        log_weights=jnp.zeros(1),
+        log_target=fit.log_density(samples),
+        log_evidence=jnp.zeros(()),
+        log_evidence_se=jnp.zeros(()),
+        fit=fit,
+        info=None,
+        kind="quadrature",
+    )
+    swapped = cloud.with_priors(
+        {"a": _ExponentialBlock(2)}, min_n_eff=None, max_khat=None
+    )
+    np.testing.assert_array_equal(swapped.samples["a"]["u"], [50.0])
+    assert swapped.samples["a"]["u"].dtype == jnp.float64
+    np.testing.assert_array_equal(swapped.log_target - cloud.log_target, [3750.0])
+    np.testing.assert_array_max_ulp(
+        np.asarray(swapped.info.log_mass_ratio), 3750.0 - np.log(2.0), maxulp=2
+    )
+    assert not swapped.info.refused
 
 
 @pytest.mark.medium(reason="compiles the re-expression and its Jacobian, 8 s cold")

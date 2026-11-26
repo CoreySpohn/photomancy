@@ -5,7 +5,7 @@ from hwoutils.precision import require_float64
 from jax.scipy.special import logsumexp
 
 from photomancy.infer.backends.base import AbstractBackend
-from photomancy.infer.fit import Fit
+from photomancy.infer.fit import Fit, _wide_coordinates
 from photomancy.infer.posterior import Posterior
 
 __all__ = ["run"]
@@ -32,10 +32,10 @@ def run(
 ) -> Posterior:
     """Run ``backend`` on ``fit`` and return the :class:`Posterior`.
 
-    The backend returns its native draws and unnormalized log weights; this function
-    alone normalizes them, evaluates ``fit.log_density`` at the draws for
-    ``log_target``, fixes the float64 fields and attaches the fit. It performs no hidden
-    second pass: a backend with no evidence gives NaN. When the evidence is refused,
+    The backend returns its native draws and unnormalized log weights. This function
+    stores the draws in float64, normalizes the weights, fills ``log_target`` from
+    ``fit.log_density`` if the backend omitted it, and attaches the fit. A backend
+    with no evidence gives NaN. When the evidence is refused,
     the draws and weights are still returned; what a finite ``log_evidence`` means is
     stated once, on :attr:`~photomancy.infer.posterior.Posterior.log_evidence`.
     The active process must support float64 when evaluating the backend.
@@ -65,14 +65,15 @@ def run(
     """
     require_float64("run")
     draws = backend._run(fit, key, batch_size=batch_size)
+    samples = _wide_coordinates(draws.samples)
     log_target = (
-        fit.log_density(draws.samples, batch_size=batch_size)
+        fit.log_density(samples, batch_size=batch_size)
         if draws.log_target is None
         else draws.log_target
     )
     log_target = jnp.asarray(log_target, jnp.float64)
     return Posterior(
-        samples=draws.samples,
+        samples=samples,
         log_weights=_normalized(draws.log_weights),
         log_target=log_target,
         log_evidence=jnp.asarray(draws.log_evidence, jnp.float64),

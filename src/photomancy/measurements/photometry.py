@@ -556,7 +556,11 @@ def system_separation_dmag(system, time_d, *, albedo_area_AU2=None):
 
 def _fixed_noise_null(alpha_pred, dMag_pred, data):
     """Score censored photometry in units of planet-free noise."""
-    dmag0 = interpolate_contrast_curve(alpha_pred, data.sep_grid, data.dmag0_grid)
+    dmag0 = interpolate_contrast_curve(
+        jnp.asarray(alpha_pred, jnp.float64),
+        jnp.asarray(data.sep_grid, jnp.float64),
+        jnp.asarray(data.dmag0_grid, jnp.float64),
+    )
     # Clip the exponent when the sampler proposes an implausibly bright orbit.
     exp_arg = jnp.clip(-0.4 * (dMag_pred - dmag0), max=200.0)
     law = ReportRule(threshold=data.snr_thresh)
@@ -600,11 +604,13 @@ def loglike_dmag(alpha_pred, dMag_pred, data):
     require_float64("Magnitude log likelihood")
     mask = data.valid  # boolean
 
+    dMag_pred = jnp.asarray(dMag_pred, jnp.float64)
     ll_null = _fixed_noise_null(alpha_pred, dMag_pred, data)
 
     # --- Detection branch: Gaussian on measured dMag ---
-    residual = dMag_pred - data.dmag_obs
-    safe_err = jnp.where(data.dmag_err > 0, data.dmag_err, 1.0)
+    residual = dMag_pred - jnp.asarray(data.dmag_obs, jnp.float64)
+    error = jnp.asarray(data.dmag_err, jnp.float64)
+    safe_err = jnp.where(error > 0, error, 1.0)
     ll_det = -0.5 * (residual / safe_err) ** 2 - jnp.log(
         safe_err * jnp.sqrt(2.0 * jnp.pi)
     )
@@ -633,6 +639,7 @@ class PhotometryTerm(AbstractTerm):
             ``quadrature``. The contrast integrates the star, planet and filter
             tables over each band; empty, it serves a system with no table, whose
             sources are sampled at the nodes.
+        forward_fields: Fields used for forward differentiation.
         reads: Model paths a held build cached. Empty: the resolution depends on
             the system's static knot grids only, which no fit can free, and a
             replaced grid has no operator in it and is refused.
@@ -643,6 +650,7 @@ class PhotometryTerm(AbstractTerm):
     transmissions: tuple[Transmission, ...]
     system_path: str = eqx.field(static=True, default="")
     resolution: Resolution = eqx.field(default_factory=Resolution)
+    forward_fields = ("quadrature", "transmissions", "resolution")
     reads: ClassVar[tuple[str, ...]] = ()
 
     def __check_init__(self):
@@ -721,8 +729,10 @@ class PhotometryTerm(AbstractTerm):
         """
         require_float64("Photometry log likelihood")
         prediction, data = self._prediction_and_data(model)
-        z = (data.contrast - prediction) / data.contrast_err
-        detection = -0.5 * z**2 - jnp.log(data.contrast_err * jnp.sqrt(2.0 * jnp.pi))
+        observed = jnp.asarray(data.contrast, jnp.float64)
+        error = jnp.asarray(data.contrast_err, jnp.float64)
+        z = (observed - jnp.asarray(prediction, jnp.float64)) / error
+        detection = -0.5 * z**2 - jnp.log(error * jnp.sqrt(2.0 * jnp.pi))
         rows = jnp.where(data.is_upper_limit, norm.logcdf(z), detection)
         return jnp.sum(jnp.where(data.valid, rows, 0.0))
 
@@ -792,6 +802,7 @@ class DMagTerm(AbstractTerm):
         data: Detection and null epochs with their contrast curves.
         system_path: Model path of the one-planet system; the empty path is the model.
         area_path: Model path of the photometric area, or None.
+        forward_fields: Empty tuple because the term differentiates no stored fields.
         reads: Model paths a held build cached. Empty: the term reads the model
             directly.
     """
@@ -799,6 +810,7 @@ class DMagTerm(AbstractTerm):
     data: DMagData
     system_path: str = eqx.field(static=True, default="")
     area_path: str | None = eqx.field(static=True, default=None)
+    forward_fields = ()
     reads: ClassVar[tuple[str, ...]] = ()
 
     def _prediction(self, model):

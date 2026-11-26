@@ -7,11 +7,38 @@ function: the likelihood of a forward model's output.
 from typing import Self
 
 import equinox as eqx
+import jax
+import jax.numpy as jnp
 from hwoutils.precision import require_float64
 
 from photomancy.infer.fit import AbstractTerm
+from photomancy.infer.likelihoods import (
+    LowRankGaussianLogLikelihood,
+    MaskedLogLikelihood,
+)
 
 __all__ = ["ForwardTerm"]
+
+_BUILTIN_LIKELIHOODS = (MaskedLogLikelihood, LowRankGaussianLogLikelihood)
+
+
+def _wide_leaf(x):
+    if eqx.is_inexact_array(x):
+        return x.astype(jnp.complex128 if jnp.iscomplexobj(x) else jnp.float64)
+    return x
+
+
+def _score_prediction(likelihood, predicted):
+    require_float64("ForwardTerm log likelihood")
+    # The built-in densities widen their covariance and normalization together.
+    # Custom scorers receive wide data as well as a wide prediction.
+    likelihood = jax.tree.map(
+        _wide_leaf,
+        likelihood,
+        is_leaf=lambda x: isinstance(x, _BUILTIN_LIKELIHOODS),
+    )
+    value = likelihood(jax.tree.map(_wide_leaf, predicted))
+    return jnp.asarray(value, jnp.float64)
 
 
 class ForwardTerm(AbstractTerm):
@@ -24,6 +51,7 @@ class ForwardTerm(AbstractTerm):
     a path the forward would not see change.
 
     Attributes:
+        forward_fields: Forward differentiation uses ``forward``.
         forward: ``model -> prediction``, an ``eqx.Module`` so that the arrays it
             holds (a grid, a mask, a table) stay leaves of the term and are traced
             instead of compiled in. A closure is refused.
@@ -34,6 +62,7 @@ class ForwardTerm(AbstractTerm):
             drawn data.
     """
 
+    forward_fields = ("forward",)
     forward: eqx.Module
     likelihood: eqx.Module
 
@@ -70,9 +99,12 @@ class ForwardTerm(AbstractTerm):
             model: The model at one draw, every leaf an array.
 
         Returns:
-            ``(forward(model), likelihood)``.
+            The raw prediction and its float64 scoring callable.
         """
-        return self.forward(model), self.likelihood
+        score = self.likelihood
+        if not isinstance(score, _BUILTIN_LIKELIHOODS):
+            score = eqx.Partial(_score_prediction, score)
+        return self.forward(model), score
 
     def __call__(self, model):
         """Return the scalar log likelihood of the data at ``model``.
@@ -84,7 +116,7 @@ class ForwardTerm(AbstractTerm):
             Scalar log likelihood of the held data at ``model``.
         """
         require_float64("ForwardTerm log likelihood")
-        return self.likelihood(self.forward(model))
+        return _score_prediction(self.likelihood, self.forward(model))
 
     def fisher_root(self, model):
         """Return the likelihood's Fisher root of the forward model's output.
@@ -117,11 +149,14 @@ class ForwardTerm(AbstractTerm):
             The whitened residual, shaped like the likelihood's data, NaN where an
             element is not used.
         """
+        require_float64("ForwardTerm residual")
         if not hasattr(self.likelihood, "residual"):
             raise NotImplementedError(
                 f"{type(self.likelihood).__name__} has no whitened residual"
             )
-        return self.likelihood.residual(self.forward(model))
+        likelihood = jax.tree.map(_wide_leaf, self.likelihood)
+        predicted = jax.tree.map(_wide_leaf, self.forward(model))
+        return likelihood.residual(predicted)
 
     def draw(self, key, model) -> Self:
         """Copy holding data drawn from the likelihood at ``model``.

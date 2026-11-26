@@ -78,17 +78,24 @@ def report_case():
 
 
 @pytest.mark.float64_only(reason="measurement log densities require float64")
-def test_normalization():
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_normalization(dtype):
     """Fails if selection is conditioned twice or the null uses the wrong tail.
 
     Fixed 256-node Gauss-Legendre quadrature integrates standard-normal counts
     from the midpoint below the threshold grid point through at least 12 sigma,
-    leaving <2e-33 tail mass. The 1e-9 absolute bound allows quadrature and
-    floating-point rounding.
+    leaving <2e-33 tail mass. The 1e-12 absolute mass bound allows quadrature
+    roundoff. The independent float64 normal CDF uses the exact stored
+    variance, including 3, whose square root rounds differently in float32.
     """
     rule = ReportRule()
     nodes, weights = np.polynomial.legendre.leggauss(256)
-    for counts, s, limit in ((0.0, 0.5, 2.0), (10.0, 4.0, 2.0), (100.0, 10.0, 2.0)):
+    for counts, variance, limit in (
+        (0.0, 0.25, 2.0),
+        (8.0, 3.0, 2.0),
+        (100.0, 100.0, 2.0),
+    ):
+        s = np.sqrt(np.float64(variance))
         edge = np.float32(rule.threshold * limit)
         previous = np.nextafter(edge, np.float32(-np.inf))
         boundary = (float(edge) + float(previous)) / 2
@@ -96,12 +103,19 @@ def test_normalization():
         upper = max(a, 0.0) + 12
         z = (nodes + 1) * (upper - a) / 2 + a
         prediction = ReportPrediction(
-            jnp.array(counts), jnp.array(s * s), jnp.array(0.0), jnp.array(0.0)
+            jnp.array(counts, dtype),
+            jnp.array(variance, dtype),
+            jnp.array(0.0),
+            jnp.array(0.0),
         )
+        assert prediction.counts.dtype == dtype
         density = np.exp(rule.log_counts_density(counts + s * z, limit, prediction)) * s
         mass = np.dot(weights, density) * (upper - a) / 2
         null = float(jnp.exp(rule.log_null_probability(limit, prediction)))
         assert abs(null + mass - 1) < 1e-9
+        # Each branch must use the wide sqrt even if both round the same way.
+        np.testing.assert_allclose(null, norm.cdf(a), rtol=0, atol=float(ulps(32, 1.0)))
+        np.testing.assert_allclose(mass, norm.sf(a), rtol=0, atol=1e-12)
     for kwargs in ({"threshold": 0.0}, {"kappa": np.nan}, {"corr": 1.0}):
         with pytest.raises(ValueError):
             ReportRule(**kwargs)

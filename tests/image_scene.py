@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
+from hwoutils.precision import like
 from optixstuff import ConstantThroughput, Detector, Instrument, SimplePrimary
 from optixstuff.coronagraph import AbstractTableCoronagraph, SourcePSFs
 from optixstuff.exposure import FramePlan
@@ -110,6 +111,14 @@ class ConstantVarianceDetector(Detector):
         """Build the parent detector and fix the variance."""
         super().__init__(**kwargs)
         self.variance_e2 = float(variance_e2)
+
+    def electrons(self, rates):
+        """Integrate the incoming photons at the detector calibration precision."""
+        rates = jax.tree.map(
+            lambda x: like(x, self.survival_fraction) if eqx.is_inexact_array(x) else x,
+            rates,
+        )
+        return super().electrons(rates)
 
     def mean_and_variance(self, rates, plan, *, sum_bands=False):
         """Mean from the parent, a fixed variance everywhere."""

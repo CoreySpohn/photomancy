@@ -210,11 +210,13 @@ def _radec_bivariate_loglike(ra_pred, dec_pred, data):
     require_float64("Astrometry log likelihood")
     mask = data.valid  # boolean
 
-    dx = data.east_arcsec - ra_pred
-    dy = data.north_arcsec - dec_pred
-    rho = data.corr
-    sx = data.east_err_arcsec
-    sy = data.north_err_arcsec
+    dx = jnp.asarray(data.east_arcsec, jnp.float64) - jnp.asarray(ra_pred, jnp.float64)
+    dy = jnp.asarray(data.north_arcsec, jnp.float64) - jnp.asarray(
+        dec_pred, jnp.float64
+    )
+    rho = jnp.asarray(data.corr, jnp.float64)
+    sx = jnp.asarray(data.east_err_arcsec, jnp.float64)
+    sy = jnp.asarray(data.north_err_arcsec, jnp.float64)
 
     # Bivariate Gaussian quadratic form
     one_minus_rho2 = jnp.clip(1.0 - rho**2, 1e-30)
@@ -301,18 +303,20 @@ def _record_form(design, data):
     """Assemble a :class:`LinearGaussian` from an arcsec-per-AU design and records."""
     valid = data.valid
     target = jnp.where(
-        valid[:, None], jnp.stack([data.east_arcsec, data.north_arcsec], -1), 0.0
+        valid[:, None],
+        jnp.stack([data.east_arcsec, data.north_arcsec], -1, dtype=jnp.float64),
+        0.0,
     )
-    sx = jnp.where(valid, data.east_err_arcsec, 1.0)
-    sy = jnp.where(valid, data.north_err_arcsec, 1.0)
-    rho = jnp.where(valid, data.corr, 0.0)
+    sx = jnp.where(valid, jnp.asarray(data.east_err_arcsec, jnp.float64), 1.0)
+    sy = jnp.where(valid, jnp.asarray(data.north_err_arcsec, jnp.float64), 1.0)
+    rho = jnp.where(valid, jnp.asarray(data.corr, jnp.float64), 0.0)
     scale = 1.0 / (1.0 - rho**2)
     off = -scale * rho / (sx * sy)
     precision = jnp.stack(
         [jnp.stack([scale / sx**2, off], -1), jnp.stack([off, scale / sy**2], -1)], -2
     )
     return LinearGaussian(
-        design=jnp.where(valid[:, None, None], design, 0.0),
+        design=jnp.where(valid[:, None, None], jnp.asarray(design, jnp.float64), 0.0),
         target=target,
         precision=jnp.where(valid[:, None, None], precision, 0.0),
     )
@@ -329,6 +333,7 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
             ``orbix.system.System`` is also accepted, using ``solve`` and its public
             ``offset_arcsec`` observable; planet indices then refer to zero-based
             Jacobi chain order.
+        forward_fields: Empty tuple because the term differentiates no stored fields.
         reads: Model paths a held build cached. Empty: the term reads the model
             directly.
 
@@ -337,6 +342,7 @@ class RelativeAstrometryTerm(AbstractLinearGaussianTerm):
 
     data: AstrometryData
     system_path: str = eqx.field(static=True, default="")
+    forward_fields = ()
     reads: ClassVar[tuple[str, ...]] = ()
 
     def check(self, model) -> None:
@@ -475,12 +481,14 @@ class StellarAstrometryTerm(AbstractTerm):
     Attributes:
         data: Stellar reflex astrometry in arcsec.
         system_path: Model path of the system whose ``star_reflex(time_d)`` is read.
+        forward_fields: Empty tuple because the term differentiates no stored fields.
         reads: Model paths a held build cached. Empty: the term reads the model
             directly.
     """
 
     data: AstrometryData
     system_path: str = eqx.field(static=True, default="")
+    forward_fields = ()
     reads: ClassVar[tuple[str, ...]] = ()
 
     def _prediction_and_data(self, model):

@@ -16,6 +16,7 @@ leaves only), so a group's state is exactly what ``optax.multi_transform`` would
 hold for it, and a stage that does not free a group can leave its state alone.
 """
 
+import warnings
 from collections.abc import Callable
 from typing import Any
 
@@ -28,7 +29,7 @@ from hwoutils.leaves import canonical
 from hwoutils.numerics import roundoff
 from hwoutils.precision import require_float64
 
-from photomancy.infer._scale import information_scale
+from photomancy.infer._scale import _map_scale
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
 from photomancy.infer.fit import Fit
 from photomancy.infer.posterior import Posterior
@@ -971,9 +972,12 @@ class MAPInfo(eqx.Module):
 
     Attributes:
         stages: One :class:`StageTrace` per stage, in order.
+        scale_fallback_reason: Precision diagnostic naming the forward leaf that
+            prevented Fisher scaling, or ``None`` if no precision fallback occurred.
     """
 
     stages: tuple[StageTrace, ...]
+    scale_fallback_reason: str | None = eqx.field(static=True, default=None)
 
 
 class MAP(AbstractBackend):
@@ -1002,9 +1006,11 @@ class MAP(AbstractBackend):
     1e-3 (a Newton decrement near 5e-7 nat); the stage trace reports
     ``stopped_early=True`` for that and only that. A loss stall alone does not stop
     it, because L-BFGS in badly scaled coordinates stalls and then speeds up. A fit
-    with a term that has no Fisher root runs unscaled, and so does one with
-    ``scale=False``; that path has no step-size-free convergence test, so it runs
-    all ``n_steps`` and never reports ``stopped_early``.
+    with a term that lacks a Fisher root runs unscaled, as does one with
+    ``scale=False``. A float32 forward owner also runs unscaled, with a warning
+    naming the leaf and the reason recorded in ``info.scale_fallback_reason``.
+    The unscaled stage runs all ``n_steps`` and never reports
+    ``stopped_early``.
     Explicit ``stages`` are never rescaled: their transforms are written in the
     coordinates of ``fit.to_real`` (use :func:`rescaled_transform`
     to change them). Pass ``labels``, ``transforms``
@@ -1075,18 +1081,18 @@ class MAP(AbstractBackend):
             labels = jax.tree.map(lambda _: "all", start)
         stages = self.stages
         transforms = self.transforms
+        scale_fallback_reason = None
         if stages is None:
-            stages = (
-                default_stage(
-                    self.n_steps,
-                    optax.lbfgs(),
-                    (
-                        information_scale(fit, start, include_prior=True)
-                        if self.scale
-                        else None
-                    ),
-                ),
-            )
+            scale = None
+            if self.scale:
+                scale, scale_fallback_reason = _map_scale(fit, start)
+                if scale_fallback_reason is not None:
+                    warnings.warn(
+                        f"MAP is running unscaled. {scale_fallback_reason}",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+            stages = (default_stage(self.n_steps, optax.lbfgs(), scale),)
         stages = tuple(_real_stage(stage, fit) for stage in stages)
         result = map_fit(
             _RealLogProb(fit),
@@ -1105,6 +1111,8 @@ class MAP(AbstractBackend):
             log_weights=jnp.zeros(1),
             log_evidence=jnp.asarray(jnp.nan),
             log_evidence_se=jnp.asarray(jnp.nan),
-            info=MAPInfo(stages=result.stages),
+            info=MAPInfo(
+                stages=result.stages, scale_fallback_reason=scale_fallback_reason
+            ),
             kind="monte_carlo",
         )

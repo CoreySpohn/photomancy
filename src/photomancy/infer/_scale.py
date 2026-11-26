@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
-from photomancy.infer.fit import Fit
+from photomancy.infer.fit import Fit, _Float32OwnerError
 
 __all__ = ["SCALE_SPAN", "information_scale"]
 
@@ -85,11 +85,29 @@ def information_scale(fit: Fit, u: dict, *, include_prior: bool, span=SCALE_SPAN
 
     Returns:
         The scale as an entry dict with the structure and shapes of ``u``, or ``None``
-        when a term has no Fisher root (the caller then runs unscaled, as the rule is
-        per fit and never per term).
+        when a term has no Fisher root. The optimizer then uses its unscaled stage.
+
+    Raises:
+        PrecisionError: If a forward owner is narrow, float64 is unavailable,
+            or a term's Fisher root cannot be evaluated at the working precision.
     """
+    model = fit._require_float64_forward("Fisher scale", fit.from_real(u)[0])
+    return _scale_from_roots(fit, model, u, include_prior, span)
+
+
+def _map_scale(fit, start):
+    """Return the default MAP scale and any float32 forward-owner diagnostic."""
     try:
-        fit._root_length()
+        x, _ = fit.from_real(start)
+        model = fit._require_float64_forward("MAP Fisher scale", x)
+    except _Float32OwnerError as err:
+        return None, str(err)
+    return _scale_from_roots(fit, model, start, True, SCALE_SPAN), None
+
+
+def _scale_from_roots(fit, model, u, include_prior, span):
+    try:
+        fit._root_length(model)
     except NotImplementedError:
         return None
     entries = _entries(fit, u, include_prior)

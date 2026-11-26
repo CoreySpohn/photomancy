@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.epoch import Epoch
+from hwoutils.leaves import as_float_leaf
 from hwoutils.model_paths import resolve
 from hwoutils.numerics import COARSEST
 from hwoutils.precision import float_dtype, require_float64
@@ -45,18 +46,13 @@ __all__ = [
 ]
 
 
-def _float64(value):
-    return jnp.asarray(
-        value, dtype=jnp.float64 if jax.config.x64_enabled else jnp.float32
-    )
-
-
 class ReportRule(eqx.Module):
     """Static detection threshold and observable-based centroid error rule.
 
-    Detection includes the nominal threshold's float32 rounding bin. Sampled
-    counts and the continuous density keep their working precision.
-
+    Detection includes the nominal threshold's float32 rounding bin. Simulated
+    count and centroid draws use standard normals at the predictor's counts
+    dtype, so changing that dtype can change a seeded report. The continuous
+    log density and null probability use float64.
 
     Attributes:
         threshold: Detection threshold, in multiples of the noise level of the limit
@@ -119,8 +115,10 @@ class ReportRule(eqx.Module):
             PrecisionError: If float64 is unavailable.
         """
         require_float64("Report log probability")
-        noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
-        return log_ndtr((self._null_boundary(limit_counts) - prediction.counts) / noise)
+        variance = prediction.variance.astype(jnp.float64)
+        noise = jnp.sqrt(jnp.where(variance > 0, variance, 1.0))
+        mean = jnp.asarray(prediction.counts, jnp.float64)
+        return log_ndtr((self._null_boundary(limit_counts) - mean) / noise)
 
     def log_counts_density(self, counts, limit_counts, prediction):
         """Unconditional counts log density on the detection region, shape (R,).
@@ -138,8 +136,10 @@ class ReportRule(eqx.Module):
             PrecisionError: If float64 is unavailable.
         """
         require_float64("Report log probability")
-        noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
-        value = norm.logpdf(counts, prediction.counts, noise)
+        variance = prediction.variance.astype(jnp.float64)
+        noise = jnp.sqrt(jnp.where(variance > 0, variance, 1.0))
+        mean = jnp.asarray(prediction.counts, jnp.float64)
+        value = norm.logpdf(jnp.asarray(counts, jnp.float64), mean, noise)
         return jnp.where(
             jnp.isnan(counts),
             jnp.nan,
@@ -169,18 +169,18 @@ class ReportData(eqx.Module):
         corr: East/north correlation coefficient of a detection.
     """
 
-    time_d: jax.Array = eqx.field(converter=_float64)
-    science_s: jax.Array = eqx.field(converter=_float64)
-    limit_counts: jax.Array = eqx.field(converter=_float64)
+    time_d: jax.Array = eqx.field(converter=as_float_leaf)
+    science_s: jax.Array = eqx.field(converter=as_float_leaf)
+    limit_counts: jax.Array = eqx.field(converter=as_float_leaf)
     mode: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, jnp.int32))
     valid: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, bool))
     is_detected: jax.Array = eqx.field(converter=lambda x: jnp.asarray(x, bool))
-    counts: jax.Array = eqx.field(converter=_float64)
-    east_arcsec: jax.Array = eqx.field(converter=_float64)
-    north_arcsec: jax.Array = eqx.field(converter=_float64)
-    east_err_arcsec: jax.Array = eqx.field(converter=_float64)
-    north_err_arcsec: jax.Array = eqx.field(converter=_float64)
-    corr: jax.Array = eqx.field(converter=_float64)
+    counts: jax.Array = eqx.field(converter=as_float_leaf)
+    east_arcsec: jax.Array = eqx.field(converter=as_float_leaf)
+    north_arcsec: jax.Array = eqx.field(converter=as_float_leaf)
+    east_err_arcsec: jax.Array = eqx.field(converter=as_float_leaf)
+    north_err_arcsec: jax.Array = eqx.field(converter=as_float_leaf)
+    corr: jax.Array = eqx.field(converter=as_float_leaf)
 
     def __check_init__(self):
         """Require one common row axis."""
@@ -278,10 +278,10 @@ class ReportPrediction(eqx.Module):
         north_arcsec: Predicted north offset per row (arcsec).
     """
 
-    counts: jax.Array = eqx.field(converter=_float64)
-    variance: jax.Array = eqx.field(converter=_float64)
-    east_arcsec: jax.Array = eqx.field(converter=_float64)
-    north_arcsec: jax.Array = eqx.field(converter=_float64)
+    counts: jax.Array = eqx.field(converter=as_float_leaf)
+    variance: jax.Array = eqx.field(converter=as_float_leaf)
+    east_arcsec: jax.Array = eqx.field(converter=as_float_leaf)
+    north_arcsec: jax.Array = eqx.field(converter=as_float_leaf)
 
     @classmethod
     def from_limit(
@@ -354,9 +354,9 @@ class CountRateTable(eqx.Module):
             the system's static knot grids only.
     """
 
-    separation_arcsec: jax.Array = eqx.field(converter=_float64)
-    counts_per_contrast_s: jax.Array = eqx.field(converter=_float64)
-    lod_arcsec: jax.Array = eqx.field(converter=_float64)
+    separation_arcsec: jax.Array = eqx.field(converter=as_float_leaf)
+    counts_per_contrast_s: jax.Array = eqx.field(converter=as_float_leaf)
+    lod_arcsec: jax.Array = eqx.field(converter=as_float_leaf)
     quadrature: Quadrature
     transmissions: tuple[Transmission, ...]
     epoch: Epoch = eqx.field(static=True)
@@ -472,7 +472,8 @@ def _scale_fit(counts, limit, rows, rule):
         ``(has, t_hat, sd, chi2, log_norm, on_region)``.
     """
     det = rows.valid & rows.is_detected
-    measured = jnp.where(det, rows.counts, 0.0)
+    measured = jnp.where(det, rows.counts.astype(jnp.float64), 0.0)
+    counts, limit = counts.astype(jnp.float64), limit.astype(jnp.float64)
     var = limit**2 + measured
     g = jnp.where(det, counts, 0.0)
     s_gg = jnp.sum(jnp.where(det, g**2 / var, 0.0))
@@ -515,6 +516,7 @@ class ReportTerm(AbstractProposingTerm):
     Attributes:
         rule: Detection threshold and centroid error rule.
         data: The exposure rows, planned or realized.
+        forward_fields: Forward differentiation uses ``predictor``.
         predictor: Predicts counts, variance and position for each row.
         lod_arcsec: Diffraction scale lambda/D of each row (arcsec). Shape ``(R,)``.
             Required unless the predictor is precomputed.
@@ -526,9 +528,10 @@ class ReportTerm(AbstractProposingTerm):
 
     rule: ReportRule
     data: ReportData
+    forward_fields = ("predictor",)
     predictor: AbstractReportPredictor
     lod_arcsec: jax.Array | None = eqx.field(
-        default=None, converter=lambda x: None if x is None else _float64(x)
+        default=None, converter=lambda x: None if x is None else as_float_leaf(x)
     )
     leaf_path: str | None = eqx.field(static=True, default=None)
     leaf_exponent: float = eqx.field(static=True, default=2.0)
@@ -641,7 +644,7 @@ class ReportTerm(AbstractProposingTerm):
         require_float64("Report leaf proposal")
         if self.leaf_path is None:
             raise ValueError("this ReportTerm has no leaf_path to propose")
-        leaf = jnp.asarray(resolve(model, self.leaf_path))
+        leaf = jnp.asarray(resolve(model, self.leaf_path), jnp.float64)
         if leaf.size != 1:
             raise ValueError(f"leaf {self.leaf_path!r} must hold a single value")
         clean = _prediction_rows(self.data)
