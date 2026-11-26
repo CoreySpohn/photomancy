@@ -225,12 +225,19 @@ matters, say so in the prior you choose rather than hiding it.
 
 One `MAP` point is one answer. Two kinds of repeated answer look alike and are not.
 
-- **An alias is the same model written another way.** The disk orientation `(i, PA)` has four
-  such points: `(i, PA)`, `(180 - i, PA + 180)`, `(i + 180, PA)`, and the two radial slopes
-  exchanged. The images agree to rounding, so the four points have the same log likelihood,
-  and the data cannot tell them apart because there is nothing to tell. They are one disk. The
-  log prior can differ between them (it does for `default_disk_prior`), and the fit ends at
-  whichever is nearer the start or higher in density.
+- **An alias is the same model written another way.** A Grater disk at `(i, PA)` gives
+  the same image at `(180 - i, PA + 180)` and `(i + 180, PA)`. Exchanging the two radial
+  slopes also preserves the image. All angles here are in degrees. At fixed inclination,
+  rotating PA by 180 degrees alone reverses the near side, which anisotropic scattering
+  can distinguish.
+  `default_disk_prior` gives equal probability to equal solid angles. Inclination
+  ranges from 0 to 180 degrees with density `(pi/360) * sin(i * pi/180)` per degree,
+  and PA is uniform over one 360-degree turn centered on the scene's PA. The sine
+  gives supported mirror inclinations equal density and vanishes at both poles.
+  The inner and outer slope Normals are conditioned on positive and
+  negative values, respectively, so exchanging the slopes gives zero prior density.
+  Fit transforms these leaf bounds to the real line. NUTS and MCLMC accept them, and
+  explicit starting values for either sampler must lie inside the bounds.
 - **A mode is a different model that the data cannot exclude.** An orbit at inclination `i` or
   `180 - i` from sky positions alone is a pair of such modes: the two have different log
   likelihoods, and each is a separate answer with its own weight.
