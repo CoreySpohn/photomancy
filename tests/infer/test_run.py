@@ -168,7 +168,7 @@ def test_posterior_checks_its_fields():
         Posterior(**{**fields, "kind": "gibbs"})
     with pytest.raises(ValueError, match=r"keys of fit\.free"):
         Posterior(**{**fields, "samples": {"other": post.samples[KEY]}})
-    with pytest.raises(ValueError, match="float64"):
+    with pytest.raises(PrecisionError, match="float64"):
         Posterior(**{**fields, "log_target": post.log_target.astype(jnp.float32)})
     with pytest.raises(ValueError, match="log_target has shape"):
         Posterior(**{**fields, "log_target": post.log_target[:-1]})
