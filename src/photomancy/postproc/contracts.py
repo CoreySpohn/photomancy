@@ -24,12 +24,8 @@ from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
 
 
-def _asarray(value):
-    return jnp.asarray(value, dtype=jnp.result_type(float))
-
-
 def _asarray_or_none(value):
-    return None if value is None else _asarray(value)
+    return None if value is None else as_float_leaf(value)
 
 
 # A host roll series is static metadata: keep its original values through jit.
@@ -51,7 +47,7 @@ def _roll_angles(value):
     return HostGrid(value).values.view(_HostRolls)
 
 
-_ROLL_TOLERANCE_DEG = 1e-6  # tol: physical, degrees of roll for coaddition.
+_ROLL_TOLERANCE_DEG = 1e-6  # tol: physical, 1e-6 degrees of roll for coaddition
 
 
 class FrameSet(eqx.Module):
@@ -76,11 +72,11 @@ class FrameSet(eqx.Module):
             (ny, nx) map. Reserved for correlated-noise-aware calibration.
     """
 
-    frames: jnp.ndarray = eqx.field(converter=_asarray)
-    time_d: jnp.ndarray = eqx.field(converter=_asarray)
-    frame_time_s: jnp.ndarray = eqx.field(converter=_asarray)
+    frames: jnp.ndarray = eqx.field(converter=as_float_leaf)
+    time_d: jnp.ndarray = eqx.field(converter=as_float_leaf)
+    frame_time_s: jnp.ndarray = eqx.field(converter=as_float_leaf)
     telescope_pa_deg: jax.Array | np.ndarray = eqx.field(converter=_roll_angles)
-    fwhm_px: jnp.ndarray = eqx.field(converter=_asarray)
+    fwhm_px: jnp.ndarray = eqx.field(converter=as_float_leaf)
     band: Band = eqx.field(static=True)
     epoch: Epoch = eqx.field(static=True)
     grid: PixelGrid
@@ -199,11 +195,11 @@ class DetectionStats(eqx.Module):
             "mawet_t".
     """
 
-    positions_yx: jnp.ndarray = eqx.field(converter=_asarray)
-    statistic: jnp.ndarray = eqx.field(converter=_asarray)
-    fpf: jnp.ndarray = eqx.field(converter=_asarray)
-    dof: jnp.ndarray = eqx.field(converter=_asarray)
-    fwhm_px: jnp.ndarray = eqx.field(converter=_asarray)
+    positions_yx: jnp.ndarray = eqx.field(converter=as_float_leaf)
+    statistic: jnp.ndarray = eqx.field(converter=as_float_leaf)
+    fpf: jnp.ndarray = eqx.field(converter=as_float_leaf)
+    dof: jnp.ndarray = eqx.field(converter=as_float_leaf)
+    fwhm_px: jnp.ndarray = eqx.field(converter=as_float_leaf)
     statistic_kind: str = eqx.field(static=True)
 
     def __check_init__(self):

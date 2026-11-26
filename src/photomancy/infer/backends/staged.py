@@ -829,7 +829,7 @@ def map_fit(
                 failed = True
             elif seen.size:
                 best_seen = float(seen.min())
-                tolerance = max(STOP_MIN_DELTA, 1e-10 * abs(best_seen))
+                tolerance = max(STOP_MIN_DELTA, STOP_REL_DELTA * abs(best_seen))
                 regressed = final > best_seen + tolerance
             stopped = stopped and not failed
         records.append((stage.name, offset, n_run, stopped, failed, regressed, final))
@@ -856,8 +856,11 @@ def map_fit(
 STOP_PATIENCE = 5
 """Consecutive steps without a gain of ``STOP_MIN_DELTA`` that stall a default stage."""
 
-STOP_MIN_DELTA = 1e-7
+STOP_MIN_DELTA = 1e-7  # tol: algorithm, 1e-7 nats of log-density improvement
 """Smallest decrease of the best objective that counts as a gain in a default stage."""
+
+STOP_REL_DELTA = 1e-10  # tol: algorithm, 1e-10 of the objective scale (dimensionless)
+"""Relative allowance for comparing the last objective to the best in the trace."""
 
 STOP_CHECK_EVERY = 5
 """Steps between the stopping checks of a default stage."""

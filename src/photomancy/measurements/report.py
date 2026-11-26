@@ -26,6 +26,7 @@ from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Resolution, Transmission
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.fit import AbstractProposingTerm, LeafProposal
 from photomancy.measurements._observables import (
     _band_contrasts,
@@ -115,9 +116,9 @@ class ReportRule(eqx.Module):
             PrecisionError: If float64 is unavailable.
         """
         require_float64("Report log probability")
-        variance = prediction.variance.astype(jnp.float64)
+        variance = _as_wide(prediction.variance)
         noise = jnp.sqrt(jnp.where(variance > 0, variance, 1.0))
-        mean = jnp.asarray(prediction.counts, jnp.float64)
+        mean = _as_wide(prediction.counts)
         return log_ndtr((self._null_boundary(limit_counts) - mean) / noise)
 
     def log_counts_density(self, counts, limit_counts, prediction):
@@ -136,10 +137,10 @@ class ReportRule(eqx.Module):
             PrecisionError: If float64 is unavailable.
         """
         require_float64("Report log probability")
-        variance = prediction.variance.astype(jnp.float64)
+        variance = _as_wide(prediction.variance)
         noise = jnp.sqrt(jnp.where(variance > 0, variance, 1.0))
-        mean = jnp.asarray(prediction.counts, jnp.float64)
-        value = norm.logpdf(jnp.asarray(counts, jnp.float64), mean, noise)
+        mean = _as_wide(prediction.counts)
+        value = norm.logpdf(_as_wide(counts), mean, noise)
         return jnp.where(
             jnp.isnan(counts),
             jnp.nan,
@@ -472,8 +473,8 @@ def _scale_fit(counts, limit, rows, rule):
         ``(has, t_hat, sd, chi2, log_norm, on_region)``.
     """
     det = rows.valid & rows.is_detected
-    measured = jnp.where(det, rows.counts.astype(jnp.float64), 0.0)
-    counts, limit = counts.astype(jnp.float64), limit.astype(jnp.float64)
+    measured = jnp.where(det, _as_wide(rows.counts), 0.0)
+    counts, limit = _as_wide(counts), _as_wide(limit)
     var = limit**2 + measured
     g = jnp.where(det, counts, 0.0)
     s_gg = jnp.sum(jnp.where(det, g**2 / var, 0.0))
@@ -644,7 +645,7 @@ class ReportTerm(AbstractProposingTerm):
         require_float64("Report leaf proposal")
         if self.leaf_path is None:
             raise ValueError("this ReportTerm has no leaf_path to propose")
-        leaf = jnp.asarray(resolve(model, self.leaf_path), jnp.float64)
+        leaf = _as_wide(resolve(model, self.leaf_path))
         if leaf.size != 1:
             raise ValueError(f"leaf {self.leaf_path!r} must hold a single value")
         clean = _prediction_rows(self.data)

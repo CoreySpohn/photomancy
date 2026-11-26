@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 from hwoutils.precision import require_float64
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.fit import AbstractTerm
 from photomancy.infer.likelihoods import (
     LowRankGaussianLogLikelihood,
@@ -24,7 +25,9 @@ _BUILTIN_LIKELIHOODS = (MaskedLogLikelihood, LowRankGaussianLogLikelihood)
 
 def _wide_leaf(x):
     if eqx.is_inexact_array(x):
-        return x.astype(jnp.complex128 if jnp.iscomplexobj(x) else jnp.float64)
+        return x.astype(
+            jnp.complex128 if jnp.iscomplexobj(x) else jnp.float64
+        )  # precision-ok: custom likelihood residuals use float64 and complex128
     return x
 
 
@@ -38,7 +41,7 @@ def _score_prediction(likelihood, predicted):
         is_leaf=lambda x: isinstance(x, _BUILTIN_LIKELIHOODS),
     )
     value = likelihood(jax.tree.map(_wide_leaf, predicted))
-    return jnp.asarray(value, jnp.float64)
+    return _as_wide(value)
 
 
 class ForwardTerm(AbstractTerm):

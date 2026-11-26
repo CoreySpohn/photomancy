@@ -92,6 +92,8 @@ def test_backend_without_its_sampler_names_the_extra(tmp_path, precision, pytest
             f"--precision={precision.name}",
             "-q",
             "-p",
+            "hwoutils.precision_guard",
+            "-p",
             "no:cacheprovider",
             f"--basetemp={tmp_path / 'pytest'}",
             str(child),

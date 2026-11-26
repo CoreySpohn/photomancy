@@ -14,6 +14,7 @@ from hwoutils.model_paths import resolve
 from hwoutils.precision import require_float64
 from orbix.system import System
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.fit import AbstractTerm
 from photomancy.measurements._observables import _concrete
 from photomancy.measurements._padding import _pad_1d, _valid_mask
@@ -308,12 +309,12 @@ def loglike_rv_marginalized(rv_obs, rv_model, rv_err, inst_ids, n_inst, jitters,
 
     # Total variance: measurement + jitter
     inst_ids = jnp.where(mask, inst_ids, 0)
-    err = jnp.where(mask, jnp.asarray(rv_err, jnp.float64), 1.0)
-    jitter = jnp.where(mask, jnp.asarray(jitters, jnp.float64)[inst_ids], 0.0)
+    err = jnp.where(mask, _as_wide(rv_err), 1.0)
+    jitter = jnp.where(mask, _as_wide(jitters)[inst_ids], 0.0)
     var = err**2 + jitter**2
     w = jnp.where(mask, 1.0 / var, 0.0)
-    rv_obs = jnp.asarray(rv_obs, jnp.float64)
-    rv_model = jnp.asarray(rv_model, jnp.float64)
+    rv_obs = _as_wide(rv_obs)
+    rv_model = _as_wide(rv_model)
     shifted = _centered_rv_residual(rv_obs, rv_model, inst_ids, mask, n_inst)
     A = jax.ops.segment_sum(w, inst_ids, num_segments=n_inst)
     B = jax.ops.segment_sum(w * shifted, inst_ids, num_segments=n_inst)

@@ -40,6 +40,7 @@ from jax.flatten_util import ravel_pytree
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logsumexp
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.particles import systematic_indices
 
 __all__ = [
@@ -335,8 +336,8 @@ class MixtureProposal(AbstractDensityProposal):
                 NaN counts as zero weight.
             n_images: Images on each side of every periodic coordinate.
         """
-        means = jnp.asarray(means, jnp.float64)
-        covs = jnp.asarray(covs, jnp.float64)
+        means = _as_wide(means)
+        covs = _as_wide(covs)
         if covs.ndim == 2:
             covs = covs[None]
         log_pi = jnp.zeros(means.shape[0]) if log_pi is None else jnp.asarray(log_pi)

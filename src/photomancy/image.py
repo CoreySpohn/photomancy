@@ -68,6 +68,7 @@ from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.rates import floor_rate
 from skyscapes.scene import Scene
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.fit import AbstractTerm
 
 __all__ = ["ImageModel", "ImageTerm"]
@@ -260,14 +261,14 @@ class _ImageScore(eqx.Module):
         require_float64("image log likelihood")
         total = rates.total()
         _check_score_shape(self.mask, self.observed_e, total.shape)
-        observed = jnp.where(self.mask, self.observed_e.astype(jnp.float64), 0.0)
+        observed = jnp.where(self.mask, _as_wide(self.observed_e), 0.0)
         masked = _masked_rates(
             rates,
             self.mask,
             preserve_floor=type(self.detector).log_prob is AbstractDetector.log_prob,
         )
         log_prob = self.detector.log_prob(observed, masked, self.plan)
-        value = jnp.sum(jnp.where(self.mask, log_prob, 0.0), dtype=jnp.float64)
+        value = jnp.sum(_as_wide(jnp.where(self.mask, log_prob, 0.0)))
         nan_rate = jnp.isnan(total)
         if rates.variance is not None:
             nan_rate = nan_rate | jnp.isnan(rates.variance.total())
@@ -661,7 +662,7 @@ class ImageTerm(AbstractTerm):
 
     def _fit_residual(self, model):
         wide = eqx.tree_at(
-            lambda term: term.observed_e, self, self.observed_e.astype(jnp.float64)
+            lambda term: term.observed_e, self, _as_wide(self.observed_e)
         )
         return wide.residual(model)
 

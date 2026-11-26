@@ -150,6 +150,7 @@ library = "photomancy"
 [tool.pytest.ini_options]
 addopts = "-p hwoutils.testing.precision"
 default_precision = "float32"
+precision_guard_enforce = true
 filterwarnings = [
     "error",
     # tol_colors initializes colormaps with Matplotlib's deprecated set_bad API.

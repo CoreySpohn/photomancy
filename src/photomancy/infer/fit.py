@@ -69,6 +69,8 @@ from jax.flatten_util import ravel_pytree
 from jax.scipy.special import log_ndtr, logsumexp
 from priorities import AbstractDistribution, from_real, to_real
 
+from photomancy.infer._precision import _as_wide
+
 __all__ = [
     "AbstractLinearGaussianTerm",
     "AbstractProposingTerm",
@@ -552,7 +554,7 @@ def _observed_information(fit, x, include_prior, batch_size):
 
     def negative(theta):
         entries = unravel(theta)
-        total = jnp.asarray(fit.log_likelihood(entries), jnp.float64)
+        total = _as_wide(fit.log_likelihood(entries))
         if include_prior:
             total = total + fit.log_prior(entries)
         return -total
@@ -657,7 +659,7 @@ def _write_block(model, writes):
 
 def _wide_coordinates(x):
     return jax.tree.map(
-        lambda a: as_float_leaf(a).astype(jnp.float64),
+        lambda a: _as_wide(as_float_leaf(a)),
         x,
         is_leaf=lambda a: isinstance(a, list | tuple),
     )
@@ -1316,7 +1318,7 @@ class Fit(eqx.Module):
         if kind not in ("observed", "fisher"):
             raise ValueError(f"kind must be 'observed' or 'fisher', got {kind!r}")
         model = self._require_float64_forward("Fit.information", x)
-        x = jax.tree.map(lambda a: jnp.asarray(a, jnp.float64), x)
+        x = jax.tree.map(_as_wide, x)
         n_param = sum(int(np.size(a)) for a in jax.tree.leaves(x))
         if kind == "observed":
             _admit_information(

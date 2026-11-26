@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.backends._flat import draw_template
 from photomancy.infer.backends.base import AbstractBackend, BackendDraws
 
@@ -98,8 +99,8 @@ class Grid(AbstractBackend):
             weights = np.asarray(self.axes[name][1])
             if np.any(~(weights > 0)):
                 raise ValueError(f"axis {name!r} has a non-positive weight")
-        nodes = [jnp.asarray(self.axes[n][0], jnp.float64) for n in names]
-        wts = [jnp.asarray(self.axes[n][1], jnp.float64) for n in names]
+        nodes = [_as_wide(self.axes[n][0]) for n in names]
+        wts = [_as_wide(self.axes[n][1]) for n in names]
         mesh = jnp.meshgrid(*nodes, indexing="ij")
         log_w = sum(jnp.meshgrid(*[jnp.log(w) for w in wts], indexing="ij")).reshape(-1)
         flat = {n: m.reshape(-1) for n, m in zip(names, mesh, strict=True)}

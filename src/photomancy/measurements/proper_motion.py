@@ -12,6 +12,7 @@ import jax.numpy as jnp
 from hwoutils.model_paths import resolve
 from hwoutils.precision import require_float64
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.fit import AbstractTerm
 from photomancy.measurements._observables import _stellar_reflex
 
@@ -81,10 +82,8 @@ def loglike_pm_anomaly(anom_pred, data):
         PrecisionError: If float64 is unavailable.
     """
     require_float64("Proper motion log likelihood")
-    resid = jnp.asarray(data.pm_anomaly, jnp.float64) - jnp.asarray(
-        anom_pred, jnp.float64
-    )
-    covariance = jnp.asarray(data.pm_anomaly_cov, jnp.float64)
+    resid = _as_wide(data.pm_anomaly) - _as_wide(anom_pred)
+    covariance = _as_wide(data.pm_anomaly_cov)
     prec = jnp.linalg.inv(covariance)
     _, logdet = jnp.linalg.slogdet(covariance)
     ll = -0.5 * resid @ prec @ resid - 0.5 * logdet - jnp.log(2.0 * jnp.pi)

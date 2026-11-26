@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from hwoutils.precision import require_float64
 from jax.scipy.special import logsumexp
 
+from photomancy.infer._precision import _as_wide
 from photomancy.infer.backends.base import AbstractBackend
 from photomancy.infer.fit import Fit, _wide_coordinates
 from photomancy.infer.posterior import Posterior
@@ -17,7 +18,7 @@ def _normalized(log_weights):
     A slice with no support (every weight ``-inf``) or with any NaN weight is all NaN:
     a NaN target is a refusal, never a zero weight.
     """
-    log_weights = jnp.asarray(log_weights, jnp.float64)
+    log_weights = _as_wide(log_weights)
     peak = jnp.max(log_weights, axis=-1, keepdims=True)
     refused = jnp.any(jnp.isnan(log_weights), axis=-1, keepdims=True) | ~jnp.isfinite(
         peak
@@ -71,13 +72,13 @@ def run(
         if draws.log_target is None
         else draws.log_target
     )
-    log_target = jnp.asarray(log_target, jnp.float64)
+    log_target = _as_wide(log_target)
     return Posterior(
         samples=samples,
         log_weights=_normalized(draws.log_weights),
         log_target=log_target,
-        log_evidence=jnp.asarray(draws.log_evidence, jnp.float64),
-        log_evidence_se=jnp.asarray(draws.log_evidence_se, jnp.float64),
+        log_evidence=_as_wide(draws.log_evidence),
+        log_evidence_se=_as_wide(draws.log_evidence_se),
         fit=fit,
         info=draws.info,
         kind=draws.kind,

@@ -52,10 +52,12 @@ class TwoSampleTTest(AbstractTest):
         n_valid = jnp.sum(mask)
         bg_mean = masked_mean(samples, mask)
         bg_std = masked_std(samples, mask, mean=bg_mean)
-        penalty = small_sample_penalty(n_valid)
+        n_float = jnp.asarray(n_valid, dtype=jnp.result_type(signal, bg_std))
+        penalty = small_sample_penalty(n_float)
         statistic = (signal - bg_mean) / jnp.maximum(bg_std * penalty, 1e-10)
-        statistic = jnp.where(n_valid >= 3, statistic, jnp.nan)
-        dof = jnp.asarray(n_valid, dtype=jnp.result_type(float)) - 1.0
+        nan = jnp.asarray(jnp.nan, dtype=statistic.dtype)
+        statistic = jnp.where(n_valid >= 3, statistic, nan)
+        dof = n_float - 1.0
         fpf = student_t_sf(statistic, dof)
         return statistic, fpf, dof
 
@@ -94,11 +96,11 @@ class AnnulusSigmaTest(AbstractTest):
         """
         bg_mean = nanmasked_mean(samples, mask)
         bg_std = nanmasked_population_std(samples, mask, mean=bg_mean)
-        bg_mean = jnp.nan_to_num(bg_mean, nan=0.0)
-        bg_std = jnp.nan_to_num(bg_std, nan=1.0)
+        bg_mean = jnp.nan_to_num(bg_mean, nan=jnp.zeros((), bg_mean.dtype))
+        bg_std = jnp.nan_to_num(bg_std, nan=jnp.ones((), bg_std.dtype))
         statistic = (signal - bg_mean) / jnp.maximum(bg_std, 1e-10)
         fpf = normal_sf(statistic)
-        dof = jnp.asarray(jnp.inf, dtype=jnp.result_type(float))
+        dof = jnp.full_like(statistic, jnp.inf)
         return statistic, fpf, dof
 
 
@@ -137,16 +139,18 @@ class GrubbsTest(AbstractTest):
         n_refs = jnp.sum(mask)
         n_pooled = n_refs + 1
         pooled_sum = jnp.sum(samples * mask) + signal
-        pooled_mean = pooled_sum / jnp.maximum(n_pooled, 1.0)
+        pooled_mean = pooled_sum / jnp.maximum(n_pooled, 1)
         residuals = (samples - pooled_mean) * mask
         pooled_var = (jnp.sum(residuals**2) + (signal - pooled_mean) ** 2) / (
-            jnp.maximum(n_pooled - 1, 1.0)
+            jnp.maximum(n_pooled - 1, 1)
         )
         pooled_std = jnp.sqrt(pooled_var)
-        pooled_max = jnp.maximum(jnp.max(jnp.where(mask, samples, -jnp.inf)), signal)
+        excluded = jnp.asarray(-jnp.inf, dtype=jnp.result_type(samples, 0.0))
+        pooled_max = jnp.maximum(jnp.max(jnp.where(mask, samples, excluded)), signal)
         statistic = (pooled_max - pooled_mean) / jnp.maximum(pooled_std, 1e-10)
-        statistic = jnp.where(n_pooled >= 3, statistic, jnp.nan)
-        n_float = jnp.asarray(n_pooled, dtype=jnp.result_type(float))
+        nan = jnp.asarray(jnp.nan, dtype=statistic.dtype)
+        statistic = jnp.where(n_pooled >= 3, statistic, nan)
+        n_float = jnp.asarray(n_pooled, dtype=statistic.dtype)
         dof = n_float - 2.0
         fpf = grubbs_fpf(statistic, n_float)
         return statistic, fpf, dof

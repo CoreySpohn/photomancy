@@ -44,6 +44,8 @@ import jax.scipy as jsp
 import numpy as np
 from hwoutils.precision import float_dtype, like, require_float64
 
+from photomancy.infer._precision import _as_wide
+
 __all__ = [
     "LowRankGaussianLogLikelihood",
     "MaskedLogLikelihood",
@@ -244,10 +246,10 @@ class MaskedLogLikelihood(_FixedNoiseLikelihood):
             PrecisionError: When float64 inference is unavailable.
         """
         require_float64("masked log density")
-        data = self.data.astype(jnp.float64)
-        sigma = self.sigma.astype(jnp.float64)
+        data = _as_wide(self.data)
+        sigma = _as_wide(self.sigma)
         norm = self._noise.inference[-1]
-        return self._score(jnp.asarray(predicted, jnp.float64), data, sigma, norm)
+        return self._score(_as_wide(predicted), data, sigma, norm)
 
     def detection_score(self, predicted):
         """Evaluate the profile-detection objective in the data precision.
@@ -370,7 +372,7 @@ class LowRankGaussianLogLikelihood(_FixedNoiseLikelihood):
             ValueError: If the basis shape or used data, sigma, or basis is invalid.
         """
         dtype = jnp.result_type(
-            jnp.asarray(data), jnp.asarray(sigma), jnp.asarray(basis), float
+            jnp.asarray(data), jnp.asarray(sigma), jnp.asarray(basis), 0.0
         )
         data, sigma, basis = np.asarray(data), np.asarray(sigma), np.asarray(basis)
         mask = np.asarray(True if mask is None else mask, dtype=bool)
@@ -444,9 +446,9 @@ class LowRankGaussianLogLikelihood(_FixedNoiseLikelihood):
             PrecisionError: When float64 inference is unavailable.
         """
         require_float64("low-rank Gaussian log density")
-        predicted = jnp.asarray(jnp.where(self.mask, predicted, 0), jnp.float64)
-        data = self.data.astype(jnp.float64)
-        sigma = self.sigma.astype(jnp.float64)
+        predicted = _as_wide(jnp.where(self.mask, predicted, 0))
+        data = _as_wide(self.data)
+        sigma = _as_wide(self.sigma)
         z = (predicted - data) / sigma
         return self._score(z.ravel(), *self._noise.inference)
 
@@ -538,7 +540,7 @@ def _kernel_log_const(kind, shape):
 def _build(data, sigma, mask, kind, shape_param=0.0):
     data = jnp.asarray(data)
     sigma = jnp.asarray(sigma)
-    dtype = jnp.result_type(data, sigma, float)
+    dtype = jnp.result_type(data, sigma, 0.0)
     data = data.astype(dtype)
     sigma = sigma.astype(dtype)
     mask = jnp.ones((), bool) if mask is None else jnp.asarray(mask, dtype=bool)
