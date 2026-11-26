@@ -11,7 +11,7 @@ import pytest
 import toy_coronagraph as toy
 from hwoutils.memory import MemoryLimit
 from hwoutils.precision import PrecisionError
-from hwoutils.testing import ulps
+from hwoutils.testing import precision_pair, ulps
 from image_scene import (
     make_detector,
     make_exposure,
@@ -772,11 +772,11 @@ def _fit(term):
     return Fit(_sky(0.0, 0.0), free, (term,))
 
 
-def _image_problem(kind, seed=11):
+def _image_problem(kind, seed=11, amplitude=_TRUE_AMP):
     """A fit with both coordinates free, and the noise-free mean at the truth.
 
-    The frame is the expected counts of a planet of amplitude 3 (units of contrast
-    1e-10) at position angle 150 degrees plus noise from the detector's own law.
+    The planet is at position angle 150 degrees with amplitude in units of
+    contrast 1e-10. The frame adds noise from the detector's own law.
     """
     detector = make_detector(
         kind, **({"variance_e2": _VARIANCE} if kind == "constant" else {})
@@ -790,7 +790,7 @@ def _image_problem(kind, seed=11):
         instrument=instrument,
         exposure=exposure,
     )
-    mean = np.asarray(_SkyImage(blank).predict(_sky(_TRUE_AMP, _TRUE_PA)))
+    mean = np.asarray(_SkyImage(blank).predict(_sky(amplitude, _TRUE_PA)))
     rng = np.random.default_rng(seed)
     if kind == "constant":
         observed = mean + np.sqrt(_VARIANCE) * rng.normal(size=mean.shape)
@@ -808,6 +808,70 @@ def _image_problem(kind, seed=11):
         exposure=exposure,
     )
     return _fit(_SkyImage(image)), mean, mask
+
+
+class _RenderedTrial(eqx.Module):
+    """The background and unit planet image rendered at one position angle."""
+
+    base: jax.Array
+    template: jax.Array
+    pa_deg: float
+
+    def __call__(self, model):
+        prediction = self.base + model.amplitude * self.template
+        return jnp.where(model.pa_deg == self.pa_deg, prediction, jnp.nan)
+
+
+@vv.case("scene-fits", "code-verification", basis="spike", srq="detection z score")
+@pytest.mark.float64_only(reason="precision_pair needs x64")
+@pytest.mark.medium(reason="cold compilation of the image render in both precisions")
+@pytest.mark.parametrize(
+    ("amplitude", "target_z", "amplitude_bound"),
+    [(1.15, 10, 4.6e-5), (0.45, 4, 1.1e-4)],
+    ids=["clear", "marginal"],
+)
+def test_detect_with_float32_rendered_images(amplitude, target_z, amplitude_bound):
+    """Compare float32 and float64 renders in the same float64 detection fit.
+
+    The masked 24x24 Gaussian frame has 10-electron noise (seed 11) and a
+    planet at 0.05 arcsec, PA 150 deg. At contrasts 1.15e-10 and 0.45e-10,
+    the reference z scores are 9.9803 and 4.0145. Float32 moves z by
+    1.414e-4 sigma in both cases and the fitted amplitudes by 1.521e-5 and
+    3.625e-5 relative to float64. Bounds are three times the measurements
+    rounded up to two significant digits: 4.3e-4 sigma, 4.6e-5 and 1.1e-4.
+    Fails if float32 rendering moves z or the fitted amplitude beyond these bounds.
+    """
+    fit, _, mask = _image_problem("constant", amplitude=amplitude)
+    sky = fit.terms[0]
+    empty = sky._scene(_sky(0.0, _TRUE_PA))
+    unit = sky._scene(_sky(1.0, _TRUE_PA))
+    args64 = (sky.image, empty, unit)
+    likelihood = gaussian_loglike(sky.image.observed_e, np.sqrt(_VARIANCE), mask)
+
+    def recovered(image, empty, unit):
+        base = image.predict(empty)
+        template = image.predict(unit) - base
+        assert base.dtype == template.dtype == image.observed_e.dtype
+        # detect differentiates the fit in float64, after the image render.
+        trial = _RenderedTrial(
+            base.astype(jnp.float64), template.astype(jnp.float64), _TRUE_PA
+        )
+        return detect(
+            _fit(ForwardTerm(trial, likelihood)),
+            {"pa_deg": jnp.asarray([_TRUE_PA])},
+            amplitude="amplitude",
+        )
+
+    def centered_z(*args):
+        # With |z - target_z| < 1, precision_pair's denominator is one sigma.
+        offset = recovered(*args).z - target_z
+        assert abs(offset.item()) < 1
+        return offset
+
+    precision_pair(centered_z, args64, bound=4.3e-4, scale=1.0)
+    precision_pair(
+        lambda *args: recovered(*args).a_hat, args64, bound=amplitude_bound, scale=0.0
+    )
 
 
 @pytest.mark.float64_only(reason="formal errors require a float64 image forward")
