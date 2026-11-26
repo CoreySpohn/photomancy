@@ -149,7 +149,7 @@ def _check_image(image, instrument, exposure):
                 f"the observed Image is on {image.grid}, not on the detector grid "
                 f"{detector}: score data on the instrument's own pixels"
             )
-    roll = None if exposure is None else exposure.roll_deg
+    roll = None if exposure is None else exposure.pointing.roll_deg
     if roll is None or isinstance(roll, jax.core.Tracer):
         return
     have = image.grid.orientation
