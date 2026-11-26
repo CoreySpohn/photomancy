@@ -605,7 +605,7 @@ def test_an_observed_image_is_checked_against_the_held_detector_and_roll():
     ImageTerm(
         replace(image, grid=full_turn), mask, instrument=instrument, exposure=exposure
     )
-    rolled = eqx.tree_at(lambda e: e.roll_deg, exposure, jnp.asarray(30.1))
+    rolled = eqx.tree_at(lambda e: e.pointing.roll_deg, exposure, jnp.asarray(30.1))
     single = replace(grid, orientation=SkyOrientation(float(np.float32(30.1))))
     ImageTerm(replace(image, grid=single), mask, instrument=instrument, exposure=rolled)
     unchecked = ImageTerm(
