@@ -10,7 +10,8 @@ information built from full per-mode predictive covariances, and the class infor
 ``I(C; Y)`` over caller-supplied per-mode class weights. The forward model
 is a caller-supplied ``forward(z, candidate) -> observables`` (differentiable in the
 flat position ``z``); the orbit / disk / imaging layers supply their own. This core
-knows no domain.
+knows no domain. All estimators require float64 for posterior weights,
+covariances and reported information.
 
 One naming pattern: every estimator is ``eig_<method>`` (``eig_geometric``,
 ``eig_alias_breaking``, ``eig_detectability``, ``eig_class``, ``eig_linearized``,
@@ -22,6 +23,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from hwoutils.leaves import as_float_leaf
+from hwoutils.precision import require_float64
 from jax.scipy.special import logsumexp, xlogy
 from jax.scipy.stats import norm
 
@@ -43,6 +46,12 @@ __all__ = [
     "eig_linearized",
     "eig_nested",
 ]
+
+
+def _information_inputs(what, *arrays):
+    """Require float64 owners and bring host inputs into the float64 calculation."""
+    require_float64(what, *arrays)
+    return tuple(None if value is None else as_float_leaf(value) for value in arrays)
 
 
 def _binary_entropy(p):
@@ -71,6 +80,9 @@ def eig_geometric(cov_old, jacobian, obs_variance, qoi_projection=None):
     Returns:
         ``(eig, cov_new)`` -- scalar information gain and the updated covariance.
     """
+    cov_old, jacobian, obs_variance, qoi_projection = _information_inputs(
+        "eig_geometric", cov_old, jacobian, obs_variance, qoi_projection
+    )
     prec_old = jnp.linalg.inv(cov_old)
     obs_var = jnp.broadcast_to(
         jnp.atleast_1d(jnp.asarray(obs_variance)), (jacobian.shape[0],)
@@ -128,10 +140,9 @@ def eig_alias_breaking_from_covariances(weights, y_preds, predictive_covariances
     matter. Every component with positive weight must have a symmetric
     positive-definite covariance; if any such covariance (or the mixture
     covariance) is not positive definite to the accuracy of its dtype (a rescaled
-    condition number within a factor of 100 of ``1 / eps``, about ``1e5`` in
-    float32), the result is NaN rather than a wrong number. Rank candidates with a
-    NaN-aware reduction such as ``jnp.nanargmax``, and use 64-bit precision for
-    predictives that are this elongated. Components with zero weight are treated
+    condition number within a factor of 100 of ``1 / eps`` in float64),
+    the result is NaN. Rank candidates with a NaN-aware reduction such as
+    ``jnp.nanargmax``. Components with zero weight are treated
     as absent, and their means and covariances are not read.
 
     Args:
@@ -147,9 +158,10 @@ def eig_alias_breaking_from_covariances(weights, y_preds, predictive_covariances
         ValueError: If the shapes are not ``(K,)``, ``(K, n_obs)`` and
             ``(K, n_obs, n_obs)``.
     """
-    weights = jnp.asarray(weights)
-    y_preds = jnp.asarray(y_preds)
-    covs = jnp.asarray(predictive_covariances)
+    weights, y_preds, predictive_covariances = _information_inputs(
+        "eig_alias_breaking_from_covariances", weights, y_preds, predictive_covariances
+    )
+    covs = predictive_covariances
     n_modes = weights.shape[0]
     if y_preds.ndim != 2 or y_preds.shape[0] != n_modes:
         raise ValueError(
@@ -207,8 +219,10 @@ def eig_alias_breaking(weights, y_preds, obs_variance):
     Returns:
         Scalar upper bound on the mode information, in nats.
     """
-    y_preds = jnp.asarray(y_preds)
-    pred_var = jnp.broadcast_to(jnp.asarray(obs_variance), y_preds.shape)
+    weights, y_preds, obs_variance = _information_inputs(
+        "eig_alias_breaking", weights, y_preds, obs_variance
+    )
+    pred_var = jnp.broadcast_to(obs_variance, y_preds.shape)
     diag_covs = pred_var[:, :, None] * jnp.eye(y_preds.shape[1], dtype=pred_var.dtype)
     return eig_alias_breaking_from_covariances(weights, y_preds, diag_covs)
 
@@ -227,6 +241,9 @@ def eig_detectability(weights, det_weights):
     Returns:
         Scalar detection-channel EIG.
     """
+    weights, det_weights = _information_inputs(
+        "eig_detectability", weights, det_weights
+    )
     p_det = jnp.sum(weights * det_weights)
     return _binary_entropy(p_det) - jnp.sum(weights * _binary_entropy(det_weights))
 
@@ -247,6 +264,9 @@ def eig_detection_class(weights, det_weights, class_probs):
     Returns:
         Scalar classification EIG.
     """
+    weights, det_weights, class_probs = _information_inputs(
+        "eig_detection_class", weights, det_weights, class_probs
+    )
     p_det = jnp.sum(weights * det_weights)
     tiny = jnp.finfo(jnp.result_type(p_det)).tiny
     q_prior = weights @ class_probs
@@ -288,9 +308,10 @@ def eig_class(weights, class_probs, y_preds, obs_variance, *, key, n_samples=64)
     Returns:
         Scalar classification EIG (clipped at 0, the estimand's exact floor).
     """
-    y_preds = jnp.asarray(y_preds)
-    class_probs = jnp.asarray(class_probs)
-    pred_var = jnp.broadcast_to(jnp.asarray(obs_variance), y_preds.shape)
+    weights, class_probs, y_preds, obs_variance = _information_inputs(
+        "eig_class", weights, class_probs, y_preds, obs_variance
+    )
+    pred_var = jnp.broadcast_to(obs_variance, y_preds.shape)
     pred_sd = jnp.sqrt(pred_var)
     log_w = jnp.where(
         weights > 0.0, jnp.log(jnp.where(weights > 0.0, weights, 1.0)), -jnp.inf
@@ -423,6 +444,9 @@ def eig_detection_channel(weights, means, covs, a, b, n_nodes=32):
     Returns:
         Scalar detection-channel EIG.
     """
+    weights, means, covs, a, b = _information_inputs(
+        "eig_detection_channel", weights, means, covs, a, b
+    )
     a_arr = jnp.broadcast_to(jnp.asarray(a), weights.shape)
     b_arr = jnp.broadcast_to(jnp.asarray(b), means.shape)
     m_u = a_arr + jnp.einsum("kd,kd->k", b_arr, means)
@@ -571,14 +595,18 @@ def eig_linearized(
         precision scores NaN (see :func:`eig_alias_breaking_from_covariances`); rank
         with ``jnp.nanargmax``.
     """
-    obs_var = jnp.atleast_1d(jnp.asarray(obs_variance))
-    batch_fn = _build_eig_batch_fn(forward, detectable)
-
     components = mixture.component_distribution
-    means = components.loc
-    tril = components.scale_tril
+    means, tril, logits, obs_var = _information_inputs(
+        "eig_linearized",
+        components.loc,
+        components.scale_tril,
+        mixture.mixing_logits,
+        obs_variance,
+    )
     covs = tril @ jnp.swapaxes(tril, -1, -2)
-    weights = jax.nn.softmax(mixture.mixing_logits)
+    weights = jax.nn.softmax(logits)
+    obs_var = jnp.atleast_1d(obs_var)
+    batch_fn = _build_eig_batch_fn(forward, detectable)
     total, geom, alias, preds, det_w = batch_fn(
         jnp.asarray(candidates),
         means,
@@ -617,6 +645,7 @@ class EIGEstimate(eqx.Module):
 
 
 def _require_slice(posterior, name):
+    require_float64(name)
     if jnp.ndim(posterior.log_weights) != 1:
         raise ValueError(
             f"{name} takes one slice; map it over the batch with eqx.filter_vmap"
@@ -776,7 +805,7 @@ def eig_nested(posterior, term, key, *, n_outer, n_inner, min_n_eff, batch_size=
     n_eff = kish_ess(log_weights)
     ok = ~jnp.any(jnp.isnan(log_weights)) & (n_eff >= min_n_eff)
     ok = ok & (n_inner <= jnp.min(n_rest))
-    nan = jnp.asarray(jnp.nan, jnp.float64)
+    nan = jnp.asarray(jnp.nan, dtype=log_weights.dtype)
     return EIGEstimate(
         eig=jnp.where(ok, jnp.mean(log_joint - log_marginal), nan),
         bias_scale=jnp.where(ok, 0.5 * jnp.mean(relative_variance), nan),

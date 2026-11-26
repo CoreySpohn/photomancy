@@ -8,6 +8,7 @@ tests pin the gradient finite and the padding helpers.
 
 import jax
 import jax.numpy as jnp
+import pytest
 from kinematics import (
     predict_photometry,
 )
@@ -37,6 +38,7 @@ def _predict(data, cos_i):
     )
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_loglike_dmag_gradient_finite_on_placeholder():
     """The masked-placeholder gradient of the dMag likelihood is finite."""
     img0 = DMagData.zeros(64)
@@ -44,6 +46,7 @@ def test_loglike_dmag_gradient_finite_on_placeholder():
     assert jnp.isfinite(grad)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_contrast_curve_nulls_convert_and_keep_a_finite_gradient():
     """Fails if the contrast-curve constructor misconverts or breaks the gradient.
 
@@ -63,6 +66,7 @@ def test_contrast_curve_nulls_convert_and_keep_a_finite_gradient():
     assert jnp.isfinite(grad)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_null_epochs_penalize_only_a_planet_bright_enough_to_see():
     """Fails if a null epoch penalizes the wrong planets or pushes the wrong way.
 

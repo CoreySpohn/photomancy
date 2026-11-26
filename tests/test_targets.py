@@ -5,6 +5,8 @@ import ineedvalidation as vv
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
+from hwoutils.precision import PrecisionError
+from hwoutils.testing import ulps
 from optixstuff.spectral import Band, Transmission
 from test_terms import _ELEMENTS, _system
 
@@ -66,11 +68,14 @@ ignored = true
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-def test_target_routing_and_composition(tmp_path):
+def test_target_routing_and_composition(tmp_path, precision):
     """Truth source: explicit TOML rows, polar conversion and separate term sums.
 
-    Tolerance basis: 1e-14 relative for x64 unit/error propagation and summation;
-    raw rows, counts and routing are exact. Fails if: pending/comparison rows
+    Tolerance basis: twelve rounding operations along the polar error-propagation
+    path (casts, radian conversion, trigonometry, squares, products, sum and root).
+    Magnitude exponentiation amplifies a relative exponent error by abs(log(contrast));
+    its bound includes three exponent operations and five conversion/error operations.
+    Raw rows, counts and routing are exact. Fails if: pending/comparison rows
     enter the fit, errors are not averaged, mas are treated as arcsec, filter
     order is lost, or the loaded terms cannot score the selected system.
     """
@@ -84,19 +89,29 @@ def test_target_routing_and_composition(tmp_path):
     assert loaded.target["name"] == "X"
     assert loaded.band_names == ("L'",)
     assert loaded.relative_astrometry.time_d.size == 1
+    polar_rtol = float(ulps(12, precision.type(1)))
     np.testing.assert_allclose(
-        loaded.relative_astrometry.east_arcsec, [0.3], rtol=1e-14
+        loaded.relative_astrometry.east_arcsec, [0.3], rtol=polar_rtol, atol=0
     )
     np.testing.assert_allclose(
-        loaded.relative_astrometry.east_err_arcsec, [0.007], rtol=1e-14
+        loaded.relative_astrometry.east_err_arcsec, [0.007], rtol=polar_rtol, atol=0
     )
     np.testing.assert_allclose(
-        loaded.relative_astrometry.north_err_arcsec, [0.3 * np.deg2rad(1.2)], rtol=1e-14
+        loaded.relative_astrometry.north_err_arcsec,
+        [0.3 * np.deg2rad(1.2)],
+        rtol=polar_rtol,
+        atol=0,
     )
     contrast = 10 ** (-0.4 * 9.9)
-    np.testing.assert_allclose(loaded.photometry.contrast, [contrast], rtol=1e-14)
+    flux_rtol = float(ulps(3 * np.ceil(abs(np.log(contrast))) + 5, precision.type(1)))
     np.testing.assert_allclose(
-        loaded.photometry.contrast_err, [0.4 * np.log(10) * contrast * 0.25], rtol=1e-14
+        loaded.photometry.contrast, [contrast], rtol=flux_rtol, atol=0
+    )
+    np.testing.assert_allclose(
+        loaded.photometry.contrast_err,
+        [0.4 * np.log(10) * contrast * 0.25],
+        rtol=flux_rtol,
+        atol=0,
     )
     assert [r["use"] for r in loaded.comparisons["astrometry"]] == [
         "comparison",
@@ -111,7 +126,13 @@ def test_target_routing_and_composition(tmp_path):
     model = _Model(_system())
     terms = loaded.terms(system=model.system, system_path="system", transmissions=bands)
     assert len(terms) == 2
-    assert all(np.isfinite(term(model)) for term in terms)
+    assert all(np.all(np.isfinite(term.predict(model))) for term in terms)
+    if precision == np.float64:
+        assert all(np.isfinite(term(model)) for term in terms)
+    else:
+        for term in terms:
+            with pytest.raises(PrecisionError, match="enable_x64"):
+                term(model)
     pending = load_target(path, epoch=_EPOCH, include_pending=True, transmissions=bands)
     assert pending.band_names == ("L'", "H")
     assert pending.relative_astrometry.time_d.size == 2
@@ -154,7 +175,7 @@ def test_target_guards_and_empty(tmp_path):
 
 @vv.case("scene-fits", "code-verification", basis="equivalence")
 @pytest.mark.parametrize("include_pending", [False, True])
-def test_target_epoch_invariance(tmp_path, include_pending):
+def test_target_epoch_invariance(tmp_path, include_pending, precision):
     """Fails if dates reach a device before subtraction or terms mix time origins.
 
     Two split epochs differ by exactly 100.25 days. Time differences are exact;
@@ -183,5 +204,11 @@ def test_target_epoch_invariance(tmp_path, include_pending):
         elements[-1] += epochs[0].days_between(data.epoch)
         system = _system(elements, epoch=data.epoch)
         assert system.epoch is data.epoch
-        values.append([term(system) for term in data.terms(system=system)])
-    np.testing.assert_allclose(values[0], values[1], rtol=1e-10, atol=0)
+        terms = data.terms(system=system)
+        if precision == np.float32:
+            with pytest.raises(PrecisionError, match="enable_x64"):
+                terms[0](system)
+        else:
+            values.append([term(system) for term in terms])
+    if values:
+        np.testing.assert_allclose(values[0], values[1], rtol=1e-10, atol=0)

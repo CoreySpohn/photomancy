@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import G, Msun2kg, Rearth2AU
 from hwoutils.epoch import Epoch
+from hwoutils.testing import ulps
 from kinematics import (
     predict_photometry,
     predict_pm_anomaly,
@@ -247,7 +248,11 @@ def bare_system(a, e, cos_i, W, cos_w, sin_w, tp, mass_kg, dist_pc):
 
 @pytest.mark.parametrize("oracle", ["numpy", "orbix"])
 def test_relative_astrometry_east_north(k16, oracle):
-    """Green (1985), ch. 17; Brandt et al. (2021), Eqs. 6-9: RA is east."""
+    """Green (1985), ch. 17; Brandt et al. (2021), Eqs. 6-9: RA is east.
+
+    Floating-point basis: 64 eps of the angular semimajor axis for phase
+    reduction, the Kepler solve and eccentric projection over 1.5 periods.
+    """
     times = jnp.asarray(np.linspace(-0.2, 1.3, 25) * k16["T"])
     if oracle == "numpy":
         expected = reference(times, k16)
@@ -265,12 +270,19 @@ def test_relative_astrometry_east_north(k16, oracle):
         position, _ = orbit.at(times)
         expected = np.asarray(position)[..., :2].T / k16["dist_pc"]
     actual = predict_relative_astrometry(times, **forward_params(k16))
-    np.testing.assert_allclose(actual, expected, atol=1e-9, rtol=0)
+    np.testing.assert_allclose(
+        actual, expected, atol=float(ulps(64, k16["a"] / k16["dist_pc"])), rtol=0
+    )
 
 
 @pytest.mark.parametrize("cos_i", [0.7, -0.7])
 def test_raw_rows_and_forward_match_classical_ti(k16, cos_i):
-    """Classical TI formulas give east, north, away raw rows for either sense."""
+    """Classical TI formulas give east, north, away raw rows for either sense.
+
+    Floating-point basis: 64 eps of semimajor axis for phase reduction,
+    the Kepler solve and rotations; normalize the corresponding lengths
+    by distance for sky angles and by orbital radius for phase cosine.
+    """
     p = dict(k16, cos_i=cos_i)
     times = jnp.asarray(np.linspace(-0.2, 1.3, 25) * p["T"])
     expected = position_au(
@@ -289,14 +301,26 @@ def test_raw_rows_and_forward_match_classical_ti(k16, cos_i):
     rows, _ = orbit.at(times)
     beta = phase_angle_rad(rows)
     radius = jnp.linalg.norm(rows, axis=-1)
-    np.testing.assert_allclose(rows.T, expected, atol=1e-9, rtol=0)
-    np.testing.assert_allclose(np.cos(beta), expected[2] / radius, atol=1e-12, rtol=0)
+    length_error = float(ulps(64, p["a"]))
+    np.testing.assert_allclose(rows.T, expected, atol=length_error, rtol=0)
+    np.testing.assert_allclose(
+        np.cos(beta),
+        expected[2] / radius,
+        atol=length_error / float(jnp.min(radius)),
+        rtol=0,
+    )
     actual = predict_relative_astrometry(times, **forward_params(p))
-    np.testing.assert_allclose(actual, expected[:2] / p["dist_pc"], atol=1e-9, rtol=0)
+    np.testing.assert_allclose(
+        actual, expected[:2] / p["dist_pc"], atol=length_error / p["dist_pc"], rtol=0
+    )
 
 
 def test_eig_astrometry_east_north(k16):
-    """Brandt et al. (2021), Eqs. 6-9: EIG uses (east, north) observables."""
+    """Brandt et al. (2021), Eqs. 6-9: EIG uses (east, north) observables.
+
+    Floating-point basis: 64 eps of the angular semimajor axis for the
+    epoch conversion, Kepler solve and rotated sky projection.
+    """
     system = bare_system(
         k16["a"],
         k16["e"],
@@ -310,24 +334,33 @@ def test_eig_astrometry_east_north(k16):
     )
     actual = _astrometry(system, 1234.0, 0)
     np.testing.assert_allclose(
-        actual, reference([1234.0], k16)[:, 0], atol=1e-9, rtol=0
+        actual,
+        reference([1234.0], k16)[:, 0],
+        atol=float(ulps(64, k16["a"] / k16["dist_pc"])),
+        rtol=0,
     )
 
 
 @pytest.mark.parametrize("predictor", ["eig", "forward"])
-@pytest.mark.parametrize("case", ["eccentric", "near-full", "near-new"])
+@pytest.mark.parametrize("case", ["eccentric", "near-full", "crescent", "near-new"])
 def test_standard_lambert_phase(predictor, case):
     """Fails if photometry changes phase convention, radius units or inverse square.
 
     Exact-algebra basis: independent Cartesian positions, beta=atan2(hypot(x,y),z),
     Phi=(sin(beta)+(pi-beta)*cos(beta))/pi, C=Ag*(Rp_AU/r)^2*Phi.
-    Float64 tolerance is 2e-15 absolute in contrast divided by area: near new
-    phase loses relative precision through cancellation in the Lambert numerator.
-    Six cases cover two prediction paths and three distinct orbit/phase regimes.
+    Floating-point basis: 64 eps of the apparent orbital radius for phase
+    reduction, propagation and projection. Propagate the corresponding angular
+    error through dPhi/dbeta = -(pi-beta)*sin(beta)/pi. The Lambert sum has
+    an absolute error of four eps at unit phase scale (rounded pi, trig, sum
+    and division); the contrast-to-magnitude round trip adds a relative error
+    proportional to abs(log(contrast)). The resolved crescent rejects zero
+    even when the closer conjunction is below the phase evaluation floor.
     """
     a, e, cos_i, W, omega, M0 = 1.7, 0.4, 0.4, 0.6, 0.3, 1.1
     if case != "eccentric":
         a, e, cos_i, W, omega = 1.0, 0.0, 1e-3, 0.0, 0.0
+        if case == "crescent":
+            cos_i = 0.1
         M0 = np.pi / 2 if case == "near-full" else 3 * np.pi / 2
     period = 2 * np.pi * np.sqrt(a**3 / (G * Msun2kg))
     Ag, Rp_AU = 0.3, 1.4 * Rearth2AU
@@ -379,15 +412,62 @@ def test_standard_lambert_phase(predictor, case):
     beta = np.arctan2(np.hypot(*position[:2]), position[2])
     phase = (np.sin(beta) + (np.pi - beta) * np.cos(beta)) / np.pi
     expected = Ag * (Rp_AU / radius) ** 2 * phase
-    np.testing.assert_allclose(sep, np.hypot(*position[:2]) / 10.0, atol=2e-14, rtol=0)
     np.testing.assert_allclose(
-        10 ** (-0.4 * dmag) / area, expected / area, atol=2e-15, rtol=2e-13
+        sep, np.hypot(*position[:2]) / 10.0, atol=float(ulps(64, a / 10.0)), rtol=0
     )
+    slope = (np.pi - beta) * np.sin(beta) / np.pi
+    phase_error = ulps(4, 1.0) + ulps(64, a / radius) * abs(slope)
+    relative_error = ulps(64, a / radius) + ulps(4, abs(np.log(expected)))
+    np.testing.assert_allclose(
+        10 ** (-0.4 * dmag) / area,
+        expected / area,
+        atol=float(phase_error / radius**2),
+        rtol=float(relative_error),
+    )
+
+
+def test_resolved_lambert_crescent_stays_above_the_dark_ceiling(precision):
+    """The same representable phase resolves its positive crescent in both lanes.
+
+    The oracle uses the first three nonzero Taylor terms in the angle from pi.
+    Pi is subtracted at decimal precision. The next term changes the magnitude
+    by less than one fp64 rounding; allow 16 eps at magnitude scale for the
+    forward trig, polynomial, contrast conversion and logarithm.
+    Fails if cancellation sends this positive flux to the 750 mag ceiling.
+    """
+    from decimal import Decimal
+
+    from skyscapes.physical_model import LambertianPhysicalModel
+
+    from photomancy.measurements.photometry import lambertian_dmag
+
+    beta = np.float32(np.pi - 0.001)
+    delta = float(Decimal("3.141592653589793238462643383") - Decimal(float(beta)))
+    phase = (delta**3 / 3 - delta**5 / 30 + delta**7 / 840) / np.pi
+    expected = -2.5 * np.log10(phase * Rearth2AU**2)
+
+    def magnitude(angle):
+        unit = jnp.ones_like(angle)
+        return lambertian_dmag(angle, unit, LambertianPhysicalModel(unit), unit)
+
+    angle = jnp.array([beta], dtype=precision)
+    for evaluate in (magnitude, jax.jit(magnitude)):
+        np.testing.assert_allclose(
+            evaluate(angle),
+            [expected],
+            rtol=0,
+            atol=float(ulps(16, jnp.asarray(expected, dtype=precision))),
+        )
 
 
 @pytest.mark.parametrize("observable", ["stellar", "proper_motion", "pm_anomaly"])
 def test_reflex_observables_east_north(k16, observable):
-    """Green (1985), ch. 17: barycentric reflex retains the east/north axes."""
+    """Green (1985), ch. 17: barycentric reflex retains the east/north axes.
+
+    Floating-point basis: 64 eps of the reflex semimajor axis for the
+    propagated position. In slope units multiply by sum(abs(dt))/sum(dt**2),
+    the window fit sensitivity, and add 2/baseline for the endpoint slope.
+    """
     # The K16 mass is the Kepler total; split it so Ms + Mp keeps the period.
     Ms = k16["Ms"] / 1.1
     Mp = 0.1 * Ms
@@ -410,4 +490,9 @@ def test_reflex_observables_east_north(k16, observable):
             actual = predict_pm_anomaly(hip, gaia, window, n, **params)
             ends = fraction * reference([hip, gaia], k16)
             expected -= (ends[:, 1] - ends[:, 0]) / (gaia - hip)
-    np.testing.assert_allclose(actual, expected, atol=1e-12, rtol=0)
+    atol = float(ulps(64, abs(fraction) * k16["a"] / k16["dist_pc"]))
+    if observable != "stellar":
+        atol *= np.sum(np.abs(dt)) / (dt @ dt) + (
+            2 / (gaia - hip) if observable == "pm_anomaly" else 0
+        )
+    np.testing.assert_allclose(actual, expected, atol=atol, rtol=0)

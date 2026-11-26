@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.memory import MemoryLimit
+from hwoutils.precision import PrecisionError
 from priorities import Normal, Uniform
 from scipy import integrate
 
@@ -203,14 +204,21 @@ def test_an_unknown_kind_is_refused():
         fit.information({"mu": jnp.ones(3)}, kind="expected")
 
 
-@pytest.mark.float64_only(reason="float64 Fit before testing the curvature refusal")
-def test_float32_is_refused():
-    """With x64 off the curvature is refused rather than computed in float32."""
+@pytest.mark.float64_only(reason="float64 curvature from narrower coordinates")
+def test_information_widens_narrow_coordinates():
+    """Float32 coordinates on a float64 fit give float64 curvature."""
     fit = _fit(np.eye(3), gaussian_loglike(np.zeros(3), 1.0))
     point = {"mu": jnp.ones(3, dtype=jnp.float32)}
     assert fit.information(point, kind="observed").dtype == jnp.float64
-    with jax.enable_x64(False), pytest.raises(RuntimeError, match="x64"):
-        fit.information(point, kind="observed")
+
+
+@pytest.mark.float32_only(reason="curvature requires float64")
+def test_information_refuses_when_float64_is_unavailable():
+    """A valid fit brought into the float32 lane refuses curvature at entry."""
+    with jax.enable_x64():
+        fit = _fit(np.eye(3), gaussian_loglike(np.zeros(3), 1.0))
+    with pytest.raises(PrecisionError, match=r"Fit\.information.*enable_x64"):
+        fit.information({"mu": jnp.ones(3)}, kind="observed")
 
 
 @pytest.mark.float64_only(reason="curvature requires float64")

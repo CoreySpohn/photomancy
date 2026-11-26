@@ -7,6 +7,7 @@ import ineedvalidation as vv
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.testing import ulps
 
 from photomancy.postproc import DetectionEstimator
 from photomancy.postproc.calibration import (
@@ -39,7 +40,9 @@ class TestMapFilter:
         value is the plane at the reference position, computed here from the
         ring geometry (angular step 2 arcsin(fwhm / 2r), n references
         starting one and a half steps clockwise of the candidate), and the
-        statistic is the two-sample t of those values.
+        statistic is the two-sample t of those values. Allow eight operations
+        for ring geometry and bilinear weights and two pairwise reductions
+        for the reference mean and variance at the signal-to-noise scale.
         """
         ny = nx = 81
         a, b, c = 3.0, 0.7, -0.4
@@ -74,7 +77,13 @@ class TestMapFilter:
         expected = (signal - ref.mean()) / (ref.std(ddof=1) * np.sqrt(1 + 1 / n))
 
         assert n > 10  # guard: the reference ring is populated
-        np.testing.assert_allclose(stats.statistic[0], expected, rtol=1e-10)
+        scale = (abs(signal) + np.max(np.abs(ref))) / ref.std(ddof=1)
+        floor = ulps(
+            8 + 2 * (n - 1).bit_length(), jnp.asarray(scale, stats.statistic.dtype)
+        )
+        np.testing.assert_allclose(
+            stats.statistic[0], expected, rtol=0, atol=float(floor)
+        )
         np.testing.assert_allclose(stats.dof[0], n - 1)
 
     @vv.case("system-postproc", "code-verification", basis="exact-algebra")
@@ -276,7 +285,9 @@ class TestInjection:
 
     @vv.case("system-postproc", "code-verification", basis="exact-algebra")
     def test_contrast_curve_constructed_case(self):
-        """Basis exact-algebra: 5 sigma of noise 1e-7 at throughput 0.5 is 1e-6."""
+        """Basis: one input rounding, one multiplication and one division."""
         out = contrast_curve(5.0, [1e-7, 2e-7, 4e-7], [0.5, 0.25, 0.0])
-        np.testing.assert_allclose(out[:2], [1e-6, 4e-6], rtol=1e-12)
+        np.testing.assert_allclose(
+            out[:2], [1e-6, 4e-6], rtol=float(ulps(3, jnp.ones_like(out[0])))
+        )
         assert np.isinf(out[2])

@@ -105,6 +105,7 @@ def _assert_pinned(term, model, system, scale_AU):
         np.testing.assert_allclose(_gaussian(form, c), actual, rtol=1e-11, atol=1e-9)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_relative_form_is_the_term_on_the_golden_system():
     """Fails if the design, target or precision units of the form are wrong.
 
@@ -117,6 +118,7 @@ def test_relative_form_is_the_term_on_the_golden_system():
     _assert_pinned(terms[0], model_at(scene, entry(0)), "dynamics", 0.5)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_relative_form_on_a_bare_system_with_records_of_its_row():
     """Fails if a single-row bare system is not exact, or another planet is accepted."""
     system = _system()
@@ -142,6 +144,7 @@ def test_a_fit_on_a_bare_system_joins_the_block_path():
     assert np.all(np.isfinite(fit.log_density(x)))
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_relative_form_refuses_a_system_with_more_than_one_planet_row():
     """Fails if a two-planet form is built: it errs by 0.2 nat at a 10 percent move.
 
@@ -154,6 +157,7 @@ def test_relative_form_refuses_a_system_with_more_than_one_planet_row():
         term.linear_gaussian(_system(k=2), planet=1)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_the_linear_capability_is_a_type_and_the_stellar_term_does_not_have_it():
     """Fails if a consumer must probe attributes, or the stellar term claims a form.
 

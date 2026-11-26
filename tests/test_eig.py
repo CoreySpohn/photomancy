@@ -25,6 +25,7 @@ LAMBDA = 0.3 * Rearth2AU**2
 KEY = jax.random.key(0)
 
 
+@pytest.mark.float64_only(reason="posterior weights and covariance require float64")
 def test_geometric_eig_matches_analytic_gaussian_update():
     """The log-det shrinkage equals the 1-D conjugate-Gaussian information gain."""
     eig, cov_new = eig_geometric(jnp.array([[4.0]]), jnp.array([[1.0]]), 1.0)
@@ -36,6 +37,7 @@ def test_geometric_eig_matches_analytic_gaussian_update():
     assert eig_precise > eig  # a more precise measurement is more informative
 
 
+@pytest.mark.float64_only(reason="posterior weights and covariance require float64")
 def test_alias_breaking_eig_zero_when_modes_agree():
     """Zero when modes predict the same observable; positive when they differ."""
     weights = jnp.array([0.5, 0.5])
@@ -45,6 +47,7 @@ def test_alias_breaking_eig_zero_when_modes_agree():
     assert eig_alias_breaking(weights, jnp.array([[1.0], [5.0]]), 1.0) > 0.0
 
 
+@pytest.mark.float64_only(reason="posterior weights and covariance require float64")
 def test_detectability_eig_zero_when_modes_agree():
     """No information when all modes agree on detectability; positive when split."""
     weights = jnp.array([0.5, 0.5])

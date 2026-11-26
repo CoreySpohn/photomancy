@@ -9,10 +9,10 @@ import numpy as np
 import pytest
 from hwoutils.constants import AU2m, G, Mearth2kg, Msun2kg, d2s
 from hwoutils.epoch import Epoch
+from hwoutils.testing import ulps
 from kinematics import predict_rv
 from orbix.equations import period_to_sma
 from orbix.system import Body, FrameOrbit, SkyFrame, System
-from term_utils import both
 
 from photomancy import RadialVelocityTerm
 from photomancy.measurements import RadialVelocityData
@@ -35,6 +35,7 @@ def _circular_system(periods, masses_kg, cos_i=0.0):
 
 
 @pytest.mark.parametrize("n_planets", [1, 2])
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
     """A 10 m/s signal favors its true amplitude over half or twice that mass."""
     times = jnp.linspace(0.0, 800.0, 60)
@@ -63,6 +64,7 @@ def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
 
 
 @pytest.mark.parametrize("invalid_value", [float("nan"), float("inf")])
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_invalid_rv_rows_have_finite_likelihood_and_gradient(invalid_value):
     """Invalid observations, predictions, errors, and jitters cannot poison sums."""
     from photomancy.measurements import loglike_rv_marginalized
@@ -103,6 +105,7 @@ def test_invalid_rv_rows_have_finite_likelihood_and_gradient(invalid_value):
         assert float(gradient[1]) == 0.0
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_single_rv_observation_integrates_to_one():
     """Integrating the sole observation's flat offset leaves log likelihood zero."""
     from photomancy.measurements import loglike_rv_marginalized
@@ -120,6 +123,7 @@ def test_single_rv_observation_integrates_to_one():
 
 
 @pytest.mark.parametrize("n_inst", [2, 3])
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_rv_offset_marginalization_matches_quadrature(n_inst):
     """Three observations match integrating both populated instrument offsets.
 
@@ -164,17 +168,22 @@ def test_rv_offset_marginalization_matches_quadrature(n_inst):
 
 
 def test_predict_rv_known_mass_matches_exact_two_body_K():
-    """Known mass gives the exact two-body K at Mp/Ms=0.1 (Lovis/Fischer Eq. 14)."""
+    """Known mass gives the two-body K at Mp/Ms=0.1 (Lovis/Fischer Eq. 14).
+
+    Floating-point basis: 16 eps for the two cube roots, mass ratio,
+    eccentricity and inclination factors and the periapsis rate. The
+    reference cube roots avoid a rounded fractional power on masses in kg.
+    """
     from hwoutils.constants import G, two_pi
 
     period, eccentricity, cos_i = 400.0, 0.35, 0.4
     mass = 0.1 * Msun2kg
-    minimum_mass = mass * jnp.sqrt(1.0 - cos_i**2)
+    minimum_mass = mass * np.sqrt(1.0 - cos_i**2)
     expected_K = (
-        (two_pi * G / period) ** (1.0 / 3.0)
+        np.cbrt(two_pi * G / period)
         * minimum_mass
-        / (Msun2kg + mass) ** (2.0 / 3.0)
-        / jnp.sqrt(1.0 - eccentricity**2)
+        / np.cbrt(Msun2kg + mass) ** 2
+        / np.sqrt(1.0 - eccentricity**2)
     )
     velocity = predict_rv(
         jnp.array([0.0]),
@@ -188,15 +197,17 @@ def test_predict_rv_known_mass_matches_exact_two_body_K():
         Mp=mass,
     )[0]
     measured_K = -velocity / (1.0 + eccentricity)
-    assert float(measured_K) == pytest.approx(float(expected_K), rel=1e-12, abs=0)
+    assert float(measured_K) == pytest.approx(
+        float(expected_K), rel=float(ulps(16, jnp.ones_like(measured_K))), abs=0
+    )
 
 
 def test_predict_rv_matches_orbit_radial_velocity():
     """Compare minimum-mass RV to the orbit's stellar velocity in m/s.
 
     Fails if true mass, inclination, sign or units differ between the paths.
-    The x64 tolerance (rtol 1e-12, atol 1e-10 m/s) allows solver and conversion
-    rounding for a finite-mass, eccentric, inclined orbit.
+    Floating-point basis: 64 eps of peak velocity for phase reduction, the
+    eccentric-anomaly solve (sensitivity up to 2.5), rotations and conversion.
     """
     from hwoutils.constants import G
     from orbix.equations import period_to_sma
@@ -228,16 +239,20 @@ def test_predict_rv_matches_orbit_radial_velocity():
         tp,
         Mp=mass,
     ) * (AU2m / d2s)
-    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-10)
+    np.testing.assert_allclose(
+        actual, expected, rtol=0, atol=float(ulps(64, jnp.max(jnp.abs(expected))))
+    )
 
 
-def test_rv_term_uses_total_mass():
+def test_rv_term_uses_total_mass(precision):
     """The RV term uses the planet's true mass in both a and K.
 
     Fails if the semi-major axis or the semi-amplitude drops the planet mass: a
     0.1 Msun planet on a 400 d circular, inclined orbit reproduces the exact
     two-body velocity curve, so the marginalized log likelihood of data equal to
-    that curve is the zero-residual value to 1e-10.
+    that curve is the zero-residual value to 1e-10. Floating-point basis:
+    32 eps of peak RV for mean anomaly, circular propagation, projection
+    and conversion to m/s; the quarter-period zero uses the same scale.
     """
     from hwoutils.constants import two_pi
 
@@ -247,11 +262,10 @@ def test_rv_term_uses_total_mass():
     periods = jnp.array([400.0])
     masses = jnp.array([0.1]) * Msun2kg
     cos_i = 0.4
-    K = (two_pi * G / periods) ** (1.0 / 3.0) * masses * jnp.sqrt(1 - cos_i**2)
-    K /= (Msun2kg + masses) ** (2.0 / 3.0)
-    velocities = -jnp.sum(
-        K[:, None] * jnp.cos(two_pi * times / periods[:, None]), axis=0
-    )
+    mass = 0.1 * Msun2kg
+    K = np.cbrt(two_pi * G / 400.0) * mass * np.sqrt(1 - cos_i**2)
+    K /= np.cbrt(Msun2kg + mass) ** 2
+    velocities = -K * np.cos(two_pi * np.asarray(times, dtype=np.float64) / 400.0)
     data = RadialVelocityData(
         time_d=times,
         rv=velocities * (AU2m / d2s),
@@ -261,22 +275,33 @@ def test_rv_term_uses_total_mass():
         instruments=("a",),
     )
     term = RadialVelocityTerm(data, jitters=jnp.array([0.01]))
-    value, prediction = both(term, _circular_system(periods, masses, cos_i))
-    np.testing.assert_allclose(prediction, data.rv, rtol=1e-9, atol=1e-9)
-    expected = loglike_rv_marginalized(
-        data.rv,
-        data.rv,
-        data.rv_err,
-        data.inst_ids,
-        1,
-        jnp.array([0.01]),
-        data.valid,
+    system = _circular_system(periods, masses, cos_i)
+    prediction = term.predict(system)
+    np.testing.assert_allclose(
+        prediction,
+        velocities * (AU2m / d2s),
+        rtol=0,
+        atol=float(ulps(32, K * (AU2m / d2s))),
     )
-    assert float(value) == pytest.approx(float(expected), abs=1e-10)
+    if precision == np.float64:
+        expected = loglike_rv_marginalized(
+            data.rv,
+            data.rv,
+            data.rv_err,
+            data.inst_ids,
+            1,
+            jnp.array([0.01]),
+            data.valid,
+        )
+        assert float(term(system)) == pytest.approx(float(expected), abs=1e-10)
 
 
 def test_reflex_orbit_closes_at_total_mass_period():
-    """Stellar propagation uses the same two-body mass as Kepler's third law."""
+    """Stellar propagation uses the same two-body mass as Kepler's third law.
+
+    Floating-point basis: 32 eps of the apparent reflex semimajor axis for
+    period, phase reduction, Kepler solve and sky projection.
+    """
     from kinematics import predict_stellar_astrometry
     from orbix.equations import period_to_sma
 
@@ -295,13 +320,20 @@ def test_reflex_orbit_closes_at_total_mass_period():
         mass,
         10.0,
     )
-    assert float(ra[1]) == pytest.approx(float(ra[0]), rel=1e-12, abs=1e-15)
-    assert float(dec[1]) == pytest.approx(float(dec[0]), rel=1e-12, abs=1e-15)
+    scale = a * mass / (Msun2kg + mass) / 10.0
+    np.testing.assert_allclose(
+        [ra[1], dec[1]], [ra[0], dec[0]], rtol=0, atol=float(ulps(32, scale))
+    )
 
 
 @pytest.mark.parametrize("known_mass", [False, True])
 def test_predict_rv_is_receding_positive_stellar_velocity(known_mass):
-    """RV is +dz_star/dt in the right-handed (east, north, away) frame."""
+    """RV is +dz_star/dt in the right-handed (east, north, away) frame.
+
+    The minimum-mass approximation contributes (2/3) Mp/Ms relative.
+    Floating-point basis: 64 eps of peak speed for two periods of phase
+    reduction, the Kepler solve, its derivative and sky projection.
+    """
     from hwoutils.constants import G
     from orbix.equations import period_to_sma
     from orbix.system import FrameOrbit
@@ -339,10 +371,15 @@ def test_predict_rv_is_receding_positive_stellar_velocity(known_mass):
         tp,
         **({"Mp": mass} if known_mass else {}),
     )
-    tolerance = 1e-12 if known_mass else (2.0 / 3.0) * (mass / Msun2kg)
+    tolerance = 0.0 if known_mass else (2.0 / 3.0) * (mass / Msun2kg)
     assert bool(jnp.any(velocity > 0))
     assert bool(jnp.any(velocity < 0))
-    assert jnp.allclose(prediction, velocity, rtol=tolerance, atol=0.0)
+    np.testing.assert_allclose(
+        prediction,
+        velocity,
+        rtol=tolerance,
+        atol=float(ulps(64, jnp.max(jnp.abs(velocity)))),
+    )
 
 
 def test_minimum_mass_rv_matches_inclined_true_mass():
@@ -351,6 +388,8 @@ def test_minimum_mass_rv_matches_inclined_true_mass():
     The expected fractional excess is (2/3) Mp/Ms to leading order;
     concavity makes the exact excess smaller. A small planet isolates this
     approximation from the independently propagated true stellar velocity.
+    Floating-point basis: 64 eps of peak speed for two periods of mean
+    anomaly, the Kepler solve and rotated velocity components.
     """
     from hwoutils.constants import G, two_pi
     from orbix.system import FrameOrbit
@@ -374,7 +413,12 @@ def test_minimum_mass_rv_matches_inclined_true_mass():
         jnp.sin(peri),
         17.0,
     )
-    np.testing.assert_allclose(minimum, true_rv, rtol=(2.0 / 3.0) * mass / Msun2kg)
+    np.testing.assert_allclose(
+        minimum,
+        true_rv,
+        rtol=(2.0 / 3.0) * mass / Msun2kg,
+        atol=float(ulps(64, jnp.max(jnp.abs(true_rv)))),
+    )
 
 
 @pytest.mark.medium(reason="4096 vmapped draws of two RV children, 5.5 s cold")
@@ -486,6 +530,7 @@ def test_rv_offset_is_one_latent_per_instrument_and_merged_terms_score_the_union
     assert Fit(_Ramp(jnp.asarray(0.0)), {}, (merged,)).terms == (merged,)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_rv_merge_joins_instruments_by_name_and_remaps_ids():
     """Terms of ``("a",)`` and ``("b", "a")`` merge to ``("a", "b")`` without mixing.
 
@@ -537,6 +582,23 @@ def test_rv_data_refuses_ids_outside_the_instruments_but_not_padded_rows():
             valid=jnp.ones(2, bool),
             instruments=("a",),
         )
+
+    def host_delivery(ids, valid):
+        return RadialVelocityData(
+            **{**rows, "rv": np.array([100_000.0, 100_000.002])},
+            inst_ids=ids,
+            valid=valid,
+            instruments=("a",),
+        ).rv
+
+    for evaluate in (lambda f: f, jax.jit):
+        with pytest.raises(ValueError, match="inst_ids"):
+            evaluate(lambda: host_delivery(np.array([0, 1]), [True, True]))()
+        np.testing.assert_array_equal(
+            evaluate(lambda: host_delivery(np.array([0, -1]), [True, False]))()[0],
+            100_000.0,
+        )
+
     padded = RadialVelocityData(
         **rows,
         inst_ids=jnp.array([0, -1]),
@@ -585,6 +647,7 @@ def test_rv_merge_of_traced_terms_names_the_host_requirement():
         jax.jit(lambda term: first.merged(term))(second)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_rv_score_is_unchanged_by_a_large_common_offset():
     """Two velocities 0.002 m/s apart score the same with 1e5 m/s added to both.
 
@@ -612,9 +675,19 @@ def test_rv_score_is_unchanged_by_a_large_common_offset():
             jnp.zeros(1),
             jnp.ones(2, dtype=bool),
         )
-        np.testing.assert_allclose(float(value), expected, rtol=0, atol=1e-7)
+        data = RadialVelocityData.pad(
+            time_d=[0.0, 1.0],
+            rv=[shift, shift + 0.002],
+            rv_err=[sigma] * 2,
+            inst_ids=[0, 0],
+            instruments=("a",),
+            max_n=2,
+        )
+        actual = RadialVelocityTerm(data)(_Ramp(jnp.asarray(0.0)))
+        np.testing.assert_allclose([value, actual], expected, rtol=0, atol=1e-7)
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 def test_a_single_row_instrument_scores_zero_whatever_its_offset(precision):
     """One row of 90000 m/s with a tiny error contributes exactly nothing.
 
@@ -642,3 +715,167 @@ def test_a_single_row_instrument_scores_zero_whatever_its_offset(precision):
         jax.jit(loglike_rv_marginalized, static_argnums=4),
     ):
         np.testing.assert_allclose(float(call(*args)), 0.0, rtol=0, atol=atol)
+
+
+def test_host_rv_offsets_keep_the_measured_separation_across_batches():
+    """Two spectrographs resolve 2 mm/s at opposing 100 km/s zero points.
+
+    Floating-point basis: each offset is the host float64 subtraction rounded
+    once to storage precision. IDs are interleaved and the second batch
+    supplies another calibration order and an independent velocity origin.
+    """
+    origins = np.array([1.0e5, -1.0e5])
+    ids = np.array([1, 0, 1, 0])
+    absolute = origins[ids] + [0.0, 0.0, 0.002, -0.002]
+    expected = absolute - origins[ids]
+    one = _rv_row_term([0, 0, 1, 1], absolute, ids, ("a", "b"), max_n=5)
+    first = _rv_row_term([0, 0], absolute[:2], ids[:2], ("a", "b"))
+    second = _rv_row_term([1, 1], absolute[2:], 1 - ids[2:], ("b", "a"))
+    merged = first.merged(second)
+    for data in (one.data, merged.data, dataclasses.replace(one.data)):
+        np.testing.assert_array_equal(
+            data.rv_offset[:4], expected.astype(data.rv_offset.dtype)
+        )
+        assert data.rv_reference == tuple(origins)
+        np.testing.assert_array_equal(data.rv[:4], absolute.astype(data.rv.dtype))
+    changed = dataclasses.replace(one.data, rv=[*absolute, 0.0])
+    np.testing.assert_array_equal(changed.rv_offset, one.data.rv_offset)
+    term = dataclasses.replace(
+        first, data=dataclasses.replace(first.data, rv_offset=jnp.full(2, 1.0e-12))
+    )
+    np.testing.assert_array_equal(
+        term.merged(first).data.rv_offset[:2], term.data.rv_offset
+    )
+
+    # The device batch has an artificial zero reference. The two host contrasts
+    # fall on different points from their rounded absolute velocities in float32.
+    device = _rv_row_term([0], jnp.array([1e5]), [0], ("a",))
+    for deltas in ([0.0078125, 0.015625], [0.002, 0.004]):
+        delivery = 1e5 + np.array(deltas)
+        host = _rv_row_term([1, 2], delivery, [0, 0], ("a",))
+        merged = device.merged(host)
+        expected = np.r_[0.0, delivery - 1e5].astype(merged.data.rv_offset.dtype)
+        np.testing.assert_array_equal(merged.data.rv_offset, expected)
+        np.testing.assert_array_equal(
+            jax.jit(lambda data: data.rv_offset)(merged.data), expected
+        )
+
+
+def test_rv_residual_anchors_observation_and_model_separately(precision):
+    """A two-m/s contrast survives even when the model has a huge zero point.
+
+    The host observation contrast and a constant model are exact in either
+    working dtype. In float64, the score is the unit-variance Gaussian for
+    the orthonormal two-row contrast, allowing eight roundings for the
+    weighted sum, logs and normalization. Fails if the large model zero point
+    is subtracted before the measured separation is formed.
+    """
+    from photomancy.measurements.radial_velocity import _centered_rv_residual
+
+    class ConstantVelocity(eqx.Module):
+        velocity: jax.Array
+
+        def star_radial_velocity(self, *, time_d):
+            return jnp.broadcast_to(self.velocity, time_d.shape)
+
+    origin = float(2**54 if precision == np.float64 else 2**25)
+    data = _rv_row_term([0, 1], [origin, origin - 2], [0, 0], ("a",)).data
+    model = ConstantVelocity(jnp.asarray(origin, dtype=precision))
+
+    def residual(data, model):
+        return _centered_rv_residual(
+            data.rv_offset,
+            model.star_radial_velocity(time_d=data.time_d),
+            data.inst_ids,
+            data.valid,
+            data.n_inst,
+        )
+
+    for evaluate in (residual, jax.jit(residual)):
+        np.testing.assert_array_equal(evaluate(data, model), [0, -2])
+    if precision == np.float64:
+        term = RadialVelocityTerm(data)
+        expected = -0.5 * (np.log(2 * np.pi) + 2)
+        for evaluate in (term, eqx.filter_jit(term)):
+            np.testing.assert_allclose(
+                evaluate(model), expected, rtol=0, atol=float(ulps(8, abs(expected)))
+            )
+
+
+def test_rv_construction_accepts_traced_rows():
+    """A sequence of traced RVs remains differentiable in its working precision."""
+
+    def build(first, second):
+        return RadialVelocityData.pad(
+            time_d=[0.0, 1.0],
+            rv=[first, second],
+            rv_err=[1.0, 1.0],
+            inst_ids=[0, 0],
+            instruments=("a",),
+            max_n=3,
+        ).rv
+
+    np.testing.assert_array_equal(jax.jit(build)(2.0, 3.0), [2.0, 3.0, 0.0])
+
+    def from_host(ids):
+        return RadialVelocityData.pad(
+            time_d=[0.0, 1.0],
+            rv=[1.0e5, 1.0e5 + 0.002],
+            rv_err=[1.0, 1.0],
+            inst_ids=ids,
+            instruments=("a",),
+            max_n=2,
+        )
+
+    with pytest.raises(ValueError, match="concrete instrument IDs"):
+        jax.jit(from_host)(jnp.zeros(2, dtype=int))
+
+
+@pytest.mark.float32_only(reason="overflow on narrowing host observations")
+def test_rv_refuses_unrepresentable_storage():
+    """A finite host velocity or offset cannot become infinite in stored data."""
+    largest = float(np.finfo(np.float32).max)
+    for velocities in ([largest * 2], [largest, -largest], [largest, 1.5 * largest]):
+        n = len(velocities)
+        with pytest.raises(ValueError, match="do not fit"):
+            _rv_row_term(range(n), velocities, [0] * n, ("a",))
+
+    def build(values):
+        n = len(values)
+        return _rv_row_term(range(n), values, [0] * n, ("a",)).data.rv
+
+    just_above = np.nextafter(largest, np.inf)
+    for evaluate in (lambda f: f, jax.jit):
+        np.testing.assert_array_equal(
+            evaluate(lambda: build([just_above]))(), [largest]
+        )
+        with pytest.raises(ValueError, match="offsets overflow"):
+            evaluate(lambda: build([1e308, -1e308]))()
+        with pytest.raises(ValueError, match="do not fit"):
+            evaluate(lambda: build([largest, -largest]))()
+        with pytest.raises(ValueError, match="do not fit"):
+            evaluate(
+                lambda: (
+                    RadialVelocityData(
+                        time_d=[0],
+                        rv_offset=[largest * 2],
+                        rv_reference=(0.0,),
+                        rv_err=[1.0],
+                        inst_ids=[0],
+                        valid=[True],
+                        instruments=("a",),
+                    ).rv_offset
+                )
+            )()
+
+
+@pytest.mark.float64_only(reason="narrowing a float64 data object to float32")
+def test_absolute_rv_reconstruction_checks_the_host_origin_after_narrowing():
+    """An origin kept on the host can exceed the precision of narrowed offsets."""
+    from hwoutils.leaves import canonical
+
+    data = _rv_row_term([0], [1.0e40], [0], ("a",)).data
+    narrowed = canonical(data, precision="float32")
+    np.testing.assert_array_equal(narrowed.rv_offset, [0.0])
+    with pytest.raises(ValueError, match="Absolute RVs do not fit float32"):
+        _ = narrowed.rv

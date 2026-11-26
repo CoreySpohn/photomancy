@@ -11,7 +11,7 @@ Conventions (shared by every function here):
   ``jax.vmap`` over a batch prefix.
 * Log weights are unnormalized. NaN counts as zero weight. A slice with no
   finite log weight has no support and returns NaN statistics.
-* Nothing forces a dtype: float64 inputs stay float64.
+* Posterior weights and their summaries require float64.
 """
 
 import functools
@@ -19,6 +19,9 @@ import math
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from hwoutils.leaves import as_float_leaf
+from hwoutils.precision import float_dtype, require_float64
 from jax.scipy.special import logsumexp
 
 __all__ = [
@@ -51,9 +54,12 @@ def _tied(diff, value):
     return diff <= _TIE_ULPS * eps * jnp.maximum(1.0, jnp.abs(value))
 
 
-def _over_batch(fn, log_weights, *values, **kwargs):
+def _over_batch(fn, log_weights, *values, center_host=False, **kwargs):
     """Map ``fn(log_weights_slice, *values_slice, **kwargs)`` over the batch prefix."""
-    log_weights = jnp.asarray(log_weights)
+    require_float64("posterior weight diagnostics")
+    if center_host and isinstance(log_weights, np.ndarray) and log_weights.ndim:
+        log_weights, _, _ = _shift_log_weights(log_weights)
+    log_weights = jnp.asarray(log_weights, dtype=float_dtype())
     if log_weights.ndim < 1:
         raise ValueError("log_weights needs a draw axis")
     mapped = functools.partial(fn, **kwargs)
@@ -63,20 +69,33 @@ def _over_batch(fn, log_weights, *values, **kwargs):
 
 
 def _shift_log_weights(log_weights):
-    log_weights = jnp.where(jnp.isnan(log_weights), -jnp.inf, log_weights)
-    peak = jnp.max(log_weights)
-    no_support = ~jnp.isfinite(peak)
-    shifted = jnp.where(no_support, -jnp.inf, log_weights - peak)
+    # Host deliveries can resolve contrasts smaller than a device ULP at the
+    # absolute weight. Difference on the host before transferring the offsets.
+    host = isinstance(log_weights, np.ndarray)
+    xp = np if host else jnp
+    if host:
+        log_weights = np.asarray(log_weights, dtype=np.float64)
+    lw = xp.where(xp.isnan(log_weights), -xp.inf, log_weights)
+    peak = xp.max(lw, axis=-1)
+    no_support = ~xp.isfinite(peak)
+    reference = xp.where(no_support, 0.0, peak)
+    if host:
+        # A negative overflow is log zero: the weight is far below exp's range.
+        with np.errstate(over="ignore"):
+            contrast = lw - reference[..., None]
+        shifted = as_float_leaf(np.where(no_support[..., None], -np.inf, contrast))
+    else:
+        shifted = jnp.where(no_support[..., None], -jnp.inf, lw - reference[..., None])
     return shifted, peak, no_support
 
 
 def _normalize(log_weights):
     shifted, peak, no_support = _shift_log_weights(log_weights)
-    log_sum = logsumexp(jnp.where(no_support, 0.0, shifted))
+    log_sum = logsumexp(jnp.where(no_support[..., None], 0.0, shifted), axis=-1)
     return (
-        shifted - log_sum,
+        shifted - log_sum[..., None],
         jnp.where(no_support, -jnp.inf, peak + log_sum),
-        no_support,
+        jnp.asarray(no_support),
     )
 
 
@@ -96,7 +115,12 @@ def normalize_log_weights(log_weights):
         ``(*batch, S)``; ``log_total`` is the log of the summed weights and
         ``no_support`` is the boolean flag, both with shape ``(*batch,)``.
     """
-    return _over_batch(_normalize, log_weights)
+    require_float64("posterior weight diagnostics")
+    if not isinstance(log_weights, np.ndarray):
+        log_weights = jnp.asarray(log_weights, dtype=float_dtype())
+    if log_weights.ndim < 1:
+        raise ValueError("log_weights needs a draw axis")
+    return _normalize(log_weights)
 
 
 def _kish(log_weights):
@@ -288,7 +312,7 @@ def weighted_mean(log_weights, values):
     Returns:
         Weighted mean, shape ``(*batch, *event)``; NaN for a slice without support.
     """
-    return _over_batch(_mean, log_weights, values)
+    return _over_batch(_mean, log_weights, values, center_host=True)
 
 
 def _cov(log_weights, values):
@@ -322,7 +346,7 @@ def weighted_cov(log_weights, values):
         Weighted covariance, shape ``(*batch, d, d)``, or the variance
         ``(*batch,)`` for scalar draws; NaN for a slice without support.
     """
-    return _over_batch(_cov, log_weights, values)
+    return _over_batch(_cov, log_weights, values, center_host=True)
 
 
 def _quantile(log_weights, values, *, q):
@@ -397,8 +421,7 @@ def _over_batch_r_eff(fn, log_weights, *values, r_eff):
     """``_over_batch`` with an optional ``r_eff`` that is scalar or batch shaped."""
     if r_eff is None:
         return _over_batch(fn, log_weights, *values)
-    log_weights = jnp.asarray(log_weights)
-    r_eff = jnp.broadcast_to(jnp.asarray(r_eff), log_weights.shape[:-1])
+    r_eff = jnp.broadcast_to(jnp.asarray(r_eff), np.shape(log_weights)[:-1])
     return _over_batch(fn, log_weights, *values, r_eff)
 
 
@@ -445,8 +468,7 @@ def ratio_mc_se(log_weights, numerator, denominator, *, r_eff=None):
     Returns:
         Standard error of the ratio estimate, shape ``(*batch, *event)``.
     """
-    log_weights = jnp.asarray(log_weights)
-    denominator = jnp.broadcast_to(jnp.asarray(denominator), log_weights.shape)
+    denominator = jnp.broadcast_to(jnp.asarray(denominator), np.shape(log_weights))
     return _over_batch_r_eff(
         _ratio_mc_se, log_weights, numerator, denominator, r_eff=r_eff
     )
@@ -481,8 +503,9 @@ def kish_temperature(
     Returns:
         The new temperature in ``[beta, 1]``.
     """
-    log_base = jnp.asarray(log_base)
-    log_likelihood = jnp.asarray(log_likelihood)
+    require_float64("Kish temperature")
+    log_base = jnp.asarray(log_base, dtype=float_dtype())
+    log_likelihood = jnp.asarray(log_likelihood, dtype=float_dtype())
 
     def size(b):
         scaled = jnp.where(b == 0.0, 0.0, b * log_likelihood)

@@ -19,6 +19,8 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.epoch import Epoch
 from hwoutils.model_paths import resolve
+from hwoutils.numerics import COARSEST
+from hwoutils.precision import float_dtype, require_float64
 from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Resolution, Transmission
@@ -52,6 +54,10 @@ def _float64(value):
 class ReportRule(eqx.Module):
     """Static detection threshold and observable-based centroid error rule.
 
+    Detection includes the nominal threshold's float32 rounding bin. Sampled
+    counts and the continuous density keep their working precision.
+
+
     Attributes:
         threshold: Detection threshold, in multiples of the noise level of the limit
             counts.
@@ -60,7 +66,7 @@ class ReportRule(eqx.Module):
         corr: Correlation coefficient of the east and north centroid errors.
     """
 
-    threshold: float = eqx.field(static=True, default=5.0)
+    threshold: float = eqx.field(static=True, default=5.0, converter=float)
     kappa: float = eqx.field(static=True, default=1.0)
     corr: float = eqx.field(static=True, default=0.0)
 
@@ -84,6 +90,20 @@ class ReportRule(eqx.Module):
         """
         return self.threshold * limit_counts
 
+    def _decision_limit(self, limit_counts):
+        threshold = jnp.asarray(self.threshold, dtype=COARSEST)
+        return threshold * jnp.asarray(limit_counts, dtype=COARSEST)
+
+    def _detects(self, counts, limit_counts):
+        return jnp.asarray(counts, dtype=COARSEST) >= self._decision_limit(limit_counts)
+
+    def _null_boundary(self, limit_counts):
+        # A continuous draw starts rounding to the detection grid point
+        # halfway between that point and its predecessor. Ties have zero mass.
+        grid = jax.lax.stop_gradient(self._decision_limit(limit_counts))
+        previous = jnp.nextafter(grid, jnp.full_like(grid, -jnp.inf))
+        return 0.5 * previous.astype(float_dtype()) + 0.5 * grid.astype(float_dtype())
+
     def log_null_probability(self, limit_counts, prediction):
         """Log probability of counts below the detection threshold, shape (R,).
 
@@ -94,11 +114,13 @@ class ReportRule(eqx.Module):
         Returns:
             Log probability that the counts fall below the detection limit, shape
             ``(R,)``.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
+        require_float64("Report log probability")
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
-        return log_ndtr(
-            (self.detection_limit(limit_counts) - prediction.counts) / noise
-        )
+        return log_ndtr((self._null_boundary(limit_counts) - prediction.counts) / noise)
 
     def log_counts_density(self, counts, limit_counts, prediction):
         """Unconditional counts log density on the detection region, shape (R,).
@@ -111,13 +133,17 @@ class ReportRule(eqx.Module):
         Returns:
             Log density of the counts, minus infinity below the detection limit and NaN
             where ``counts`` is NaN. Shape ``(R,)``.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
+        require_float64("Report log probability")
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
         value = norm.logpdf(counts, prediction.counts, noise)
         return jnp.where(
             jnp.isnan(counts),
             jnp.nan,
-            jnp.where(counts >= self.detection_limit(limit_counts), value, -jnp.inf),
+            jnp.where(self._detects(counts, limit_counts), value, -jnp.inf),
         )
 
 
@@ -173,7 +199,7 @@ class ReportData(eqx.Module):
         Returns:
             Rows of shape ``(R,)`` with every row invalid and every payload zero.
         """
-        z = jnp.zeros(n_rows, jnp.float64)
+        z = jnp.zeros(n_rows)
         return cls(
             z,
             z,
@@ -459,7 +485,7 @@ def _scale_fit(counts, limit, rows, rule):
     sd = jnp.sqrt(safe_gg) / safe_cg
     chi2 = s_cc - jnp.where(has, s_cg**2 / safe_gg, 0.0)
     log_norm = jnp.sum(jnp.where(det, -0.5 * jnp.log(2.0 * jnp.pi * var), 0.0))
-    on_region = jnp.all(~det | (rows.counts >= rule.detection_limit(limit)))
+    on_region = jnp.all(~det | rule._detects(rows.counts, limit))
     return has, t_hat, sd, chi2, log_norm, on_region
 
 
@@ -576,7 +602,7 @@ class ReportTerm(AbstractProposingTerm):
             axis=0,
         )
         value = jnp.where(outcome_nan, jnp.nan, value)
-        return jnp.where(rows.valid, value, 0.0), prediction
+        return jnp.where(rows.valid, value, 0.0)
 
     def __call__(self, model) -> jax.Array:
         """Sum valid null log probabilities and detection counts log densities.
@@ -586,8 +612,12 @@ class ReportTerm(AbstractProposingTerm):
 
         Returns:
             Scalar log-likelihood of the valid rows.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
-        return jnp.sum(self._row_density(model, self.data)[0])
+        require_float64("Report log likelihood")
+        return jnp.sum(self._row_density(model, self.data))
 
     def leaf_proposal(self, model) -> LeafProposal:
         """A Gaussian proposal for the photometric leaf, as a one-component mixture.
@@ -598,6 +628,7 @@ class ReportTerm(AbstractProposingTerm):
         with no detection has no peak: the log mass is ``-inf``.
 
         Raises:
+            PrecisionError: If float64 is unavailable.
             ValueError: With no ``leaf_path``, or a leaf that is not a single value.
 
         Args:
@@ -607,6 +638,7 @@ class ReportTerm(AbstractProposingTerm):
         Returns:
             A one-component proposal for the leaf.
         """
+        require_float64("Report leaf proposal")
         if self.leaf_path is None:
             raise ValueError("this ReportTerm has no leaf_path to propose")
         leaf = jnp.asarray(resolve(model, self.leaf_path))
@@ -640,7 +672,7 @@ class ReportTerm(AbstractProposingTerm):
         Returns:
             Predicted counts, variance and position of every row.
         """
-        return self._row_density(model, self.data)[1]
+        return self.predictor(model, _prediction_rows(self.data))
 
     def draw(self, key, model) -> Self:
         """Draw counts then two position normals per row, preserving padding.
@@ -656,10 +688,12 @@ class ReportTerm(AbstractProposingTerm):
         valid = rows.valid & (rows.science_s > 0) & (rows.limit_counts > 0)
         clean = _prediction_rows(eqx.tree_at(lambda r: r.valid, rows, valid))
         prediction = self.predictor(model, clean)
-        eps = jax.random.normal(key, (rows.time_d.size, 3), dtype=jnp.float64)
+        eps = jax.random.normal(
+            key, (rows.time_d.size, 3), dtype=prediction.counts.dtype
+        )
         noise = jnp.sqrt(jnp.where(prediction.variance > 0, prediction.variance, 1.0))
         counts = prediction.counts + noise * eps[:, 0]
-        detected = valid & (counts >= self.rule.detection_limit(clean.limit_counts))
+        detected = valid & self.rule._detects(counts, clean.limit_counts)
         reported_counts = jnp.where(detected, counts, 0.0)
         snr = reported_counts / jnp.sqrt(
             clean.limit_counts**2 + jnp.maximum(reported_counts, 0.0)
@@ -748,8 +782,11 @@ class ReportTerm(AbstractProposingTerm):
 
         Returns:
             Per-row difference of log densities, shape ``(R,)``.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
-        return (
-            self._row_density(model, self.data)[0]
-            - other._row_density(model, self.data)[0]
+        require_float64("Report log likelihood ratio")
+        return self._row_density(model, self.data) - other._row_density(
+            model, self.data
         )

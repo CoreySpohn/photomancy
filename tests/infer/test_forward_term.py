@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from hwoutils.precision import PrecisionError
 from priorities import Normal
 
 from photomancy.infer import AbstractTerm, Fit, ForwardTerm
@@ -76,6 +77,7 @@ def test_reads_are_the_forwards_reads_and_a_fit_refuses_freeing_them():
         Fit(_Model(jnp.ones(3)), {"mu": law}, (built,))
 
 
+@pytest.mark.float64_only(reason="inference log density")
 def test_value_and_prediction_follow_the_forward():
     """The value is the likelihood of the forward and predict returns the forward.
 
@@ -178,3 +180,11 @@ def test_fit_density_adds_the_prior_to_the_term_value():
         fit = Fit(model, {"mu": prior}, (ForwardTerm(_Scale(jnp.ones(3)), likelihood),))
         expected = float(prior.log_prob(x["mu"]).sum()) + float(likelihood(x["mu"]))
         np.testing.assert_allclose(float(fit.log_density(x)), expected, rtol=1e-12)
+
+
+@pytest.mark.float32_only(reason="inference log densities require float64")
+def test_forward_term_refuses_before_evaluating_the_forward():
+    """A custom likelihood obeys the term's precision boundary as well."""
+    term = _term(_Drawable(jnp.zeros(3)))
+    with pytest.raises(PrecisionError, match=r"ForwardTerm.*enable_x64"):
+        term(None)

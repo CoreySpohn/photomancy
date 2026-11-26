@@ -61,7 +61,9 @@ import jax.numpy as jnp
 import numpy as np
 from coronagraphoto import expected, planet_source_support
 from hwoutils.model_paths import join, resolve
-from optixstuff import AbstractDetector, Exposure, Instrument, Rates
+from hwoutils.precision import require_float64
+from optixstuff import AbstractDetector, Exposure, Instrument
+from optixstuff.detector import _floored
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.rates import floor_rate
 from skyscapes.scene import Scene
@@ -117,25 +119,6 @@ def _masked_rates(rates, mask, *, preserve_floor=False, only_nonfinite=False):
         rates,
         (*values, variance, n_pix),
         is_leaf=lambda value: value is None,
-    )
-
-
-def _clipped(rates):
-    """Rates holding only their total clipped at zero, the values ``log_prob`` scores.
-
-    :func:`optixstuff.rates.floor_rate` returns the total clipped at zero whatever
-    its tolerance; the tolerance only flags a total too negative to be integration
-    error, which ``log_prob`` scores as ``-inf``.
-    """
-    variance = None if rates.variance is None else _clipped(rates.variance)
-    return Rates(
-        rates.bands,
-        rates.carrier,
-        planet=jnp.maximum(rates.total(), 0.0),
-        n_pix=rates.n_pix,
-        variance=variance,
-        supported=rates.supported,
-        static_supported=rates.static_supported,
     )
 
 
@@ -243,6 +226,14 @@ def _lit_planets_outside(scene, instrument, exposure):
     return int(outside.sum())
 
 
+def _check_score_shape(mask, observed, shape):
+    if mask.shape != shape or observed.shape[-3:] != shape:
+        raise ValueError(
+            f"mask {mask.shape} and observed frames {observed.shape} "
+            f"must match the render's {shape}"
+        )
+
+
 class _ImageScore(eqx.Module):
     """The log likelihood of one frame as a function of the expected rates.
 
@@ -266,13 +257,9 @@ class _ImageScore(eqx.Module):
     static_beyond_speckle: bool = eqx.field(static=True)
 
     def __call__(self, rates) -> jax.Array:
+        require_float64("image log likelihood")
         total = rates.total()
-        shape = total.shape
-        if jnp.shape(self.mask) != shape or jnp.shape(self.observed_e)[-3:] != shape:
-            raise ValueError(
-                f"mask {jnp.shape(self.mask)} and observed frames "
-                f"{jnp.shape(self.observed_e)} must match the render's {shape}"
-            )
+        _check_score_shape(self.mask, self.observed_e, total.shape)
         observed = jnp.where(self.mask, self.observed_e, 0.0)
         masked = _masked_rates(
             rates,
@@ -540,13 +527,7 @@ class ImageTerm(AbstractTerm):
         instrument = self._instrument(model)
         exposure = self._exposure(model)
         shape = (len(exposure.quadrature.bands), *instrument.detector.shape)
-        if self.observed_e.shape[-3:] != shape:
-            raise ValueError(
-                f"observed_e has shape {self.observed_e.shape}, "
-                f"expected trailing axes {shape}"
-            )
-        if self.mask.shape != shape:
-            raise ValueError(f"mask has shape {self.mask.shape}, expected {shape}")
+        _check_score_shape(self.mask, self.observed_e, shape)
         strict, static = (
             np.asarray(flag) for flag in _flags(scene, instrument, exposure)
         )
@@ -582,7 +563,17 @@ class ImageTerm(AbstractTerm):
 
         Returns:
             The scalar log likelihood, or NaN if a scored pixel lacks support.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
+            ValueError: If the observed frame or mask has the wrong shape.
         """
+        shape = (
+            len(self._exposure(model).quadrature.bands),
+            *self._instrument(model).detector.shape,
+        )
+        _check_score_shape(self.mask, self.observed_e, shape)
+        require_float64("image log likelihood")
         rates, score = self.split(model)
         return score(rates)
 
@@ -646,8 +637,19 @@ class ImageTerm(AbstractTerm):
         observed = jnp.where(self.mask, self.observed_e, 0.0)
         preserve_floor = type(detector).log_prob is AbstractDetector.log_prob
         rates = _masked_rates(rates, self.mask, preserve_floor=preserve_floor)
-        mean, variance = detector.mean_and_variance(_clipped(rates), plan)
-        defined = jnp.isfinite(detector.log_prob(observed, rates, plan))
+        floored, bad = _floored(rates)
+        mean, variance = detector.mean_and_variance(floored, plan)
+        if preserve_floor:
+            # A residual needs the domain and moments, without a log density.
+            defined = ~bad & jnp.isfinite(observed) & jnp.isfinite(mean)
+            if detector.photon_counting:
+                # gammaln(y + 1) has poles at negative integer counts.
+                at_pole = (observed < 0) & (observed == jnp.floor(observed))
+                defined &= ~at_pole & ((mean > 0) | ((mean == 0) & (observed == 0)))
+            else:
+                defined &= jnp.isfinite(variance)
+        else:
+            defined = jnp.isfinite(detector.log_prob(observed, rates, plan))
         ok = self.mask & defined & (variance > 0)
         whitened = (observed - mean) / jnp.sqrt(jnp.where(ok, variance, 1.0))
         return jnp.where(ok, whitened, jnp.nan)

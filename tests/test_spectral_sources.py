@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg
 from hwoutils.epoch import Epoch
+from hwoutils.testing import ulps
 from jax.test_util import check_grads
 from numpy.polynomial.legendre import leggauss
 from optixstuff.spectral import Band, Quadrature, Resolution, Transmission
@@ -235,7 +236,7 @@ def test_warm_cost_of_the_integrated_contrast():
     scene = _scene()
     term = _term(scene)
     times = jnp.zeros(1)
-    integrated = jax.jit(lambda model: term(model))
+    integrated = jax.jit(lambda model: term.predict(model))
     sampled = jax.jit(lambda model: _point_sampled(model, term.quadrature, times))
 
     def warm(fun):
@@ -248,7 +249,7 @@ def test_warm_cost_of_the_integrated_contrast():
     cost = warm(integrated), warm(sampled)
     ms = [c * 1e3 for c in cost]
     print(f"warm call ms: integrated {ms[0]:.3f}, point sample {ms[1]:.3f}")
-    assert np.isfinite(float(integrated(scene)))
+    assert np.all(np.isfinite(np.asarray(integrated(scene))))
     assert np.all(np.isfinite(np.asarray(sampled(scene))))
 
 
@@ -259,7 +260,9 @@ def test_the_report_predictor_integrates_a_tabulated_star():
     Truth: the same Gauss-cell band ratio as the photometric term (``_truth``)
     times the flat tabulated rate and the exposure time. Tolerance basis:
     both are exact quadratures of piecewise polynomials, so they agree to
-    float64 rounding over a few hundred cells; rtol 1e-10 (measured 1e-16).
+    rounding of cell interpolation, weighted normalization and scaling.
+    Thirty-two eps cover two interpolations, products, a pairwise sum of
+    a few hundred terms, the quotient and the two count-scale multipliers.
     The point sample at the nodes is off by 4.5e-2 on this star, and a table
     without a resolution is refused rather than sampled.
     """
@@ -280,8 +283,13 @@ def test_the_report_predictor_integrates_a_tabulated_star():
         jnp.zeros(1), jnp.array([5.0]), jnp.array([1.0]), jnp.array([0])
     )
     predictor = PrecomputedReportPredictor(table, 0)
-    counts = float(predictor(scene, rows).counts[0])
-    np.testing.assert_allclose(counts, _truth(scene) * 2.0 * 5.0, rtol=1e-10)
+    counts = predictor(scene, rows).counts[0]
+    np.testing.assert_allclose(
+        counts,
+        _truth(scene) * 2.0 * 5.0,
+        rtol=float(ulps(32, jnp.ones((), counts.dtype))),
+        atol=0,
+    )
     term = ReportTerm(ReportRule(threshold=4.5, kappa=1.3, corr=0.4), rows, predictor)
     assert term.reads == () and table.resolution.rules
     bare = eqx.tree_at(lambda t: t.resolution, table, Resolution())

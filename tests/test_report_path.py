@@ -16,9 +16,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hwoutils.epoch import Epoch
+from hwoutils.testing import ulps
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.system import OrbitLaw, ThieleInnesBlock
 from priorities import LogUniform
+from scipy.special import log_ndtr
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.population import kipping_eccentricity
 from skyscapes.scene import FlatStar, Planet, Scene
@@ -288,9 +290,33 @@ def _scores(fit, both, one, z, astro=None):
         sheets = jnp.stack(
             [one(m) + (0.0 if astro is None else astro(m)) for m in pair]
         )
-        return both(model), sheets, record.mean, record.sd, record.log_pi
+        predictions = [one.predict(m) for m in pair]
+        counts = jnp.stack([p.counts for p in predictions])
+        variance = jnp.stack([p.variance for p in predictions])
+        return (
+            both(model),
+            sheets,
+            record.mean,
+            record.sd,
+            record.log_pi,
+            counts,
+            variance,
+        )
 
     return jax.vmap(per)(z)
+
+
+def _golden_null_shift(rows, counts, variance):
+    """Independent Gaussian CDF correction for the new detection boundary."""
+    nominal = THRESHOLD * np.asarray(rows.limit_counts)
+    grid = np.float32(THRESHOLD) * np.asarray(rows.limit_counts, np.float32)
+    previous = np.nextafter(grid, np.float32(-np.inf))
+    boundary = (grid.astype(np.float64) + previous.astype(np.float64)) / 2
+    sigma = np.sqrt(np.where(variance > 0, variance, 1))
+    change = log_ndtr((boundary - counts) / sigma) - log_ndtr(
+        (nominal - counts) / sigma
+    )
+    return np.sum(np.where(rows.valid & ~rows.is_detected, change, 0.0), axis=-1)
 
 
 @pytest.mark.float64_only(reason="stored float64 V&V reference values")
@@ -305,11 +331,13 @@ def test_report_term_matches_the_stored_golden(fit, name):
     has no peak), and the fixture with real detection positions. The stored sheets of
     the fixture agree with the previous report scorer to 4e-5 nat above -150 nat (it
     interpolates a different table). Checks, at rtol 1e-10 (compiled against the
-    eager values stored): the ``SheetSum`` value, each sheet alone, the record; for the
-    report with positions, the counts-only sheets plus ``RelativeAstrometryTerm`` on
-    ``rows.astrometry()`` against the stored values of the term that also scored the
-    position; and exactly: the two-sheet value is ``logaddexp`` of the sheets minus
-    ``log 2``, and padded rows holding garbage change nothing.
+    eager values stored): the ``SheetSum`` value, each sheet alone, the record. The
+    stored sheets use the nominal threshold. An independent Gaussian CDF difference
+    at the midpoint below the threshold grid point corrects only the null masses.
+    For the position report, counts plus ``RelativeAstrometryTerm`` agree with the
+    stored position scores. Combining the sheets allows four roundings of the
+    uncancelled logaddexp/log(2) scale for the log-sum-exp and subtraction,
+    including a log mean near zero. Padding is exactly inert.
     """
     golden = json.loads(GOLDEN.read_text())
     want = golden["reports"][name]
@@ -317,18 +345,30 @@ def test_report_term_matches_the_stored_golden(fit, name):
     kw = REPORTS[name]
     one = report_term(rows(**kw))
     both = sheet_sum(one)
-    two, sheets, mean, sd, log_pi = _scores(fit, both, one, z)
-    np.testing.assert_allclose(two, want["two_sheet"], rtol=1e-10)
-    np.testing.assert_allclose(sheets, want["sheets"], rtol=1e-10)
+    two, sheets, mean, sd, log_pi, counts, variance = _scores(fit, both, one, z)
+    delta = _golden_null_shift(one.data, np.asarray(counts), np.asarray(variance))
+    expected_sheets = np.asarray(want["sheets"]) + delta
+    old_two = np.logaddexp(*np.asarray(want["sheets"]).T) - np.log(2)
+    np.testing.assert_allclose(old_two, want["two_sheet"], rtol=1e-10)
+    expected_two = np.logaddexp(*expected_sheets.T) - np.log(2)
+    np.testing.assert_allclose(two, expected_two, rtol=1e-10)
+    np.testing.assert_allclose(sheets, expected_sheets, rtol=1e-10)
     np.testing.assert_allclose(mean, want["mean"], rtol=1e-10)
     np.testing.assert_allclose(sd, want["sd"], rtol=1e-10)
     np.testing.assert_allclose(log_pi, want["log_pi"], rtol=1e-10)
     if name == "positions":
         astro = RelativeAstrometryTerm(one.data.astrometry())
         joint = _scores(fit, both, one, z, astro)[1]
-        np.testing.assert_allclose(joint, want["with_positions"], rtol=1e-10)
-    summed = np.logaddexp(sheets[:, 0], sheets[:, 1]) - np.log(2.0)
-    np.testing.assert_allclose(two, summed, rtol=1e-14)
+        np.testing.assert_allclose(
+            joint, np.asarray(want["with_positions"]) + delta, rtol=1e-10
+        )
+    log_two = np.log(2.0)
+    added = np.logaddexp(sheets[:, 0], sheets[:, 1])
+    summed = added - log_two
+    finite = np.isfinite(summed)
+    np.testing.assert_array_equal(two[~finite], summed[~finite])
+    tolerance = ulps(4, np.maximum(np.abs(added[finite]), log_two))
+    assert np.all(np.abs(two[finite] - summed[finite]) <= tolerance)
     counts = np.where(REP_VALID, kw.get("counts", REP_COUNTS), 999.0)
     epochs = np.where(REP_VALID, REP_EPOCHS, 12345.0)
     detected = np.where(REP_VALID, kw.get("detected", REP_DETECTED), True)
@@ -345,8 +385,7 @@ def test_report_term_matches_the_stored_golden(fit, name):
     assert np.any(peaks) if name in ("fixture", "positions") else not np.any(peaks)
 
 
-@pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_report_planet_and_sheet_sum_planet_outside_the_model_are_refused():
+def test_report_planet_and_sheet_sum_planet_outside_the_model_are_refused(precision):
     """Planet 1 or -1 of a one-planet model raises for the report and the sheet sum.
 
     Truth: the scene has one planet and one orbit row, so valid indices are
@@ -363,13 +402,15 @@ def test_report_planet_and_sheet_sum_planet_outside_the_model_are_refused():
     )
     with pytest.raises(ValueError, match="planet"):
         bad.check(model)
-    with pytest.raises(ValueError, match="planet"):
-        Fit(model, {}, (bad,))
+    if precision == np.float64:
+        with pytest.raises(ValueError, match="planet"):
+            Fit(model, {}, (bad,))
     for planet in (1, -1):
         with pytest.raises(ValueError, match="SheetSum planet"):
             SheetSum((good,), ORBITS, planet).check(model)
-        with pytest.raises(ValueError, match="SheetSum planet"):
-            Fit(model, {}, (SheetSum((good,), ORBITS, planet),))
+        if precision == np.float64:
+            with pytest.raises(ValueError, match="SheetSum planet"):
+                Fit(model, {}, (SheetSum((good,), ORBITS, planet),))
 
 
 def test_report_planet_check_holds_under_jit_and_a_late_epoch_model_passes():
@@ -409,8 +450,7 @@ def test_report_planet_check_holds_under_jit_and_a_late_epoch_model_passes():
         far.check(Late(model))
 
 
-@pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_sheet_sum_requires_a_resolvable_path_and_counts_the_last_axis():
+def test_sheet_sum_requires_a_resolvable_path_and_counts_the_last_axis(precision):
     """An unresolvable ``orbit_path`` refuses at fit setup; planets index the last axis.
 
     Truth: reflection indexes the last batch axis of the quaternions, so orbits of
@@ -425,8 +465,9 @@ def test_sheet_sum_requires_a_resolvable_path_and_counts_the_last_axis():
     for path in ("dynamics.orbit", "planets[99].orbits"):
         with pytest.raises(ValueError, match="does not resolve"):
             SheetSum((good,), path, 0).check(model)
-        with pytest.raises(ValueError, match="does not resolve"):
-            Fit(model, {}, (SheetSum((good,), path, 0),))
+        if precision == np.float64:
+            with pytest.raises(ValueError, match="does not resolve"):
+                Fit(model, {}, (SheetSum((good,), path, 0),))
     orbits = resolve(model, ORBITS)
     for shape, planet, accepted in (((2, 1, 4), 1, False), ((1, 2, 4), 1, True)):
         stacked = eqx.tree_at(lambda o: o.quat, orbits, jnp.zeros(shape))

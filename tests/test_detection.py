@@ -10,6 +10,8 @@ import numpy as np
 import pytest
 import toy_coronagraph as toy
 from hwoutils.memory import MemoryLimit
+from hwoutils.precision import PrecisionError
+from hwoutils.testing import ulps
 from image_scene import (
     make_detector,
     make_exposure,
@@ -58,7 +60,8 @@ def test_gaussian_profile_equals_the_closed_form(budget):
 
     Truth source: the weighted least-squares solution for ``r = data - base`` and
     ``W = 1 / sigma**2``, from NumPy.
-    Tolerance basis: exact-algebra (rtol 1e-12; a quadratic needs one Newton step).
+    Tolerance basis: eight levels per 200-pixel sum, with two score sums
+    and eight operations for pixel weights, the Newton quotient and the gain.
     Fails if: the amplitude, the statistic or the curvature uses the wrong weights, or
     the derivative of the likelihood is taken with respect to the wrong argument.
     """
@@ -71,9 +74,10 @@ def test_gaussian_profile_equals_the_closed_form(budget):
         gaussian_loglike(data, sigma), base, template, **budget
     )
     assert bool(resolved)
-    np.testing.assert_allclose(a_hat, want, rtol=1e-12)
-    np.testing.assert_allclose(two_delta, want**2 * tw, rtol=1e-12)
-    np.testing.assert_allclose(curvature, tw, rtol=1e-12)
+    tol = float(ulps(2 * (data.size - 1).bit_length() + 8, jnp.ones_like(a_hat)))
+    np.testing.assert_allclose(a_hat, want, rtol=tol)
+    np.testing.assert_allclose(two_delta, want**2 * tw, rtol=tol)
+    np.testing.assert_allclose(curvature, tw, rtol=tol)
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -82,7 +86,8 @@ def test_poisson_profile_stays_in_the_domain():
 
     Truth source: the Poisson score vanishes at mu = k. Twice the log ratio
     is 2 (log(1/10) - 1 + 10).
-    Tolerance basis: rtol 1e-6 allows for iterative convergence in float64.
+    Tolerance basis: the stopping gradient is 1e-6 standard errors; four
+    rounded operations form the prediction, logarithm, difference and gain.
     Fails if: the first Newton step goes to -90 and leaves the log domain.
     """
 
@@ -90,8 +95,9 @@ def test_poisson_profile_stays_in_the_domain():
         return jnp.sum(jnp.log(mu) - mu)
 
     a_hat, gain, _, resolved = profile_amplitude(like, jnp.array([10.0]), jnp.ones(1))
-    np.testing.assert_allclose(a_hat, -9.0, rtol=1e-6)
-    np.testing.assert_allclose(gain, 2 * (np.log(0.1) + 9), rtol=1e-6)
+    tol = float(ulps(4, jnp.ones_like(a_hat)))
+    np.testing.assert_allclose(a_hat, -9.0, rtol=tol, atol=1e-6)
+    np.testing.assert_allclose(gain, 2 * (np.log(0.1) + 9), rtol=tol)
     assert bool(resolved)
 
 
@@ -116,22 +122,51 @@ def test_huber_profile_reaches_the_peak_from_a_linear_tail():
     assert bool(resolved)
 
 
+def test_rounded_huber_score_brackets_the_stationary_amplitude(precision):
+    """Rounded score ties still locate the Huber peak at ten counts.
+
+    The unit Huber core has curvature one. Amplitude accuracy is one rounding
+    at ten counts or the profiler's 1e-6 standard-error stationarity bound.
+    The gain is exactly the difference of the two rounded endpoint scores.
+    Fails if ties close a false bracket around the nonstationary linear tail.
+    """
+
+    def profile(offset):
+        def objective(a):
+            d = jnp.abs(a - 10)
+            return -offset - jnp.where(d <= 1, 0.5 * d**2, d - 0.5)
+
+        return detection._profile(objective, 8, offset.dtype)
+
+    for run in (profile, jax.jit(profile)):
+        amplitude, gain, curvature, resolved = run(jnp.asarray(1e8, dtype=precision))
+        null, peak = np.asarray([-1e8 - 9.5, -1e8], dtype=precision)
+        assert gain == 2 * (peak - null)
+        np.testing.assert_allclose(
+            amplitude, 10, rtol=0, atol=max(1e-6, float(ulps(1, amplitude)))
+        )
+        assert curvature == 1 and resolved
+
+
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-@pytest.mark.parametrize("scale", [1e-6, 1e-3, 1.0, 1e6])
+@pytest.mark.parametrize("scale", [1e-8, 1e-6, 1e-3, 1.0, 1e6])
 def test_huber_profile_does_not_depend_on_the_template_scale(scale):
     """A source ten sigma above the null is found at any template scale.
 
     Truth source: the Huber loss is linear beyond delta, so the peak is at
     a = 10 / scale with twice the gain 2 (10 delta - delta^2 / 2).
-    Tolerance basis: rtol 1e-6 allows for iterative convergence in float64.
+    Tolerance basis: one standard error is one count, and the stopping
+    tolerance is 1e-6 standard errors. Eight operations cover Huber scaling,
+    the quadratic and linear terms, normalization and score differencing.
     Fails if: a rejected overshoot is discarded rather than bracketed, or the
-    expansion cannot reach an amplitude of 1e7 units.
+    expansion cannot reach an amplitude of 1e9 units.
     """
     delta = 1.345
     like = huber_loglike(jnp.array([10.0]), 1.0, delta=delta)
     a_hat, gain, _, resolved = profile_amplitude(like, jnp.zeros(1), jnp.full(1, scale))
-    np.testing.assert_allclose(a_hat * scale, 10.0, rtol=1e-6)
-    np.testing.assert_allclose(gain, 2 * (10 * delta - 0.5 * delta**2), rtol=1e-6)
+    tol = float(ulps(8, jnp.ones_like(a_hat)))
+    np.testing.assert_allclose(a_hat * scale, 10.0, rtol=tol, atol=1e-6)
+    np.testing.assert_allclose(gain, 2 * (10 * delta - 0.5 * delta**2), rtol=tol)
     assert bool(resolved)
 
 
@@ -162,7 +197,9 @@ def test_bright_poisson_source_resolves_at_the_default_budget():
 
     Truth source: with k = 100 and unit template, a = 90 and twice the gain is
     2 [100 log(10) - 90].
-    Tolerance basis: rtol 1e-9, the profile converges to rounding.
+    Tolerance basis: two logs, two products, three differences and a
+    doubling for the gain. The stopping rule permits 1e-6 formal errors
+    in amplitude; the Poisson width is sqrt(100).
     Fails if: the default iteration budget leaves a bright source unresolved
     (a = 71.5 after four iterations).
     """
@@ -172,8 +209,9 @@ def test_bright_poisson_source_resolves_at_the_default_budget():
         return jnp.sum(k * jnp.log(mu) - mu)
 
     a_hat, gain, _, resolved = profile_amplitude(like, jnp.array([10.0]), jnp.ones(1))
-    np.testing.assert_allclose(a_hat, 90.0, rtol=1e-9)
-    np.testing.assert_allclose(gain, 2 * (k * np.log(10.0) - 90.0), rtol=1e-9)
+    tol = float(ulps(8, jnp.ones_like(a_hat)))
+    np.testing.assert_allclose(a_hat, 90.0, rtol=tol, atol=1e-6 * np.sqrt(k))
+    np.testing.assert_allclose(gain, 2 * (k * np.log(10.0) - 90.0), rtol=tol)
     assert bool(resolved)
 
 
@@ -252,6 +290,25 @@ def test_float32_profile_three_sigma_off_a_large_objective_is_unresolved():
     _, _, curvature, resolved = detection._profile(objective, 0, jnp.float32)
     assert float(curvature) == 1.0
     assert not bool(resolved)
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_profile_resolves_at_a_rounded_gaussian_maximum():
+    """A slope from rounding 36/35 must still give the analytic z of 36.
+
+    One division sets the target amplitude. Two products, a subtraction
+    and a square root give the unit-noise significance.
+    """
+    like = gaussian_loglike(jnp.asarray([36.0]), 1.0)
+    found = likelihood_ratio_map(
+        ((like, jnp.zeros(1), lambda _: jnp.asarray([35.0])),), jnp.zeros(1)
+    )
+    np.testing.assert_allclose(
+        found.a_hat, [36 / 35], rtol=float(ulps(1, jnp.ones_like(found.z[0])))
+    )
+    np.testing.assert_allclose(
+        found.z, [36.0], rtol=float(ulps(4, jnp.ones_like(found.z[0])))
+    )
 
 
 @pytest.mark.float32_only(reason="float32 significance at the objective rounding floor")
@@ -335,7 +392,7 @@ def test_huber_profile_matches_a_bisection_optimum():
     data, base, template, sigma = _problem()
     data[:5] += 8.0
     like = huber_loglike(data, sigma)
-    grad = jax.grad(lambda a: like(base + a * template))
+    grad = jax.grad(lambda a: like.detection_score(base + a * template))
     lo, hi = -10.0, 10.0
     for _ in range(200):
         mid = 0.5 * (lo + hi)
@@ -379,12 +436,22 @@ def test_laplace_likelihood_is_rejected():
         likelihood_ratio_map(((like, base, lambda x: template),), jnp.zeros(1))
 
 
+@pytest.mark.float32_only(reason="curvature requires float64")
+def test_curvature_entries_refuse_before_evaluation():
+    """A float32 process refuses curvature before evaluating the model."""
+    with pytest.raises(PrecisionError, match=r"measure.*Enable x64"):
+        measure(None, {})
+    with pytest.raises(PrecisionError, match=r"curvature_block.*Enable x64"):
+        curvature_block(None, jnp.ones(1), lambda x: x)
+
+
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 def test_masked_nan_does_not_leak():
     """NaN in the data, base and template at masked pixels leaves the fit unchanged.
 
     Truth source: the closed form over the used pixels only.
-    Tolerance basis: exact-algebra (rtol 1e-12, and every output finite).
+    Tolerance basis: two eight-level pixel sums and six operations for the
+    residual, weight, products and Newton quotient.
     Fails if: a masked pixel's NaN reaches the value or a derivative (as it does when
     the derivative is taken in reverse mode through a NaN template).
     """
@@ -407,7 +474,9 @@ def test_masked_nan_does_not_leak():
         assert bool(resolved)
         assert all(np.isfinite(float(v)) for v in (a_hat, two_delta, curvature))
         if build is gaussian_loglike:
-            np.testing.assert_allclose(a_hat, want, rtol=1e-12)
+            np.testing.assert_allclose(
+                a_hat, want, rtol=float(ulps(22, jnp.ones_like(a_hat)))
+            )
     out = likelihood_ratio_map(
         ((like, poisoned(base), lambda x: poisoned(template) * x),), jnp.ones(3)
     )
@@ -449,7 +518,8 @@ def test_noise_free_companion_is_found_at_its_pixel_with_its_flux():
 
     Truth source: the injected position and flux; with ``data = base + f t(x0)`` the
     residual equals ``f t(x0)`` and, by Cauchy-Schwarz, ``z(x)`` is largest at ``x0``.
-    Tolerance basis: exact-algebra (rtol 1e-9 on the amplitude, in float64).
+    Tolerance basis: the two weighted dot products each have ceil(log2(N))
+    additions, plus eight operations for weighting, division and square root.
     Fails if: the signed root, the shared template or the position axis is mixed up.
     """
     instrument, base, flux, mask, sigma, grid = _toy_scene()
@@ -461,11 +531,10 @@ def test_noise_free_companion_is_found_at_its_pixel_with_its_flux():
     )
     best = int(jnp.argmax(out.z))
     np.testing.assert_array_equal(grid[best], [6.0, -5.0])
-    np.testing.assert_allclose(out.a_hat[best], flux, rtol=1e-9)
+    tol = float(ulps(2 * (base.size - 1).bit_length() + 8, jnp.ones_like(out.z[best])))
+    np.testing.assert_allclose(out.a_hat[best], flux, rtol=tol)
     assert float(out.z[best]) > 5.0
-    np.testing.assert_allclose(
-        out.z[best], out.a_hat[best] / out.sigma[best], rtol=1e-9
-    )
+    np.testing.assert_allclose(out.z[best], out.a_hat[best] / out.sigma[best], rtol=tol)
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
@@ -476,11 +545,10 @@ def test_batched_map_equals_the_unbatched_map():
     position at once, as everywhere else in the package.
 
     Truth source: the same map with one position at a time.
-    Tolerance basis: floating-point (1e-9 of each output's largest magnitude: a batch
-    is vmapped, which may reorder the pixel sums by an ulp, and the residual
-    ``data - base`` subtracts a star 1e3 times brighter than the companion, so
-    bitwise equality is not promised; 7 does not divide the grid, so the remainder
-    batch is exercised).
+    Tolerance basis: two dot products of ceil(log2(N)) levels and eight
+    arithmetic operations at the map amplitude or width scale. For z,
+    compare signed squared significances since square root magnifies
+    roundoff at a null. Two subtracted log likelihoods set its error scale.
     Fails if: batching drops or misorders positions, or changes the statistic.
     """
     instrument, base, flux, mask, sigma, grid = _toy_scene()
@@ -495,10 +563,18 @@ def test_batched_map_equals_the_unbatched_map():
         np.testing.assert_array_equal(a, b)
     for batch in (7, 16, None):
         batched = likelihood_ratio_map(terms, jnp.asarray(grid), batch_size=batch)
-        for a, b in zip(jax.tree.leaves(plain), jax.tree.leaves(batched), strict=True):
-            np.testing.assert_allclose(
-                a, b, rtol=0.0, atol=1e-9 * float(jnp.max(jnp.abs(a)))
-            )
+        depth = (base.size - 1).bit_length()
+        for a, b in ((plain.a_hat, batched.a_hat), (plain.sigma, batched.sigma)):
+            floor = float(ulps(2 * depth + 8, jnp.max(jnp.abs(a))))
+            np.testing.assert_allclose(a, b, rtol=0, atol=floor)
+        null = terms[0][0].detection_score(base)
+        floor = float(ulps(4 * (depth + 8), null))
+        np.testing.assert_allclose(
+            plain.z * jnp.abs(plain.z),
+            batched.z * jnp.abs(batched.z),
+            rtol=0,
+            atol=floor,
+        )
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
@@ -506,7 +582,8 @@ def test_two_terms_share_one_amplitude_like_the_summed_closed_form():
     """Two exposures give ``a_hat = sum_k t'W_k r_k / sum_k t'W_k t``.
 
     Truth source: NumPy weighted least squares over both exposures at one template.
-    Tolerance basis: exact-algebra (rtol 1e-12).
+    Tolerance basis: two weighted dot products, nine summation levels
+    per two-exposure reduction, plus eight operations for weights and ratios.
     Fails if: the terms are profiled separately or the amplitudes are averaged.
     """
     d1, b1, t, s1 = _problem(seed=2)
@@ -518,14 +595,13 @@ def test_two_terms_share_one_amplitude_like_the_summed_closed_form():
     out = likelihood_ratio_map(terms, jnp.asarray([1.0, 2.0]))
     num = np.sum(t * (d1 - b1) / s1**2) + np.sum(t * (d2 - b2) / s2**2)
     den = np.sum(t * t / s1**2) + np.sum(t * t / s2**2)
+    tol = float(ulps(26, jnp.ones_like(out.z[0])))
     # template x * t: a_hat(x) = want / x and sigma(x) = 1 / (x sqrt(den))
+    np.testing.assert_allclose(out.a_hat, (num / den) / np.array([1.0, 2.0]), rtol=tol)
     np.testing.assert_allclose(
-        out.a_hat, (num / den) / np.array([1.0, 2.0]), rtol=1e-12
+        out.sigma, 1.0 / (np.array([1.0, 2.0]) * np.sqrt(den)), rtol=tol
     )
-    np.testing.assert_allclose(
-        out.sigma, 1.0 / (np.array([1.0, 2.0]) * np.sqrt(den)), rtol=1e-12
-    )
-    np.testing.assert_allclose(out.z, num / np.sqrt(den), rtol=1e-12)
+    np.testing.assert_allclose(out.z, num / np.sqrt(den), rtol=tol)
 
 
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
@@ -1002,8 +1078,8 @@ def test_psf_template_filter_amplitude_equals_the_linear_profile_amplitude():
     definition).
     Both the inverse-variance and the unweighted forms are checked, at an integer
     position so the patch extraction is exact.
-    Tolerance basis: exact-algebra (rtol 1e-9; spline interpolation at an integer
-    position reproduces the pixels to rounding).
+    Tolerance basis: four 81-pixel reductions for weighted means and
+    dot products, seven levels each, and six weight and ratio operations.
     Fails if: the filter drops the weighting or the background, or the linear profile
     uses a different normalization.
     """
@@ -1029,7 +1105,7 @@ def test_psf_template_filter_amplitude_equals_the_linear_profile_amplitude():
         want, _, _, _ = profile_amplitude(
             gaussian_loglike(patch, sigma), np.full_like(patch, b), t_zm
         )
-        np.testing.assert_allclose(got, want, rtol=1e-9)
+        np.testing.assert_allclose(got, want, rtol=float(ulps(34, jnp.ones_like(got))))
 
 
 def _spd(n, seed, cond):

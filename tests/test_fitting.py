@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from hwoutils.constants import Mearth2kg, Msun2kg, Rearth2AU
+from hwoutils.testing import ulps
 from kinematics import (
     predict_photometry,
     predict_relative_astrometry,
@@ -74,8 +75,8 @@ class TestKepler:
     def test_matches_halley(self):
         """Fails if default trig evaluation disagrees with independent Halley.
 
-        Absolute 1e-12 and relative 1e-5 tolerances retain the original
-        solver parity floor.
+        Floating-point basis: 16 eps at unit trig amplitude covers the
+        anomaly solve (sensitivity at most two at e=0.5) and sin/cos.
         """
         M = jnp.linspace(0.01, 2 * jnp.pi - 0.01, 100)
         e = 0.5
@@ -83,8 +84,8 @@ class TestKepler:
         sinE_ref, cosE_ref = kepler(M, e, 0.0, solver=Halley())
         sinE, cosE = kepler(M, e, 0.0)
 
-        assert jnp.allclose(sinE_ref, sinE, atol=1e-12)
-        assert jnp.allclose(cosE_ref, cosE, atol=1e-12)
+        assert jnp.allclose(sinE_ref, sinE, rtol=0, atol=ulps(16, M.dtype.type(1)))
+        assert jnp.allclose(cosE_ref, cosE, rtol=0, atol=ulps(16, M.dtype.type(1)))
 
     def test_grad_finite(self):
         """Gradients w.r.t. M and e should be finite."""
@@ -365,6 +366,7 @@ class TestPredictPhotometry:
 # ============================================================================
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 class TestLoglikeRV:
     """Tests for the RV marginalized likelihood."""
 
@@ -434,6 +436,7 @@ class TestLoglikeRV:
         assert jnp.all(jnp.isfinite(g))
 
 
+@pytest.mark.float64_only(reason="measurement log densities require float64")
 class TestLoglikeAstrom:
     """Tests for the astrometry likelihood."""
 

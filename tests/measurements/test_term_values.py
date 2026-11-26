@@ -8,6 +8,7 @@ import jax
 import numpy as np
 import pytest
 from golden_systems import imaging_data, model_at, systems
+from infer.test_fit import _scene
 
 from photomancy.measurements import DMagTerm
 
@@ -74,10 +75,7 @@ def test_a_dmag_term_with_a_null_epoch_refuses_to_draw():
     of detections still draws.
     """
     detections, null = imaging_data()
-    scene, entry, _ = next(
-        (scene, entry, terms) for n, scene, entry, terms in systems() if n == "g3"
-    )
-    model = model_at(scene, entry(0))
+    model = _scene()
     key = jax.random.key(0)
     for term in (DMagTerm(null), DMagTerm(detections)):
         with pytest.raises(Exception, match="ReportTerm"):

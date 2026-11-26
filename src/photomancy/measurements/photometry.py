@@ -14,6 +14,9 @@ import jax.numpy as jnp
 from hwoutils.constants import Rearth2AU
 from hwoutils.conversions import contrast_to_delta_mag, delta_mag_to_contrast
 from hwoutils.model_paths import resolve
+from hwoutils.numerics import COARSEST
+from hwoutils.precision import require_float64
+from jax.scipy.special import log_ndtr
 from jax.scipy.stats import norm
 from optixstuff.spectral import Quadrature, Resolution, Transmission
 from orbix.system import System
@@ -31,7 +34,7 @@ from photomancy.measurements._padding import (
     _pad_2d,
     _valid_mask,
 )
-from photomancy.measurements.report import ReportPrediction, ReportRule
+from photomancy.measurements.report import ReportRule
 
 __all__ = [
     "DMagData",
@@ -44,6 +47,9 @@ __all__ = [
     "loglike_dmag",
     "system_separation_dmag",
 ]
+
+
+_MAX_DMAG = 750.0  # Magnitude at the orbit-fit contrast floor of 1e-300.
 
 
 class DMagData(eqx.Module):
@@ -483,7 +489,9 @@ def lambertian_dmag(phase_rad, distance_AU, model, radius_Rearth, flux_scale=1.0
             0
         ]
     )
-    return contrast_to_delta_mag(jnp.maximum(contrast, 1e-300))
+    # The corresponding contrast floor is not representable in float32.
+    dmag = contrast_to_delta_mag(jnp.where(contrast <= 0, 1.0, contrast))
+    return jnp.where(contrast <= 0, _MAX_DMAG, jnp.minimum(dmag, _MAX_DMAG))
 
 
 def system_separation_dmag(system, time_d, *, albedo_area_AU2=None):
@@ -552,10 +560,11 @@ def _fixed_noise_null(alpha_pred, dMag_pred, data):
     # Clip the exponent when the sampler proposes an implausibly bright orbit.
     exp_arg = jnp.clip(-0.4 * (dMag_pred - dmag0), max=200.0)
     law = ReportRule(threshold=data.snr_thresh)
-    counts = law.detection_limit(1.0) * 10.0**exp_arg
-    zero = jnp.zeros_like(counts)
-    prediction = ReportPrediction(counts, jnp.ones_like(counts), zero, zero)
-    return law.log_null_probability(1.0, prediction)
+    limit = law.detection_limit(1.0)
+    # A contrast curve supplies a continuous physical threshold, without a
+    # detector report's rounded classification.
+    counts = limit * 10.0**exp_arg
+    return log_ndtr(limit - counts)
 
 
 def loglike_dmag(alpha_pred, dMag_pred, data):
@@ -584,7 +593,11 @@ def loglike_dmag(alpha_pred, dMag_pred, data):
 
     Returns:
         Scalar log-likelihood value.
+
+    Raises:
+        PrecisionError: If float64 is unavailable.
     """
+    require_float64("Magnitude log likelihood")
     mask = data.valid  # boolean
 
     ll_null = _fixed_noise_null(alpha_pred, dMag_pred, data)
@@ -670,7 +683,7 @@ class PhotometryTerm(AbstractTerm):
             "band",
         )
 
-    def _score(self, model):
+    def _prediction_and_data(self, model):
         valid = self.data.valid
         data = PhotometryData(
             time_d=jnp.where(valid, self.data.time_d, 0.0),
@@ -692,10 +705,7 @@ class PhotometryTerm(AbstractTerm):
             self.resolution,
         )
         prediction = jnp.where(valid, prediction, 0.0)
-        z = (data.contrast - prediction) / data.contrast_err
-        detection = -0.5 * z**2 - jnp.log(data.contrast_err * jnp.sqrt(2.0 * jnp.pi))
-        rows = jnp.where(data.is_upper_limit, norm.logcdf(z), detection)
-        return jnp.sum(jnp.where(valid, rows, 0.0)), prediction
+        return prediction, data
 
     def __call__(self, model):
         """Return the scalar log-likelihood.
@@ -705,8 +715,16 @@ class PhotometryTerm(AbstractTerm):
 
         Returns:
             Scalar log-likelihood of the valid rows.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
-        return self._score(model)[0]
+        require_float64("Photometry log likelihood")
+        prediction, data = self._prediction_and_data(model)
+        z = (data.contrast - prediction) / data.contrast_err
+        detection = -0.5 * z**2 - jnp.log(data.contrast_err * jnp.sqrt(2.0 * jnp.pi))
+        rows = jnp.where(data.is_upper_limit, norm.logcdf(z), detection)
+        return jnp.sum(jnp.where(data.valid, rows, 0.0))
 
     def predict(self, model):
         """Return each row's linear contrast, ``(T,)``.
@@ -719,7 +737,7 @@ class PhotometryTerm(AbstractTerm):
             planet
             and epoch, zero on invalid rows. Shape ``(T,)``.
         """
-        return self._score(model)[1]
+        return self._prediction_and_data(model)[0]
 
     def draw(self, key, model) -> Self:
         """Draw Gaussian contrasts, censoring at each stored upper limit.
@@ -740,9 +758,11 @@ class PhotometryTerm(AbstractTerm):
         valid = data.valid
         sigma = jnp.where(valid, data.contrast_err, 1.0)
         draw = self.predict(model) + sigma * jax.random.normal(
-            key, data.contrast.shape, dtype=jnp.float64
+            key, data.contrast.shape, dtype=data.contrast_err.dtype
         )
-        censored = data.is_upper_limit & (draw < data.contrast)
+        censored = data.is_upper_limit & (
+            draw.astype(COARSEST) < data.contrast.astype(COARSEST)
+        )
         contrast = jnp.where(censored, data.contrast, draw)
         sampled = eqx.tree_at(
             lambda d: (d.contrast, d.is_upper_limit),
@@ -801,7 +821,11 @@ class DMagTerm(AbstractTerm):
 
         Returns:
             Scalar log-likelihood of the detection and null rows.
+
+        Raises:
+            PrecisionError: If float64 is unavailable.
         """
+        require_float64("Magnitude log likelihood")
         return loglike_dmag(*self._prediction(model), self.data)
 
     def predict(self, model):
@@ -844,7 +868,7 @@ class DMagTerm(AbstractTerm):
         mask = data.valid & data.is_detected
         sigma = jnp.where(mask, data.dmag_err, 1.0)
         dmag = self.predict(model)[1]
-        draw = dmag + sigma * jax.random.normal(key, dmag.shape, dtype=jnp.float64)
+        draw = dmag + sigma * jax.random.normal(key, dmag.shape, dtype=dmag.dtype)
         sampled = eqx.tree_at(
             lambda d: d.dmag_obs, data, jnp.where(mask, draw, data.dmag_obs)
         )

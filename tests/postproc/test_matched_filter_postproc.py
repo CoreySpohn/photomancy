@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from hwoutils.constants import J2000_JD
 from hwoutils.epoch import Epoch
+from hwoutils.testing import ulps
 from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
 
@@ -289,7 +290,12 @@ def _numpy_t(signal, samples):
 
 @pytest.mark.parametrize("pixel, dropped", [((31, 19), True), ((30, 16), False)])
 def test_template_edge_reference_footprint(pixel, dropped):
-    """SciPy nearest patches set the exact dof and the float64 t within 1e-10."""
+    """SciPy nearest patches set the exact dof and the reference t.
+
+    At unit t scale allow four levels each for patch mean, dot product
+    and norm, five levels each for ring mean and variance, and eight
+    operations for centering, products, normalization and the t ratio.
+    """
     position = np.array([16.0, 32.2])
     image = np.random.default_rng(13).normal(size=(33, 33))
     estimator = _edge_estimator()
@@ -305,12 +311,20 @@ def test_template_edge_reference_footprint(pixel, dropped):
     result = estimator(jnp.asarray(image), jnp.asarray(position[None]), valid)
     assert result.dof[0] == len(keep) - 1
     np.testing.assert_allclose(
-        result.statistic[0], _numpy_t(signal, keep), rtol=0, atol=1e-10
+        result.statistic[0],
+        _numpy_t(signal, keep),
+        rtol=0,
+        atol=float(ulps(30, jnp.ones_like(result.statistic[0]))),
     )
 
 
 def test_template_integer_image_interpolation():
-    """Fits to SciPy-rounded integer patches agree within float64 roundoff (1e-10)."""
+    """SciPy-rounded integer patches give the reference t.
+
+    At unit t scale allow three four-level patch reductions, two five-level
+    ring reductions and eight operations for centering, products and t.
+    The rounded integer patches themselves must agree.
+    """
     image = np.random.default_rng(14).integers(-20, 20, size=(33, 33), dtype=np.int32)
     position = np.array([16.0, 27.25])
     signal, refs = _numpy_ring_responses(
@@ -318,7 +332,10 @@ def test_template_integer_image_interpolation():
     )
     result = _edge_estimator(order=1)(jnp.asarray(image), jnp.asarray(position[None]))
     np.testing.assert_allclose(
-        result.statistic[0], _numpy_t(signal, refs), rtol=0, atol=1e-10
+        result.statistic[0],
+        _numpy_t(signal, refs),
+        rtol=0,
+        atol=float(ulps(30, jnp.ones_like(result.statistic[0]))),
     )
 
 

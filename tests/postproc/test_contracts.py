@@ -3,6 +3,7 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from hwoutils.constants import J2000_JD
 from hwoutils.epoch import Epoch
@@ -290,3 +291,89 @@ def test_single_orientation_keeps_small_float32_differences():
             ).single_orientation()
         assert not bool(eqx.filter_jit(check)(order))
     assert jax.vmap(check)(jnp.stack([turn, turn[::-1]])).tolist() == [False, False]
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_single_orientation_across_half_turn(direction):
+    """One float32 spacing across +/-180 exceeds the physical tolerance.
+
+    Both host and dynamic decisions use a common grid, so a sub-spacing
+    difference around the half turn rounds away. At zero, adjacent float32
+    values test the inclusive threshold. Fails if a NumPy delivery changes
+    admission when passed into jit instead of supplied eagerly or captured.
+    """
+    up = np.spacing(np.float32(180.0)).item()
+    science = make_frameset(n_frames=2)
+
+    def dynamic(pa):
+        return eqx.tree_at(
+            lambda s: s.telescope_pa_deg, science, pa
+        ).single_orientation()
+
+    compiled = jax.jit(dynamic)
+
+    def construct(pa):
+        return make_frameset(n_frames=2, telescope_pa_deg=pa).single_orientation()
+
+    compiled_constructor = jax.jit(construct)
+    compiled_host = jax.jit(lambda fs: fs.single_orientation())
+
+    def check_host(original, allowed):
+        host = make_frameset(n_frames=2, telescope_pa_deg=original)
+        for check in (FrameSet.single_orientation, compiled_host):
+            if allowed:
+                assert bool(check(host))
+            else:
+                with pytest.raises(ValueError, match="spread"):
+                    check(host)
+
+    for offset, valid in ((0, True), (up, False), (up / 4, True)):
+        original = direction * np.array([180.0, -180.0 + offset])
+        pa = jnp.asarray(original)
+        if valid:
+            assert bool(dynamic(pa))
+        else:
+            with pytest.raises(ValueError, match="spread"):
+                dynamic(pa)
+        assert bool(compiled(pa)) == valid
+        assert bool(compiled_constructor(original)) == valid
+        if valid:
+            assert bool(construct(original)) and bool(
+                jax.jit(lambda pa=original: construct(pa))()
+            )
+        else:
+            with pytest.raises(ValueError, match="spread"):
+                jax.jit(lambda pa=original: construct(pa))()
+        check_host(original, valid)
+
+    check_host([0.0, direction * 1e-6], True)
+    check_host([0.0, direction * np.nextafter(1e-6, np.inf)], True)
+    limit = np.float32(1e-6)
+    for last, allowed in (
+        (limit, True),
+        (np.nextafter(limit, np.float32(np.inf)), False),
+    ):
+        original = np.array([0.0, direction * last])
+        check_host(original, allowed)
+        assert bool(compiled_constructor(original)) == allowed
+        assert bool(compiled(jnp.asarray(original))) == allowed
+
+
+def test_host_and_traced_roll_inputs():
+    """Host integer and traced scalar lists share the orientation contract."""
+    assert bool(
+        make_frameset(n_frames=2, telescope_pa_deg=[-180, 180]).single_orientation()
+    )
+    with pytest.raises(ValueError, match="finite"):
+        make_frameset(n_frames=2, telescope_pa_deg=[0, np.inf])
+    with pytest.raises(ValueError, match="1D"):
+        make_frameset(n_frames=2, telescope_pa_deg=[[0], [0]])
+
+    @jax.jit
+    def aligned(last):
+        return make_frameset(
+            n_frames=2, telescope_pa_deg=[0, last]
+        ).single_orientation()
+
+    assert bool(aligned(jnp.int32(360)))
+    assert not bool(aligned(jnp.asarray(np.nan)))

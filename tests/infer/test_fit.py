@@ -18,6 +18,7 @@ import pytest
 from hwoutils.blocks import AbstractBlock
 from hwoutils.constants import GM_SUN_AU3_PER_D2, Mearth2kg, Msun2kg, Rearth2AU
 from hwoutils.model_paths import resolve
+from hwoutils.precision import PrecisionError
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
 from priorities import LogUniform, Normal, TruncatedDistribution, Uniform
@@ -491,7 +492,7 @@ def test_a_caller_defined_term_adds_only_its_own_value():
 @pytest.mark.float32_only(reason="Fit must refuse a float32 process")
 def test_refuses_without_x64():
     """Construction on the host refuses when float64 is off."""
-    with pytest.raises(RuntimeError, match="jax_enable_x64"):
+    with pytest.raises(PrecisionError, match="enable_x64"):
         Fit(_scene(), {})
 
 
@@ -1016,6 +1017,7 @@ def test_walls_follow_a_law_edited_in_place_and_survive_replace():
     chart, whose disk ignores the lower edge, adds a wall on ``e``; lowering it back
     removes it; swapping the classical block for the Cartesian one adds walls on
     ``a_AU`` and ``e``. NUTS follows: it refuses the walled edit before sampling.
+    A dynamic fit argument and a captured edited fit are both refused.
     ``dataclasses.replace`` builds a fit with the same walls. Truth: the walls of a
     fit built afresh from the edited entries. No sampling.
     """
@@ -1042,9 +1044,28 @@ def test_walls_follow_a_law_edited_in_place_and_survive_replace():
     raised = eqx.tree_at(law_e, frame, Uniform(0.2, 0.95))
     assert raised.walls == {"dynamics.orbits": ("e",)}
     assert raised.walls == Fit(raised.model, raised.free, raised.terms).walls
+    nuts = NUTS(n_warmup=10, n_draws=10)
+    key = jax.random.key(0)
     with pytest.raises(ValueError, match=r"NUTS needs .*'dynamics.orbits'.*e"):
-        run(raised, NUTS(n_warmup=10, n_draws=10), jax.random.key(0))
-    assert eqx.tree_at(law_e, raised, Uniform(0.0, 0.95)).walls == {}
+        run(raised, nuts, key)
+    with pytest.raises(ValueError, match=r"NUTS needs .*'dynamics.orbits'.*e"):
+        eqx.filter_jit(lambda k: run(raised, nuts, k))(key)
+
+    from photomancy.infer.backends._flat import require_no_walls
+
+    def admit(fit, key):
+        return require_no_walls(fit, "NUTS", key)
+
+    compiled = eqx.filter_jit(admit)
+    with pytest.raises(
+        eqx.EquinoxRuntimeError, match=r"NUTS needs .*'dynamics.orbits'.*e"
+    ):
+        jax.block_until_ready(compiled(raised, key))
+    lowered = eqx.tree_at(law_e, raised, Uniform(0.0, 0.95))
+    assert lowered.walls == {}
+    np.testing.assert_array_equal(
+        jax.random.key_data(compiled(lowered, key)), jax.random.key_data(key)
+    )
     fits = _walled_fits()
     classical, cartesian = fits["classical"][0], fits["cartesian"][0]
     swapped = eqx.tree_at(
@@ -1079,8 +1100,13 @@ def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack():
     out = eqx.filter_vmap(lambda f, k: run(f, nuts, k))(_stack_two(frame), keys)
     assert all(bool(jnp.all(jnp.isfinite(v))) for v in jax.tree.leaves(out.samples))
     cartesian = _walled_fits()["cartesian"][0]
-    with pytest.raises(ValueError, match=r"NUTS needs .*'dynamics.orbits'.*a_AU, e"):
-        eqx.filter_vmap(lambda f, k: run(f, nuts, k))(_stack_two(cartesian), keys)
+    with pytest.raises(
+        (ValueError, eqx.EquinoxRuntimeError),
+        match=r"NUTS needs .*'dynamics.orbits'.*a_AU, e",
+    ):
+        eqx.filter_jit(eqx.filter_vmap(lambda f, k: run(f, nuts, k)))(
+            _stack_two(cartesian), keys
+        ).log_weights.block_until_ready()
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
