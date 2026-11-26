@@ -12,6 +12,9 @@ import optax
 import pytest
 import toy_coronagraph as toy
 from hwoutils.model_paths import resolve
+from hwoutils.numerics import roundoff
+from jax.flatten_util import ravel_pytree
+from jax.scipy.linalg import solve_triangular
 from priorities import Normal
 from term_utils import ExposureRecord, ExposureRender
 
@@ -266,6 +269,7 @@ def _joint_fit(peak_fraction):
         "a_hat": float(detection.a_hat[best]),
         "z": float(detection.z[best]),
         "sci_data": sci_data,
+        "sci_fit": sci,
         "render": render,
         "mask": mask,
         "sigma": sigma,
@@ -312,11 +316,14 @@ def test_planet_freed_after_the_map_recovers_flux_and_offset():
     H1 agree to 5e-14 relative on the capture platform; H0's frozen offset and flux
     are exact and H1 is held to rtol 1e-2 on the offset and flux because that fit
     stops before round-off and its optimum moves with the platform (see above).
-    The H0 seam coefficients are compared through the point image they render at the
-    origin, not coefficient by coefficient: 3000 Adam steps amplify round-off, so
-    jax 0.12.1 against 0.12.0.1 moves the coefficients by 1.6e-3 (``ote``) and
-    1.1e-2 (``si``) relative, while the point image moves by 1.8e-6 of its peak.
-    The tolerance, 5e-6 of the image peak, is 3 times that.
+    The H0 golden check compares the point images at the origin. Finite Adam
+    schedules leave the fitted seams sensitive to platform arithmetic. The masked
+    Huber science likelihood gives a formal covariance from the inverse Fisher
+    information at the golden H0 fit, with the companion frozen and both seams,
+    star tilt, and star flux allowed to vary. Propagating it through the point-image
+    Jacobian gives each pixel's formal standard error. The quarter-sigma budget
+    keeps the squared maximum image difference below one sixteenth of the largest
+    formal pixel variance.
     Fails if: the map's amplitude or position is not a usable start, a stage that frees
     the planet leaves the star position or flux fixed so the planet cannot explain its
     own light, or the frozen-companion control absorbs the planet.
@@ -338,16 +345,36 @@ def test_planet_freed_after_the_map_recovers_flux_and_offset():
         rtol = 1e-6 if name == "h0" else 1e-2
         np.testing.assert_allclose(model.scene.offset, want["offset"], rtol=rtol)
         np.testing.assert_allclose(model.scene.flux, want["flux"], rtol=rtol, atol=0)
-    golden_h0 = eqx.tree_at(
-        lambda i: (i.ote, i.si),
-        h0.instrument,
-        (jnp.asarray(golden["h0"]["ote"]), jnp.asarray(golden["h0"]["si"])),
+    golden_entries = {
+        "exposures[0].tilt": jnp.asarray(golden["h0"]["tilt"]),
+        _STAR_FLUX: jnp.asarray(golden["h0"]["star_flux"]),
+        "instrument.ote": jnp.asarray(golden["h0"]["ote"]),
+        "instrument.si": jnp.asarray(golden["h0"]["si"]),
+    }
+    sci = out["sci_fit"]
+    h0_science_fit = Fit(
+        h0, {path: sci.free[path] for path in golden_entries}, sci.terms
     )
+    theta, unravel = ravel_pytree(golden_entries)
     origin = jnp.zeros(2)
-    expected = np.asarray(toy.point_image(golden_h0, origin))
-    np.testing.assert_allclose(
-        toy.point_image(h0.instrument, origin),
-        expected,
-        rtol=0,
-        atol=5e-6 * np.max(np.abs(expected)),
+
+    def point_image(flat):
+        model = h0_science_fit.model_at(unravel(flat))
+        return toy.point_image(model.instrument, origin)
+
+    expected = point_image(theta)
+    actual = toy.point_image(h0.instrument, origin)
+    jac = jax.jacfwd(point_image)(theta).reshape(-1, theta.size)
+    info = h0_science_fit.information(
+        golden_entries, kind="fisher", include_prior=False
     )
+    # If I = L L^T, the pixel variances are the squared column norms of L^-1 J^T.
+    image_sigma = jnp.linalg.norm(
+        solve_triangular(jnp.linalg.cholesky(info), jac.T, lower=True), axis=0
+    )
+    peak_sigma = float(jnp.max(image_sigma))
+    assert np.isfinite(peak_sigma) and peak_sigma > 0
+    atol = 0.25 * peak_sigma  # tol: statistical, quarter of peak formal error
+    # One comparison subtraction at the summed magnitude of the two image operands.
+    atol += float(roundoff(jnp.max(jnp.abs(expected) + jnp.abs(actual)), n_ops=1))
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=atol)
