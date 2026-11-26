@@ -106,6 +106,12 @@ prediction's); a trial that fails is profiled by Newton steps through the fit's
 likelihood instead, which holds for any prediction and costs nested derivatives through
 the renderer. Its `batch_size` follows the rule above: `None` maps all trials at once.
 
+For a masked 24 × 24 image with 10-electron Gaussian noise, rendering the background
+and planet template in float32 before a float64 `detect` fit shifted `z` by
+0.0001414 sigma at both `z = 9.98` and `z = 4.01` (fitted amplitudes changed by
+1.521e-5 and 3.625e-5 relative to float64, respectively), so use a float64 render
+when a detection falls within 0.0001414 sigma of the threshold in this configuration.
+
 The significance holds for the likelihood you give it. A Huber likelihood gives a map
 that resists outliers, but its `z` is then a likelihood-ratio root rather than a matched
 filter, and its null distribution has to be calibrated (against residuals of the same
