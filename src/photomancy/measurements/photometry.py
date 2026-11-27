@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 from hwoutils.constants import Rearth2AU
 from hwoutils.conversions import contrast_to_delta_mag, delta_mag_to_contrast
+from hwoutils.interpolation import interp_linear
 from hwoutils.model_paths import resolve
 from hwoutils.numerics import COARSEST
 from hwoutils.precision import require_float64
@@ -396,15 +397,12 @@ _UNDETECTABLE_DMAG0 = -1e8
 def interpolate_contrast_curve(alpha_pred, sep_grid, dmag0_grid, limit_grid=None):
     """Interpolate the dMag0 detection limit at each epoch, gradient-safely.
 
-    The contrast-curve grids are padded (trailing sep=0, dmag0=-inf). A raw
-    ``jnp.interp`` over that non-monotonic query grid divides by zero in its slopes
-    and subtracts ``inf - inf`` -- it returns a finite value but a nan gradient
-    w.r.t. the separation (and even the wrong value when the curve is padded), so a
-    fit cannot initialize. The padded columns (identified by ``dmag0 == -inf``) are
-    pushed just past the last real separation as a strictly increasing tail, and the
-    undetectable limit is a finite sentinel. The real curve is left untouched, so the
-    value is exact within the curve; out-of-curve separations map to the sentinel
-    (``flux_ratio -> 0``, no penalty) with a finite gradient.
+    The contrast-curve grids are padded (trailing sep=0, dmag0=-inf). Interpolating
+    the raw grid can produce an incorrect limit and a nonfinite gradient. Move the
+    padded knots just past the last real separation as a strictly increasing tail
+    and replace their limits with a finite sentinel. Interpolation preserves the
+    real curve and maps separations outside it to the sentinel (zero flux ratio,
+    no penalty) with a finite gradient.
 
     Args:
         alpha_pred: Predicted separation per epoch. Shape ``(N,)``.
@@ -425,7 +423,7 @@ def interpolate_contrast_curve(alpha_pred, sep_grid, dmag0_grid, limit_grid=None
     fp = jnp.where(is_pad, _UNDETECTABLE_DMAG0, dmag0_grid)
 
     def _one(alpha_val, xp_row, fp_row):
-        return jnp.interp(
+        return interp_linear(
             alpha_val,
             xp_row,
             fp_row,
@@ -443,7 +441,7 @@ def interpolate_contrast_curve(alpha_pred, sep_grid, dmag0_grid, limit_grid=None
     last = jnp.argmax(real_sep, axis=1)[:, None]
     edge_limit = jnp.take_along_axis(limit_grid, last, axis=1)
     fp_limit = jnp.where(is_pad, edge_limit, limit_grid)
-    limit = jax.vmap(jnp.interp)(alpha_pred, xp, fp_limit)
+    limit = jax.vmap(interp_linear)(alpha_pred, xp, fp_limit)
     return dmag0, limit
 
 
