@@ -244,7 +244,9 @@ def test_a_pool_with_no_live_constant_weighs_zero_without_nan(fit):
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.medium(reason="the completed report run under filter_vmap, 17 s")
+@pytest.mark.slow(
+    reason="compiles the completed report under filter_vmap and a loop, 36.17 s on CI"
+)
 def test_the_report_run_under_vmap_equals_the_loop():
     """Fails if a batch of report fits differs from the per-world loop.
 

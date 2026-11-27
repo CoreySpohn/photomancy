@@ -179,6 +179,9 @@ def test_posterior_checks_its_fields():
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
+@pytest.mark.slow(
+    reason="compiles a Laplace fit with a leaf and an orbit block, 31.23 s on CI"
+)
 def test_ravel_samples_round_trips_a_block_fit():
     """``ravel_samples`` flattens leaf and block entries and ``unravel`` inverts it."""
     fit = Fit(

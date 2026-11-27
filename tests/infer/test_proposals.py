@@ -368,7 +368,9 @@ def _modes_and_evidence(label, backend):
             )
 
 
-@pytest.mark.medium(reason="four seeds of four L-BFGS modes on the frame-chart orbit")
+@pytest.mark.slow(
+    reason="runs four seeds of four L-BFGS modes on the frame chart, 30.59 s on CI"
+)
 def test_laplace_keeps_its_modes_and_refuses_the_evidence_above_the_khat_limit():
     """``Laplace`` on the frame-chart orbit keeps its stored modes, and F2 holds.
 
@@ -394,8 +396,8 @@ def test_laplace_keeps_its_modes_and_refuses_the_evidence_above_the_khat_limit()
     _modes_and_evidence("laplace", Laplace(n_draws=2000, n_modes=4, min_eigenvalue=1.0))
 
 
-@pytest.mark.medium(
-    reason="four seeds of four Pathfinder paths on the frame-chart orbit"
+@pytest.mark.slow(
+    reason="runs four seeds of four Pathfinder paths on the frame chart, 32.72 s on CI"
 )
 def test_pathfinder_keeps_its_paths_and_refuses_the_evidence_above_the_khat_limit():
     """``Pathfinder`` keeps its stored paths (sorted by ELBO), and F2 holds.

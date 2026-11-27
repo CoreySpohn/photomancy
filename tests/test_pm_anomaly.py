@@ -138,9 +138,10 @@ class _Forward(eqx.Module):
         return jnp.concatenate([ra, dec, anom])
 
 
-# Medium: The joint seven-parameter PMa fit needs a cold gradient and Hessian compile.
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="compiles joint seven-parameter PMa gradient and Hessian, 32.93 s on CI"
+)
 def test_joint_relative_astrom_and_pma_recovers_mass():
     """Relative astrometry pins the orbit shape; the PMa then pins the mass.
 
