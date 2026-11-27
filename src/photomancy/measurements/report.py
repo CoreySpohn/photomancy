@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.epoch import Epoch
+from hwoutils.interpolation import interp_linear
 from hwoutils.leaves import as_float_leaf
 from hwoutils.model_paths import resolve
 from hwoutils.numerics import COARSEST
@@ -438,7 +439,7 @@ class PrecomputedReportPredictor(AbstractReportPredictor):
         safe_last = jnp.where(jnp.isfinite(last), last, 0.0)
         xp = jnp.where(finite, xp, safe_last[:, None] + jnp.arange(xp.shape[1]) + 1.0)
         rate = jax.vmap(
-            lambda x, knots, rates: jnp.interp(x, knots, rates, left=0.0, right=0.0)
+            lambda x, knots, rates: interp_linear(x, knots, rates, left=0.0, right=0.0)
         )(sep, xp, fp)
         rate = jnp.where((sep >= first) & (sep <= last), rate, 0.0)
         counts = contrast * rate * clean.science_s

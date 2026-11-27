@@ -1112,8 +1112,8 @@ def test_detect_false_alarms_match_the_poisson_null():
 
 @pytest.mark.float64_only(reason="curvature requires float64")
 @vv.case("scene-fits", "code-verification", basis="floating-point")
-@pytest.mark.medium(
-    reason="second-order autodiff through the renderer compiles the Hessian"
+@pytest.mark.slow(
+    reason="second-order autodiff through the renderer, about 350 programs, 45 s cold"
 )
 def test_measure_covariance_matches_the_curvature_block_and_the_fisher_matrix():
     """The covariance is the inverse curvature block, the inverse Fisher at the truth.

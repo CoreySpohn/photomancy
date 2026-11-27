@@ -131,7 +131,9 @@ def _unscreened(comp, shape, key, n_pool):
     return z[keep], log_z + jax.scipy.special.logsumexp(rest) - jnp.log(n_pool)
 
 
-@pytest.mark.medium(reason="compiles the completed sample once, 15 s cold")
+@pytest.mark.slow(
+    reason="compiles the completed sample once, about 1000 programs, 39 s cold"
+)
 def test_completed_weight_is_the_generic_weight(fit):
     """Fails if a completed weight or its reported density is not the generic one.
 
@@ -171,7 +173,7 @@ class _MassTerm(AbstractTerm):
         raise NotImplementedError
 
 
-@pytest.mark.medium(reason="2000 keys at four shapes on one compiled stage, 12 s cold")
+@pytest.mark.slow(reason="2000 keys at four shapes on one compiled stage, 31-33 s cold")
 def test_the_screened_weight_is_unbiased(fit):
     """Fails if the screen biases the marginal weight of ``shape``.
 
@@ -295,7 +297,9 @@ def test_scale_rotate_density_is_normalized_and_matches_the_draws():
     assert abs(w.mean() - p_draws) < 4 * np.hypot(se_draws, se_prior)
 
 
-@pytest.mark.medium(reason="both backends and one vmapped run, 21 s cold")
+@pytest.mark.slow(
+    reason="both backends and one vmapped run, a few large programs, 55 s cold"
+)
 def test_any_epoch_and_few_epoch_agree_and_vmap_equals_the_loop():
     """Fails if the engines disagree on the evidence of one row, or vmap differs.
 
@@ -372,7 +376,9 @@ def test_any_epoch_refits_with_over_dispersed_kernels_in_every_round():
         np.testing.assert_allclose(w @ w.mT, 4.0 * (n @ n.mT), rtol=1e-6)
 
 
-@pytest.mark.medium(reason="one completed sample on two thresholds, 15 s cold")
+@pytest.mark.slow(
+    reason="one completed sample on two thresholds, about 1160 programs, 63 s cold"
+)
 def test_the_pool_reading_gates_the_evidence_and_matches_a_direct_one(fit):
     """Fails if the pool fraction is not the Kish size of the screen over the pool.
 

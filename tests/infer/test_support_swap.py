@@ -199,7 +199,9 @@ def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
     )
 
 
-@pytest.mark.medium(reason="three re-expressions, two block types, 12 s cold")
+@pytest.mark.slow(
+    reason="three re-expressions, two block types, about 1450 programs, 44 s cold"
+)
 def test_a_block_change_outside_its_laws_is_refused():
     """A changed epoch or a changed parameterization cannot be shown contained.
 
@@ -283,7 +285,9 @@ def test_the_gate_still_refuses_a_swap_that_leaves_few_draws():
     assert np.all(np.isnan(out.log_weights)) and np.isnan(out.log_evidence)
 
 
-@pytest.mark.medium(reason="compiles the swap batched and per world, 14 s cold")
+@pytest.mark.slow(
+    reason="compiles the swap batched and per world, about 1400 programs, 38 s cold"
+)
 def test_a_swap_over_two_worlds_equals_the_loop():
     """``filter_vmap`` over stacked worlds equals the per-world loop.
 

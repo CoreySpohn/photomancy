@@ -1083,7 +1083,7 @@ def test_walls_follow_a_law_edited_in_place_and_survive_replace():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-@pytest.mark.medium(reason="two-world NUTS compile, about 10 s cold")
+@pytest.mark.slow(reason="two-world NUTS compile, about 560 programs, 37 s cold")
 def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack():
     """Fails if a stack of wall-free fits is refused, or a stack of walled fits runs.
 
