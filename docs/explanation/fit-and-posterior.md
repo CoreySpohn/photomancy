@@ -262,6 +262,46 @@ assert all(
 )
 ```
 
+## A refused reweighting falls back to a refit
+
+The precise measurements above are a datum that reweighting cannot absorb: the cloud drawn
+under the broad posterior has almost no draws where the sharp likelihood lives. The
+function `update` makes the cheap move when it works and refits when it does not. It calls
+`append_term` (or `replace_term`, when given an `index`) with the gate, and on a refusal
+it runs the given backend on the new fit.
+
+```python continuation
+from photomancy.infer import Laplace, update
+
+updated = update(
+    posterior,
+    sharp,
+    Laplace(n_draws=4000),
+    jax.random.key(1),
+    min_n_eff=500,
+    max_khat=0.7,
+)
+
+y_all = [0.9, 1.3, 1.1, 1.02, 0.98, 1.01]
+noise = np.diag([0.25] * 3 + [1e-4] * 3)
+log_z6_exact = multivariate_normal(np.zeros(6), noise + np.ones((6, 6))).logpdf(y_all)
+
+print(updated.log_evidence, log_z6_exact)
+assert abs(updated.log_evidence - log_z6_exact) < 1e-6
+```
+
+Here the reweighting is refused and the refit with `Laplace` returns the evidence of all
+six measurements, exact for this Gaussian problem. The refit must return the same layout
+as the cloud, the same number of draws and the same kind of posterior, so the backend is
+built with the posterior's draw count. Because the choice between the two branches is one
+`jax.lax.cond`, `update` can be traced and mapped over a stack of fits.
+
+The `info` of the result is an `UpdateInfo`. Its `reweight` field holds the gate reading
+(`n_eff`, `khat`, `refused`), where `refused` is true exactly when the refit ran. Its
+`refit` field is the backend's own info, the same as `run(...).info` where the refit ran
+and filled with NaN, zero or false elsewhere, so `info.refit.proposal_valid` says whether
+the refit's proposal could vouch for its weights.
+
 ## One offset per instrument
 
 A radial-velocity instrument has a constant offset that the likelihood integrates out
@@ -328,46 +368,6 @@ assert len(posterior.fit.terms) == 2
 
 One term, three rows: each epoch alone carries no information, because its offset absorbs
 a single velocity, and the merge is what lets the three constrain the slope together.
-
-## A refused reweighting falls back to a refit
-
-The precise measurements above are a datum that reweighting cannot absorb: the cloud drawn
-under the broad posterior has almost no draws where the sharp likelihood lives. The
-function `update` makes the cheap move when it works and refits when it does not. It calls
-`append_term` (or `replace_term`, when given an `index`) with the gate, and on a refusal
-it runs the given backend on the new fit.
-
-```python continuation
-from photomancy.infer import Laplace, update
-
-updated = update(
-    posterior,
-    sharp,
-    Laplace(n_draws=4000),
-    jax.random.key(1),
-    min_n_eff=500,
-    max_khat=0.7,
-)
-
-y_all = [0.9, 1.3, 1.1, 1.02, 0.98, 1.01]
-noise = np.diag([0.25] * 3 + [1e-4] * 3)
-log_z6_exact = multivariate_normal(np.zeros(6), noise + np.ones((6, 6))).logpdf(y_all)
-
-print(updated.log_evidence, log_z6_exact)
-assert abs(updated.log_evidence - log_z6_exact) < 1e-6
-```
-
-Here the reweighting is refused and the refit with `Laplace` returns the evidence of all
-six measurements, exact for this Gaussian problem. The refit must return the same layout
-as the cloud, the same number of draws and the same kind of posterior, so the backend is
-built with the posterior's draw count. Because the choice between the two branches is one
-`jax.lax.cond`, `update` can be traced and mapped over a stack of fits.
-
-The `info` of the result is an `UpdateInfo`. Its `reweight` field holds the gate reading
-(`n_eff`, `khat`, `refused`), where `refused` is true exactly when the refit ran. Its
-`refit` field is the backend's own info, the same as `run(...).info` where the refit ran
-and filled with NaN, zero or false elsewhere, so `info.refit.proposal_valid` says whether
-the refit's proposal could vouch for its weights.
 
 ## The backends
 
