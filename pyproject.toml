@@ -18,7 +18,7 @@ classifiers = [
 ]
 dependencies = [
     # The pixel likelihood renders expected electrons with coronagraphoto.expected.
-    "coronagraphoto>=7.0.0",  # unreleased: next release, see .github/sibling-pins.txt
+    "coronagraphoto>=7.0.0",
     "equinox>=0.13.2",
     "hwoutils[jax]>=3.0.0",  # unreleased: next release
     "jax>=0.8.1",

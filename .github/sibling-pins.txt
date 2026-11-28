@@ -1,4 +1,2 @@
 # Unreleased sibling libraries, applied as uv overrides in the same resolve.
 # Each pins the sibling's release head; delete a pin once PyPI carries that version.
-coronagraphoto @ git+https://github.com/CoreySpohn/coronagraphoto@6d242a92e3cf0c328a346929ada872a5c150d551
-tiptilt @ git+https://github.com/CoreySpohn/tiptilt@1f5190aa732c6638cb67364531ae959a02dbe324
