@@ -15,6 +15,7 @@ from hwoutils.epoch import Epoch
 from hwoutils.precision import like
 from optixstuff import ConstantThroughput, Detector, Instrument, SimplePrimary
 from optixstuff.coronagraph import AbstractTableCoronagraph, SourcePSFs
+from optixstuff.data import ExposureData
 from optixstuff.exposure import FramePlan
 from optixstuff.grids import Frame, Image, Measure, PixelGrid
 from optixstuff.performance import PerformanceCurves, SampledProfile
@@ -201,3 +202,18 @@ def float_leaves(tree):
         for leaf in jax.tree.leaves(tree)
         if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating)
     )
+
+
+def make_data(instrument, exposure, values, *, quantity="electrons", **quality):
+    """Measured ``values`` of shape ``(W, ny, nx)`` on the detector grid, as data.
+
+    ``quality`` is ``variance``, ``valid`` or ``flags`` of the same shape.
+    """
+    image = Image(
+        values,
+        instrument.detector.grid,
+        ("band",),
+        Measure.integral(),
+        quantity,
+    )
+    return ExposureData(image, exposure, **quality)

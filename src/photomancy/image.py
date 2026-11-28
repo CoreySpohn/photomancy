@@ -60,9 +60,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from coronagraphoto import expected, planet_source_support
+from hwoutils.leaves import is_traced
 from hwoutils.model_paths import join, resolve
 from hwoutils.precision import require_float64
-from optixstuff import AbstractDetector, Exposure, Instrument
+from optixstuff import AbstractDetector, Exposure, ExposureData, Instrument
 from optixstuff.detector import _floored
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.rates import floor_rate
@@ -71,7 +72,7 @@ from skyscapes.scene import Scene
 from photomancy.infer._precision import _as_wide
 from photomancy.infer.fit import AbstractTerm
 
-__all__ = ["ImageModel", "ImageTerm"]
+__all__ = ["ImageForward", "ImageModel", "ImageTerm"]
 
 
 _COUNTS = ("electron", "electrons")
@@ -227,6 +228,135 @@ def _lit_planets_outside(scene, instrument, exposure):
     return int(outside.sum())
 
 
+def _held_or_resolved(model, held, path):
+    return held if path is None else resolve(model, path)
+
+
+def _render(
+    model,
+    *,
+    scene_path,
+    instrument,
+    instrument_path,
+    exposure,
+    exposure_path,
+    static_beyond_speckle,
+):
+    """The one place that turns a model into ``(detector, rates, plan)``.
+
+    The scene is ``resolve(model, scene_path)`` (``""`` is the model itself); each of
+    the instrument and the exposure is the held object or, with its path, the node of
+    ``model`` at that path.
+    """
+    instrument = _held_or_resolved(model, instrument, instrument_path)
+    exposure = _held_or_resolved(model, exposure, exposure_path)
+    rates = expected(
+        resolve(model, scene_path),
+        instrument,
+        exposure,
+        static_beyond_speckle=static_beyond_speckle,
+    )
+    return instrument.detector, rates, exposure.plan
+
+
+def _footprint_paths(instrument_path, exposure_path):
+    """Model paths that move the field of view (band nodes, primary, detector)."""
+    paths = []
+    if exposure_path is not None:
+        paths.append(join(exposure_path, "quadrature"))
+    if instrument_path is not None:
+        paths += [join(instrument_path, "primary"), join(instrument_path, "detector")]
+    return tuple(paths)
+
+
+def _assumptions(static_beyond_speckle):
+    return ("static_beyond_speckle",) if static_beyond_speckle else ()
+
+
+def _check_planets(scene, instrument, exposure):
+    planets = _lit_planets_outside(scene, instrument, exposure)
+    if planets:
+        raise ValueError(
+            f"{planets} lit planet(s) lie outside the coronagraph's source domain "
+            "at a band centre. Start the fit inside the domain or hold them"
+        )
+
+
+def _check_sources(
+    model, *, scene_path, instrument, instrument_path, exposure, exposure_path
+):
+    """Refuse a lit planet outside the source domain."""
+    scene = resolve(model, scene_path)
+    instrument = _held_or_resolved(model, instrument, instrument_path)
+    exposure = _held_or_resolved(model, exposure, exposure_path)
+    _check_planets(scene, instrument, exposure)
+
+
+def _check_exclusive(instrument, instrument_path, exposure, exposure_path):
+    if (instrument is None) == (instrument_path is None):
+        raise ValueError("give exactly one of instrument and instrument_path")
+    if (exposure is None) == (exposure_path is None):
+        raise ValueError("give exactly one of exposure and exposure_path")
+    if exposure is not None and exposure.plan is None:
+        raise ValueError("the exposure needs a FramePlan: build it with plan=")
+
+
+def _data_grid(grid):
+    return replace(grid, orientation=None)
+
+
+def _check_data_image(image, instrument, *, what):
+    """Refuse data that is not integral electrons (or rates) on the detector grid."""
+    if image.measure != Measure.integral():
+        raise ValueError(
+            f"{what}: the data holds {image.quantity!r} as {image.measure}, not an "
+            "integral per pixel"
+        )
+    if "event" in image.leading_axes:
+        raise ValueError(
+            f"{what}: the data has an 'event' axis; build one term per event with "
+            "ExposureData.take(index)"
+        )
+    if instrument is not None and _data_grid(image.grid) != _data_grid(
+        instrument.detector.grid
+    ):
+        raise ValueError(
+            f"{what}: the data is on {image.grid}, not on the detector grid "
+            f"{instrument.detector.grid}: score data on the instrument's own pixels"
+        )
+
+
+def _from_exposure_data(data, instrument, exposure, exposure_path):
+    """Electrons, the usable-pixel mask and the exposure a term holds, from data."""
+    image = data.image
+    if image.quantity not in _COUNTS:
+        raise ValueError(
+            f"ImageTerm needs electrons, but the data holds {image.quantity!r}: "
+            "score a rate image through ForwardTerm(ImageForward.from_exposure_data"
+            "(data), MaskedLogLikelihood.from_exposure_data(data))"
+        )
+    _check_data_image(image, instrument, what="ImageTerm")
+    if data.variance is not None:
+        raise ValueError(
+            "the data carries its own variance, but ImageTerm scores with the "
+            "detector law as the noise model: use ForwardTerm(ImageForward"
+            ".from_exposure_data(data), MaskedLogLikelihood.from_exposure_data(data))"
+        )
+    if exposure is not None:
+        raise ValueError(
+            "ExposureData supplies the exposure: drop exposure=, or name the "
+            "model's exposure with exposure_path"
+        )
+    valid = data.valid
+    if "draw" in image.leading_axes:
+        if is_traced(valid):
+            raise ValueError("valid must be concrete to compare it across draws")
+        if not bool(jnp.all(valid == valid[:1])):
+            raise ValueError("the draws have unequal valid masks: score them apart")
+        valid = valid[0]
+    return image.data, valid, data.exposure if exposure_path is None else None
+
+
 def _check_score_shape(mask, observed, shape):
     if mask.shape != shape or observed.shape[-3:] != shape:
         raise ValueError(
@@ -361,7 +491,7 @@ class ImageTerm(AbstractTerm):
     def __init__(
         self,
         observed_e,
-        mask,
+        mask=None,
         instrument: Instrument | None = None,
         exposure: Exposure | None = None,
         scene_path: str = "",
@@ -373,34 +503,50 @@ class ImageTerm(AbstractTerm):
         """Store the frame, checking an ``Image`` against the held instrument.
 
         Args:
-            observed_e: Observed electrons, an :class:`optixstuff.grids.Image` or an
-                array of shape ``(*batch, W, ny, nx)``.
-            mask: Boolean array of shape ``(W, ny, nx)`` shared by all frames.
+            observed_e: Observed electrons, an :class:`optixstuff.grids.Image`, an
+                array of shape ``(*batch, W, ny, nx)`` or an
+                :class:`optixstuff.ExposureData` (see the class docstring).
+            mask: Boolean array of shape ``(W, ny, nx)`` shared by all frames. It is
+                required for an array or an ``Image``; with ``ExposureData`` it is
+                optional and combined by logical and with the data's ``valid``.
             instrument: The held instrument, or ``None`` with ``instrument_path``.
-            exposure: The held exposure, or ``None`` with ``exposure_path``.
+            exposure: The held exposure, or ``None`` with ``exposure_path``. Not
+                accepted with ``ExposureData``, which supplies it.
             scene_path: Model path of the scene.
             instrument_path: Model path of the instrument, or ``None``.
-            exposure_path: Model path of the exposure, or ``None``.
+            exposure_path: Model path of the exposure, or ``None``. With
+                ``ExposureData`` it takes precedence over the data's exposure.
             static_beyond_speckle: Keep the static light where only the speckle
                 field lacks data (see the class docstring). A Python, NumPy or
                 concrete 0-d JAX boolean, stored as a Python bool.
 
         Raises:
             TypeError: When the mask or ``static_beyond_speckle`` is not boolean.
-            ValueError: When the mask is None or the observed image has the
-                wrong quantity, detector grid or sky orientation.
+            ValueError: When the mask is None for an array or an ``Image``, the
+                observed image has the wrong quantity, detector grid or sky
+                orientation, or ``ExposureData`` has a variance, an event axis,
+                draws with unequal ``valid``, or comes with an explicit ``exposure``.
         """
-        if isinstance(observed_e, Image):
+        data_valid = None
+        if isinstance(observed_e, ExposureData):
+            observed_e, data_valid, exposure = _from_exposure_data(
+                observed_e, instrument, exposure, exposure_path
+            )
+        elif isinstance(observed_e, Image):
             _check_image(observed_e, instrument, exposure)
             observed_e = observed_e.data
         self.observed_e = jnp.asarray(observed_e)
-        if mask is None:
+        if mask is None and data_valid is None:
             raise ValueError(
                 "give a boolean mask or use ImageTerm.on_support(model, ...)"
             )
-        self.mask = jnp.asarray(mask)
-        if self.mask.dtype != jnp.bool_:
-            raise TypeError(f"mask must be boolean, got {self.mask.dtype}")
+        if mask is not None:
+            mask = jnp.asarray(mask)
+            if mask.dtype != jnp.bool_:
+                raise TypeError(f"mask must be boolean, got {mask.dtype}")
+        if data_valid is not None:
+            mask = data_valid if mask is None else mask & data_valid
+        self.mask = mask
         self.instrument = instrument
         self.exposure = exposure
         self.scene_path = scene_path
@@ -417,12 +563,9 @@ class ImageTerm(AbstractTerm):
                 "static_beyond_speckle must be a Python bool, got "
                 f"{type(self.static_beyond_speckle).__name__}"
             )
-        if (self.instrument is None) == (self.instrument_path is None):
-            raise ValueError("give exactly one of instrument and instrument_path")
-        if (self.exposure is None) == (self.exposure_path is None):
-            raise ValueError("give exactly one of exposure and exposure_path")
-        if self.exposure is not None and self.exposure.plan is None:
-            raise ValueError("the exposure needs a FramePlan: build it with plan=")
+        _check_exclusive(
+            self.instrument, self.instrument_path, self.exposure, self.exposure_path
+        )
         if self.observed_e.ndim < 3:
             raise ValueError("observed_e must have shape (*batch, W, ny, nx)")
 
@@ -438,50 +581,41 @@ class ImageTerm(AbstractTerm):
         Returns:
             A term whose mask is ``supported_mask(model)`` at construction.
         """
-        data = observed_e.data if isinstance(observed_e, Image) else observed_e
-        term = cls(observed_e, jnp.ones(np.shape(data)[-3:], bool), **kwargs)
-        mask = np.asarray(term.supported_mask(model))
+        if isinstance(observed_e, ExposureData):
+            term = cls(observed_e, **kwargs)
+        else:
+            data = observed_e.data if isinstance(observed_e, Image) else observed_e
+            term = cls(observed_e, jnp.ones(np.shape(data)[-3:], bool), **kwargs)
+        mask = np.asarray(term.mask) & np.asarray(term.supported_mask(model))
         return eqx.tree_at(lambda t: t.mask, term, jnp.asarray(mask))
 
     @property
     def assumptions(self) -> tuple[str, ...]:
         """``("static_beyond_speckle",)`` when the option is set, else empty."""
-        return ("static_beyond_speckle",) if self.static_beyond_speckle else ()
+        return _assumptions(self.static_beyond_speckle)
 
     def _instrument(self, model):
-        if self.instrument_path is None:
-            return self.instrument
-        return resolve(model, self.instrument_path)
+        return _held_or_resolved(model, self.instrument, self.instrument_path)
 
     def _exposure(self, model):
-        if self.exposure_path is None:
-            return self.exposure
-        return resolve(model, self.exposure_path)
+        return _held_or_resolved(model, self.exposure, self.exposure_path)
 
     def _rates(self, model):
         """Return ``(detector, rates, plan)`` at ``model``."""
-        instrument = self._instrument(model)
-        exposure = self._exposure(model)
-        rates = expected(
-            resolve(model, self.scene_path),
-            instrument,
-            exposure,
+        return _render(
+            model,
+            scene_path=self.scene_path,
+            instrument=self.instrument,
+            instrument_path=self.instrument_path,
+            exposure=self.exposure,
+            exposure_path=self.exposure_path,
             static_beyond_speckle=self.static_beyond_speckle,
         )
-        return instrument.detector, rates, exposure.plan
 
     @property
     def footprint_paths(self) -> tuple[str, ...]:
         """Model paths that move the field of view (band nodes, primary, detector)."""
-        paths = []
-        if self.exposure_path is not None:
-            paths.append(join(self.exposure_path, "quadrature"))
-        if self.instrument_path is not None:
-            paths += [
-                join(self.instrument_path, "primary"),
-                join(self.instrument_path, "detector"),
-            ]
-        return tuple(paths)
+        return _footprint_paths(self.instrument_path, self.exposure_path)
 
     def supported_mask(self, model) -> jax.Array:
         """Return the detector pixels the coronagraph data cover, shape ``(W, ny, nx)``.
@@ -550,12 +684,7 @@ class ImageTerm(AbstractTerm):
                 "ImageTerm.supported_mask(model) into the mask or crop the "
                 "detector"
             )
-        planets = _lit_planets_outside(scene, instrument, exposure)
-        if planets:
-            raise ValueError(
-                f"{planets} lit planet(s) lie outside the coronagraph's source domain "
-                "at a band centre. Start the fit inside the domain or hold them"
-            )
+        _check_planets(scene, instrument, exposure)
 
     def __call__(self, model) -> jax.Array:
         """Return the scalar log likelihood, summed over scored pixels in float64.
@@ -713,3 +842,193 @@ class ImageTerm(AbstractTerm):
         frames = frames.reshape(*batch, *frames.shape[1:])
         observed = jnp.where(self.mask, frames, self.observed_e)
         return eqx.tree_at(lambda term: term.observed_e, self, observed)
+
+
+_QUANTITIES = ("electrons", "electron/s")
+
+
+class ImageForward(eqx.Module):
+    """The expected detector image of a model, as the forward of a ``ForwardTerm``.
+
+    It renders with the same function as :class:`ImageTerm` and returns the mean
+    detector prediction, so a law that is not the detector's own (a calibrated rate
+    image with its stated variance, a robust density) can score it::
+
+        ForwardTerm(
+            ImageForward.from_exposure_data(data, instrument_path="instrument"),
+            MaskedLogLikelihood.from_exposure_data(data),
+        )
+
+    The instrument and the exposure each have one owner, a field of the forward or
+    the node of the model at a path, as for :class:`ImageTerm`.
+
+    Attributes:
+        instrument: A held :class:`optixstuff.Instrument`, or ``None``.
+        exposure: A held :class:`optixstuff.Exposure` with a ``plan``, or ``None``.
+        scene_path: Model path of the :class:`skyscapes.Scene`; ``""`` is the model.
+        instrument_path: Model path of the instrument, or ``None`` when it is held.
+        exposure_path: Model path of the exposure, or ``None`` when it is held.
+        quantity: ``"electrons"``, the mean electrons accumulated over the plan (what
+            :meth:`ImageTerm.predict` returns), or ``"electron/s"``, that mean divided
+            by the plan's live time: the mean detector count rate, dark terms included.
+        static_beyond_speckle: The option of :class:`ImageTerm`.
+        reads: Model paths a held build cached; empty.
+    """
+
+    instrument: Instrument | None = None
+    exposure: Exposure | None = None
+    scene_path: str = eqx.field(static=True, default="")
+    instrument_path: str | None = eqx.field(static=True, default=None)
+    exposure_path: str | None = eqx.field(static=True, default=None)
+    quantity: str = eqx.field(static=True, default="electrons")
+    static_beyond_speckle: bool = eqx.field(static=True, default=False)
+    reads: ClassVar[tuple[str, ...]] = ()
+
+    def __check_init__(self):
+        """Require one source each for instrument and exposure and a known quantity."""
+        _check_exclusive(
+            self.instrument, self.instrument_path, self.exposure, self.exposure_path
+        )
+        if self.quantity not in _QUANTITIES:
+            raise ValueError(
+                f"quantity must be one of {_QUANTITIES}, got {self.quantity!r}"
+            )
+
+    @classmethod
+    def from_exposure_data(
+        cls,
+        data: ExposureData,
+        *,
+        instrument: Instrument | None = None,
+        instrument_path: str | None = None,
+        exposure_path: str | None = None,
+        scene_path: str = "",
+        static_beyond_speckle: bool = False,
+    ) -> Self:
+        """Build the forward of a measured image: its quantity, grid and exposure.
+
+        The quantity is the data's (``"electrons"`` or ``"electron/s"``). The data's
+        exposure is held unless ``exposure_path`` is given, which takes precedence and
+        stores nothing from the data.
+
+        Args:
+            data: Measured values with an integral measure and no event axis.
+            instrument: The held instrument, whose detector grid the data must be on,
+                or ``None`` with ``instrument_path``.
+            instrument_path: Model path of the instrument, or ``None``.
+            exposure_path: Model path of the exposure, or ``None``.
+            scene_path: Model path of the scene.
+            static_beyond_speckle: The option of :class:`ImageTerm`.
+
+        Returns:
+            The forward whose output is comparable with ``data.image.data``.
+
+        Raises:
+            ValueError: For another quantity, a measure that is not integral, an
+                event axis, or a grid that is not the held detector's.
+        """
+        image = data.image
+        if image.quantity not in _QUANTITIES:
+            raise ValueError(
+                f"the data holds {image.quantity!r}; ImageForward predicts one of "
+                f"{_QUANTITIES}"
+            )
+        _check_data_image(image, instrument, what="ImageForward")
+        return cls(
+            instrument=instrument,
+            exposure=data.exposure if exposure_path is None else None,
+            scene_path=scene_path,
+            instrument_path=instrument_path,
+            exposure_path=exposure_path,
+            quantity=image.quantity,
+            static_beyond_speckle=static_beyond_speckle,
+        )
+
+    def rates(self, model):
+        """Return the detector, rates and plan at ``model``, as ``ImageTerm`` renders.
+
+        Args:
+            model: The model PyTree holding the scene, and the instrument and exposure
+                at their paths when they are not held.
+
+        Returns:
+            ``(detector, rates, plan)``: the instrument's detector, the
+            :class:`optixstuff.Rates` of the render and the exposure's frame plan.
+        """
+        return _render(
+            model,
+            scene_path=self.scene_path,
+            instrument=self.instrument,
+            instrument_path=self.instrument_path,
+            exposure=self.exposure,
+            exposure_path=self.exposure_path,
+            static_beyond_speckle=self.static_beyond_speckle,
+        )
+
+    def __call__(self, model) -> jax.Array:
+        """Return the predicted image, shape ``(W, ny, nx)``, in ``quantity``.
+
+        Args:
+            model: The model PyTree, as for :meth:`rates`.
+
+        Returns:
+            The mean detector prediction in ``quantity``.
+        """
+        detector, rates, plan = self.rates(model)
+        mean = detector.mean_and_variance(rates, plan)[0]
+        if self.quantity == "electrons":
+            return mean
+        return mean / jnp.atleast_1d(plan.live_time_s)[:, None, None]
+
+    def image(self, model) -> Image:
+        """Return the prediction as a named :class:`optixstuff.grids.Image`.
+
+        The grid is the detector's with no orientation, the axes are ``("band",)``,
+        the measure is integral and the quantity is :attr:`quantity`.
+
+        Args:
+            model: The model PyTree, as for :meth:`rates`.
+
+        Returns:
+            The named prediction; its ``data`` is ``self(model)``.
+        """
+        instrument = _held_or_resolved(model, self.instrument, self.instrument_path)
+        return Image(
+            self(model),
+            _data_grid(instrument.detector.grid),
+            ("band",),
+            Measure.integral(),
+            self.quantity,
+        )
+
+    @property
+    def footprint_paths(self) -> tuple[str, ...]:
+        """Model paths that move the field of view (band nodes, primary, detector)."""
+        return _footprint_paths(self.instrument_path, self.exposure_path)
+
+    @property
+    def assumptions(self) -> tuple[str, ...]:
+        """``("static_beyond_speckle",)`` when the option is set, else empty."""
+        return _assumptions(self.static_beyond_speckle)
+
+    def check(self, model) -> None:
+        """Raise when a lit planet lies outside the coronagraph's source domain.
+
+        Call it where ``model`` is concrete. The forward scores no pixels, so the
+        coverage of a mask is the likelihood's to state.
+
+        Args:
+            model: The concrete model PyTree, as for :meth:`rates`.
+
+        Raises:
+            ValueError: When a lit planet lies outside the coronagraph's source domain
+                at a band centre.
+        """
+        _check_sources(
+            model,
+            scene_path=self.scene_path,
+            instrument=self.instrument,
+            instrument_path=self.instrument_path,
+            exposure=self.exposure,
+            exposure_path=self.exposure_path,
+        )

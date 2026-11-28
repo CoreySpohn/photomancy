@@ -13,6 +13,7 @@ through a uniform ``Backend`` that returns one ``Posterior``. That machinery is
 measurement-term modules build on it.
 """
 
+from photomancy.image import ImageForward, ImageTerm
 from photomancy.measurements import (
     AbstractReportPredictor,
     CountRateTable,
@@ -40,6 +41,8 @@ __all__ = [
     "AbstractReportPredictor",
     "CountRateTable",
     "DMagTerm",
+    "ImageForward",
+    "ImageTerm",
     "PhotometryTerm",
     "PrecomputedReportPredictor",
     "ProperMotionAnomalyTerm",

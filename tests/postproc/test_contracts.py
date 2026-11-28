@@ -1,5 +1,6 @@
 """Tests for the post-processing seam contract types (FrameSet, DetectionStats)."""
 
+import coronagraphoto as cp
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -7,6 +8,10 @@ import numpy as np
 import pytest
 from hwoutils.constants import J2000_JD
 from hwoutils.epoch import Epoch
+from hwoutils.testing import ulps
+from image_scene import BANDS, make_data, make_detector, make_instrument, make_scene
+from optixstuff import stack_exposure_data
+from optixstuff.exposure import FramePlan
 from optixstuff.grids import PixelGrid
 from optixstuff.spectral import Band
 
@@ -377,3 +382,129 @@ def test_host_and_traced_roll_inputs():
 
     assert bool(aligned(jnp.int32(360)))
     assert not bool(aligned(jnp.asarray(np.nan)))
+
+
+# ---- FrameSet.from_exposure_data ----
+
+_ROLLS = (10.0, 250.0, 30.0, 100.0)
+_TIMES = (3.0, 1.0, 4.0, 2.0)
+
+
+def _events(
+    rolls=_ROLLS, times=_TIMES, n_frames=1, offsets=None, variance=False, bands=BANDS
+):
+    """Stacked single-band events on the toy detector, valid masks that differ."""
+    instrument = make_instrument(make_detector())
+    scene = make_scene()
+    shape = (len(bands), *instrument.detector.shape)
+    rng = np.random.default_rng(0)
+    items = []
+    for i, (roll, time_d) in enumerate(zip(rolls, times, strict=True)):
+        exposure = cp.build_exposure(
+            scene,
+            instrument,
+            bands,
+            time_d=time_d,
+            roll_deg=roll,
+            offset_mas=None if offsets is None else offsets[i],
+            plan=FramePlan(frame_time_s=1000.0, n_frames=n_frames),
+        )
+        valid = np.ones(shape, bool)
+        valid[:, i, i] = False
+        items.append(
+            make_data(
+                instrument,
+                exposure,
+                rng.poisson(50.0, size=shape).astype(float),
+                valid=valid,
+                variance=rng.uniform(1.0, 2.0, size=shape) if variance else None,
+            )
+        )
+    return items
+
+
+def _fs(data, **kwargs):
+    return FrameSet.from_exposure_data(
+        data, fwhm_px=3.0, epoch=Epoch(J2000_JD), **kwargs
+    )
+
+
+def test_single_frame_events_become_frames_in_order():
+    """Fails if events are reordered, a mask is taken from one frame or a field is lost.
+
+    Truth source: the inputs, typed here. Four single-frame events with rolls
+    10, 250, 30 and 100 degrees at times 3, 1, 4 and 2 days (not time ordered),
+    each masking a different pixel, give four frames in event order with the
+    times, rolls, 1000 s frame times and variance as given; ``valid`` is the and of
+    the four masks as ones and zeros. The default policy refuses these rolls as
+    a series with one roll, and accepts rolls that agree modulo 360 degrees.
+    Tolerance basis: exact (no arithmetic).
+    """
+    items = _events(variance=True)
+    data = stack_exposure_data(items)
+    fs = _fs(data, rolls="per_frame")
+    np.testing.assert_array_equal(fs.frames, data.image.data[:, 0])
+    np.testing.assert_array_equal(fs.time_d, _TIMES)
+    np.testing.assert_array_equal(fs.frame_time_s, 1000.0)
+    np.testing.assert_array_equal(fs.telescope_pa_deg, _ROLLS)
+    np.testing.assert_array_equal(fs.noise_variance, data.variance[:, 0])
+    want = np.ones(fs.frames.shape[1:])
+    for i in range(4):
+        want[i, i] = 0.0
+    np.testing.assert_array_equal(fs.valid, want)
+    assert fs.band == BANDS[0] and fs.noise_variance is not None
+    with pytest.raises(ValueError, match="per_frame"):
+        _fs(data)
+    same = stack_exposure_data(_events(rolls=(10.0, 370.0, -350.0, 10.0)))
+    assert _fs(same).frames.shape[0] == 4
+
+
+def test_an_accumulated_event_is_refused_or_kept_as_one_frame():
+    """Fails if an accumulated draw is repeated, divided or silently accepted.
+
+    Truth source: the inputs. Events of five 1000 s frames raise by default; with
+    ``accumulated="coadd"`` there is one frame per event, of 5000 s, holding the
+    input electrons unchanged (the total equals the input's: no repetition).
+    Tolerance basis: exact.
+    """
+    data = stack_exposure_data(_events(n_frames=5))
+    with pytest.raises(ValueError, match="coadd"):
+        _fs(data, rolls="per_frame")
+    fs = _fs(data, rolls="per_frame", accumulated="coadd")
+    assert fs.frames.shape[0] == 4
+    np.testing.assert_array_equal(fs.frame_time_s, 5000.0)
+    np.testing.assert_array_equal(fs.frames, data.image.data[:, 0])
+    assert float(fs.frames.sum()) == float(data.image.data.sum())
+
+
+def test_frame_sets_refuse_what_they_cannot_hold_and_follow_a_common_offset():
+    """Fails if two bands, draws or unequal offsets pass, or the centre ignores them.
+
+    Truth source: the contract. Two bands and a draw axis raise; events with unequal
+    pointing offsets raise; with one offset the grid centre is the pixel of that
+    offset, computed here from the grid's own ``unit_to_pixel``. Tolerance basis:
+    exact refusals; ``ulps(4, expected)`` for the centre.
+    """
+    two = Band(600.0, 700.0)
+    with pytest.raises(ValueError, match="one band"):
+        _fs(stack_exposure_data(_events(bands=(BANDS[0], two))), rolls="per_frame")
+    draws = stack_exposure_data(_events()[:1] * 2, axis="draw")
+    with pytest.raises(ValueError, match="leading_axes"):
+        _fs(draws)
+    unequal = [[1.0, 2.0], [1.0, 2.5]]
+    with pytest.raises(ValueError, match="different offsets"):
+        _fs(
+            stack_exposure_data(
+                _events(rolls=(0.0, 0.0), times=(0.0, 1.0), offsets=unequal)
+            )
+        )
+    offset = [5.0, -3.0]
+    data = stack_exposure_data(
+        _events(rolls=(0.0, 0.0), times=(0.0, 1.0), offsets=[offset, offset])
+    )
+    fs = _fs(data)
+    grid = data.image.grid
+    x, y = grid.unit_to_pixel(offset[0] * 1e-3, offset[1] * 1e-3)
+    assert (float(x), float(y)) != (grid.center_x, grid.center_y)
+    assert abs(fs.grid.center_x - float(x)) <= float(ulps(4, x))
+    assert abs(fs.grid.center_y - float(y)) <= float(ulps(4, y))

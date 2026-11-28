@@ -233,6 +233,52 @@ class MaskedLogLikelihood(_FixedNoiseLikelihood):
         else:
             self._noise = _Covariance(sigma, mask, None, None, (log_norm,), (log_norm,))
 
+    @classmethod
+    def from_exposure_data(
+        cls,
+        data,
+        *,
+        kind: str = "gaussian",
+        shape_param: float | None = None,
+        mask: jax.Array | None = None,
+    ) -> "MaskedLogLikelihood":
+        """Build the density of a measured image with its stated variance.
+
+        The values are ``data.image.data``, the scale is ``sqrt(data.variance)`` and
+        the used pixels are ``data.valid`` (and ``mask``, when given). Normalization
+        is the builder's: the result equals the matching ``*_loglike`` of those
+        arrays.
+
+        Args:
+            data: An ``optixstuff.ExposureData`` with a variance (read by attribute;
+                this subpackage imports no astronomy library). Data without one takes
+                the detector law instead: :class:`photomancy.ImageTerm`.
+            kind: ``"gaussian"``, ``"laplace"``, ``"huber"`` or ``"student_t"``.
+            shape_param: ``delta`` for Huber (default 1.345), ``nu`` for Student-t
+                (default 4.0); not accepted for the other two.
+            mask: Optional boolean array broadcastable to the data, combined with
+                ``data.valid`` by logical and.
+
+        Returns:
+            The log likelihood ``predicted -> scalar``.
+
+        Raises:
+            ValueError: For data without a variance, an unknown ``kind`` or a
+                ``shape_param`` the kind does not take.
+        """
+        values, sigma, used = _law_inputs(data, mask)
+        if kind in ("gaussian", "laplace"):
+            if shape_param is not None:
+                raise ValueError(f"the {kind} density takes no shape_param")
+            return _build(values, sigma, used, kind)
+        if kind == "huber":
+            delta = 1.345 if shape_param is None else shape_param
+            return huber_loglike(values, sigma, used, delta=delta)
+        if kind == "student_t":
+            nu = 4.0 if shape_param is None else shape_param
+            return student_t_loglike(values, sigma, used, nu=nu)
+        raise ValueError(f"kind must be one of {tuple(_KERNELS)}, got {kind!r}")
+
     def __call__(self, predicted):
         """Return the log-likelihood of ``predicted`` (broadcastable to ``data``).
 
@@ -393,6 +439,34 @@ class LowRankGaussianLogLikelihood(_FixedNoiseLikelihood):
             -_LOG_SQRT_2PI,
         )
 
+    @classmethod
+    def from_exposure_data(
+        cls, data, basis, *, mask=None
+    ) -> "LowRankGaussianLogLikelihood":
+        """Build the correlated Gaussian of a measured image with its variance.
+
+        The values are ``data.image.data``, the diagonal scale is
+        ``sqrt(data.variance)`` and the used pixels are ``data.valid`` (and ``mask``,
+        when given). Construct outside JAX tracing.
+
+        Args:
+            data: An ``optixstuff.ExposureData`` with a variance (read by attribute).
+                Data without one takes the detector law instead:
+                :class:`photomancy.ImageTerm`.
+            basis: Array of shape ``(data.image.data.size, rank)`` in flattened image
+                order and data units.
+            mask: Optional boolean array broadcastable to the data, combined with
+                ``data.valid`` by logical and.
+
+        Returns:
+            The log likelihood ``predicted -> scalar``.
+
+        Raises:
+            ValueError: For data without a variance.
+        """
+        values, sigma, used = _law_inputs(data, mask)
+        return low_rank_gaussian_loglike(values, sigma, basis, used)
+
     def _whiten(self, image):
         return (jnp.where(self.mask, image, 0) / self.sigma).ravel()
 
@@ -535,6 +609,17 @@ def _kernel_log_const(kind, shape):
         - math.lgamma(0.5 * shape)
         - 0.5 * math.log(shape * math.pi)
     )
+
+
+def _law_inputs(data, mask):
+    """Values, scale and used-pixel mask of measured data that states its variance."""
+    if data.variance is None:
+        raise ValueError(
+            "the data states no variance: use ImageTerm for the detector's own noise "
+            "law, or build the data with a variance"
+        )
+    used = data.valid if mask is None else data.valid & jnp.asarray(mask, dtype=bool)
+    return data.image.data, jnp.sqrt(data.variance), used
 
 
 def _build(data, sigma, mask, kind, shape_param=0.0):

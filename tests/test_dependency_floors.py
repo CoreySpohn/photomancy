@@ -19,7 +19,7 @@ SKY_FLOORS = {
     # Next releases (not yet on PyPI; see .github/sibling-pins.txt).
     "orbix": Version("6.0.0"),  # sky design and Thiele-Innes block APIs
     "skyscapes": Version("6.0.0"),  # scene sky frame and local-zodi models
-    "coronagraphoto": Version("7.0.0"),  # renders on optixstuff 7 types
+    "coronagraphoto": Version("7.1.0"),  # renders on optixstuff 7 types; observe_data
 }
 
 

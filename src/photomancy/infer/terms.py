@@ -51,7 +51,10 @@ class ForwardTerm(AbstractTerm):
     ``likelihood(forward(model))``. A forward that holds a build made from model
     values (an exposure built from the scene, say) declares the model paths that
     build read in its own ``reads``; the term reports them, so ``Fit`` refuses to free
-    a path the forward would not see change.
+    a path the forward would not see change. In the same way the term reports the
+    forward's ``footprint_paths`` and ``assumptions`` and calls its ``check(model)``,
+    each only when the forward defines it, so a ``Fit`` tests the endpoints of the
+    leaves that move the field of view of an :class:`photomancy.ImageForward`.
 
     Attributes:
         forward_fields: Forward differentiation uses ``forward``.
@@ -73,6 +76,26 @@ class ForwardTerm(AbstractTerm):
     def reads(self) -> tuple[str, ...]:
         """Model paths the forward's held build read: its ``reads``, else none."""
         return tuple(getattr(self.forward, "reads", ()))
+
+    @property
+    def footprint_paths(self) -> tuple[str, ...]:
+        """Model paths that move the field of view: the forward's, else none."""
+        return tuple(getattr(self.forward, "footprint_paths", ()))
+
+    @property
+    def assumptions(self) -> tuple[str, ...]:
+        """Names of the assumptions the forward declares, else none."""
+        return tuple(getattr(self.forward, "assumptions", ()))
+
+    def check(self, model) -> None:
+        """Run the forward's ``check`` at a concrete ``model`` when it has one.
+
+        Args:
+            model: The concrete model to test.
+        """
+        check = getattr(self.forward, "check", None)
+        if check is not None:
+            check(model)
 
     def __check_init__(self):
         """Refuse a forward or likelihood that is not an ``eqx.Module``."""

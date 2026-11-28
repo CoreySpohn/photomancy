@@ -12,6 +12,13 @@ from hwoutils.leaves import canonical
 from hwoutils.numerics import roundoff
 from hwoutils.precision import PrecisionError
 from hwoutils.testing import assert_precision_closed, precision_pair, ulps
+from image_scene import (
+    make_data,
+    make_detector,
+    make_exposure,
+    make_instrument,
+    make_scene,
+)
 from jax.test_util import check_grads
 from priorities import Normal
 from scipy import integrate, stats
@@ -19,6 +26,7 @@ from scipy import integrate, stats
 from photomancy.infer import MAP, Fit, run
 from photomancy.infer.likelihoods import (
     LowRankGaussianLogLikelihood,
+    MaskedLogLikelihood,
     gaussian_loglike,
     huber_loglike,
     laplace_loglike,
@@ -614,4 +622,87 @@ def test_map_with_a_float32_forward():
     assert np.isfinite(value) and np.all(np.isfinite(gradient["mu"]))
     np.testing.assert_allclose(
         post.samples["mu"], expected, rtol=0, atol=float(ulps(4, np.float32(1.7)))
+    )
+
+
+def _data_with_variance(variance=True):
+    instrument = make_instrument(make_detector("poisson"))
+    scene = make_scene()
+    exposure = make_exposure(scene, instrument)
+    rng = np.random.default_rng(1)
+    shape = (1, *instrument.detector.shape)
+    valid = np.ones(shape, bool)
+    valid[0, 3, 4] = False
+    return make_data(
+        instrument,
+        exposure,
+        rng.normal(size=shape),
+        quantity="electron/s",
+        variance=rng.uniform(0.5, 2.0, size=shape) if variance else None,
+        valid=valid,
+    )
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.parametrize(
+    ("kind", "shape_param"),
+    [("gaussian", None), ("laplace", None), ("huber", None), ("student_t", 7.0)],
+)
+def test_a_law_from_data_is_the_builder_on_its_values_scale_and_valid_pixels(
+    kind, shape_param
+):
+    """Fails if the scale is the variance, the mask is dropped or a default is wrong.
+
+    Truth source: the released builder of the same kind on ``data.image.data``,
+    ``sqrt(data.variance)`` and ``data.valid`` (combined with ``mask``), with that
+    builder's default shape parameter when none is given. Tolerance basis:
+    exact-algebra (equal leaves; a variance of 0.5 to 2 makes a missing square root
+    change every term).
+    """
+    data = _data_with_variance()
+    extra = np.ones(data.valid.shape, bool)
+    extra[0, 7, 9] = False
+    sigma = jnp.sqrt(data.variance)
+    used = data.valid & extra
+    keyword = {} if shape_param is None else {"shape_param": shape_param}
+    built = MaskedLogLikelihood.from_exposure_data(
+        data, kind=kind, mask=extra, **keyword
+    )
+    builder = BUILDERS[kind]
+    name = {"huber": "delta", "student_t": "nu"}.get(kind)
+    options = {} if name is None or shape_param is None else {name: shape_param}
+    assert eqx.tree_equal(built, builder(data.image.data, sigma, used, **options))
+    assert not bool(built.mask[0, 3, 4]) and not bool(built.mask[0, 7, 9])
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_laws_from_data_refuse_what_they_cannot_score():
+    """Fails if a missing variance, an unknown kind or a stray shape is accepted.
+
+    Truth source: the contract. Data without a variance names ``ImageTerm`` as the
+    detector-law route, for both laws; an unknown kind and a shape parameter on a
+    density that takes none raise. The low-rank law from data is the builder's:
+    rank zero reproduces the Gaussian. Tolerance basis: exact.
+    """
+    bare = _data_with_variance(variance=False)
+    with pytest.raises(ValueError, match="ImageTerm"):
+        MaskedLogLikelihood.from_exposure_data(bare)
+    with pytest.raises(ValueError, match="ImageTerm"):
+        LowRankGaussianLogLikelihood.from_exposure_data(
+            bare, np.zeros((bare.valid.size, 0))
+        )
+    data = _data_with_variance()
+    with pytest.raises(ValueError, match="kind must be one of"):
+        MaskedLogLikelihood.from_exposure_data(data, kind="cauchy")
+    with pytest.raises(ValueError, match="takes no shape_param"):
+        MaskedLogLikelihood.from_exposure_data(data, shape_param=2.0)
+    if not jax.config.jax_enable_x64:  # the low-rank density needs float64
+        return
+    flat = LowRankGaussianLogLikelihood.from_exposure_data(
+        data, np.zeros((data.valid.size, 0))
+    )
+    gauss = MaskedLogLikelihood.from_exposure_data(data)
+    predicted = data.image.data + 0.3
+    np.testing.assert_allclose(
+        flat(predicted), gauss(predicted), rtol=float(ulps(8, gauss(predicted)))
     )

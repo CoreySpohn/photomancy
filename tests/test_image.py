@@ -16,12 +16,19 @@ from hwoutils.testing import ulps
 from image_scene import (
     BANDS,
     GaussianCoronagraph,
+    make_data,
     make_detector,
     make_exposure,
     make_instrument,
     make_scene,
 )
-from optixstuff import AbstractSpeckleField, Detector, Rates
+from optixstuff import (
+    AbstractSpeckleField,
+    Detector,
+    ExposureData,
+    Rates,
+    stack_exposure_data,
+)
 from optixstuff.coronagraph import MultiBandCoronagraph
 from optixstuff.exposure import FramePlan
 from optixstuff.grids import Image, Measure, PixelGrid, SkyOrientation
@@ -29,10 +36,13 @@ from optixstuff.spectral import Band, Quadrature
 from priorities import LogUniform, Normal
 from scipy import stats
 from skyscapes.physical_model import LambertianPhysicalModel
+from skyscapes.scene import FlatStar
 
 from photomancy import detection
-from photomancy.image import ImageModel, ImageTerm, _ImageScore
+from photomancy.image import ImageForward, ImageModel, ImageTerm, _ImageScore
 from photomancy.infer import MAP, Fit, run
+from photomancy.infer.likelihoods import MaskedLogLikelihood, gaussian_loglike
+from photomancy.infer.terms import ForwardTerm
 from photomancy.orbit.sheets import SheetSum
 
 _PATHS = {"scene_path": "scene", "instrument_path": "instrument"}
@@ -1312,3 +1322,441 @@ def test_map_fits_flux_scale_with_a_narrow_instrument(monkeypatch):
     np.testing.assert_allclose(
         post.samples[path], wide.samples[path], rtol=0, atol=2 * bound
     )
+
+
+# ---- ExposureData: the term, the forward and the laws built from data ----
+
+
+@pytest.fixture(scope="module")
+def measured(poisson_image):
+    """The shared scene observed once: ``(model, exposure, data, released counts)``."""
+    model, exposure, _ = poisson_image
+    key = jax.random.key(0)
+    data = cp.observe_data(key, model.scene, model.instrument, exposure)
+    counts = cp.observe(key, model.scene, model.instrument, exposure).data
+    return model, exposure, data, counts
+
+
+def _displaced(model):
+    """The model with its planet contrast scaled by 1.2."""
+    grid = model.scene.planets[0].physical_model.contrast_grid
+    return eqx.tree_at(
+        lambda m: m.scene.planets[0].physical_model.contrast_grid, model, grid * 1.2
+    )
+
+
+def _values(term, model):
+    """The residual everywhere, and the score where float64 is available."""
+    out = [np.asarray(term.residual(model))]
+    if jax.config.jax_enable_x64:
+        out.append(np.asarray(term(model)))
+    return out
+
+
+def _finite_where_scored(term, values):
+    """The residual is finite on the scored pixels and the score is finite."""
+    residual, *score = values
+    return bool(
+        np.isfinite(residual[np.asarray(term.mask)]).all()
+        and all(np.isfinite(x) for x in score)
+    )
+
+
+def _nan_equal(a, b):
+    return np.array_equal(a, b, equal_nan=True)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_a_term_built_from_exposure_data_is_the_released_term(measured):
+    """Fails if the data spelling stores or scores anything the array spelling does not.
+
+    Truth source: the released term on the same electrons (``observe``'s array, an
+    all-True mask, the instrument and the exposure). Tolerance basis: exact-algebra,
+    bitwise: both terms hold the same leaves and run the same program. The
+    ``__call__`` and ``fisher_root`` comparisons run where float64 is available;
+    ``split`` rates and ``residual`` run in both lanes, at the truth model and at a
+    displaced one.
+    """
+    model, exposure, data, counts = measured
+    np.testing.assert_array_equal(data.image.data, counts)
+    spec = dict(instrument=model.instrument, scene_path="scene")
+    supported = np.asarray(ImageTerm(data, **spec).supported_mask(model))
+    assert not supported.all()
+    for mask in (None, supported):
+        ones = jnp.ones(counts.shape, bool) if mask is None else mask
+        new = ImageTerm(data, mask, **spec)
+        old = ImageTerm(counts, ones, model.instrument, exposure, "scene")
+        assert eqx.tree_equal(new, old)
+        for at in (model, _displaced(model)):
+            assert eqx.tree_equal(new.split(at)[0], old.split(at)[0])
+            if jax.config.jax_enable_x64:
+                np.testing.assert_array_equal(new.fisher_root(at), old.fisher_root(at))
+            got, want = _values(new, at), _values(old, at)
+            assert all(_nan_equal(a, b) for a, b in zip(got, want, strict=True))
+            if mask is not None:
+                assert _finite_where_scored(new, got)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_the_forward_is_the_term_prediction_in_either_quantity(measured):
+    """Fails if the forward renders its own way or divides by the wrong time.
+
+    Truth source: exact algebra, one renderer: ``ImageForward`` in electrons is
+    ``ImageTerm.predict`` (bitwise), and in electrons per second times the live time
+    it is the same array to two roundings (``ulps(2, expected)``). The data
+    spelling holds the data's quantity, grid and exposure. ``image`` names the
+    prediction: quantity, integral measure, band axis and the detector grid with no
+    orientation. The plan has four frames, so the live time is not one frame.
+    """
+    model, exposure, data, _ = measured
+    four = eqx.tree_at(lambda e: e.plan, exposure, FramePlan(2500.0, 4))
+    held = dict(instrument=model.instrument, scene_path="scene")
+    from_data = ImageForward.from_exposure_data(data, **held)
+    assert from_data.exposure is data.exposure and from_data.quantity == "electrons"
+    for plan_exposure in (exposure, four):
+        electrons = ImageForward(exposure=plan_exposure, **held)
+        rate = ImageForward(exposure=plan_exposure, quantity="electron/s", **held)
+        want = ImageTerm(data, instrument=model.instrument, scene_path="scene").predict(
+            model
+        )
+        if plan_exposure is exposure:
+            np.testing.assert_array_equal(electrons(model), want)
+        else:
+            want = electrons(model)
+        live = float(plan_exposure.plan.live_time_s)
+        assert live == 1.0e4
+        back = np.asarray(rate(model)) * live
+        assert np.all(np.abs(back - np.asarray(want)) <= np.asarray(ulps(2, want)))
+    image = rate.image(model)
+    assert (image.quantity, image.measure, image.leading_axes) == (
+        "electron/s",
+        Measure.integral(),
+        ("band",),
+    )
+    assert image.grid == replace(model.instrument.detector.grid, orientation=None)
+    np.testing.assert_array_equal(image.data, rate(model))
+    assert electrons.image(model).quantity == "electrons"
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_the_forward_passes_static_beyond_speckle_to_the_renderer():
+    """Fails if the forward drops the option or keeps a second renderer without it.
+
+    Truth source: ``ImageTerm.predict`` with the same option on a detector wider
+    than the speckle field, where the default render is exactly zero outside the
+    field and the optioned render is the static scene (``predict`` of the term).
+    Tolerance basis: exact-algebra, bitwise. The forward names the option in its
+    ``assumptions`` and is the held instrument or the one at a model path.
+    """
+    model, exposure = _speckle_setup(24, 12)
+    model = ImageModel(model.scene, model.instrument, (exposure,))
+    shape = (1, *model.instrument.detector.shape)
+    term = ImageTerm(
+        jnp.zeros(shape),
+        jnp.ones(shape, bool),
+        exposure=exposure,
+        static_beyond_speckle=True,
+        **_PATHS,
+    )
+    plain = ImageForward(exposure=exposure, **_PATHS)
+    kept = ImageForward(exposure=exposure, static_beyond_speckle=True, **_PATHS)
+    by_path = ImageForward(
+        exposure_path="exposures[0]", static_beyond_speckle=True, **_PATHS
+    )
+    assert not np.array_equal(plain(model), kept(model))
+    np.testing.assert_array_equal(kept(model), term.predict(model))
+    np.testing.assert_array_equal(by_path(model), term.predict(model))
+    assert (kept.assumptions, plain.assumptions) == (("static_beyond_speckle",), ())
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+def test_the_electrons_rate_of_a_dark_only_scene_is_the_dark_rate():
+    """Fails if the rate omits the dark term or divides by the frame time.
+
+    Truth source: constants typed here. A star of zero flux and a planet of zero
+    contrast leave only dark current, 0.01 electron per pixel per second, so the
+    prediction is 0.01 at every pixel, over a plan of four frames of 2500 s: 100
+    electrons and 0.01 electron per second. Dividing by the 2500 s frame gives 0.04;
+    dropping the dark term gives zero.
+    Tolerance basis: ``rtol=1e-5``, float32 accumulation over the quadrature.
+    """
+    grid = GaussianCoronagraph().grid
+    pitch = float(grid.frame.lod_to_arcsec(550.0)) * 0.3
+    detector = Detector(
+        pixel_scale_arcsec=pitch,
+        shape=(24, 24),
+        qe=0.8,
+        dark_current_e_per_pixel_s=0.01,
+    )
+    instrument = make_instrument(detector)
+    scene = make_scene(contrast=1e-10)
+    scene = eqx.tree_at(lambda s: s.star, scene, FlatStar(flux_phot_per_nm_m2=0.0))
+    exposure = make_exposure(scene, instrument, time_s=2500.0)
+    exposure = eqx.tree_at(lambda e: e.plan, exposure, FramePlan(2500.0, 4))
+    model = ImageModel(scene, instrument)
+    for quantity, want in (("electrons", 100.0), ("electron/s", 0.01)):
+        forward = ImageForward(
+            instrument=instrument,
+            exposure=exposure,
+            scene_path="scene",
+            quantity=quantity,
+        )
+        np.testing.assert_allclose(forward(model), want, rtol=1e-5)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="image log densities require float64")
+def test_the_exposure_path_takes_precedence_over_the_data(measured):
+    """Fails if the data's exposure wins over the model's, or both exposures are held.
+
+    Truth source: the released term holding the model's exposure. The data's roll is
+    changed to 30 degrees: the score at the model is the released one and does not
+    move with the data's roll; moving the model's roll changes it. An explicit
+    ``exposure=`` beside data raises. Tolerance basis: exact (equality).
+    """
+    model, exposure, data, counts = measured
+    model = ImageModel(model.scene, model.instrument, (exposure,))
+    turned = eqx.tree_at(
+        lambda d: d.exposure.pointing.roll_deg, data, jnp.asarray(30.0)
+    )
+    spec = dict(instrument=model.instrument, scene_path="scene")
+    path = ImageTerm.on_support(model, data, exposure_path="exposures[0]", **spec)
+    other = ImageTerm.on_support(model, turned, exposure_path="exposures[0]", **spec)
+    released = ImageTerm.on_support(
+        model,
+        counts,
+        instrument=model.instrument,
+        exposure=exposure,
+        scene_path="scene",
+    )
+    assert path.exposure is None and other.exposure is None
+    assert float(path(model)) == float(other(model)) == float(released(model))
+    rolled = eqx.tree_at(
+        lambda m: m.exposures[0].pointing.roll_deg, model, jnp.asarray(20.0)
+    )
+    assert float(path(rolled)) != float(path(model))
+    assert float(path(rolled)) == float(other(rolled))
+    with pytest.raises(ValueError, match="supplies the exposure"):
+        ImageTerm(data, exposure=exposure, **spec)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_the_data_mask_is_scored_and_combined_with_an_explicit_mask(measured):
+    """Fails if ``valid`` is ignored, alone or beside ``mask``, or draws are mixed.
+
+    Truth source: the array spelling with the mask typed here. One invalid pixel in
+    the data equals the array term with that pixel masked; an explicit mask is
+    combined by logical and; two draws with the same ``valid`` give one mask and two
+    frames, and unequal ``valid`` raise. Tolerance basis: exact (equal leaves and
+    values).
+    """
+    model, exposure, data, counts = measured
+    spec = dict(instrument=model.instrument, scene_path="scene")
+    supported = np.asarray(ImageTerm(data, **spec).supported_mask(model))
+    valid = supported.copy()
+    valid[0, 5, 5] = False
+    extra = np.ones(counts.shape, bool)
+    extra[0, 7, 9] = False
+    masked = ExposureData(data.image, exposure, valid=valid, built_at=data.built_at)
+
+    def array_term(mask):
+        return ImageTerm(counts, mask, model.instrument, exposure, "scene")
+
+    plain = ImageTerm(masked, **spec)
+    assert eqx.tree_equal(plain, array_term(valid))
+    both = ImageTerm(masked, extra, **spec)
+    assert eqx.tree_equal(both, array_term(valid & extra))
+    assert not bool(both.mask[0, 5, 5]) and not bool(both.mask[0, 7, 9])
+    for term, ref in ((plain, array_term(valid)), (both, array_term(valid & extra))):
+        got, want = _values(term, model), _values(ref, model)
+        assert all(_nan_equal(a, b) for a, b in zip(got, want, strict=True))
+        assert _finite_where_scored(term, got)
+    twice = stack_exposure_data([masked, masked], axis="draw")
+    drawn = ImageTerm(twice, **spec)
+    assert drawn.observed_e.shape == (2, *counts.shape)
+    np.testing.assert_array_equal(drawn.mask, valid)
+    unequal = stack_exposure_data(
+        [masked, ExposureData(data.image, exposure, built_at=data.built_at)],
+        axis="draw",
+    )
+    with pytest.raises(ValueError, match="unequal valid"):
+        ImageTerm(unequal, **spec)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_data_the_detector_law_cannot_score_is_refused(measured):
+    """Fails if a variance is ignored, an event axis accepted or a grid unchecked.
+
+    Truth source: the contract. ``ImageTerm`` refuses data with its own variance
+    (naming the term and law that take it), data with an event axis, data on a
+    grid that is not the held detector's, and a quantity that is not electrons;
+    ``ImageForward`` refuses an unknown quantity, an event axis and a foreign grid.
+    Tolerance basis: exact (the refusals and their messages).
+    """
+    model, exposure, data, counts = measured
+    spec = dict(instrument=model.instrument, scene_path="scene")
+    with_variance = ExposureData(data.image, exposure, variance=np.ones(counts.shape))
+    with pytest.raises(ValueError, match=r"ForwardTerm.*MaskedLogLikelihood"):
+        ImageTerm(with_variance, **spec)
+    events = stack_exposure_data([data, data])
+    with pytest.raises(ValueError, match="event"):
+        ImageTerm(events, **spec)
+    with pytest.raises(ValueError, match="event"):
+        ImageForward.from_exposure_data(events, **spec)
+    other = replace(data.image.grid, center_x=data.image.grid.center_x + 1.0)
+    foreign = ExposureData(replace(data.image, grid=other), exposure)
+    with pytest.raises(ValueError, match="detector grid"):
+        ImageTerm(foreign, **spec)
+    with pytest.raises(ValueError, match="detector grid"):
+        ImageForward.from_exposure_data(foreign, **spec)
+    flux = ExposureData(replace(data.image, quantity="photons"), exposure)
+    with pytest.raises(ValueError, match="needs electrons"):
+        ImageTerm(flux, **spec)
+    with pytest.raises(ValueError, match="predicts one of"):
+        ImageForward.from_exposure_data(flux, **spec)
+    with pytest.raises(ValueError, match="quantity must be one of"):
+        ImageForward(exposure=exposure, quantity="photons", **spec)
+
+
+def _calibrated(model, exposure, scale=1.05):
+    """A rate image with a stated variance and one masked pixel, near the model."""
+    rate = ImageForward(
+        instrument=model.instrument,
+        exposure=exposure,
+        scene_path="scene",
+        quantity="electron/s",
+    )(model)
+    values = rate * scale + 1e-3
+    valid = np.ones(values.shape, bool)
+    valid[0, 5, 5] = False
+    return make_data(
+        model.instrument,
+        exposure,
+        values,
+        quantity="electron/s",
+        variance=(0.1 * values + 0.02) ** 2,
+        valid=valid,
+    )
+
+
+def _calibrated_term(model, exposure):
+    cal = _calibrated(model, exposure)
+    forward = ImageForward.from_exposure_data(
+        cal, instrument=model.instrument, scene_path="scene"
+    )
+    return cal, ForwardTerm(forward, MaskedLogLikelihood.from_exposure_data(cal))
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.float64_only(reason="ForwardTerm log densities require float64")
+def test_a_calibrated_rate_image_scores_as_the_gaussian_density(poisson_image):
+    """Fails if the forward and the law disagree on quantity, mask or scale.
+
+    Truth source: the Gaussian log density typed here in NumPy float64, summed over
+    the valid pixels, at the mean rate that ``detector.mean_and_variance`` gives
+    for the forward's rates (divided by the live time), the data and the variance:
+    ``-(d - p)^2 / (2 v) - log(v) / 2 - log(2 pi) / 2``. The law equals
+    ``gaussian_loglike`` of the same arrays exactly. Tolerance basis:
+    floating-point, ``ulps(64, expected)`` (a sum over 575 pixels of terms of
+    order one to ten).
+    """
+    model, exposure, _ = poisson_image
+    cal, term = _calibrated_term(model, exposure)
+    detector, rates, plan = term.forward.rates(model)
+    mean = np.asarray(detector.mean_and_variance(rates, plan)[0], np.float64)
+    predicted = mean / float(plan.live_time_s)
+    data = np.asarray(cal.image.data, np.float64)
+    variance = np.asarray(cal.variance, np.float64)
+    used = np.asarray(cal.valid)
+    assert not used.all()
+    density = (
+        -((data - predicted) ** 2) / (2 * variance)
+        - 0.5 * np.log(variance)
+        - 0.5 * np.log(2 * np.pi)
+    )
+    want = density[used].sum()
+    got = float(term(model))
+    assert abs(got - want) <= float(ulps(64, want))
+    ref = gaussian_loglike(cal.image.data, jnp.sqrt(cal.variance), cal.valid)
+    assert float(ref(term.forward(model))) == got
+
+
+@vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.float64_only(reason="float64 central differences")
+def test_the_calibrated_term_has_the_flux_gradient(poisson_image):
+    """Fails if the forward or law breaks differentiation with respect to flux.
+
+    Truth source: a central difference of the term along a uniform scaling of the
+    planet contrast grid, step 1e-4 relative; the autodiff gradient is contracted
+    with the same direction. Tolerance basis: ``rtol=1e-3``.
+    """
+    model, exposure, _ = poisson_image
+    _, term = _calibrated_term(model, exposure)
+    where = lambda m: m.scene.planets[0].physical_model.contrast_grid  # noqa: E731
+    grid = where(model)
+    grad = where(eqx.filter_grad(term)(model))
+    exact = float(jnp.sum(grad * grid))
+    h = 1e-4
+
+    def at(factor):
+        return float(term(eqx.tree_at(where, model, grid * factor)))
+
+    numeric = (at(1 + h) - at(1 - h)) / (2 * h)
+    assert exact != 0.0
+    np.testing.assert_allclose(exact, numeric, rtol=1e-3)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_a_forward_term_reports_the_forwards_footprint_and_check(poisson_image):
+    """Fails if ``ForwardTerm`` drops the forward's footprint, check or assumptions.
+
+    Truth source: the ``ImageTerm`` behavior. A ``ForwardTerm`` over an
+    ``ImageForward`` reports the same ``footprint_paths`` and refuses an unbounded
+    prior on the band nodes as ``ImageTerm`` does; its ``check`` raises for a lit
+    planet outside the coronagraph's source domain and passes for one inside; the
+    option appears in the fit's assumptions. Tolerance basis: exact.
+    """
+    from priorities import Normal
+
+    model, exposure, _ = poisson_image
+    model = ImageModel(model.scene, model.instrument, (exposure,))
+    paths = dict(
+        scene_path="scene",
+        instrument_path="instrument",
+        exposure_path="exposures[0]",
+    )
+    shape = (1, *model.instrument.detector.shape)
+    forward = ImageForward(**paths)
+    law = gaussian_loglike(jnp.zeros(shape), jnp.ones(shape))
+    term = ForwardTerm(forward, law)
+    released = ImageTerm.on_support(model, jnp.zeros(shape), **paths)
+    assert term.footprint_paths == released.footprint_paths != ()
+    nodes = exposure.quadrature.nodes_nm
+    prior = {"exposures[0].quadrature.nodes_nm": Normal(nodes, jnp.ones_like(nodes))}
+    for scored in (term, released):
+        with pytest.raises(ValueError, match="unbounded"):
+            Fit(model, prior, (scored,))
+    assert term.assumptions == ()
+    kept = ForwardTerm(ImageForward(static_beyond_speckle=True, **paths), law)
+    assert Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (kept,)).assumptions == (
+        "static_beyond_speckle",
+    )
+
+    class Bounded(type(make_instrument(make_detector()).coronagraph)):
+        def _native_source_psfs(self, x_lod, y_lod):
+            psfs = super()._native_source_psfs(x_lod, y_lod)
+            inside = jnp.hypot(jnp.atleast_1d(x_lod), jnp.atleast_1d(y_lod)) <= 2.0
+            return type(psfs)(psfs.image, inside)
+
+    instrument = eqx.tree_at(
+        lambda i: i.coronagraph, make_instrument(make_detector()), Bounded()
+    )
+    for separation, refused in ((0.05, True), (0.02, False)):
+        scene = make_scene(contrast=1e-10, separation_arcsec=separation)
+        bounded = ImageModel(scene, instrument, (make_exposure(scene, instrument),))
+        if refused:
+            with pytest.raises(ValueError, match="outside the coronagraph's source"):
+                term.check(bounded)
+        else:
+            term.check(bounded)

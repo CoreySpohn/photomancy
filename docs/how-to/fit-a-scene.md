@@ -44,6 +44,41 @@ mask = terms[0].mask & good_pixels
 first = ImageTerm(images[0], mask, instrument=instrument, exposure=exposures[0])
 ```
 
+{func}`coronagraphoto.observe_data` returns the measurement together with its exposure, and an
+`ImageTerm` takes it directly, with no separate mask or exposure argument. This block is not run
+with the documentation, which holds no rendered data.
+
+```python notest
+data = observe_data(key, scene, instrument, exposure)
+term = ImageTerm.on_support(scene, data, instrument=instrument)
+```
+
+The pixels the data marks as usable (`data.valid`) are the pixels the term scores; a `mask`
+argument narrows them further. The term holds the data's exposure. When the exposure is a node
+of the model (for example because the roll is free), pass `exposure_path` instead: the model's
+exposure is then read at every evaluation and takes precedence over the one recorded in the data,
+so the two are never compared. Data that carries its own variance is refused here, because the
+detector law is the noise model of an `ImageTerm`; the next paragraphs show the route for such
+data.
+
+A calibrated image, in electrons per second with a variance the pipeline states, is scored through
+a {class}`~photomancy.infer.ForwardTerm`. {class}`~photomancy.image.ImageForward` renders the
+expected image in the data's own quantity, and a law built from the data holds its values, its
+variance and its usable pixels. This block is not run with the documentation, which holds no
+calibrated image.
+
+```python notest
+from photomancy import ImageForward
+from photomancy.infer import ForwardTerm
+from photomancy.infer.likelihoods import MaskedLogLikelihood
+
+calibrated = ExposureData(rate_image, exposure, variance=variance, valid=good_pixels)
+term = ForwardTerm(
+    ImageForward.from_exposure_data(calibrated, instrument=instrument),
+    MaskedLogLikelihood.from_exposure_data(calibrated),
+)
+```
+
 When a free instrument parameter or wavelength changes the field of view, a NaN image term
 can mean that the proposed render lost coverage of a scored pixel. A larger footprint adds
 no observations to the score. Choose a mask covered throughout the allowed parameter range.

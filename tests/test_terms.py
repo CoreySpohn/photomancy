@@ -27,7 +27,7 @@ from skyscapes.scene import Scene
 from skyscapes.scene.planet import Planet
 from skyscapes.scene.star import FlatStar
 from system_helpers import _TIMES, _data, _new_term
-from term_utils import ExposureRecord, ExposureRender, both
+from term_utils import ExposureRecord, ExposureRender, both, named_model
 
 from photomancy import (
     PhotometryTerm,
@@ -1244,3 +1244,22 @@ def test_measurement_curvature_owners_exclude_data_and_include_band_response():
     narrow = eqx.tree_at(lambda t: t.transmissions, photometry, bands)
     with pytest.raises(PrecisionError, match=r"term\.transmissions\[0\]"):
         narrow._check_forward_precision("curvature", "term")
+
+
+class _PlainForward(eqx.Module):
+    """A forward that defines none of the optional attributes of a term."""
+
+    def __call__(self, model):
+        return model.x
+
+
+def test_a_forward_without_footprint_check_or_assumptions_keeps_the_empty_defaults():
+    """Fails if ``ForwardTerm`` invents a footprint, an assumption or a check.
+
+    Truth source: the released term. A forward that defines none of
+    ``footprint_paths``, ``assumptions`` and ``check`` gives empty tuples and a
+    ``check`` that accepts the model. Tolerance basis: exact.
+    """
+    term = ForwardTerm(_PlainForward(), gaussian_loglike(jnp.zeros(()), jnp.ones(())))
+    assert (term.footprint_paths, term.assumptions, term.reads) == ((), (), ())
+    assert term.check(named_model()) is None

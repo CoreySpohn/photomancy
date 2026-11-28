@@ -13,14 +13,17 @@ Conventions:
       indexing convention used across the library.
 """
 
+from dataclasses import replace
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 from hwoutils.epoch import Epoch
-from hwoutils.leaves import HostGrid, as_float_leaf
+from hwoutils.leaves import HostGrid, as_float_leaf, is_traced
 from hwoutils.numerics import COARSEST
-from optixstuff.grids import PixelGrid
+from optixstuff import ExposureData
+from optixstuff.grids import Measure, PixelGrid
 from optixstuff.spectral import Band
 
 
@@ -48,6 +51,18 @@ def _roll_angles(value):
 
 
 _ROLL_TOLERANCE_DEG = 1e-6  # tol: physical, 1e-6 degrees of roll for coaddition
+_COMMON_ROLL_DEG = 1e-9  # tol: physical, rolls of one exposure series equal in practice
+
+
+def _per_event(value, n_events, name):
+    """One value per event from a plan field of shape ``(E,)`` or ``(E, 1)``."""
+    value = jnp.asarray(value)
+    if value.size != n_events:
+        raise ValueError(
+            f"{name} must hold one value per event for a single band; "
+            f"got shape {value.shape}"
+        )
+    return value.reshape(n_events)
 
 
 class FrameSet(eqx.Module):
@@ -118,6 +133,122 @@ class FrameSet(eqx.Module):
             )
         if self.grid.shape != (ny, nx):
             raise ValueError("grid.shape must match frames spatial shape")
+
+    @classmethod
+    def from_exposure_data(
+        cls,
+        data: ExposureData,
+        *,
+        fwhm_px,
+        epoch: Epoch,
+        rolls: str = "common",
+        accumulated: str = "refuse",
+        tau_c_s=None,
+    ) -> "FrameSet":
+        """Build the frame series of a stack of single-band events.
+
+        Each event becomes one frame, in order. Times and rolls are the exposure's,
+        and the variance and the usable pixels pass through; a pixel invalid in any
+        frame is excluded from all. The epoch and the resolution element are
+        arguments because the exposure holds neither.
+
+        Args:
+            data: Electrons with axes ``("event", "band")``, one band, an integral
+                measure, and a frame plan on each event.
+            fwhm_px: Resolution element (lambda/D) in pixels.
+            epoch: Epoch that ``data.exposure.time_d`` is measured from.
+            rolls: ``"common"`` (default) requires one roll for the series, equal
+                modulo 360 degrees within 1e-9 degrees when the rolls are concrete;
+                ``"per_frame"`` keeps each event's roll, as an angular-differential
+                series needs. A traced roll is not checked.
+            accumulated: ``"refuse"`` (default) requires every event to be a single
+                frame (``plan.n_frames == 1``); ``"coadd"`` makes each event one frame
+                of duration ``plan.live_time_s``. An accumulated event is never
+                repeated or divided into frames.
+            tau_c_s: Optional speckle decorrelation time, seconds.
+
+        Returns:
+            The frame set. When the pointing has an offset, the grid centre is
+            ``data.target_px()``.
+
+        Raises:
+            ValueError: For another layout, quantity or measure, two bands, rolls
+                that differ under ``rolls="common"``, an accumulated event under
+                ``accumulated="refuse"``, an unknown policy, or unequal offsets.
+        """
+        image, exposure = data.image, data.exposure
+        if image.leading_axes != ("event", "band"):
+            raise ValueError(
+                "FrameSet.from_exposure_data needs leading_axes ('event', 'band'), "
+                f"got {image.leading_axes}"
+            )
+        if image.data.shape[1] != 1:
+            raise ValueError("a FrameSet holds one band; split the data by band")
+        if image.quantity != "electrons" or image.measure != Measure.integral():
+            raise ValueError(
+                "a FrameSet holds electrons per pixel, got "
+                f"{image.quantity!r} as {image.measure}"
+            )
+        if rolls not in ("common", "per_frame"):
+            raise ValueError(f"rolls must be 'common' or 'per_frame', got {rolls!r}")
+        if accumulated not in ("refuse", "coadd"):
+            raise ValueError(
+                f"accumulated must be 'refuse' or 'coadd', got {accumulated!r}"
+            )
+        n_events = image.data.shape[0]
+        roll = exposure.pointing.roll_deg
+        if rolls == "common" and not is_traced(roll):
+            angles = np.asarray(roll, dtype=np.float64)
+            spread = np.abs((angles - angles[0] + 180.0) % 360.0 - 180.0).max()
+            if spread > _COMMON_ROLL_DEG:
+                raise ValueError(
+                    f"the events have rolls {angles.tolist()} degrees; pass "
+                    "rolls='per_frame' for an angular-differential series"
+                )
+        plan = exposure.plan
+        if plan is None:
+            raise ValueError("every event needs a FramePlan")
+        if accumulated == "refuse":
+            if is_traced(plan.n_frames):
+                raise ValueError("n_frames must be concrete to check single frames")
+            counts = _per_event(plan.n_frames, n_events, "plan.n_frames")
+            if not bool(jnp.all(counts == 1)):
+                raise ValueError(
+                    f"the events accumulate n_frames={np.asarray(counts).tolist()}; "
+                    "pass accumulated='coadd' to treat each as one frame of its "
+                    "live time"
+                )
+            frame_time_s = _per_event(plan.frame_time_s, n_events, "plan.frame_time_s")
+        else:
+            frame_time_s = _per_event(plan.live_time_s, n_events, "plan.live_time_s")
+        grid = replace(image.grid, orientation=None)
+        offset = exposure.pointing.offset_mas
+        if offset is not None:
+            if is_traced(offset):
+                raise ValueError("the pointing offsets must be concrete")
+            if not bool(jnp.all(offset == offset[:1])):
+                raise ValueError(
+                    "the events point at different offsets; a FrameSet has one "
+                    "star centre"
+                )
+            x, y = data.target_px()[0]
+            grid = replace(grid, center_x=float(x), center_y=float(y))
+        valid = jnp.all(data.valid[:, 0], axis=0).astype(
+            jnp.result_type(image.data.dtype, 0.0)
+        )
+        return cls(
+            frames=image.data[:, 0],
+            time_d=exposure.time_d,
+            frame_time_s=frame_time_s,
+            telescope_pa_deg=roll,
+            fwhm_px=fwhm_px,
+            band=exposure.quadrature.bands[0],
+            epoch=epoch,
+            grid=grid,
+            noise_variance=None if data.variance is None else data.variance[:, 0],
+            valid=valid,
+            tau_c_s=tau_c_s,
+        )
 
     @property
     def rate_frames(self) -> jnp.ndarray:
