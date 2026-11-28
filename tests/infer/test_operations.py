@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 from hwoutils.blocks import AbstractBlock
 from priorities import Mixture, Normal, Uniform
+from term_utils import named_model
 from test_fit import _scene
 from test_run import HIGH, KEY, WIDTH, _Gauss, _leaf_fit, _radius_model
 
@@ -420,6 +421,35 @@ def _point_cloud(entry, theta):
         info=None,
         kind="quadrature",
     )
+
+
+def test_a_swap_keyed_by_another_spelling_of_a_free_path_replaces_that_entry():
+    """The key may be the free key or another spelling of its model path.
+
+    Truth source: the swap keyed by the free key, and the closed-form mass of
+    ``Uniform(0, 1)`` on ``Uniform(0, 2)`` (``log 2``).
+    Fails if: the alias key is looked up in the old free set (a bare ``KeyError``).
+    """
+    fit = Fit(named_model(), {"els[first].x": Uniform(0.0, 2.0)})
+    x = jnp.asarray([0.5, 1.5], jnp.float64)
+    samples = {"els[first].x": x}
+    cloud = Posterior(
+        samples=samples,
+        log_weights=jnp.full(2, -math.log(2.0)),
+        log_target=fit.log_density(samples),
+        log_evidence=jnp.asarray(0.0, jnp.float64),
+        log_evidence_se=jnp.asarray(0.0, jnp.float64),
+        fit=fit,
+        info=None,
+        kind="quadrature",
+    )
+    by_key = cloud.with_priors({"els[first].x": Uniform(0.0, 4.0)}, **NO_GATE)
+    by_alias = cloud.with_priors({"els[0].x": Uniform(0.0, 4.0)}, **NO_GATE)
+    assert list(by_alias.fit.free) == ["els[first].x"]
+    assert by_alias.fit.free["els[first].x"].high == 4.0
+    np.testing.assert_array_equal(by_alias.log_weights, by_key.log_weights)
+    with pytest.raises(ValueError, match="cannot change the free set"):
+        cloud.with_priors({"els[1].x": Uniform(0.0, 4.0)}, **NO_GATE)
 
 
 def _stack(*posteriors):

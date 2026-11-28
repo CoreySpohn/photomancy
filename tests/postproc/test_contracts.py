@@ -1,5 +1,7 @@
 """Tests for the post-processing seam contract types (FrameSet, DetectionStats)."""
 
+from dataclasses import replace
+
 import coronagraphoto as cp
 import equinox as eqx
 import jax
@@ -437,7 +439,9 @@ def test_single_frame_events_become_frames_in_order():
     each masking a different pixel, give four frames in event order with the
     times, rolls, 1000 s frame times and variance as given; ``valid`` is the and of
     the four masks as ones and zeros. The default policy refuses these rolls as
-    a series with one roll, and accepts rolls that agree modulo 360 degrees.
+    a series with one roll, and accepts rolls that agree modulo 360 degrees, with
+    the same tolerance as ``single_orientation`` (1e-8 degrees apart passes, 1e-4
+    does not).
     Tolerance basis: exact (no arithmetic).
     """
     items = _events(variance=True)
@@ -457,6 +461,16 @@ def test_single_frame_events_become_frames_in_order():
         _fs(data)
     same = stack_exposure_data(_events(rolls=(10.0, 370.0, -350.0, 10.0)))
     assert _fs(same).frames.shape[0] == 4
+    singular = replace(same.image, quantity="electron")
+    assert _fs(replace(same, image=singular)).frames.shape[0] == 4
+    close = stack_exposure_data(_events(rolls=(10.0, 10.0 + 1e-8, 370.0, -350.0)))
+    assert _fs(close).frames.shape[0] == 4
+    assert bool(_fs(close, rolls="per_frame").single_orientation())
+    apart = stack_exposure_data(_events(rolls=(10.0, 10.0 + 1e-4, 10.0, 10.0)))
+    with pytest.raises(ValueError, match="per_frame"):
+        _fs(apart)
+    with pytest.raises(ValueError, match="share one orientation"):
+        _fs(apart, rolls="per_frame").single_orientation()
 
 
 def test_an_accumulated_event_is_refused_or_kept_as_one_frame():

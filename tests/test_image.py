@@ -1413,6 +1413,10 @@ def test_the_forward_is_the_term_prediction_in_either_quantity(measured):
     held = dict(instrument=model.instrument, scene_path="scene")
     from_data = ImageForward.from_exposure_data(data, **held)
     assert from_data.exposure is data.exposure and from_data.quantity == "electrons"
+    singular = ExposureData(replace(data.image, quantity="electron"), data.exposure)
+    one = ImageForward.from_exposure_data(singular, **held)
+    assert one.quantity == "electron" and one.image(model).quantity == "electron"
+    np.testing.assert_array_equal(one(model), from_data(model))
     for plan_exposure in (exposure, four):
         electrons = ImageForward(exposure=plan_exposure, **held)
         rate = ImageForward(exposure=plan_exposure, quantity="electron/s", **held)

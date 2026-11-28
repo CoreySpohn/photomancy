@@ -22,7 +22,7 @@ import numpy as np
 from hwoutils.epoch import Epoch
 from hwoutils.leaves import HostGrid, as_float_leaf, is_traced
 from hwoutils.numerics import COARSEST
-from optixstuff import ExposureData
+from optixstuff import ELECTRON_COUNT_QUANTITIES, ExposureData
 from optixstuff.grids import Measure, PixelGrid
 from optixstuff.spectral import Band
 
@@ -51,7 +51,6 @@ def _roll_angles(value):
 
 
 _ROLL_TOLERANCE_DEG = 1e-6  # tol: physical, 1e-6 degrees of roll for coaddition
-_COMMON_ROLL_DEG = 1e-9  # tol: physical, rolls of one exposure series equal in practice
 
 
 def _per_event(value, n_events, name):
@@ -157,8 +156,10 @@ class FrameSet(eqx.Module):
                 measure, and a frame plan on each event.
             fwhm_px: Resolution element (lambda/D) in pixels.
             epoch: Epoch that ``data.exposure.time_d`` is measured from.
-            rolls: ``"common"`` (default) requires one roll for the series, equal
-                modulo 360 degrees within 1e-9 degrees when the rolls are concrete;
+            rolls: ``"common"`` (default) requires one roll for the series, as
+                :meth:`single_orientation` decides (equal modulo 360 degrees within
+                1e-6 degrees) when the rolls are concrete; the per-event rolls are
+                kept either way;
                 ``"per_frame"`` keeps each event's roll, as an angular-differential
                 series needs. A traced roll is not checked.
             accumulated: ``"refuse"`` (default) requires every event to be a single
@@ -184,7 +185,10 @@ class FrameSet(eqx.Module):
             )
         if image.data.shape[1] != 1:
             raise ValueError("a FrameSet holds one band; split the data by band")
-        if image.quantity != "electrons" or image.measure != Measure.integral():
+        if (
+            image.quantity not in ELECTRON_COUNT_QUANTITIES
+            or image.measure != Measure.integral()
+        ):
             raise ValueError(
                 "a FrameSet holds electrons per pixel, got "
                 f"{image.quantity!r} as {image.measure}"
@@ -197,14 +201,6 @@ class FrameSet(eqx.Module):
             )
         n_events = image.data.shape[0]
         roll = exposure.pointing.roll_deg
-        if rolls == "common" and not is_traced(roll):
-            angles = np.asarray(roll, dtype=np.float64)
-            spread = np.abs((angles - angles[0] + 180.0) % 360.0 - 180.0).max()
-            if spread > _COMMON_ROLL_DEG:
-                raise ValueError(
-                    f"the events have rolls {angles.tolist()} degrees; pass "
-                    "rolls='per_frame' for an angular-differential series"
-                )
         plan = exposure.plan
         if plan is None:
             raise ValueError("every event needs a FramePlan")
@@ -236,7 +232,7 @@ class FrameSet(eqx.Module):
         valid = jnp.all(data.valid[:, 0], axis=0).astype(
             jnp.result_type(image.data.dtype, 0.0)
         )
-        return cls(
+        frame_set = cls(
             frames=image.data[:, 0],
             time_d=exposure.time_d,
             frame_time_s=frame_time_s,
@@ -249,6 +245,15 @@ class FrameSet(eqx.Module):
             valid=valid,
             tau_c_s=tau_c_s,
         )
+        if rolls == "common":
+            try:
+                frame_set.single_orientation()
+            except ValueError as error:
+                raise ValueError(
+                    f"{error}; pass rolls='per_frame' for an angular-differential "
+                    "series"
+                ) from error
+        return frame_set
 
     @property
     def rate_frames(self) -> jnp.ndarray:

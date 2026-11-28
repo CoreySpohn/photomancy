@@ -63,7 +63,13 @@ from coronagraphoto import expected, planet_source_support
 from hwoutils.leaves import is_traced
 from hwoutils.model_paths import join, resolve
 from hwoutils.precision import require_float64
-from optixstuff import AbstractDetector, Exposure, ExposureData, Instrument
+from optixstuff import (
+    ELECTRON_COUNT_QUANTITIES,
+    AbstractDetector,
+    Exposure,
+    ExposureData,
+    Instrument,
+)
 from optixstuff.detector import _floored
 from optixstuff.grids import Image, Measure, SkyOrientation
 from optixstuff.rates import floor_rate
@@ -73,9 +79,6 @@ from photomancy.infer._precision import _as_wide
 from photomancy.infer.fit import AbstractTerm
 
 __all__ = ["ImageForward", "ImageModel", "ImageTerm"]
-
-
-_COUNTS = ("electron", "electrons")
 
 
 def _masked_rates(rates, mask, *, preserve_floor=False, only_nonfinite=False):
@@ -138,7 +141,10 @@ def _check_image(image, instrument, exposure):
     instrument is held. When the exposure is held with a concrete roll, the image
     must carry a sky orientation, and that orientation must be the roll's.
     """
-    if image.measure != Measure.integral() or image.quantity not in _COUNTS:
+    if (
+        image.measure != Measure.integral()
+        or image.quantity not in ELECTRON_COUNT_QUANTITIES
+    ):
         raise ValueError(
             f"the observed Image holds {image.quantity!r} as {image.measure}, not "
             "electrons per pixel: score the detector counts observe returns"
@@ -329,7 +335,7 @@ def _check_data_image(image, instrument, *, what):
 def _from_exposure_data(data, instrument, exposure, exposure_path):
     """Electrons, the usable-pixel mask and the exposure a term holds, from data."""
     image = data.image
-    if image.quantity not in _COUNTS:
+    if image.quantity not in ELECTRON_COUNT_QUANTITIES:
         raise ValueError(
             f"ImageTerm needs electrons, but the data holds {image.quantity!r}: "
             "score a rate image through ForwardTerm(ImageForward.from_exposure_data"
@@ -439,6 +445,15 @@ class ImageTerm(AbstractTerm):
     read from the model (``instrument_path``) the detector is not known at
     construction and the grid is not checked; when the exposure is read from the
     model the roll is not checked.
+
+    The observed frame may also be an :class:`optixstuff.ExposureData` whose image
+    holds integral electrons, which supplies the exposure, so ``exposure`` is not
+    passed. Its ``valid`` array is combined by logical and with ``mask`` (``mask`` is
+    then optional). A variance is refused, because this term scores with the detector
+    law as its noise model: score a rate image through ``ForwardTerm`` with
+    :meth:`ImageForward.from_exposure_data` instead. A leading ``draw`` axis is
+    scored jointly as further frames of the exposure, and the draws must share one
+    ``valid``; an event axis is refused.
 
     Attributes:
         forward_fields: Forward differentiation uses ``instrument``, ``exposure``.
@@ -844,7 +859,7 @@ class ImageTerm(AbstractTerm):
         return eqx.tree_at(lambda term: term.observed_e, self, observed)
 
 
-_QUANTITIES = ("electrons", "electron/s")
+_QUANTITIES = (*ELECTRON_COUNT_QUANTITIES, "electron/s")
 
 
 class ImageForward(eqx.Module):
@@ -868,7 +883,8 @@ class ImageForward(eqx.Module):
         scene_path: Model path of the :class:`skyscapes.Scene`; ``""`` is the model.
         instrument_path: Model path of the instrument, or ``None`` when it is held.
         exposure_path: Model path of the exposure, or ``None`` when it is held.
-        quantity: ``"electrons"``, the mean electrons accumulated over the plan (what
+        quantity: ``"electrons"`` (or its singular spelling ``"electron"``, kept as
+            given in :meth:`image`), the mean electrons accumulated over the plan (what
             :meth:`ImageTerm.predict` returns), or ``"electron/s"``, that mean divided
             by the plan's live time: the mean detector count rate, dark terms included.
         static_beyond_speckle: The option of :class:`ImageTerm`.
@@ -976,7 +992,7 @@ class ImageForward(eqx.Module):
         """
         detector, rates, plan = self.rates(model)
         mean = detector.mean_and_variance(rates, plan)[0]
-        if self.quantity == "electrons":
+        if self.quantity in ELECTRON_COUNT_QUANTITIES:
             return mean
         return mean / jnp.atleast_1d(plan.live_time_s)[:, None, None]
 

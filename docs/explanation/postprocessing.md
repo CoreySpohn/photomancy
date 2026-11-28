@@ -224,6 +224,11 @@ plane. An oriented native grid requires an oriented science grid.
 
 `FrameSet(..., grid=observed.grid)` carries the star center and sampling;
 its `noise_variance` remains per-pixel variance in electrons squared.
+
+`PPConfig`, `ppfact`, `ez_ppf`, and `n_rolls` configuration fields are removed.
+Analytic post-processing uses explicit residual fractions in
+`optixstuff.PostProcessing`; photomancy does not call the calculator.
+
 ### From a stack of exposures
 
 A stack of single-frame exposures, made with `optixstuff.stack_exposure_data` from several
@@ -239,14 +244,10 @@ frames = FrameSet.from_exposure_data(
 ```
 
 The epoch and the resolution element are arguments because an exposure holds neither. By default
-the events must share one roll (equal modulo 360 degrees to a billionth of a degree), which suits
+the events must share one roll (equal modulo 360 degrees to a millionth of a degree), which suits
 frames to be coadded; an angular-differential series passes `rolls="per_frame"`. An exposure that
 accumulates several frames into one measurement is not split or repeated: the default refuses it,
 and `accumulated="coadd"` makes it one frame whose duration is the whole live time.
-
-`PPConfig`, `ppfact`, `ez_ppf`, and `n_rolls` configuration fields are removed.
-Analytic post-processing uses explicit residual fractions in
-`optixstuff.PostProcessing`; photomancy does not call the calculator.
 
 ---
 

@@ -679,6 +679,7 @@ class Posterior(eqx.Module):
                 ``kind``.
         """
         self._require_slice("with_priors")
+        priors = self.fit._priors_by_key(priors)
         new_fit = self.fit.with_priors(priors)
         moved = tuple(
             key

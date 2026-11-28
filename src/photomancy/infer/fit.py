@@ -1689,6 +1689,28 @@ class Fit(eqx.Module):
 
     # ----- edits -----------------------------------------------------------------
 
+    def _priors_by_key(self, priors: dict) -> dict:
+        """Map each replacement path to its free key, refusing the rest."""
+        canonical = self.canonical_keys
+        by_path = {path: key for key, path in self._canonical}
+        paths, extra = [], []
+        for path in priors:
+            if path in canonical:
+                paths.append((path, path))
+                continue
+            try:
+                key = by_path[self._require_path(path, "with_priors")]
+            except (KeyError, ValueError):
+                extra.append(path)
+            else:
+                paths.append((path, key))
+        if extra:
+            raise ValueError(
+                f"with_priors cannot change the free set; not free: {sorted(extra)}"
+            )
+        _check_path_aliases(paths, "prior replacements")
+        return {key: priors[path] for path, key in paths}
+
     def with_priors(self, priors: dict) -> "Fit":
         """Return a fit with some entries replaced, the free set unchanged.
 
@@ -1710,25 +1732,7 @@ class Fit(eqx.Module):
             ValueError: For a key outside the free set, two paths for one entry,
                 a replacement of the other kind, or a block of another layout.
         """
-        canonical = self.canonical_keys
-        by_path = {path: key for key, path in self._canonical}
-        paths, extra = [], []
-        for path in priors:
-            if path in canonical:
-                paths.append((path, path))
-                continue
-            try:
-                key = by_path[self._require_path(path, "with_priors")]
-            except (KeyError, ValueError):
-                extra.append(path)
-            else:
-                paths.append((path, key))
-        if extra:
-            raise ValueError(
-                f"with_priors cannot change the free set; not free: {sorted(extra)}"
-            )
-        _check_path_aliases(paths, "prior replacements")
-        priors = {key: priors[path] for path, key in paths}
+        priors = self._priors_by_key(priors)
         for key, new in priors.items():
             old = self.free[key]
             if isinstance(old, AbstractBlock):
