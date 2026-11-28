@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 from hwoutils.leaves import as_float_leaf
 from hwoutils.precision import require_float64
+from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logsumexp, xlogy
 from jax.scipy.stats import norm
 
@@ -83,14 +84,21 @@ def eig_geometric(cov_old, jacobian, obs_variance, qoi_projection=None):
     cov_old, jacobian, obs_variance, qoi_projection = _information_inputs(
         "eig_geometric", cov_old, jacobian, obs_variance, qoi_projection
     )
-    prec_old = jnp.linalg.inv(cov_old)
     obs_var = jnp.broadcast_to(
         jnp.atleast_1d(jnp.asarray(obs_variance)), (jacobian.shape[0],)
     )
-    fim = jacobian.T @ jnp.diag(1.0 / obs_var) @ jacobian
-    cov_new = jnp.linalg.inv(prec_old + fim)
+    # Square-root form: with cov_old = L L^T, the update is
+    # cov_new = L (I + L^T F L)^-1 L^T and the gain is 0.5 logdet(I + L^T F L).
+    # The middle matrix has every eigenvalue at least 1, so neither cov_old nor
+    # its precision is inverted however widely the parameter scales spread.
+    root = jnp.linalg.cholesky(cov_old)
+    whitened = (jacobian @ root) / jnp.sqrt(obs_var)[:, None]
+    middle = jnp.eye(root.shape[0], dtype=root.dtype) + whitened.T @ whitened
+    middle_root = jnp.linalg.cholesky(middle)
+    shrink = solve_triangular(middle_root, root.T, lower=True)
+    cov_new = shrink.T @ shrink
     if qoi_projection is None:
-        eig = 0.5 * (jnp.linalg.slogdet(cov_old)[1] - jnp.linalg.slogdet(cov_new)[1])
+        eig = jnp.sum(jnp.log(jnp.diagonal(middle_root)))
     else:
         phi = jnp.asarray(qoi_projection)
         marg_old = phi @ cov_old @ phi.T
