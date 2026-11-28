@@ -20,7 +20,7 @@ dependencies = [
     # The pixel likelihood renders expected electrons with coronagraphoto.expected.
     "coronagraphoto>=7.0.0",
     "equinox>=0.13.2",
-    "hwoutils[jax]>=3.0.0",  # unreleased: next release
+    "hwoutils[jax]>=3.0.0",
     "jax>=0.8.1",
     "jaxlib>=0.8.1",
     "numpy>=2.1.2",
@@ -28,14 +28,14 @@ dependencies = [
     # >=0.2.5: the L-BFGS state keeps one dtype under x64, which blackjax's
     # pathfinder needs (0.2.4 fails with "cond branches must have equal output types").
     "optax>=0.2.5",
-    "optixstuff>=7.0.0",  # unreleased: next release
+    "optixstuff>=7.0.0",
     # >=3.0.0: raw positions and velocities use (east, north, away).
-    # >=6.0.0: the sky-design, line-of-sight and Thiele-Innes block APIs (unreleased: next release).
+    # >=6.0.0: the sky-design, line-of-sight and Thiele-Innes block APIs.
     "orbix>=6.0.0",
     "priorities",
     # >=2.1.0: scene states and the disk chart use the same (east, north) sky
     # chart as orbix 3, so an older skyscapes must not install beside photomancy.
-    "skyscapes>=6.0.0",  # unreleased: next release
+    "skyscapes>=6.0.0",
 ]
 
 [project.optional-dependencies]
