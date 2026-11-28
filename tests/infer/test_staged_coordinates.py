@@ -10,12 +10,13 @@ import numpy as np
 import optax
 import pytest
 from priorities import Beta, MultivariateNormal, Normal, Uniform
+from term_utils import named_model
 from test_staged import _Bowl, _BowlTerm
 from test_support_swap import KEY as BLOCK
 from test_support_swap import _cloud
 from test_support_swap import _fit as orbit_fit
 
-from photomancy.infer import MAP, Fit, Posterior, run
+from photomancy.infer import MAP, Fit, Posterior, ravel_samples, run
 from photomancy.infer.backends._flat import start_points
 from photomancy.infer.backends.staged import MAPStage, _real_stage
 
@@ -265,3 +266,18 @@ def test_schema_follows_an_edited_free_entry():
     wide = eqx.tree_at(lambda f: f.model.x, fit, jnp.zeros(3))
     assert wide.draw_schema()["x"].shape == (3,)
     assert wide.check_draws({"x": jnp.zeros((5, 3))}) == (5,)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_alias_prior_paths_keep_coordinate_names_across_stages():
+    """Stage-local prior edits select the same scalar and keep the run's name."""
+    named, numbered = "els[first].x", "els[0].x"
+    fit = Fit(named_model(), {named: Normal(0.0, 1.0)})
+    first = fit.with_priors({named: Normal(1.0, 1.0)})
+    second = fit.with_priors({numbered: Normal(2.0, 1.0)})
+    stages = (MAPStage(0, (), fit=first), MAPStage(0, (), fit=second))
+    posterior = run(fit, MAP(stages=stages, init={named: 0.5}), jax.random.key(0))
+    assert posterior.samples.keys() == {named}
+    flat, unravel = ravel_samples(posterior, keys=(named,))
+    assert unravel(flat).keys() == {named}
+    np.testing.assert_array_equal(flat, [[0.5]])

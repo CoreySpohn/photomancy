@@ -121,6 +121,30 @@ For an image fit the amplitude is the source's `flux_scale` and the position is 
 "dynamics.orbits": SkyPositionBlock(...)}`), and at zero flux the source is absent from the
 scene.
 
+### Naming an element in a path
+
+If a model holds a tuple whose elements have unique names, a free path can select an
+element by its `name`. The path `stages[search].amplitude` selects the amplitude of
+the stage named `search`. Your draws carry the exact key you wrote in `free`.
+`fit.canonical_keys` shows the corresponding paths with numeric indices. Each model
+node may have only one free entry, so freeing the same node by name and index raises
+`ValueError`.
+
+```python continuation
+class Stage(eqx.Module):
+    name: str = eqx.field(static=True)
+    amplitude: jax.Array
+
+
+class Stages(eqx.Module):
+    stages: tuple[Stage, ...]
+
+
+stage_model = Stages((Stage("search", absent.amp0), Stage("follow_up", absent.amp1)))
+stage_fit = Fit(stage_model, {"stages[search].amplitude": Normal(0.0, 100.0)})
+print(stage_fit.canonical_keys)
+```
+
 ## 3. Detect over a grid
 
 {func}`~photomancy.detection.detect` profiles the amplitude at each trial position and returns the

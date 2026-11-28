@@ -1,11 +1,13 @@
 """``replace_term``, ``update`` and ``batch_size`` on the Posterior operations."""
 
 import equinox as eqx
+import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from priorities import Uniform
+from priorities import Normal, Uniform
+from term_utils import named_model
 from test_operations import _check_target, _gaussian_channel
 from test_run import HIGH, KEY, WIDTH, _Gauss, _leaf_fit, _radius_model
 
@@ -539,3 +541,17 @@ def test_update_refuses_ambiguous_and_unmergeable_shared_latents(rv_cloud):
     cloud = run(rv_cloud.fit.append_term(_Summing()), RV_BACKEND, jax.random.key(0))
     with pytest.raises(NotImplementedError, match="_Summing"):
         _rv_update(cloud, _Summing())
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+def test_with_priors_resolves_aliases_without_changing_coordinate_keys():
+    """The same scalar with an unbounded replacement keeps its map and name."""
+    named, numbered = "els[first].x", "els[0].x"
+    fit = Fit(named_model(), {named: Normal(0.0, 1.0)})
+    new = Normal(2.0, 3.0)
+    replaced = fit.with_priors({numbered: new})
+    assert replaced.free == {named: new}
+    assert replaced.flat_layout() == fit.flat_layout()
+    assert replaced.same_coordinates(fit)
+    with pytest.raises(ValueError, match=r"els\[0\]\.x.*els\[first\]\.x"):
+        fit.with_priors({numbered: new, named: new})

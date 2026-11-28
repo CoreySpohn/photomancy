@@ -9,8 +9,10 @@ up to named changes of coordinates (the offset is zero to rounding).
 import enum
 import json
 from pathlib import Path
+from typing import ClassVar
 
 import equinox as eqx
+import ineedvalidation as vv
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -19,6 +21,7 @@ from hwoutils.blocks import AbstractBlock
 from hwoutils.constants import GM_SUN_AU3_PER_D2, Mearth2kg, Msun2kg, Rearth2AU
 from hwoutils.model_paths import resolve
 from hwoutils.precision import PrecisionError
+from hwoutils.testing import ulps
 from optixstuff.spectral import Band, Quadrature, Transmission
 from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
 from priorities import LogUniform, Normal, TruncatedDistribution, Uniform
@@ -26,6 +29,7 @@ from priorities.testing import check_distribution
 from skyscapes.physical_model import LambertianPhysicalModel
 from skyscapes.population import kipping_eccentricity
 from skyscapes.scene import FlatStar, Planet, Scene
+from term_utils import NamedElement, named_model
 
 from photomancy import (
     PhotometryTerm,
@@ -1567,3 +1571,211 @@ def test_fit_enters_an_owned_module_but_not_a_foreign_one():
     fit = Fit(model, {"curve.value": Normal(2.0, 0.1)})
     assert "curve.value" in fit.free
     assert fit.model.curve.table is table
+
+
+class _NameReadingTerm(_ReadsRadius):
+    reads = ("els[first]",)
+
+
+class _NameFootprintTerm(_ReadsRadius):
+    reads = ()
+
+    @property
+    def footprint_paths(self):
+        return ("els[first]",)
+
+
+class _IndexedLatentTerm(_ReadsRadius):
+    reads = ()
+    marginalizes = ("planets[b]",)
+
+
+class _NamedWritingBlock(_FloatWritingBlock):
+    owns: str = eqx.field(static=True, default="els[0]")
+    outputs: tuple[str, ...] = eqx.field(static=True, default=("els[0].x",))
+
+    @property
+    def writes(self):
+        return ("els[first]",)
+
+    def forward(self, x, model):
+        return {path: x["u"] for path in self.outputs}
+
+    def inverse(self, model):
+        return {"u": model.els[0].x}
+
+
+class _DependentBlock(_FloatWritingBlock):
+    owns = "els[second]"
+    reads = ("els[0].x",)
+    writes = ("els[1]",)
+
+    def forward(self, x, model):
+        return {"els[second].x": model.els[0].x + x["u"]}
+
+    def inverse(self, model):
+        return {"u": model.els[1].x - model.els[0].x}
+
+
+class _TiedElement(NamedElement):
+    tied_fields: ClassVar = {"derived": ("x",)}
+    derived: NamedElement
+
+
+class _FirstX(eqx.Module):
+    def __call__(self, model):
+        return model.els[0].x
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_named_and_numeric_free_paths_constrain_the_same_model():
+    """One model and two spellings give the same density and model, at zero ULPs."""
+    model = named_model()
+    law = Normal(0.0, 1.0)
+    named, numbered = "els[first].x", "els[0].x"
+    # Reverse insertion order to exercise the lexicographic coordinate order.
+    term = ForwardTerm(_FirstX(), gaussian_loglike(1.0, 1.0))
+    by_name = Fit(model, {"els[third].x": law, named: law}, (term,))
+    by_index = Fit(model, {numbered: law, "els[2].x": law}, (term,))
+    aliases = {named: numbered, "els[third].x": "els[2].x"}
+    key = jax.random.key(3)
+    x_named, x_index = by_name.sample_prior(key), by_index.sample_prior(key)
+    assert x_named.keys() == aliases.keys()
+    assert x_index.keys() == set(aliases.values())
+    assert by_name.canonical_keys == aliases
+    assert tuple(by_name.canonical_keys) == tuple(aliases)
+    by_name.canonical_keys.clear()
+    assert by_name.canonical_keys == aliases
+    assert by_name.flat_layout() == (((named, None), ("els[third].x", None)), (1, 1))
+    assert tuple(by_name.draw_schema()) == (named, "els[third].x")
+    z = jnp.asarray([0.25, 0.75])
+    actual = by_name.real_log_prob(by_name.unravel(z))
+    expected = by_index.real_log_prob(by_index.unravel(z))
+    assert jnp.abs(actual - expected) <= ulps(0, expected)
+
+    for actual, expected in zip(
+        by_name.model_at(x_named).els, by_index.model_at(x_index).els, strict=True
+    ):
+        assert jnp.abs(actual.x - expected.x) <= ulps(0, expected.x)
+
+    # The mixed keys sort in the opposite order from their canonical paths.
+    indexed_third = "els[2].x"
+    mixed = Fit(model, {named: law, indexed_third: law})
+    assert mixed.flat_layout() == (((indexed_third, None), (named, None)), (1, 1))
+    assert tuple(mixed.draw_schema()) == (indexed_third, named)
+    x_mixed = mixed.sample_prior(key)
+    assert jnp.abs(x_mixed[indexed_third] - x_index[numbered]) <= ulps(
+        0, x_index[numbered]
+    )
+    assert jnp.abs(x_mixed[named] - x_index[indexed_third]) <= ulps(
+        0, x_index[indexed_third]
+    )
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_numeric_free_path_preserves_released_digest_layout_and_draw():
+    """Exact reference values recorded from the released numeric-path fixture."""
+    fit = _simple_fit()
+    path = "planets[0].Rp_Rearth"
+    assert (
+        fit.digest()
+        == "f041dc38aef7b6b4bd6d8502e051c1ef55619a574abce2e9a473e1031ed7ea34"
+    )
+    assert fit.flat_layout() == (((path, None),), (1,))
+    draw = fit.sample_prior(jax.random.key(0))
+    assert draw.keys() == {path}
+    np.testing.assert_array_equal(draw[path], [0.6959669742207993])
+    pair = {**fit.free, "planets[0].physical_model.Ag": Uniform(0.0, 1.0)}
+    reversed_pair = dict(reversed(pair.items()))
+    assert Fit(fit.model, pair).digest() == Fit(fit.model, reversed_pair).digest()
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_free_aliases_are_two_writers():
+    """Exactly one writer may select the first element's x leaf."""
+    law = Normal(0.0, 1.0)
+    with pytest.raises(ValueError, match=r"two writers.*els\[0\]\.x.*els\[first\]\.x"):
+        Fit(named_model(), {"els[0].x": law, "els[first].x": law})
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_block_ownership_and_overlap_follow_canonical_paths():
+    """One node owns its descendants, and its two spellings select that same node."""
+    model = named_model()
+    block = _NamedWritingBlock(owns="els[first]")
+    with pytest.raises(ValueError, match="two writers"):
+        Fit(model, {"els[first]": block, "els[0].x": Normal(0.0, 1.0)})
+
+    fit = Fit(
+        model, {"els[second]": _DependentBlock(), "els[first]": _NamedWritingBlock()}
+    )
+    assert fit.block_order == ("els[first]", "els[second]")
+    assert fit.canonical_keys == {"els[first]": "els[0]", "els[second]": "els[1]"}
+    at = fit.model_at({"els[first]": {"u": 4.0}, "els[second]": {"u": 5.0}})
+    assert float(at.els[1].x) == 9.0
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_named_term_reads_overlap_an_indexed_free_leaf():
+    """The cached first element contains its x leaf, including after term edits."""
+    model, free = named_model(), {"els[0].x": Normal(0.0, 1.0)}
+    initial = Fit(model, free, (_IndexedLatentTerm(),))
+    term = _NameReadingTerm()
+    for make in (
+        lambda: Fit(model, free, (term,)),
+        lambda: initial.append_term(term),
+        lambda: initial.replace_term(0, term),
+    ):
+        with pytest.raises(ValueError, match=r"els\[0\]\.x.*reads.*els\[first\]"):
+            make()
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_block_forward_respects_instance_write_paths():
+    """Only descendants of the first element may change, with no alias duplicates."""
+    model = named_model()
+    x = {"els[first]": {"u": jnp.asarray(4.0)}}
+    fit = Fit(model, {"els[first]": _NamedWritingBlock()})
+    assert float(fit.model_at(x).els[0].x) == 4.0
+    for outputs, message in (
+        (("els[1].x",), r"els\[1\]\.x.*declared writes"),
+        (("els[0].x", "els[first].x"), r"els\[0\]\.x.*els\[first\]\.x"),
+    ):
+        fit = Fit(model, {"els[first]": _NamedWritingBlock(outputs=outputs)})
+        with pytest.raises(ValueError, match=message):
+            eqx.filter_eval_shape(fit.model_at, x)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_named_ancestor_enforces_its_relative_tied_fields():
+    """The declared derived subtree forbids writing just one of its leaves."""
+    model = named_model()
+    first = model.els[0]
+    tied = _TiedElement(first.name, first.x, NamedElement("derived", first.x))
+    model = eqx.tree_at(lambda m: m.els[0], model, tied)
+    with pytest.raises(ValueError, match=r"els\[first\]\.derived\.x.*tied together"):
+        Fit(model, {"els[first].derived.x": Normal(0.0, 1.0)})
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_path_shaped_latent_identifier_does_not_bind_to_model():
+    """A marginalized latent can have any identifier, including an absent path."""
+    term = _IndexedLatentTerm()
+    fit = Fit(named_model(), {"els[0].x": Normal(0.0, 1.0)}, (term,))
+    assert fit.terms[0].marginalizes == ("planets[b]",)
+
+
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.float64_only(reason="float64 Fit coordinates")
+def test_named_footprint_checks_indexed_leaf_prior_endpoints():
+    """An unbounded x prior moves the first element's footprint and is refused."""
+    with pytest.raises(ValueError, match=r"els\[0\]\.x.*unbounded end"):
+        Fit(named_model(), {"els[0].x": Normal(0.0, 1.0)}, (_NameFootprintTerm(),))

@@ -4,8 +4,33 @@ from collections.abc import Callable
 from typing import Any
 
 import equinox as eqx
+import jax
+import jax.numpy as jnp
 
 from photomancy.measurements import RadialVelocityTerm
+
+
+class NamedElement(eqx.Module):
+    """A named tuple element with one fittable scalar."""
+
+    name: str = eqx.field(static=True)
+    x: jax.Array
+
+
+class NamedModel(eqx.Module):
+    """A small model with addressable tuple elements."""
+
+    els: tuple[NamedElement, ...]
+
+
+def named_model():
+    """Three tuple elements with distinct names and leaf values."""
+    return NamedModel(
+        tuple(
+            NamedElement(name, jnp.asarray(float(i)))
+            for i, name in enumerate(("first", "second", "third"), 1)
+        )
+    )
 
 
 class ExposureRecord(eqx.Module):

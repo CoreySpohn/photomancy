@@ -47,7 +47,7 @@ detected.
 import hashlib
 from abc import abstractmethod
 from dataclasses import fields
-from typing import ClassVar, Self
+from typing import ClassVar, NamedTuple, Self
 
 import equinox as eqx
 import jax
@@ -63,7 +63,7 @@ from hwoutils.leaves import (
     require_tree,
 )
 from hwoutils.memory import DEFAULT_MAX_BYTES, MemoryLimit, largest_batch
-from hwoutils.model_paths import assign, paths_overlap, resolve
+from hwoutils.model_paths import assign, canonical_path, paths_overlap, resolve
 from hwoutils.precision import PrecisionError, require_float64
 from jax.flatten_util import ravel_pytree
 from jax.scipy.special import log_ndtr, logsumexp
@@ -649,12 +649,60 @@ def _block_node(previous, value):
     return jax.tree.unflatten(tree, result)
 
 
-def _write_block(model, writes):
-    """Apply a block's replacement nodes at their destination leaf dtypes."""
-    for path, value in writes.items():
+class _BlockPaths(NamedTuple):
+    """One snapshot of a block's path declarations for the structural checks.
+
+    Attributes:
+        owns: Path of the owned node.
+        reads: Paths whose values the block uses.
+        writes: Paths the block may replace.
+    """
+
+    owns: str
+    reads: tuple[str, ...]
+    writes: tuple[str, ...]
+
+
+def _check_path_aliases(paths, what):
+    """Refuse two original spellings of one path before either is discarded."""
+    seen = set()
+    for key, path in paths:
+        if path in seen:
+            first = next(other for other, target in paths if target == path)
+            raise ValueError(f"{what} {first!r} and {key!r} both name {path!r}")
+        seen.add(path)
+
+
+def _write_block(model, writes, *, declared_paths=None):
+    """Check returned paths and write nodes at their destination leaf dtypes.
+
+    The support-swap Jacobian reapplies writes from a block already checked by Fit.
+    """
+    paths = [(key, _require_path(model, key, "block forward")) for key in writes]
+    _check_path_aliases(paths, "block returned aliases")
+    if declared_paths is not None:
+        declared = tuple(canonical_path(model, path) for path in declared_paths)
+        for key, path in paths:
+            if not any(
+                len(target) <= len(path) and paths_overlap(target, path)
+                for target in declared
+            ):
+                raise ValueError(
+                    f"block returned path {key!r} outside its declared writes "
+                    f"{declared_paths}"
+                )
+    for key, path in paths:
+        value = writes[key]
         node = _block_node(resolve(model, path), value)
         model = assign(model, path, node)
     return model
+
+
+def _require_path(model, path, who):
+    try:
+        return canonical_path(model, path)
+    except (AttributeError, IndexError, TypeError, ValueError) as err:
+        raise ValueError(f"unknown model path {path!r} (from {who})") from err
 
 
 def _wide_coordinates(x):
@@ -745,6 +793,7 @@ class Fit(eqx.Module):
     free: dict[str, AbstractDistribution | AbstractBlock]
     terms: tuple[AbstractTerm, ...] = ()
     _walls: tuple[tuple[str, tuple[str, ...]], ...] = eqx.field(static=True)
+    _canonical: tuple[tuple[str, str], ...] = eqx.field(static=True, init=False)
 
     def __init__(
         self,
@@ -782,9 +831,18 @@ class Fit(eqx.Module):
         self.model = eqx.combine(kept, rest, is_leaf=is_foreign)
         self.free = free
         self.terms = terms
-        self._walls = _block_walls(free) if _walls is None else _walls
+        paths = []
+        for key in sorted(free):
+            who = (
+                "a block must be keyed by the path it owns"
+                if isinstance(free[key], AbstractBlock)
+                else "free"
+            )
+            paths.append((key, self._require_path(key, who)))
+        self._canonical = tuple(paths)
 
         self._check_fit()
+        self._walls = _block_walls(free) if _walls is None else _walls
 
     def _check_fit(self):
         """Refuse an inconsistent fit on the host.
@@ -798,32 +856,39 @@ class Fit(eqx.Module):
                 ``reads``, or two terms that marginalize the same latent
                 (``AbstractTerm.marginalizes``), named in the message.
         """
+        _check_path_aliases(self._canonical, "two writers:")
+        canonical = self.canonical_keys
         leaf_paths, blocks = [], {}
         for path, entry in self.free.items():
             if isinstance(entry, AbstractDistribution):
                 self._check_leaf(path, entry)
                 leaf_paths.append(path)
             elif isinstance(entry, AbstractBlock):
-                blocks[path] = entry
+                blocks[path] = _BlockPaths(entry.owns, entry.reads, entry.writes)
             else:
                 raise TypeError(
                     f"free[{path!r}] is a {type(entry).__name__}; "
                     "expected a priorities distribution or a block"
                 )
-        for key, block in blocks.items():
-            for path in (*block.reads, *block.writes):
-                self._require_path(path, f"block {key!r}")
+        written = [(path, canonical[path]) for path in leaf_paths]
+        for key, paths in blocks.items():
+            who = f"block {key!r}"
+            self._require_path(paths.owns, who)
+            for path in paths.reads:
+                self._require_path(path, who)
+            written.extend(
+                (path, self._require_path(path, who)) for path in paths.writes
+            )
         check_ties(
-            self.model,
-            {
+            model=self.model,
+            writes={
                 **{path: (path,) for path in leaf_paths},
                 **{key: block.writes for key, block in blocks.items()},
             },
-            {key: block.reads for key, block in blocks.items()},
+            reads={key: block.reads for key, block in blocks.items()},
         )
-        check_writers(blocks, leaf_paths)
-        block_order(blocks)
-        written = [*leaf_paths, *(w for b in blocks.values() for w in b.writes)]
+        check_writers(blocks, leaf_paths, model=self.model)
+        block_order(blocks, model=self.model)
         summed = {}
         for i, term in enumerate(self.terms):
             if not isinstance(term, AbstractTerm):
@@ -838,14 +903,14 @@ class Fit(eqx.Module):
                     )
                 summed[latent] = i
             for read in term.reads:
-                self._require_path(read, f"{type(term).__name__}.reads")
-                for path in written:
-                    if paths_overlap(path, read):
+                target = self._require_path(read, f"{type(term).__name__}.reads")
+                for path, source in written:
+                    if paths_overlap(source, target):
                         raise ValueError(
                             f"free path {path!r} meets {type(term).__name__}.reads "
                             f"entry {read!r}: the term holds a build that cached it"
                         )
-        self._check_terms(leaf_paths)
+        self._check_terms([(path, canonical[path]) for path in leaf_paths])
 
     def _check_terms(self, leaf_paths):
         """Run each term's :meth:`AbstractTerm.check` on the concrete model.
@@ -859,8 +924,12 @@ class Fit(eqx.Module):
             return
         for i, term in enumerate(self.terms):
             term.check(self.model)
-            for path in leaf_paths:
-                if not any(paths_overlap(path, f) for f in term.footprint_paths):
+            footprints = tuple(
+                self._require_path(path, f"terms[{i}].footprint_paths")
+                for path in term.footprint_paths
+            )
+            for path, target in leaf_paths:
+                if not any(paths_overlap(target, f) for f in footprints):
                     continue
                 leaf = resolve(self.model, path)
                 for end in self.free[path].support():
@@ -878,13 +947,10 @@ class Fit(eqx.Module):
                     term.check(moved)
 
     def _require_path(self, path, who):
-        try:
-            return resolve(self.model, path)
-        except (AttributeError, IndexError, TypeError, ValueError) as err:
-            raise ValueError(f"unknown model path {path!r} (from {who})") from err
+        return _require_path(self.model, path, who)
 
     def _check_leaf(self, path, dist):
-        leaf = self._require_path(path, "free")
+        leaf = resolve(self.model, path)
         if not is_param(leaf):
             if eqx.is_array(leaf):
                 raise ValueError(
@@ -910,6 +976,11 @@ class Fit(eqx.Module):
             )
 
     # ----- entries ---------------------------------------------------------------
+
+    @property
+    def canonical_keys(self) -> dict[str, str]:
+        """Map each free coordinate key to its model path with numeric indices."""
+        return dict(self._canonical)
 
     @property
     def leaf_laws(self) -> dict[str, AbstractDistribution]:
@@ -950,7 +1021,7 @@ class Fit(eqx.Module):
     @property
     def block_order(self) -> tuple[str, ...]:
         """Block keys in the order they are applied."""
-        return block_order(self.blocks)
+        return block_order(self.blocks, model=self.model)
 
     @property
     def assumptions(self) -> tuple[str, ...]:
@@ -974,7 +1045,7 @@ class Fit(eqx.Module):
 
     @property
     def _schema(self) -> dict:
-        return {key: self._schema_of(key) for key in self.free}
+        return {key: self._schema_of(key) for key in sorted(self.free)}
 
     def _coordinate_difference(self, other):
         """Return the first differing key and reason, or None for the same map."""
@@ -1098,7 +1169,9 @@ class Fit(eqx.Module):
         for key in self.block_order:
             block = blocks[key]
             total = total + block.log_prob(x[key], model)
-            model = _write_block(model, block.forward(x[key], model))
+            model = _write_block(
+                model, block.forward(x[key], model), declared_paths=block.writes
+            )
         return model, total
 
     def model_at(self, x: dict) -> eqx.Module:
@@ -1531,7 +1604,9 @@ class Fit(eqx.Module):
         for bkey in self.block_order:
             block = blocks[bkey]
             x[bkey] = _wide_coordinates(block.sample(subkeys[bkey], model))
-            model = _write_block(model, block.forward(x[bkey], model))
+            model = _write_block(
+                model, block.forward(x[bkey], model), declared_paths=block.writes
+            )
         return x
 
     def sample_prior(self, key, sample_shape: tuple[int, ...] = ()) -> dict:
@@ -1605,8 +1680,11 @@ class Fit(eqx.Module):
         model = self._assign_leaf_laws(x, self.model)
         blocks = self.blocks
         for key in self.block_order:
-            x[key] = _wide_coordinates(blocks[key].from_unit(u[key], model))
-            model = _write_block(model, blocks[key].forward(x[key], model))
+            block = blocks[key]
+            x[key] = _wide_coordinates(block.from_unit(u[key], model))
+            model = _write_block(
+                model, block.forward(x[key], model), declared_paths=block.writes
+            )
         return {key: x[key] for key in self.free}
 
     # ----- edits -----------------------------------------------------------------
@@ -1622,21 +1700,35 @@ class Fit(eqx.Module):
         (:meth:`Posterior.with_priors` does, by ``same_map``).
 
         Args:
-            priors: ``{path: law or block}`` of the replacements, a subset of the free
-                keys.
+            priors: ``{path: law or block}`` of the replacements. Each path can be a
+                free key or another spelling of its model path.
 
         Returns:
             A new fit with the replacements and the same terms.
 
         Raises:
-            ValueError: For a key outside the free set, a replacement of the other
-                kind, or a block of another layout.
+            ValueError: For a key outside the free set, two paths for one entry,
+                a replacement of the other kind, or a block of another layout.
         """
-        extra = set(priors) - set(self.free)
+        canonical = self.canonical_keys
+        by_path = {path: key for key, path in self._canonical}
+        paths, extra = [], []
+        for path in priors:
+            if path in canonical:
+                paths.append((path, path))
+                continue
+            try:
+                key = by_path[self._require_path(path, "with_priors")]
+            except (KeyError, ValueError):
+                extra.append(path)
+            else:
+                paths.append((path, key))
         if extra:
             raise ValueError(
                 f"with_priors cannot change the free set; not free: {sorted(extra)}"
             )
+        _check_path_aliases(paths, "prior replacements")
+        priors = {key: priors[path] for path, key in paths}
         for key, new in priors.items():
             old = self.free[key]
             if isinstance(old, AbstractBlock):
