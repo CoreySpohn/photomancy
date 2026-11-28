@@ -28,6 +28,13 @@
   refit rather than converted. Pass east offsets (Delta RA cos Dec), not
   Delta RA, as `RelativeAstromData.ra`.
 
+## [2.0.1](https://github.com/CoreySpohn/photomancy/compare/v2.0.0...v2.0.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **photomancy:** form the geometric information gain in square-root form so a near-singular prior keeps its measured direction ([15f1a99](https://github.com/CoreySpohn/photomancy/commit/15f1a9919121f0585f99fba03c43d88a7e5bbb64))
+
 ## 2.0.0 (2026-11-28)
 
 
