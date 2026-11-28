@@ -472,18 +472,105 @@ def flat():
     return fit, start
 
 
-def _correlation_signature(fit, estimate):
+class _Gaussian(eqx.Module):
+    """The log likelihood of a Gaussian with information ``precision`` at ``mean``."""
+
+    mean: jax.Array
+    precision: jax.Array
+
+    def __call__(self, predicted):
+        r = predicted - self.mean
+        return -0.5 * r @ self.precision @ r
+
+
+class _RootedGaussian(_Gaussian):
+    """The same Gaussian with its Fisher root, so ``measure`` runs in scaled units.
+
+    The information of ``-0.5 r' P r`` is ``J' P J``; with ``P = L L'`` the root
+    ``L' predicted`` has the Jacobian ``L' J``. A likelihood without a root makes
+    ``measure`` run unscaled, and an unscaled run never stops early.
+    """
+
+    def fisher_root(self, predicted):
+        return jnp.linalg.cholesky(self.precision).T @ predicted
+
+
+class _Source(eqx.Module):
+    """The flux and sky offset of one source, one scalar each."""
+
+    a: jax.Array
+    east: jax.Array
+    north: jax.Array
+
+
+class _SourceForward(eqx.Module):
+    def __call__(self, model):
+        return jnp.stack([model.a, model.east, model.north])
+
+
+# A faint source whose flux and east offset are correlated at RIDGE_R in the likelihood
+# and whose north offset is independent, written in stored units 100 (flux) and 1000
+# (offsets) times the correlation form's, so the units are far from unity.
+RIDGE_R = 0.999
+RIDGE_MEAN = (0.2, 0.01, -0.02)
+RIDGE_UNITS = (100.0, 1e3, 1e3)
+
+
+@pytest.fixture(scope="module")
+def ridge():
+    """A flat block by construction: the Gaussian likelihood of a faint, ridged source.
+
+    The log likelihood is ``-0.5 r' P r`` about ``RIDGE_MEAN``, with ``P = D C D``:
+    ``C`` the correlation form (unit diagonal, ``RIDGE_R`` between flux and east, zero
+    elsewhere, so its eigenvalues are ``1 - RIDGE_R``, ``1`` and ``1 + RIDGE_R``) and
+    ``D = diag(RIDGE_UNITS)``. No frame, no noise: the maximum, the information and the
+    likelihood ratio against zero flux are known in closed form.
+
+    Returns:
+        The fit, a start off the maximum, the log likelihood of the fit without the
+        flux (the offsets refit; the quadratic needs no start), and ``2 delta lnL``
+        from the Schur complement.
+    """
+    d = np.array(RIDGE_UNITS)
+    corr = np.array([[1.0, RIDGE_R, 0.0], [RIDGE_R, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    precision = corr * np.outer(d, d)
+    mean = np.array(RIDGE_MEAN)
+    term = ForwardTerm(
+        _SourceForward(), _RootedGaussian(jnp.asarray(mean), jnp.asarray(precision))
+    )
+    zero = _Source(jnp.zeros(()), jnp.zeros(()), jnp.zeros(()))
+    laws = {name: Normal(0.0, 10.0) for name in ("a", "east", "north")}
+    fit = Fit(zero, laws, (term,))
+    start = {
+        "a": jnp.asarray(1.0),
+        "east": jnp.asarray(mean[1] + 0.01),
+        "north": jnp.asarray(mean[2] - 0.01),
+    }
+    without = Fit(zero, {k: laws[k] for k in ("east", "north")}, (term,))
+    refit = measure(without, {"east": start["east"], "north": start["north"]})
+    # the profile over the offsets: the flux's marginal variance is the (a, a) entry
+    # of the inverse precision, and 2 delta lnL is its own value squared over it
+    lr = mean[0] ** 2 / np.linalg.inv(precision)[0, 0]
+    return fit, start, float(refit.log_likelihood), float(lr)
+
+
+def _ridge_block(x):
+    return x["a"], x["east"], x["north"]
+
+
+def _correlation_signature(fit, estimate, scales):
     """The verdict and smallest eigenvalue of the information after a change of units.
 
-    The flat vector lists the block's east and north offsets, then the flux scale. The
-    units change from arcseconds to radians and the flux by 1e-4.
+    ``scales`` are the factors that change the coordinates, in the order of the flat
+    vector; the information is rescaled by them as they are, then again with every
+    coordinate multiplied by the arcsecond to radian factor.
     """
     info = np.asarray(
         fit.information(estimate.value, kind="observed", include_prior=False)
     )
     out = []
     for unit in (1.0, np.pi / 648000.0):
-        c = np.array([unit, unit, 1e-4 * unit])
+        c = np.asarray(scales) * unit
         _, _, definite, smallest = _correlation_inverse(
             jnp.asarray(info / np.outer(c, c))
         )
@@ -491,47 +578,77 @@ def _correlation_signature(fit, estimate):
     return out
 
 
-@vv.case("scene-fits", "code-verification", basis="floating-point")
-@pytest.mark.slow(reason="a second scene through the staged recipe")
+@vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.slow(reason="the bright planet of the staged recipe, and the compiled fit")
 def test_a_planet_the_data_cannot_place_is_removed_by_the_refit_in_any_units(
-    recipe, flat
+    recipe, ridge
 ):
-    """A faint source admitted by construction converges, is screened and is removed.
+    """A faint source on a likelihood ridge converges, is screened and is removed.
 
-    Truth source: the model. A planet of flux scale 0.03 is under one formal error above
-    zero on this grid, so its position and amplitude are not constrained: the run ends
-    where the planet sits off the detector and feeds the frame through its wing with an
-    amplitude of 4e5, whose formal width (7e6) is larger than the value. The fit
-    converges there (``converged``, ``finite``, ``stopped_early``), its block scaled by
-    its own diagonal has a smallest eigenvalue of 8e-4, below the screen, so the rule
-    refits without the source: ``2 delta lnL`` against the zero-flux fit is 3.4, far
-    below ``THRESHOLD**2`` = 14.4, and the source comes out. The bright planet (z about
-    26) is not screened (block eigenvalue 0.97, amplitude 26 widths) and is kept.
-    The verdicts, and the smallest eigenvalue of the information in correlation form, do
-    not change when the coordinates are rescaled (arcseconds to radians, the flux by
-    1e-4).
-    Tolerance basis: floating-point (the screen 0.05 lies between the 8e-4 of the flat
-    block and the 0.97 of the bright one; the rescaled eigenvalue equals the original to
-    rtol 1e-9). ``regular`` is true for the flat run (the matrix is invertible), so the
-    rule does not use it.
-    Fails if the rule keeps the flat source or removes the bright one, a verdict
-    depends on the units (a positive-definite test on the stored-unit matrix), the flat
-    run is not converged, or the removal is not made by the likelihood ratio.
+    Truth source: a Gaussian likelihood built to be flat in one direction (the
+    ``ridge`` fixture: no frame, no noise, so no realization decides the path).
+    Flux and east offset are correlated at 0.999, so the block's correlation form has
+    eigenvalues 0.001, 1 and 1.999 exactly, and the faint flux (0.2, a marginal width of
+    0.22 and z = 0.89) is under the threshold. The fit converges to the known maximum,
+    the block scaled by its own diagonal has a smallest eigenvalue of 1 - 0.999, below
+    the screen, so the rule refits without the source: ``2 delta lnL`` is the squared
+    flux over the (a, a) entry of the inverse precision, 0.80, far below
+    ``THRESHOLD**2`` = 14.4, and the source comes out. In a quadratic ``2 delta lnL`` is
+    ``z**2``, so the amplitude trigger also fires here; the block eigenvalue is what the
+    case pins, and the correlated-position case below pins the block firing alone. The
+    bright planet of the imaging recipe (z about 26) is not screened (block
+    eigenvalue near 1) and is kept. The verdicts and the smallest eigenvalue of the
+    information in correlation form do not change when the coordinates are rescaled
+    (the ridge is written in stored units 100 and 1000 times the correlation form's, the
+    imaging fit in arcseconds and flux scale; both then by 1e-4 and by arcseconds to
+    radians).
+    Tolerance basis: exact-algebra (rtol 1e-6 on the eigenvalue, on the maximum and on
+    ``2 delta lnL``, the quadratic being solved to the Newton polish; the screen 0.05
+    lies between 0.001 and the bright planet's 0.97); the rescaled eigenvalue equals the
+    original to rtol 1e-9 (floating-point, one eigenvalue of a 3 by 3 matrix whose
+    scaling rounds at 1e-16). ``regular`` is true for the ridge (the matrix is
+    invertible), so the rule does not use it.
+    Fails if the rule keeps the ridged source or removes the bright one, a verdict
+    depends on the units (a positive-definite test or an eigenvalue taken on the
+    stored-unit matrix), the screen does not see the correlation between flux and
+    position (a block that drops its cross terms), or the removal is not made by the
+    likelihood ratio.
     """
-    fit, start = flat
-    verdict = _keeps(fit, 1, start(0.004, 0.004), n_steps=400)
+    fit, start, null_lnl, lr = ridge
+    verdict = _rule(
+        fit,
+        start,
+        _ridge_block,
+        lambda x: x["a"],
+        0,
+        lambda x: null_lnl,
+        100,
+        400,
+        1e-3,
+    )
     first = verdict.first
     assert bool(first.finite) and bool(first.converged) and first is verdict.last
     assert bool(first.stopped_early) and float(first.newton_decrement) < 1e-3
-    assert verdict.by_block and verdict.marginal
-    assert verdict.lr is not None and verdict.lr < THRESHOLD**2
-    print("flat 2 delta lnL:", verdict.lr)
-    assert not verdict.keep
+    x = first.value
+    got = np.array([float(x["a"]), float(x["east"]), float(x["north"])])
+    # the offset from the maximum in the stored units' own widths (1 / units)
+    off = (got - RIDGE_MEAN) * np.array(RIDGE_UNITS)
+    np.testing.assert_allclose(off, 0.0, rtol=0, atol=1e-6)
+    eigenvalues = _scaled_eigenvalues(fit, x, _ridge_block)
+    np.testing.assert_allclose(eigenvalues.min(), 1.0 - RIDGE_R, rtol=1e-6)
+    assert verdict.by_block and verdict.marginal and verdict.by_amplitude
+    assert verdict.lr is not None and verdict.lr == pytest.approx(lr, rel=1e-6)
+    assert verdict.lr < THRESHOLD**2 and not verdict.keep
     bright = _keeps(recipe["one"], 0, recipe["start0"])
     assert bright.keep and not bright.marginal and bright.lr is None
     assert bool(bright.last.regular)
-    for model, estimate in ((fit, first), (recipe["one"], bright.last)):
-        (base, original), *rescaled = _correlation_signature(model, estimate)
+    flux_offsets = np.array([1e-4, 1.0, 1.0])
+    imaging = np.array([1.0, 1.0, 1e-4])  # the flat vector: east, north, flux
+    for model, estimate, scales in (
+        (fit, first, flux_offsets),
+        (recipe["one"], bright.last, imaging),
+    ):
+        (base, original), *rescaled = _correlation_signature(model, estimate, scales)
         assert base == bool(estimate.positive_definite)
         np.testing.assert_allclose(original, float(estimate.min_eigenvalue), rtol=1e-9)
         for definite, smallest in rescaled:
@@ -566,33 +683,35 @@ def test_a_source_the_block_screen_passes_is_removed_through_the_amplitude_trigg
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-@pytest.mark.slow(reason="a second scene through the staged recipe")
-def test_a_ridge_walk_ended_by_the_step_cap_is_rerun_because_of_the_cap(flat):
-    """A ridge walk ended by the step cap is rerun on the cap, whatever its decrement.
+@pytest.mark.slow(reason="a compiled optimizer run, then a rerun, on a constructed fit")
+def test_a_ridge_walk_ended_by_the_step_cap_is_rerun_because_of_the_cap(ridge):
+    """A run ended by the step cap is rerun on the cap, even when it is converged.
 
-    Truth source: the model (the scene of the flat-direction test). At 100 steps the
-    amplitude is still climbing: ``stopped_early`` is false and the Newton decrement is
-    3e-3 nat, above the 1e-3 tolerance, so the estimate is not converged. Judged with a
-    tolerance of 1e-2 nat it would be (3e-3 is under it), and the rule must still rerun
-    it, because the margin of the decrement over such walks is small: the cap, not the
-    decrement, triggers the rerun. With 400 steps the run converges at 160 and the
-    refit then removes the source.
-    Tolerance basis: exact-algebra for the flags (the decrement is 3 times the
-    tolerance at 100 steps and 5e-27 at 160).
-    Fails if a run that the step cap ended is called converged at the default tolerance,
-    or if the rerun is skipped when the decrement is under the tolerance.
+    Truth source: the Gaussian likelihood of the ``ridge`` fixture, a quadratic whose
+    maximum, information and ``2 delta lnL`` are known. The step cap is one L-BFGS
+    iteration, so the cap binds by construction: the stop rule needs the loss to have
+    stalled, and one step from a start 1 flux unit and 0.01 arcsec off the maximum
+    cannot stall it. The Newton polish then finishes the quadratic: the estimate is
+    finite, ``converged`` with a decrement at rounding level (far under the 1e-3 nat
+    tolerance), and still ``stopped_early`` false. The rule must rerun it for that
+    reason alone, with 400 steps; the rerun's stop rule ends it (``stopped_early``) and
+    the refit then removes the source (``2 delta lnL`` 0.80 against 14.4).
+    Tolerance basis: exact-algebra for the flags (the decrement of a polished quadratic
+    is rounding, 1e-6 nat at most here; the cap of 1 against the 400 of the rerun).
+    Fails if a run that the cap ended reports ``stopped_early`` (the cap is not
+    recorded), or the rule skips the rerun because the capped run is converged.
     """
-    fit, start = flat
-    verdict = _keeps(fit, 1, start(0.004, 0.004))
-    first = verdict.first
-    assert bool(first.finite) and not bool(first.stopped_early)
-    assert not bool(first.converged) and not bool(first.regular)
-    assert first is not verdict.last and bool(verdict.last.converged)
-    assert bool(verdict.last.stopped_early)
-    assert not verdict.keep
-    loose = _keeps(fit, 1, start(0.004, 0.004), max_decrement=1e-2)
-    assert bool(loose.first.converged) and not bool(loose.first.stopped_early)
-    assert loose.first is not loose.last and not loose.keep
+    fit, start, null_lnl, lr = ridge
+    verdict = _rule(
+        fit, start, _ridge_block, lambda x: x["a"], 0, lambda x: null_lnl, 1, 400, 1e-3
+    )
+    first, last = verdict.first, verdict.last
+    assert bool(first.finite) and bool(first.converged) and int(first.n_steps) == 1
+    assert float(first.newton_decrement) < 1e-6
+    assert not bool(first.stopped_early)
+    assert last is not first and int(last.n_steps) > 1
+    assert bool(last.converged) and bool(last.stopped_early)
+    assert verdict.lr == pytest.approx(lr, rel=1e-6) and not verdict.keep
 
 
 class _Pair(eqx.Module):
@@ -605,17 +724,6 @@ class _Pair(eqx.Module):
 class _PairForward(eqx.Module):
     def __call__(self, model):
         return jnp.stack([model.a, model.d])
-
-
-class _Gaussian(eqx.Module):
-    """The log likelihood of a Gaussian with information ``precision`` at ``mean``."""
-
-    mean: jax.Array
-    precision: jax.Array
-
-    def __call__(self, predicted):
-        r = predicted - self.mean
-        return -0.5 * r @ self.precision @ r
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
