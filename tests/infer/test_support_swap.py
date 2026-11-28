@@ -25,7 +25,7 @@ pytestmark = pytest.mark.float64_only(
 )
 
 KEY = "dynamics.orbits"
-N = 20000
+N = 512
 GATE = dict(min_n_eff=0.0, max_khat=jnp.inf)
 
 
@@ -74,6 +74,24 @@ def _check_target(post):
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+@pytest.fixture(scope="module")
+def narrow_prior_cloud():
+    """The old, narrower orbit prior for the widening and chart checks."""
+    return _cloud(_fit(0.8, 3.0))
+
+
+@pytest.fixture(scope="module")
+def wide_prior_cloud():
+    """The wide orbit prior for the narrowing and size-gate checks."""
+    return _cloud(_fit(0.5, 6.0))
+
+
+@pytest.fixture(scope="module")
+def wide_posterior():
+    """The wide orbit fit with the same semi-major-axis likelihood in both tests."""
+    return _cloud(_fit(0.5, 6.0, (_SizeTerm(),)))
 
 
 class _ExponentialBlock(_FloatWritingBlock):
@@ -125,8 +143,13 @@ def test_support_swap_widens_legacy_coordinates_before_the_jacobian():
     assert not swapped.info.refused
 
 
-@pytest.mark.medium(reason="compiles the re-expression and its Jacobian, 8 s cold")
-def test_widening_is_refused_and_the_walled_mass_is_read_from_the_info():
+@pytest.mark.slow(
+    reason="compiles both directions of an orbit support change with its coordinate "
+    "Jacobian, 18 s projected on CI"
+)
+def test_widening_is_refused_and_the_walled_mass_is_read_from_the_info(
+    narrow_prior_cloud, wide_prior_cloud
+):
     """LogUniform(0.8, 3) to LogUniform(0.5, 6) is refused; the mass is 0.5319.
 
     Truth source: with no term the cloud is the old prior, so the new law's mass on
@@ -134,18 +157,18 @@ def test_widening_is_refused_and_the_walled_mass_is_read_from_the_info():
     ratio), read from ``info.log_mass_ratio``; the narrowing swap back is accepted and
     a draw outside the narrower support has weight zero.
     Tolerance basis: exact-algebra, 1e-9 in the log (the ratio is the same constant at
-    every draw for log-uniform laws, so the Monte Carlo error is zero).
+    every draw for log-uniform laws, so the Monte Carlo error is zero). The wide
+    cloud need only contain draws on both sides of the narrower support.
     Fails if: the support test is missing (the evidence of the swap is reported as the
     new fit's), ``log_mass_ratio`` is NaN on refusal, the Jacobian of the
     re-expression is dropped or doubled, or a draw is left in the old coordinates.
     """
-    cloud = _cloud(_fit(0.8, 3.0))
-    out = cloud.with_priors({KEY: _block(_law(0.5, 6.0))}, **GATE)
+    out = narrow_prior_cloud.with_priors({KEY: _block(_law(0.5, 6.0))}, **GATE)
     assert bool(out.info.refused) and not bool(out.info.support_covered)
     assert np.all(np.isnan(out.log_weights)) and np.isnan(out.log_evidence)
     truth = np.log(np.log(3.0 / 0.8) / np.log(6.0 / 0.5))
     np.testing.assert_allclose(out.info.log_mass_ratio, truth, rtol=0, atol=1e-9)
-    wide = _cloud(_fit(0.5, 6.0))
+    wide = wide_prior_cloud
     back = wide.with_priors({KEY: _block(_law(0.8, 3.0))}, **GATE)
     assert bool(back.info.support_covered) and not bool(back.info.refused)
     a_old = jax.vmap(lambda x: wide.fit.model_at(x).dynamics.orbits.a_AU[0])(
@@ -157,24 +180,29 @@ def test_widening_is_refused_and_the_walled_mass_is_read_from_the_info():
     assert np.all(np.isfinite(np.asarray(back.log_weights)[~outside]))
 
 
-@pytest.mark.medium(reason="compiles the re-expression twice, 8 s cold")
-def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
+@pytest.mark.slow(
+    reason="re-expresses and refits the narrowed orbit and scores an appended "
+    "term, 17 s projected on CI"
+)
+def test_narrowing_gives_minus_inf_outside_and_matches_a_refit(wide_posterior):
     """Narrowing the law zeroes the draws it excludes and keeps the evidence exact.
 
     Truth source: a direct prior-sampling estimate of the evidence under the narrow
     law (the refit), with the size term.
-    Tolerance basis: 3 combined standard errors of the swap and the refit.
+    Tolerance basis: 3 combined standard errors of the swap and the refit, each
+    using 512 draws. The same-cloud evidence is exact to rounding because the
+    log-uniform ratio is constant on the surviving draws. The zero-weight
+    assertions separately pin the support cut.
     Dead draws carry NaN coordinates (visibly dead), the live ones are finite, and an
     ``append_term`` on the swapped cloud is not refused by the dead draws.
     Fails if: out-of-support draws keep weight or finite wall coordinates, the
     evidence ignores the cut, or a dead draw's NaN refuses a later operation.
     """
-    term = (_SizeTerm(),)
-    wide = _fit(0.5, 6.0, term)
+    wide = wide_posterior.fit
     narrow_block = _block(_law(1.0, 2.0))
-    out = _cloud(wide).with_priors({KEY: narrow_block}, **GATE)
+    out = wide_posterior.with_priors({KEY: narrow_block}, **GATE)
     a_old = jax.vmap(lambda x: wide.model_at(x).dynamics.orbits.a_AU[0])(
-        _cloud(wide).samples
+        wide_posterior.samples
     )
     outside = np.asarray((a_old < 1.0) | (a_old > 2.0))
     assert outside.any() and not outside.all()
@@ -188,10 +216,14 @@ def test_narrowing_gives_minus_inf_outside_and_matches_a_refit():
     assert np.isfinite(float(appended.log_evidence))
     assert np.all(np.isneginf(np.asarray(appended.log_weights)[outside]))
     assert np.all(np.isfinite(np.asarray(appended.log_weights)[~outside]))
-    ref = _cloud(Fit(_scene(), {KEY: narrow_block}, term), seed=5)
+    ref = _cloud(Fit(wide.model, {KEY: narrow_block}, wide.terms), seed=5)
     se = np.hypot(float(out.log_evidence_se), float(ref.log_evidence_se))
     assert abs(float(out.log_evidence) - float(ref.log_evidence)) < 3 * se
     kept = ~outside
+    log_ratio = np.log(np.log(6.0 / 0.5) / np.log(2.0 / 1.0))
+    live_log_mass = jax.scipy.special.logsumexp(wide_posterior.log_weights[kept])
+    expected = wide_posterior.log_evidence + log_ratio + live_log_mass
+    np.testing.assert_allclose(out.log_evidence, expected, atol=1e-10, rtol=1e-10)
     np.testing.assert_allclose(
         np.asarray(out.log_target)[kept],
         np.asarray(out.fit.log_density(out.samples))[kept],
@@ -235,24 +267,23 @@ def test_a_block_change_outside_its_laws_is_refused():
     assert bool(out.info.refused) and not bool(out.info.support_covered)
 
 
-def test_a_chart_change_is_refused_by_name():
+def test_a_chart_change_is_refused_by_name(narrow_prior_cloud):
     """Another chart is not a prior swap: the layout differs.
 
     Fails if: a chart change is treated as a support change (the stored coordinates
     would then be read as another chart's).
     """
-    cloud = _cloud(_fit(0.8, 3.0))
     other = _block(_law(0.8, 3.0), chart=EccentricityVectorChart())
     with pytest.raises(ValueError, match="same layout"):
-        cloud.with_priors({KEY: other}, **GATE)
+        narrow_prior_cloud.with_priors({KEY: other}, **GATE)
 
 
-def test_an_identity_swap_changes_nothing():
+def test_an_identity_swap_changes_nothing(wide_posterior):
     """The same block gives the same weights, evidence, error and draws.
 
     Tolerance basis: rtol 1e-12 (the identity path runs no re-expression).
     """
-    cloud = _cloud(_fit(0.5, 6.0, (_SizeTerm(),)))
+    cloud = wide_posterior
     out = cloud.with_priors({KEY: cloud.fit.free[KEY]}, **GATE)
     for name in ("log_weights", "log_target", "log_evidence", "log_evidence_se"):
         np.testing.assert_allclose(
@@ -276,12 +307,14 @@ def test_a_shape_change_inside_the_same_bounds_is_the_plain_path():
     _check_target(out)
 
 
-def test_the_gate_still_refuses_a_swap_that_leaves_few_draws():
-    """The gate runs on the combined weights across a support change."""
-    cloud = _cloud(_fit(0.5, 6.0))
+def test_the_gate_still_refuses_a_swap_that_leaves_few_draws(wide_prior_cloud):
+    """The narrow interval leaves live draws below a gate at one tenth of the cloud."""
+    cloud = wide_prior_cloud
+    floor = len(cloud.log_weights) / 10
     out = cloud.with_priors(
-        {KEY: _block(_law(1.4, 1.45))}, min_n_eff=2000.0, max_khat=jnp.inf
+        {KEY: _block(_law(1.4, 1.45))}, min_n_eff=floor, max_khat=jnp.inf
     )
+    assert 0 < float(out.info.n_eff) < floor
     assert np.all(np.isnan(out.log_weights)) and np.isnan(out.log_evidence)
 
 

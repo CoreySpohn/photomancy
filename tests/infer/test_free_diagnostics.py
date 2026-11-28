@@ -244,6 +244,10 @@ def _cloud(key, batch=(2,), n=64, d=3):
 
 
 @_INFERENCE
+@pytest.mark.slow(
+    reason="compiles full diagnostics both in batches and one slice at a time, "
+    "8 s projected on CI"
+)
 def test_batch_prefix_equals_per_slice_loop():
     """Batched, vmapped and per-slice results agree."""
     log_w, vals = _cloud(jax.random.key(1))

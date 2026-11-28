@@ -39,6 +39,10 @@ def _predict(data, cos_i):
 
 
 @pytest.mark.float64_only(reason="measurement log densities require float64")
+@pytest.mark.slow(
+    reason="compiles photometry and its gradient over masked observations, 7 s "
+    "projected on CI"
+)
 def test_loglike_dmag_gradient_finite_on_placeholder():
     """The masked-placeholder gradient of the dMag likelihood is finite."""
     img0 = DMagData.zeros(64)

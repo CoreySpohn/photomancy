@@ -177,7 +177,10 @@ def fit():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-@pytest.mark.medium(reason="the report fit density compiles once, 8 s cold")
+@pytest.mark.slow(
+    reason="compiles three report-fit density programs with distinct static "
+    "proposal settings, 17 s projected on CI"
+)
 def test_the_leaf_record_never_enters_the_fit_density(fit):
     """Fails if ``leaf_path`` or ``leaf_exponent`` reaches the report likelihood.
 
@@ -213,7 +216,10 @@ def test_unproposed_free_entries_are_refused_by_name():
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.medium(reason="compiles one screened completion on the report fit, 15 s")
+@pytest.mark.slow(
+    reason="compiles screened report completion over live and dead orbit shapes, 11 "
+    "s projected on CI"
+)
 def test_a_pool_with_no_live_constant_weighs_zero_without_nan(fit):
     """Fails if a ``shape`` whose pool lies outside the prior gets a weight or a NaN.
 

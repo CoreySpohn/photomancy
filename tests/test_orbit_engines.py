@@ -27,6 +27,7 @@ from photomancy.infer import (
     update,
 )
 from photomancy.measurements import AstrometryData, RelativeAstrometryTerm
+from photomancy.orbit import eig_astrometry
 from photomancy.orbit.backends import any_epoch, few_epoch
 from photomancy.orbit.completion import (
     CompletedProposal,
@@ -97,21 +98,27 @@ def test_completion_identity_pins_the_linear_gaussian(fit):
     rtol 1e-9; the form is in arcsec so no scale constant enters.
     """
     comp = Completion.from_fit(fit)
-    x = fit.sample_prior(jax.random.key(0), (3,))
-    shape, c = comp.split(fit.to_flat(x))
-    for i in range(3):
-        mean, chol, log_z = comp.conditional(shape[i])
-        diff = chol.T @ (c[i] - mean)
-        log_cond = (
-            -0.5 * jnp.sum(diff**2)
-            + jnp.sum(jnp.log(jnp.diag(chol)))
-            - 2.0 * jnp.log(2 * jnp.pi)
-        )
-        xi = jax.tree.map(lambda a, i=i: a[i], x)
-        rest = comp.fit_rest.log_density(xi) - _log_reference(c[i], comp.scale_AU)
-        np.testing.assert_allclose(
-            float(rest + log_z + log_cond), float(fit.log_density(xi)), rtol=1e-9
-        )
+
+    @eqx.filter_jit
+    def compare(comp, fit, key):
+        x = fit.sample_prior(key, (3,))
+        shapes, constants = comp.split(fit.to_flat(x))
+
+        def factored(shape, c, draw):
+            mean, chol, log_z = comp.conditional(shape)
+            diff = chol.T @ (c - mean)
+            log_cond = (
+                -0.5 * jnp.sum(diff**2)
+                + jnp.sum(jnp.log(jnp.diag(chol)))
+                - 2.0 * jnp.log(2 * jnp.pi)
+            )
+            rest = comp.fit_rest.log_density(draw) - _log_reference(c, comp.scale_AU)
+            return rest + log_z + log_cond
+
+        return jax.vmap(factored)(shapes, constants, x), fit.log_density(x)
+
+    factored, direct = compare(comp, fit, KEY)
+    np.testing.assert_allclose(factored, direct, rtol=1e-9)
     assert float(comp.scale_AU) == pytest.approx(10.0 * 0.15, rel=1e-6)
 
 
@@ -225,7 +232,10 @@ class _NanTerm(AbstractTerm):
         raise NotImplementedError
 
 
-@pytest.mark.medium(reason="one small any_epoch run on the scoring path, 10 s cold")
+@pytest.mark.slow(
+    reason="compiles adaptive orbit importance with a nonfinite score during "
+    "screened completion, 13 s projected on CI"
+)
 def test_a_nan_score_refuses_the_slice(fit):
     """Fails if a NaN term at a live draw is read as a zero weight.
 
@@ -262,39 +272,67 @@ def test_completion_refuses_a_term_on_another_system():
         Completion.from_fit(fit)
 
 
-@pytest.mark.medium(reason="4000 draws on two programs, 14 s cold")
-def test_scale_rotate_density_is_normalized_and_matches_the_draws():
+@pytest.fixture(scope="module")
+def scale_rotate_run():
+    """The same one-row fit and posterior for the density and EIG guards."""
+    fit = _fit(_term(n_rows=1, err=0.3))
+    return run(fit, few_epoch(n_draws=4000), KEY)
+
+
+@pytest.mark.slow(
+    reason="compiles orbit sampling and checks normalization across 4000 proposal "
+    "and prior draws, 18 s projected on CI"
+)
+def test_scale_rotate_density_is_normalized_and_matches_the_draws(scale_rotate_run):
     """Fails if the Jacobian or the sheet factor of ``log_q`` is wrong.
 
     A broad anchor kernel (0.3 arcsec) makes the proposal cover much of the prior. The
     probability that a draw is inside the period bounds, from the proposal's own draws,
     equals the integral of its density estimated with prior draws, within 4 SE; and
-    ``log_q`` of a draw equals ``log_prob`` of it. N = 4000 for a 4 SE of 0.04. A draw
-    outside the period bounds is NaN with ``log_q = -inf``, and ``weigh`` gives it
-    weight zero, so the evidence stays finite.
+    ``log_q`` of a draw equals ``log_prob`` of it. Use 4000 draws from each source
+    and compute the standard errors from their own sample variances. A draw
+    outside the period bounds is NaN with ``log_q = -inf``, and ``weigh`` gives
+    it weight zero, so the evidence stays finite.
     """
-    fit = _fit(_term(n_rows=1, err=0.3))
+    fit = scale_rotate_run.fit
     proposal = ScaleRotateProposal()
-    n = 4000
-    z, log_q = eqx.filter_jit(proposal.sample)(jax.random.key(0), fit, n)
+    n = len(scale_rotate_run.log_weights)
+    z, log_q = eqx.filter_jit(proposal.sample)(KEY, fit, n)
     inside = np.isfinite(np.asarray(log_q))
-    ok = np.where(inside)[0][:200]
+    density = eqx.filter_jit(proposal.log_prob)
     np.testing.assert_allclose(
-        proposal.log_prob(z[ok], fit), log_q[ok], rtol=1e-8, atol=1e-8
+        density(z, fit)[inside], log_q[inside], rtol=1e-8, atol=1e-8
     )
     assert 0 < inside.sum() < n
     assert np.all(np.isnan(np.asarray(z)[~inside][:, :3]))
-    draws = few_epoch(n_draws=n)._run(fit, jax.random.key(0))
-    np.testing.assert_array_equal(np.isneginf(draws.log_weights), ~inside)
-    assert np.isfinite(float(draws.log_evidence))
+    np.testing.assert_array_equal(np.isneginf(scale_rotate_run.log_weights), ~inside)
+    assert np.isfinite(float(scale_rotate_run.log_evidence))
     p_draws = inside.mean()
     se_draws = np.sqrt(p_draws * (1 - p_draws) / n)
     xp = fit.sample_prior(jax.random.key(1), (n,))
     zp = fit.to_flat(xp)
-    log_w = proposal.log_prob(zp, fit) - fit.log_prior(xp)
+    log_w = density(zp, fit) - fit.log_prior(xp)
     w = np.exp(np.asarray(log_w))
     se_prior = w.std() / np.sqrt(n)
-    assert abs(w.mean() - p_draws) < 4 * np.hypot(se_draws, se_prior)
+    band = 4 * np.hypot(se_draws, se_prior)
+    assert abs(w.mean() - p_draws) < band
+
+
+@pytest.mark.slow(
+    reason="samples a scale-and-rotate orbit cloud then clusters it and scores "
+    "candidate epochs, 7 s projected on CI"
+)
+def test_modes_of_a_run_score_every_candidate(scale_rotate_run):
+    """Fails if zero-weight NaN draws poison the modes or the epoch scores."""
+    assert np.isneginf(np.asarray(scale_rotate_run.log_weights)).any()
+    epochs = jnp.linspace(0.0, 2000.0, 4)
+    result = eig_astrometry(
+        scale_rotate_run, epochs, 0.004**2, key=jax.random.key(1), n_modes=4
+    )
+    total = np.asarray(result.eig.total)
+    assert total.shape == (4,)
+    assert np.all(np.isfinite(total) & (total >= 0.0)), total
+    assert np.ptp(total) > 0.0
 
 
 @pytest.mark.slow(

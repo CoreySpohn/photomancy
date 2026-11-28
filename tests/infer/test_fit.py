@@ -498,8 +498,10 @@ def test_refuses_without_x64():
         Fit(_scene(), {})
 
 
-def _mixed_fit():
-    return Fit(
+@pytest.fixture(scope="module")
+def mixed_draws():
+    """One mixed leaf/orbit fit and draws with two distinct batch extents."""
+    fit = Fit(
         _scene(planet_mass_Msun=1e-4),
         {
             "planets[0].Rp_Rearth": TruncatedDistribution(Normal(2.0, 0.7), low=0.5),
@@ -509,14 +511,18 @@ def _mixed_fit():
         },
         (_relative(), _stellar()),
     )
+    draws = eqx.filter_jit(fit.sample_prior)(jax.random.key(0), (2, 3))
+    return fit, draws
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-@pytest.mark.medium(reason="mixed fit compile, 7 s cold")
-def test_real_round_trip_and_density():
+@pytest.mark.slow(
+    reason="traces the real-coordinate density and gradient on a mixed orbit and "
+    "leaf fit, 21 s projected on CI"
+)
+def test_real_round_trip_and_density(mixed_draws):
     """to_real and from_real invert each other; real_log_prob adds the volume."""
-    fit = _mixed_fit()
-    x = fit.sample_prior(jax.random.key(0), (5,))
+    fit, x = mixed_draws
     u = fit.to_real(x)
     back, volume = fit.from_real(u)
     for key in x:
@@ -525,7 +531,7 @@ def test_real_round_trip_and_density():
             x[key],
             back[key],
         )
-    assert volume.shape == (5,)
+    assert volume.shape == (2, 3)
     np.testing.assert_allclose(
         fit.real_log_prob(u), fit.log_density(x) + volume, rtol=1e-12
     )
@@ -534,7 +540,7 @@ def test_real_round_trip_and_density():
         np.array_equal(u["dynamics.orbits"][k], x["dynamics.orbits"][k]) for k in COORDS
     )
     # the unconstrained density integrates to the prior: importance check on a leaf
-    one = jax.tree.map(lambda a: a[0], x)
+    one = jax.tree.map(lambda a: a[0, 0], x)
     grad = jax.grad(lambda v: fit.real_log_prob(v))(fit.to_real(one))
     assert all(np.all(np.isfinite(g)) for g in jax.tree.leaves(grad))
 
@@ -543,7 +549,13 @@ def test_real_round_trip_and_density():
 @pytest.mark.parametrize(
     "law",
     [
-        TruncatedDistribution(Normal(2.0, 0.7), low=0.5),
+        pytest.param(
+            TruncatedDistribution(Normal(2.0, 0.7), low=0.5),
+            marks=pytest.mark.slow(
+                reason="checks distribution normalization and tail round trips with "
+                "20000 prior draws, 8 s projected on CI"
+            ),
+        ),
         Uniform(0.05, 0.9),
         LogUniform(0.5, 4.0),
         TruncatedDistribution(Normal(10.0, 3.0), low=2.0),
@@ -598,20 +610,19 @@ def _cut_round_trip_excess(law, ulps=4.0, cut_ulps=32.0):
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.medium(reason="mixed fit batch compile, 6 s cold")
-def test_density_is_normalized_prior_draws_agree():
+def test_density_is_normalized_prior_draws_agree(mixed_draws):
     """Prior draws have finite log_prior and the batch shapes hold."""
-    fit = _mixed_fit()
-    x = fit.sample_prior(jax.random.key(3), (4, 2))
-    assert x["planets[0].Rp_Rearth"].shape == (4, 2, 1)
-    assert x["dynamics.orbits"][COORDS[0]].shape == (4, 2, 1)
+    fit, x = mixed_draws
+    assert x["planets[0].Rp_Rearth"].shape == (2, 3, 1)
+    assert x["dynamics.orbits"][COORDS[0]].shape == (2, 3, 1)
     lp = fit.log_prior(x)
-    assert lp.shape == (4, 2) and np.all(np.isfinite(lp))
+    assert lp.shape == (2, 3) and np.all(np.isfinite(lp))
     one = jax.tree.map(lambda a: a[1, 1], x)
     np.testing.assert_allclose(fit.log_prior(one), lp[1, 1], rtol=1e-13)
     model = fit.model_at(one)
     assert resolve(model, "planets[0].Rp_Rearth").shape == (1,)
     cloud = jax.vmap(jax.vmap(fit.model_at))(x)
-    assert resolve(cloud, "dynamics.orbits").a_AU.shape == (4, 2, 1)
+    assert resolve(cloud, "dynamics.orbits").a_AU.shape == (2, 3, 1)
     off = fit.log_density({**one, "planets[0].Rp_Rearth": jnp.array([0.1])})
     assert off == -jnp.inf
 
@@ -634,6 +645,10 @@ def test_prior_draws_do_not_depend_on_the_insertion_order_of_free():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
+@pytest.mark.slow(
+    reason="compiles prior draws and coordinate volume on a periodic orbit, 6 s "
+    "projected on CI"
+)
 def test_from_real_volume_has_the_batch_shape_for_a_block_only_fit():
     """A fit with only block entries still returns one volume per draw."""
     fit = Fit(_scene(), {"dynamics.orbits": _block()})
@@ -643,6 +658,10 @@ def test_from_real_volume_has_the_batch_shape_for_a_block_only_fit():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
+@pytest.mark.slow(
+    reason="compiles and counts the block chain across several density entry "
+    "points, 5 s projected on CI"
+)
 def test_the_block_chain_is_traced_once_per_density():
     """log_density runs each block's forward once per density."""
     calls = []
@@ -671,6 +690,10 @@ def test_the_block_chain_is_traced_once_per_density():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
+@pytest.mark.slow(
+    reason="runs orbit inference over the astrometric scene and compares the "
+    "recovered physical coordinates, 12 s projected on CI"
+)
 def test_orbit_fit_recovers_the_truth_on_a_scene():
     """The density peaks near the generating orbit and sample_prior feeds it."""
     scene = _scene(planet_mass_Msun=0.0)
@@ -802,7 +825,19 @@ def _mean_ratio(old_fit, new_fit, n=40000):
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-@pytest.mark.parametrize("kind", ["leaf", "orbit"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "leaf",
+        pytest.param(
+            "orbit",
+            marks=pytest.mark.slow(
+                reason="runs 40000 prior draws and checks the density ratio "
+                "normalization, 6 s projected on CI"
+            ),
+        ),
+    ],
+)
 def test_a_prior_swap_ratio_averages_to_one_under_the_old_prior(kind):
     """``E_old[pi_new / pi_old] = 1`` when the new support lies inside the old.
 
@@ -881,6 +916,10 @@ def test_refuses_a_leaf_law_inside_a_stored_orbit_or_a_lone_mass(prefix):
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.parametrize("prefix", ["dynamics", ""], ids=["scene", "root-system"])
+@pytest.mark.slow(
+    reason="compiles joint mass and orbit writes on a two-planet model, "
+    "8 s per case projected on CI"
+)
 def test_a_free_mass_with_an_orbit_block_keeps_every_row_keplerian(prefix):
     """Fails if a mass leaf beside an orbit block leaves a row off Kepler's third law.
 
@@ -915,7 +954,8 @@ def test_a_free_mass_with_an_orbit_block_keeps_every_row_keplerian(prefix):
     Fit(model, {path("orbits"): ti})
 
 
-def _walled_fits():
+@pytest.fixture(scope="module")
+def walled_fits():
     """The prior-recovery orbit sets: Cartesian, Thiele-Innes and the classical chart.
 
     Log-uniform a on 1 to 100 AU and uniform e on 0 to 0.95; the Thiele-Innes block
@@ -938,7 +978,7 @@ def _walled_fits():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_gradient_samplers_refuse_a_fit_with_walls():
+def test_gradient_samplers_refuse_a_fit_with_walls(walled_fits):
     """Fails if NUTS or MCLMC samples a density with walls, or refuses one without.
 
     Against a wall every rejected step is flagged as a divergence (75 and 99.9 percent
@@ -950,7 +990,7 @@ def test_gradient_samplers_refuse_a_fit_with_walls():
     from photomancy.infer import MCLMC, NUTS, run
     from photomancy.infer.backends._flat import require_no_walls
 
-    for name, (fit, walls) in _walled_fits().items():
+    for name, (fit, walls) in walled_fits.items():
         if walls is None:
             assert fit.walls == {}
             require_no_walls(fit, "NUTS")
@@ -977,7 +1017,7 @@ def _stack_two(fit):
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_walls_are_evaluated_once_and_survive_stacking_jit_and_edits():
+def test_walls_are_evaluated_once_and_survive_stacking_jit_and_edits(walled_fits):
     """Fails if a stacked, jitted or edited fit reports walls its source did not have.
 
     Inside ``filter_jit`` or ``filter_vmap`` every law parameter is traced, and a block
@@ -988,7 +1028,7 @@ def test_walls_are_evaluated_once_and_survive_stacking_jit_and_edits():
     """
     from orbix.system import FrameChart
 
-    fits = {k: f for k, (f, _) in _walled_fits().items()}
+    fits = {k: f for k, (f, _) in walled_fits.items()}
     fits["frame"] = Fit(_scene(), {"dynamics.orbits": _block(chart=FrameChart())})
     assert fits["frame"].walls == {}
     for name, fit in fits.items():
@@ -1011,7 +1051,7 @@ def test_walls_are_evaluated_once_and_survive_stacking_jit_and_edits():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_walls_follow_a_law_edited_in_place_and_survive_replace():
+def test_walls_follow_a_law_edited_in_place_and_survive_replace(walled_fits):
     """Fails if an edit that skips ``__init__`` leaves ``Fit.walls`` stale.
 
     ``eqx.tree_at`` (and ``tree_deserialise_leaves``) rebuild a fit without
@@ -1068,7 +1108,7 @@ def test_walls_follow_a_law_edited_in_place_and_survive_replace():
     np.testing.assert_array_equal(
         jax.random.key_data(compiled(lowered, key)), jax.random.key_data(key)
     )
-    fits = _walled_fits()
+    fits = walled_fits
     classical, cartesian = fits["classical"][0], fits["cartesian"][0]
     swapped = eqx.tree_at(
         lambda f: f.free["dynamics.orbits"],
@@ -1084,7 +1124,9 @@ def test_walls_follow_a_law_edited_in_place_and_survive_replace():
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
 @pytest.mark.slow(reason="two-world NUTS compile, about 560 programs, 37 s cold")
-def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack():
+def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack(
+    walled_fits,
+):
     """Fails if a stack of wall-free fits is refused, or a stack of walled fits runs.
 
     ``eqx.filter_vmap(run)`` over two stacked worlds is the documented way to run a
@@ -1101,7 +1143,7 @@ def test_nuts_maps_over_a_stack_of_wall_free_fits_and_refuses_a_walled_stack():
     frame = Fit(_scene(), {"dynamics.orbits": _block(chart=FrameChart())})
     out = eqx.filter_vmap(lambda f, k: run(f, nuts, k))(_stack_two(frame), keys)
     assert all(bool(jnp.all(jnp.isfinite(v))) for v in jax.tree.leaves(out.samples))
-    cartesian = _walled_fits()["cartesian"][0]
+    cartesian = walled_fits["cartesian"][0]
     with pytest.raises(
         (ValueError, eqx.EquinoxRuntimeError),
         match=r"NUTS needs .*'dynamics.orbits'.*a_AU, e",

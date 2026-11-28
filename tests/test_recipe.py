@@ -604,6 +604,10 @@ class _Gaussian(eqx.Module):
 
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.slow(
+    reason="compiles a correlated astrometric refit in the staged imaging recipe, 6 "
+    "s projected on CI"
+)
 def test_a_bright_source_with_a_correlated_position_is_kept_by_the_refit():
     """A source at z = 26 whose flux and separation correlate at 0.97 is kept.
 

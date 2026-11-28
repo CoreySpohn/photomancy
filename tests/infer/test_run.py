@@ -18,6 +18,8 @@ import pytest
 from hwoutils.precision import PrecisionError
 from jax.flatten_util import ravel_pytree
 from priorities import Normal, Uniform
+from skyscapes.physical_model import LambertianPhysicalModel
+from skyscapes.scene import Planet
 from test_fit import (
     GOLDEN,
     _block,
@@ -62,6 +64,20 @@ HIGH = 4.0
 WIDTH = 0.3
 
 
+class _RadiusModel(eqx.Module):
+    """The planet leaves used by the closed-form fits."""
+
+    planets: tuple[Planet, ...]
+
+
+def _radius_model():
+    planet = Planet(
+        Rp_Rearth=jnp.array([1.0]),
+        physical_model=LambertianPhysicalModel(Ag=jnp.array([0.3])),
+    )
+    return _RadiusModel((planet,))
+
+
 class _Gauss(AbstractTerm):
     """Unnormalized Gaussian likelihood of the planet radius, centered at ``center``."""
 
@@ -76,7 +92,9 @@ class _Gauss(AbstractTerm):
 
 
 def _leaf_fit(center=1.5):
-    return Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_Gauss(jnp.asarray(center)),))
+    return Fit(
+        _radius_model(), {KEY: Uniform(0.0, HIGH)}, (_Gauss(jnp.asarray(center)),)
+    )
 
 
 def _exact_log_z(center=1.5):
@@ -145,11 +163,28 @@ def test_run_stores_native_backend_samples_at_schema_precision():
     np.testing.assert_array_equal(post.log_target, fit.log_density(post.samples))
 
 
-@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-def test_posterior_checks_its_fields():
-    """Wrong kind, keys, dtype and shapes are refused; batch axes are draw axes."""
+@pytest.fixture(scope="module")
+def split_cloud():
+    """An exact 1:3 mixture of two radii used by the schema and clustering tests."""
     fit = _leaf_fit()
-    post = run(fit, Laplace(n_draws=64), jax.random.key(0))
+    samples = {KEY: jnp.tile(jnp.array([0.5, 3.0, 3.0, 3.0]), 4)[:, None]}
+    n = samples[KEY].shape[0]
+    return Posterior(
+        samples=samples,
+        log_weights=jnp.full(n, -math.log(n)),
+        log_target=fit.log_density(samples),
+        log_evidence=jnp.zeros(()),
+        log_evidence_se=jnp.zeros(()),
+        fit=fit,
+        info=None,
+        kind="monte_carlo",
+    )
+
+
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
+def test_posterior_checks_its_fields(split_cloud):
+    """Wrong kind, keys, dtype and shapes are refused; batch axes are draw axes."""
+    post = split_cloud
     fields = {
         name: getattr(post, name)
         for name in (
@@ -200,17 +235,13 @@ def test_ravel_samples_round_trips_a_block_fit():
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-def test_cluster_to_mixture_follows_the_modes():
-    """Two well-separated clusters give two modes with their masses."""
-    fit = _leaf_fit()
-    post = run(fit, Laplace(n_draws=400), jax.random.key(2))
-    left = jnp.where(jnp.arange(400) % 4 == 0, 0.5, 3.0)
-    split = eqx.tree_at(
-        lambda p: (p.samples, p.log_weights),
-        post,
-        ({KEY: left[:, None]}, jnp.full(400, -math.log(400))),
-    )
-    mixture = cluster_to_mixture(split, 2, jax.random.key(3))
+def test_cluster_to_mixture_follows_the_modes(split_cloud):
+    """Two separated radii give their exact means and 1:3 mass ratio.
+
+    The counts encode the weights exactly. The tolerance covers floating-point
+    arithmetic on the repeated points.
+    """
+    mixture = cluster_to_mixture(split_cloud, 2, jax.random.key(3))
     means = np.sort(np.asarray(mixture.component_distribution.loc).ravel())
     np.testing.assert_allclose(means, [0.5, 3.0], atol=1e-6)
     np.testing.assert_allclose(
@@ -221,28 +252,20 @@ def test_cluster_to_mixture_follows_the_modes():
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-def test_cluster_to_mixture_takes_init_centers_and_checks_their_shape():
+def test_cluster_to_mixture_takes_init_centers_and_checks_their_shape(split_cloud):
     """``init`` fixes the starting centers; a wrong count is refused.
 
     Fails if: ``init`` is ignored, or a mismatched ``init`` reaches the clustering.
     """
-    fit = _leaf_fit()
-    post = run(fit, Laplace(n_draws=400), jax.random.key(2))
-    left = jnp.where(jnp.arange(400) % 4 == 0, 0.5, 3.0)
-    split = eqx.tree_at(
-        lambda p: (p.samples, p.log_weights),
-        post,
-        ({KEY: left[:, None]}, jnp.full(400, -math.log(400))),
-    )
     mixture = cluster_to_mixture(
-        split, 2, None, init={KEY: jnp.array([[0.4], [2.9]])}, n_steps=3
+        split_cloud, 2, None, init={KEY: jnp.array([[0.4], [2.9]])}, n_steps=3
     )
     means = np.sort(np.asarray(mixture.component_distribution.loc).ravel())
     np.testing.assert_allclose(means, [0.5, 3.0], atol=1e-6)
     with pytest.raises(ValueError, match="expected n_modes=2"):
-        cluster_to_mixture(split, 2, None, init={KEY: jnp.array([[0.4]])})
+        cluster_to_mixture(split_cloud, 2, None, init={KEY: jnp.array([[0.4]])})
     with pytest.raises(ValueError, match="init needs the entries"):
-        cluster_to_mixture(split, 2, None, init={"other": jnp.zeros((2, 1))})
+        cluster_to_mixture(split_cloud, 2, None, init={"other": jnp.zeros((2, 1))})
 
 
 class _Sinusoid(eqx.Module):
@@ -259,7 +282,10 @@ class _SinusoidForward(eqx.Module):
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.medium(reason="a three-alias Laplace fit, then clustering on four keys")
+@pytest.mark.slow(
+    reason="fits three sinusoid aliases with Laplace and clusters four clouds from "
+    "its modes, 9 s projected on CI"
+)
 def test_cluster_to_mixture_recovers_period_aliases_from_the_laplace_modes():
     """One component per alias, weighted by the cloud, when seeded with the modes.
 
@@ -312,10 +338,14 @@ def test_cluster_to_mixture_recovers_period_aliases_from_the_laplace_modes():
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 def test_grid_is_quadrature_with_the_exact_evidence():
-    """A fine midpoint rule recovers the evidence and mean; refining converges."""
+    """The 48-cell midpoint rule meets the evidence and moment tolerances.
+
+    The cell width is less than a third of the Gaussian width. Its error
+    is compared with a 12-cell rule so the convergence check resolves the difference.
+    """
     fit = _leaf_fit()
     errors = []
-    for n in (200, 800):
+    for n in (12, 48):
         post = run(fit, Grid({KEY: midpoint_rule(0.0, HIGH, n)}), jax.random.key(0))
         assert post.kind == "quadrature"
         _check_contract(post, fit, n)
@@ -324,7 +354,7 @@ def test_grid_is_quadrature_with_the_exact_evidence():
     assert errors[1] < errors[0] and errors[1] < 1e-5
     mean, sd = _moments(post)
     assert abs(mean - 1.5) < 1e-6 and abs(sd - WIDTH) < 1e-3
-    gl = run(fit, Grid({KEY: gauss_legendre_rule(0.0, HIGH, 200)}), jax.random.key(0))
+    gl = run(fit, Grid({KEY: gauss_legendre_rule(0.0, HIGH, 32)}), jax.random.key(0))
     assert abs(float(gl.log_evidence) - _exact_log_z()) < 1e-6
     with pytest.raises(ValueError, match="non-positive weight"):
         run(fit, Grid({KEY: (jnp.arange(3.0), jnp.array([1.0, -1.0, 1.0]))}), None)
@@ -362,7 +392,7 @@ class _TwoBumps(AbstractTerm):
 
 def _bimodal_fit():
     centers = jnp.array([1.0, 3.0])
-    return Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_TwoBumps(centers),))
+    return Fit(_radius_model(), {KEY: Uniform(0.0, HIGH)}, (_TwoBumps(centers),))
 
 
 def _mode_radii(fit, post):
@@ -373,6 +403,10 @@ def _mode_radii(fit, post):
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.parametrize("backend", [Laplace, Pathfinder])
+@pytest.mark.slow(
+    reason="compiles two optimizer initializations at distinct and repeated mode "
+    "starts, 6 s projected on CI"
+)
 def test_explicit_starts_land_on_distinct_modes(backend):
     """One start per bump gives one mode per bump; a repeated start gives one mode."""
     fit = _bimodal_fit()
@@ -443,20 +477,32 @@ def test_explicit_starts_refuse_a_wrong_leading_length():
         )
 
 
+@pytest.fixture(scope="module")
+def block_starts():
+    """One orbit block fitted with and without a free radius leaf."""
+    model = _scene()
+    priors = {"dynamics.orbits": _block()}
+    fits = {
+        False: Fit(model, priors),
+        True: Fit(model, {**priors, KEY: Uniform(0.0, HIGH)}),
+    }
+    sample = eqx.filter_jit(Fit.sample_prior)
+    return {
+        with_leaf: (fit, sample(fit, jax.random.key(1), (3,)))
+        for with_leaf, fit in fits.items()
+    }
+
+
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
 @pytest.mark.parametrize("with_leaf", [False, True], ids=["block_only", "block_leaf"])
-def test_stacked_starts_pass_through_for_a_block_fit(with_leaf):
+def test_stacked_starts_pass_through_for_a_block_fit(with_leaf, block_starts):
     """Stacked starts of a block fit become ``(n, d)`` flat starts, one per start.
 
     Fails if: a block entry's rank is compared as a whole, so the starts raise a
     misleading error (block plus leaf) or are silently broadcast to ``(n, n, d)``.
     """
-    priors = {"dynamics.orbits": _block()}
-    if with_leaf:
-        priors[KEY] = Uniform(0.0, HIGH)
-    fit = Fit(_scene(), priors, (_relative(),))
+    fit, starts = block_starts[with_leaf]
     n = 3
-    starts = fit.sample_prior(jax.random.key(1), (n,))
     flat = start_points(fit, starts, jax.random.key(0), n)
     assert flat.shape == (n, ravel_pytree(fit.to_real(draw_template(fit)))[0].shape[0])
     for i in range(n):
@@ -468,14 +514,9 @@ def test_stacked_starts_pass_through_for_a_block_fit(with_leaf):
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-def test_mixed_rank_starts_name_the_entry():
+def test_mixed_rank_starts_name_the_entry(block_starts):
     """One entry stacked and another not raises, and the message names an entry."""
-    fit = Fit(
-        _scene(),
-        {"dynamics.orbits": _block(), KEY: Uniform(0.0, HIGH)},
-        (_relative(),),
-    )
-    starts = fit.sample_prior(jax.random.key(1), (3,))
+    fit, starts = block_starts[True]
     bad = {**starts, KEY: starts[KEY][0]}
     with pytest.raises(ValueError, match=r"leading shape \(\), expected \(3,\)") as err:
         start_points(fit, bad, jax.random.key(0), 3)
@@ -501,7 +542,7 @@ def test_nuts_has_no_evidence_and_the_right_moments():
 def test_mclmc_recovers_the_mean():
     """MCLMC (two or more dimensions) matches the known mean and has no evidence."""
     fit = Fit(
-        _scene(),
+        _radius_model(),
         {KEY: Uniform(0.0, HIGH), "planets[0].physical_model.Ag": Uniform(0.1, 1.0)},
         (_Gauss(jnp.asarray(1.5)),),
     )
@@ -588,7 +629,10 @@ def _badly_scaled_fit(rootless=False):
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.medium(reason="five L-BFGS runs of at most 600 steps and the scale pass")
+@pytest.mark.slow(
+    reason="runs scaled and unscaled L-BFGS and Newton polishing on an "
+    "ill-conditioned fit, 19 s projected on CI"
+)
 def test_map_scales_its_coordinates_by_the_information(monkeypatch):
     """Scaling by the information lets MAP and measure converge within budget.
 
@@ -692,7 +736,10 @@ def test_laplace_finds_the_mode_with_the_default_map_stage():
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.medium(reason="a Laplace run of 40 steps with a loss that never gains")
+@pytest.mark.slow(
+    reason="compiles two Laplace programs under patched stall and gradient "
+    "thresholds, 9 s projected on CI"
+)
 def test_laplace_stops_on_a_stall_only_when_the_gradient_gate_is_met(monkeypatch):
     """The Laplace optimizer ends a loss stall only once the scaled gradient is small.
 
@@ -729,12 +776,18 @@ def test_laplace_stops_on_a_stall_only_when_the_gradient_gate_is_met(monkeypatch
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
+@pytest.mark.slow(
+    reason="compiles two jaxns runs with different stopping outcomes, 26 s "
+    "projected on CI"
+)
 def test_nested_sampling_recovers_the_evidence():
     """Jaxns gives the exact evidence within its standard deviation.
 
     A run cut by ``max_samples`` (jaxns termination reason 1) keeps its samples and
     weights but has no evidence: fails if a finite value comes back from a run that
     stopped before convergence.
+    The caps of 120 and 1024 bracket convergence for the seeded one-dimensional
+    fit. The evidence tolerance uses the returned shrinkage error.
     """
     pytest.importorskip("jaxns")
     fit = _leaf_fit()
@@ -742,7 +795,7 @@ def test_nested_sampling_recovers_the_evidence():
     assert int(cut.info.termination_reason) == 1
     assert np.isnan(float(cut.log_evidence)) and np.isnan(float(cut.log_evidence_se))
     assert cut.log_weights.shape == (120,) and np.all(np.isfinite(cut.log_weights))
-    post = run(fit, NestedSampling(max_samples=20000), jax.random.key(0))
+    post = run(fit, NestedSampling(max_samples=1024), jax.random.key(0))
     assert int(post.info.termination_reason) == 0
     _check_contract(post, fit)
     se = float(post.log_evidence_se)
@@ -757,42 +810,19 @@ def test_nested_sampling_recovers_the_evidence():
     assert bool(jnp.isfinite(block_fit.log_density(stored)))
 
 
-@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-def test_a_stack_of_worlds_equals_the_per_world_loop():
-    """``eqx.filter_vmap(run)`` over two stacked fits equals running each in turn."""
-    centers = (1.2, 2.0)
-    fits = [_leaf_fit(c) for c in centers]
-    static = eqx.partition(fits[0], eqx.is_array)[1]
-    stack = eqx.combine(
-        jax.tree.map(
-            lambda *a: jnp.stack(a), *[eqx.partition(f, eqx.is_array)[0] for f in fits]
-        ),
-        static,
-    )
-    backend = Laplace(n_draws=300)
-    keys = jax.random.split(jax.random.key(7), 2)
-    batched = eqx.filter_vmap(lambda f, k: run(f, backend, k))(stack, keys)
-    assert batched.log_weights.shape == (2, 300)
-    assert batched.log_evidence.shape == (2,)
-    assert batched.samples[KEY].shape == (2, 300, 1)
-    for i, fit in enumerate(fits):
-        one = run(fit, backend, keys[i])
-        np.testing.assert_allclose(
-            np.asarray(batched.log_evidence[i]), float(one.log_evidence), rtol=1e-9
-        )
-        np.testing.assert_allclose(
-            np.asarray(batched.samples[KEY][i]), np.asarray(one.samples[KEY]), rtol=1e-9
-        )
-        np.testing.assert_allclose(
-            np.asarray(batched.log_target[i]), np.asarray(one.log_target), rtol=1e-9
-        )
-
-
 def _stack(fits):
     """Stack fits of one structure along a new leading world axis."""
     static = eqx.partition(fits[0], eqx.is_array)[1]
     arrays = [eqx.partition(f, eqx.is_array)[0] for f in fits]
     return eqx.combine(jax.tree.map(lambda *a: jnp.stack(a), *arrays), static)
+
+
+@pytest.fixture(scope="module")
+def radius_worlds():
+    """The two observation centers stacked as array-valued data."""
+    centers = (1.2, 2.0)
+    fits = [_leaf_fit(c) for c in centers]
+    return centers, fits, _stack(fits)
 
 
 _WORLD_BACKENDS = {
@@ -813,8 +843,30 @@ _WORLD_BACKENDS = {
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.parametrize("name", list(_WORLD_BACKENDS))
-def test_every_batching_backend_maps_over_two_worlds(name):
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(
+            "nuts",
+            marks=pytest.mark.slow(
+                reason="compiles a backend and its diagnostics under two-world "
+                "vmap, 11 s projected on CI"
+            ),
+        ),
+        pytest.param(
+            "pathfinder",
+            marks=pytest.mark.slow(
+                reason="compiles a backend and its diagnostics under two-world "
+                "vmap, 6 s projected on CI"
+            ),
+        ),
+        "laplace",
+        "importance",
+        "adaptive",
+        "grid",
+    ],
+)
+def test_every_batching_backend_maps_over_two_worlds(name, radius_worlds):
     """``filter_vmap(run)`` over two stacked fits gives two posteriors of one type.
 
     Truth source: each world's own fit: ``log_target`` is its density at the stored
@@ -823,16 +875,18 @@ def test_every_batching_backend_maps_over_two_worlds(name):
     differ by 0.8 between worlds, far above the sampler scatter, so each is compared to
     its center within 0.25 (200 particles, 80 draws, quadrature exact).
     Fails if: a backend closes over the fit instead of taking it as a traced argument,
-    mixes the worlds or breaks under a batch prefix.
+    mixes the worlds or breaks under a batch prefix. Laplace also matches the
+    same run per world, including the draws and evidence, to rounding (rtol 1e-9).
     """
-    centers = (1.2, 2.0)
-    fits = [_leaf_fit(c) for c in centers]
+    centers, fits, stacked = radius_worlds
     backend = _WORLD_BACKENDS[name]
     keys = jax.random.split(jax.random.key(3), 2)
-    out = eqx.filter_vmap(lambda f, k: run(f, backend, k))(_stack(fits), keys)
+    out = eqx.filter_vmap(lambda f, k: run(f, backend, k))(stacked, keys)
     n = out.log_weights.shape[-1]
     assert out.log_weights.shape == (2, n) and out.log_evidence.shape == (2,)
     assert out.samples[KEY].shape == (2, n, 1)
+    if name == "laplace":
+        assert n == 200
     for i, (fit, center) in enumerate(zip(fits, centers, strict=True)):
         np.testing.assert_allclose(
             np.asarray(out.log_target[i]),
@@ -842,6 +896,11 @@ def test_every_batching_backend_maps_over_two_worlds(name):
         w = np.exp(np.asarray(out.log_weights[i]))
         mean = float(np.sum(w * np.asarray(out.samples[KEY][i])[:, 0]))
         assert abs(mean - center) < 0.25
+        if name == "laplace":
+            one = run(fit, backend, keys[i])
+            np.testing.assert_allclose(out.log_evidence[i], one.log_evidence, rtol=1e-9)
+            np.testing.assert_allclose(out.samples[KEY][i], one.samples[KEY], rtol=1e-9)
+            np.testing.assert_allclose(out.log_target[i], one.log_target, rtol=1e-9)
 
 
 class _NanAbove(_Gauss):
@@ -859,7 +918,9 @@ def test_a_nan_term_refuses_the_slice_instead_of_zero_weight():
     Fails if: a backend or ``run`` maps NaN to a zero weight, which would return a
     clean-looking posterior and a finite evidence from the draws that did not fail.
     """
-    fit = Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_NanAbove(jnp.asarray(1.5)),))
+    fit = Fit(
+        _radius_model(), {KEY: Uniform(0.0, HIGH)}, (_NanAbove(jnp.asarray(1.5)),)
+    )
     start = {KEY: jnp.asarray([1.5])}
     laplace = run(fit, Laplace(n_draws=4000, init=start), jax.random.key(0))
     assert np.any(np.isnan(np.asarray(fit.log_density(laplace.samples))))
@@ -874,7 +935,10 @@ def _prior_only_orbit_fit():
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.medium(reason="eight 4000-draw runs of one compiled Laplace, 25 s cold")
+@pytest.mark.slow(
+    reason="runs eight Laplace draws on a wrapped orbit and checks their aggregate "
+    "evidence, 17 s projected on CI"
+)
 def test_laplace_prior_only_evidence_on_an_orbit_block_is_zero():
     """The prior-only evidence through ``Laplace`` averages to 0 over eight keys.
 
@@ -905,6 +969,10 @@ def test_laplace_prior_only_evidence_on_an_orbit_block_is_zero():
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
+@pytest.mark.slow(
+    reason="fits the orbit with Laplace and compiles adaptive importance on its "
+    "wrapped cloud, 30 s projected on CI"
+)
 def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
     """The documented remedy: refit a mixture on the Laplace cloud and adapt from it.
 
@@ -932,7 +1000,19 @@ def test_adaptive_importance_seeded_from_the_laplace_cloud_is_consistent():
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.parametrize("sequence", ["random", "roberts"])
+@pytest.mark.parametrize(
+    "sequence",
+    [
+        pytest.param(
+            "random",
+            marks=pytest.mark.slow(
+                reason="compiles the random prior proposal and periodic density over "
+                "500 orbit draws, 5 s projected on CI"
+            ),
+        ),
+        "roberts",
+    ],
+)
 def test_prior_importance_prior_only_evidence_is_exactly_zero(sequence):
     """Drawing from the prior itself gives unit weights, so ``log Z = 0`` to rounding.
 
@@ -966,6 +1046,9 @@ def test_prior_importance_recovers_the_conjugate_evidence(sequence):
 
 
 @pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
+@pytest.mark.slow(
+    reason="compiles short and full adaptive tempering ladders, 5 s projected on CI"
+)
 def test_a_ladder_that_stops_short_of_one_refuses_the_slice():
     """An adaptive run whose last proposal was fitted below temperature one is NaN.
 
@@ -1072,6 +1155,9 @@ def _unravel_leaf(fit):
     "backend",
     [NUTS(n_warmup=30, n_draws=20, n_chains=2)],
 )
+@pytest.mark.slow(
+    reason="compiles multi-chain NUTS on a periodic orbit, 20 s projected on CI"
+)
 def test_stored_angles_lie_in_one_cell(backend):
     """Sampled orbit angles are stored reduced to ``[0, 2 pi)`` for every sampler.
 
@@ -1102,7 +1188,9 @@ def test_laplace_with_no_surviving_mode_returns_a_nan_slice():
     The term is NaN everywhere, so no mode has a finite position and none is kept.
     Fails if: the guard returns a clean-looking posterior.
     """
-    fit = Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_AlwaysNan(jnp.asarray(1.5)),))
+    fit = Fit(
+        _radius_model(), {KEY: Uniform(0.0, HIGH)}, (_AlwaysNan(jnp.asarray(1.5)),)
+    )
     post = run(fit, Laplace(n_draws=200), jax.random.key(0))
     assert int(post.info.n_modes_kept) == 0
     assert np.all(np.isnan(np.asarray(post.log_weights)))

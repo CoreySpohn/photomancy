@@ -1,5 +1,6 @@
-"""Tests for the analytic Fisher EIG (Bayesian experimental design)."""
+"""Tests for the astrometric Fisher EIG (Bayesian experimental design)."""
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -14,7 +15,7 @@ from skyscapes.population import kipping_eccentricity
 from skyscapes.scene import FlatStar, Planet, Scene
 
 from photomancy.infer import Fit, Posterior
-from photomancy.infer.eig import eig_alias_breaking, eig_detectability, eig_geometric
+from photomancy.infer.eig import eig_geometric
 from photomancy.orbit import eig_astrometry
 
 DIST_PC = 10.0
@@ -35,24 +36,6 @@ def test_geometric_eig_matches_analytic_gaussian_update():
 
     eig_precise, _ = eig_geometric(jnp.array([[4.0]]), jnp.array([[1.0]]), 0.1)
     assert eig_precise > eig  # a more precise measurement is more informative
-
-
-@pytest.mark.float64_only(reason="posterior weights and covariance require float64")
-def test_alias_breaking_eig_zero_when_modes_agree():
-    """Zero when modes predict the same observable; positive when they differ."""
-    weights = jnp.array([0.5, 0.5])
-    assert jnp.allclose(
-        eig_alias_breaking(weights, jnp.array([[1.0], [1.0]]), 1.0), 0.0
-    )
-    assert eig_alias_breaking(weights, jnp.array([[1.0], [5.0]]), 1.0) > 0.0
-
-
-@pytest.mark.float64_only(reason="posterior weights and covariance require float64")
-def test_detectability_eig_zero_when_modes_agree():
-    """No information when all modes agree on detectability; positive when split."""
-    weights = jnp.array([0.5, 0.5])
-    assert jnp.allclose(eig_detectability(weights, jnp.array([1.0, 1.0])), 0.0)
-    assert eig_detectability(weights, jnp.array([1.0, 0.0])) > 0.0
 
 
 def _one_mode_posterior():
@@ -97,10 +80,11 @@ def _one_mode_posterior():
         }
     }
     n = y.shape[0]
+    log_target = eqx.filter_jit(fit.log_density)(draws)
     return Posterior(
         samples=draws,
         log_weights=jnp.full(n, -jnp.log(n)),
-        log_target=fit.log_density(draws),
+        log_target=log_target,
         log_evidence=jnp.array(0.0),
         log_evidence_se=jnp.array(0.0),
         fit=fit,
@@ -123,6 +107,7 @@ def one_mode():
     return _one_mode_posterior()
 
 
+@eqx.filter_jit
 def _score(posterior, epochs, curve):
     return eig_astrometry(
         posterior,
@@ -190,29 +175,3 @@ def test_the_contrast_curve_decides_each_report(one_mode):
     assert jnp.all(deep.eig.total > 0.0)
     np.testing.assert_array_equal(shallow.eig.detectability, jnp.zeros((2, 1)))
     np.testing.assert_array_equal(shallow.eig.total, jnp.zeros(2))
-
-
-@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.medium(reason="a scale-and-rotate run, the clustering and the EIG forward")
-def test_modes_of_a_run_score_every_candidate():
-    """Fails if the dead draws of a run poison the modes or the scores.
-
-    A ``few_epoch`` cloud of a one-row Thiele-Innes fit (the engine tests' fixture)
-    holds NaN draws at zero weight and is wide enough for four modes; they score
-    twelve candidate epochs, each finite and non-negative, and the epochs differ.
-    """
-    from test_orbit_engines import _fit, _term
-
-    from photomancy.infer import run
-    from photomancy.orbit.backends import few_epoch
-
-    posterior = run(_fit(_term(n_rows=1)), few_epoch(n_draws=2**12), KEY)
-    assert np.isneginf(np.asarray(posterior.log_weights)).any()
-    epochs = jnp.linspace(0.0, 2000.0, 12)
-    result = eig_astrometry(
-        posterior, epochs, 0.004**2, key=jax.random.key(1), n_modes=4
-    )
-    total = np.asarray(result.eig.total)
-    assert total.shape == (12,)
-    assert np.all(np.isfinite(total) & (total >= 0.0)), total
-    assert np.ptp(total) > 0.0

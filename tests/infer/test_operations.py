@@ -16,7 +16,7 @@ import pytest
 from hwoutils.blocks import AbstractBlock
 from priorities import Mixture, Normal, Uniform
 from test_fit import _scene
-from test_run import HIGH, KEY, WIDTH, _Gauss, _leaf_fit
+from test_run import HIGH, KEY, WIDTH, _Gauss, _leaf_fit, _radius_model
 
 from photomancy.infer import (
     AbstractTerm,
@@ -69,7 +69,7 @@ def _gaussian_cloud(proposal_sd, prior_sd=1.0, n=4000, seed=0):
 
     The fit is the bare prior on the radius leaf (no terms), so ``log_evidence`` is 0.
     """
-    fit = Fit(_scene(), {KEY: Normal(0.0, prior_sd)})
+    fit = Fit(_radius_model(), {KEY: Normal(0.0, prior_sd)})
     x = proposal_sd * jax.random.normal(jax.random.key(seed), (n, 1))
     log_q = jnp.sum(norm.logpdf(x, 0.0, proposal_sd), axis=-1)
     samples = {KEY: x}
@@ -169,7 +169,10 @@ def _fields(out):
     )
 
 
-@pytest.mark.medium(reason="four operations compile twice each, 6 s cold")
+@pytest.mark.slow(
+    reason="compiles four posterior operations individually and under world vmap, "
+    "10 s projected on CI"
+)
 def test_every_operation_equals_the_per_world_loop_under_filter_vmap():
     """``sample``, ``resample``, ``with_priors`` and ``append_term`` map over worlds.
 
@@ -182,7 +185,7 @@ def test_every_operation_equals_the_per_world_loop_under_filter_vmap():
     (the stacked ``with_priors`` and ``append_term`` raised a broadcast error).
     """
     worlds = [
-        _gaussian_cloud(1.2, prior_sd=sd, n=512, seed=i)
+        _gaussian_cloud(1.2, prior_sd=sd, n=64, seed=i)
         for i, sd in enumerate((1.0, 1.1))
     ]
     stack = jax.tree.map(lambda a, b: jnp.stack([a, b]), *worlds)
@@ -191,7 +194,7 @@ def test_every_operation_equals_the_per_world_loop_under_filter_vmap():
     extra = _Gauss(jnp.asarray(0.4))
     operations = {
         "sample": lambda p: p.sample(key, (7,)),
-        "resample": lambda p: p.resample(key, 100),
+        "resample": lambda p: p.resample(key, 16),
         "with_priors": lambda p: p.with_priors(role, min_n_eff=1.0, max_khat=jnp.inf),
         "append_term": lambda p: p.append_term(extra, min_n_eff=1.0, max_khat=jnp.inf),
     }
@@ -426,7 +429,10 @@ def _stack(*posteriors):
 NO_GATE = {"min_n_eff": None, "max_khat": None}
 
 
-@pytest.mark.medium(reason="four mixture swaps and one vmapped, 9 s cold")
+@pytest.mark.slow(
+    reason="compiles support changes on mixtures and maps them over two worlds, 11 "
+    "s projected on CI"
+)
 def test_a_mixture_prior_covers_only_its_weighted_components():
     """A mixture's support is the union of its components with nonzero weight.
 
@@ -576,15 +582,12 @@ def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):
         def __call__(self, model):
             return jnp.where(model.planets[0].Rp_Rearth[0] > 1.5, jnp.nan, 0.0)
 
-    out = cloud.append_term(_Nan(jnp.asarray(0.0)), min_n_eff=0, max_khat=jnp.inf)
-    assert np.all(np.isnan(out.log_weights)) and np.isnan(out.log_evidence)
-    assert bool(out.info.refused)
     for posterior, gate in (
         (cloud, {"min_n_eff": 0, "max_khat": jnp.inf}),
         (grid, {"min_n_eff": None, "max_khat": None}),
     ):
         moved = posterior.append_term(_Nan(jnp.asarray(0.0)), **gate)
-        assert bool(moved.info.refused) == bool(np.any(np.isnan(moved.log_weights)))
+        assert np.all(np.isnan(moved.log_weights)) and np.isnan(moved.log_evidence)
         assert bool(moved.info.refused)
 
 
@@ -592,21 +595,20 @@ def test_gate_arguments_follow_the_kind_and_a_nan_term_refuses(cloud):
 
 
 @pytest.mark.medium
-def test_append_agrees_with_a_refit_and_the_exact_evidence():
+def test_append_agrees_with_a_refit_and_the_exact_evidence(cloud):
     """One more Gaussian term by reweighting equals a quadrature refit of both terms.
 
-    Truth source: a 4000-node midpoint quadrature of the two-term fit (evidence error
+    Truth source: a 64-node midpoint quadrature of the two-term fit (evidence error
     below 1e-6) and the closed-form product of the two Gaussians.
     Tolerance basis: 4 reported standard errors on the evidence; 1e-2 on the moments.
     Fails if: the term is evaluated on the wrong model, the old terms are counted
     twice, or the evidence increment is dropped.
     """
-    first = run(_leaf_fit(1.5), Laplace(n_draws=8000), jax.random.key(0))
     extra = _Gauss(jnp.asarray(1.8))
-    out = first.append_term(extra, min_n_eff=1000, max_khat=0.7)
-    assert len(out.fit.terms) == 2 and len(first.fit.terms) == 1
+    out = cloud.append_term(extra, min_n_eff=1000, max_khat=0.7)
+    assert len(out.fit.terms) == 2 and len(cloud.fit.terms) == 1
     _check_target(out)
-    refit = run(out.fit, Grid({KEY: midpoint_rule(0.0, HIGH, 4000)}), jax.random.key(0))
+    refit = run(out.fit, Grid({KEY: midpoint_rule(0.0, HIGH, 64)}), jax.random.key(0))
     se = float(out.log_evidence_se)
     assert 0.0 < se < 0.05
     assert abs(float(out.log_evidence) - float(refit.log_evidence)) < 4 * se
@@ -646,6 +648,10 @@ def test_append_runs_the_static_checks_of_fit(cloud):
 # ----- per-slice refusal under vmap ----------------------------------------------
 
 
+@pytest.mark.slow(
+    reason="compiles two Laplace worlds and maps their posterior support checks, 6 "
+    "s projected on CI"
+)
 def test_the_refusal_is_per_slice_under_filter_vmap():
     """In a stack of two worlds the swap passes for one and refuses the other.
 
@@ -811,7 +817,10 @@ def _gaussian_channel(n=2048, sigma=0.7, seed=0):
     return post, term, 0.5 * math.log1p(1.0 / sigma**2)
 
 
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="runs the nested EIG bias experiment at multiple inner sample counts, 11 "
+    "s projected on CI"
+)
 def test_nested_eig_bias_falls_with_the_inner_size_and_matches_its_scale():
     """The nested estimate is biased upward by about ``bias_scale``, ``O(1/n_inner)``.
 
@@ -850,6 +859,10 @@ def test_nested_eig_bias_falls_with_the_inner_size_and_matches_its_scale():
     assert 2.5 < scales[1] / scales[2] < 5.0 and 2.5 < scales[2] / scales[3] < 5.0
 
 
+@pytest.mark.slow(
+    reason="scores contrastive EIG against the Gaussian information bound, "
+    "7 s projected on CI"
+)
 def test_contrastive_eig_is_a_lower_bound_capped_at_log_n_eff():
     """The contrastive estimate sits at or below the truth and under ``log n_eff``.
 
@@ -926,6 +939,10 @@ def test_nested_eig_inner_draws_exclude_the_outer_draw():
     assert float(est.eig) > 180.0
 
 
+@pytest.mark.slow(
+    reason="compiles two orbital densities and posterior reweighting across laws, "
+    "13 s projected on CI"
+)
 def test_a_prior_swap_on_an_orbit_block_keeps_log_target_equal_to_the_density():
     """The block's normalized density enters the ratio and ``log_target`` follows.
 

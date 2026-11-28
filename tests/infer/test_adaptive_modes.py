@@ -49,6 +49,10 @@ class _TwoModes(AbstractTerm):
         return self
 
 
+@pytest.mark.slow(
+    reason="runs the two-mode adaptive importance recovery experiment, 8 s "
+    "projected on CI"
+)
 def test_defensive_share_recovers_both_masses_of_a_two_mode_target():
     """Fails if the adaptive rounds drop the smaller mode or bias the evidence.
 

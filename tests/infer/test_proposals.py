@@ -234,11 +234,17 @@ def test_a_defensive_proposal_is_the_prior_mixture_of_its_base():
     d = len(fit.periods())
     base = MixtureProposal(jnp.zeros((1, d)), 0.05 * jnp.eye(d))
     proposal = DefensiveProposal(base, 0.2)
-    z, log_q = proposal.sample(jax.random.key(0), fit, 50)
-    expected = jnp.logaddexp(
-        math.log(0.2) + PriorProposal().log_prob(z, fit),
-        math.log(0.8) + base.log_prob(z, fit),
-    )
+
+    @eqx.filter_jit
+    def compare(proposal, fit, key):
+        z, log_q = proposal.sample(key, fit, 16)
+        expected = jnp.logaddexp(
+            math.log(0.2) + PriorProposal().log_prob(z, fit),
+            math.log(0.8) + proposal.base.log_prob(z, fit),
+        )
+        return log_q, expected
+
+    log_q, expected = compare(proposal, fit, jax.random.key(0))
     np.testing.assert_allclose(np.asarray(log_q), np.asarray(expected), rtol=1e-9)
 
 
@@ -275,6 +281,10 @@ def test_kish_temperature_hits_the_target_kish_size_of_the_cloud():
     assert float(kish_temperature(dead, 0.001 * loglik, 0.0, 0.5)) == 1.0
 
 
+@pytest.mark.slow(
+    reason="compiles full and chunked importance weights through a frame-chart "
+    "orbit, 8 s projected on CI"
+)
 def test_a_batch_size_gives_the_same_importance_run():
     """Evaluating the density in blocks of draws equals evaluating it at once.
 
@@ -284,8 +294,9 @@ def test_a_batch_size_gives_the_same_importance_run():
     d = len(fit.periods())
     proposal = MixtureProposal(jnp.zeros((1, d)), 0.5 * jnp.eye(d))
     key = jax.random.key(0)
-    whole = run(fit, Importance(proposal, n_draws=100), key)
-    blocks = run(fit, Importance(proposal, n_draws=100), key, batch_size=16)
+    backend = Importance(proposal, n_draws=17)
+    whole = run(fit, backend, key)
+    blocks = run(fit, backend, key, batch_size=8)
     np.testing.assert_allclose(
         np.asarray(blocks.log_weights), np.asarray(whole.log_weights), rtol=1e-9
     )
@@ -417,11 +428,11 @@ def test_pathfinder_keeps_its_paths_and_refuses_the_evidence_above_the_khat_limi
 class _Reporting(PriorProposal):
     """A prior proposal that reports its weights valid or invalid as told."""
 
-    reports: bool = eqx.field(static=True, default=True)
+    reports: jax.Array = eqx.field(default_factory=lambda: jnp.asarray(True))
 
     def weigh(self, key, fit, n, *, batch_size=None):
         z, log_w, log_target, _ = super().weigh(key, fit, n, batch_size=batch_size)
-        return z, log_w, log_target, jnp.asarray(self.reports)
+        return z, log_w, log_target, self.reports
 
 
 @pytest.mark.parametrize("reports", [True, False])
@@ -434,7 +445,8 @@ def test_the_evidence_needs_the_proposal_to_report_its_weights_valid(reports):
     ``info.proposal_valid`` carries the proposal's verdict.
     """
     fit = _orbit_fit()
-    draws = Importance(_Reporting(reports=reports), 512)._run(fit, jax.random.key(0))
+    proposal = _Reporting(reports=jnp.asarray(reports))
+    draws = Importance(proposal, 512)._run(fit, jax.random.key(0))
     assert bool(draws.info.proposal_valid) == reports
     assert np.all(np.isfinite(draws.log_weights))
     if reports:

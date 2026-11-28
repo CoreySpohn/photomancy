@@ -6,15 +6,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from priorities import Uniform
-from test_fit import _scene
 from test_operations import _check_target, _gaussian_channel
-from test_run import HIGH, KEY, WIDTH, _Gauss
+from test_run import HIGH, KEY, WIDTH, _Gauss, _leaf_fit, _radius_model
 
 from photomancy.infer import (
     AbstractTerm,
     Fit,
     Grid,
+    Importance,
     Laplace,
+    PriorProposal,
     ReweightInfo,
     UpdateInfo,
     eig_contrastive,
@@ -31,7 +32,9 @@ pytestmark = pytest.mark.float64_only(
     reason="float64 posterior coordinates and log weights"
 )
 
-GATE = {"min_n_eff": 500, "max_khat": 0.7}
+N_DRAWS = 512
+LAPLACE = Laplace(n_draws=N_DRAWS)
+GATE = {"min_n_eff": N_DRAWS / 8, "max_khat": 0.7}
 
 
 class _Padded(AbstractTerm):
@@ -59,7 +62,7 @@ def _with_row(center):
 
 def _padded_fit(center=1.5):
     return Fit(
-        _scene(),
+        _radius_model(),
         {KEY: Uniform(0.0, HIGH)},
         (_Gauss(jnp.asarray(center)), _empty()),
     )
@@ -71,8 +74,8 @@ def _stack(a, b):
 
 @pytest.fixture(scope="module")
 def cloud():
-    """A 4000-draw importance cloud of the padded fit (the padding is invalid)."""
-    return run(_padded_fit(), Laplace(n_draws=4000), jax.random.key(0))
+    """One importance cloud of the padded fit with 512 draws and invalid padding."""
+    return run(_padded_fit(), LAPLACE, jax.random.key(0))
 
 
 def test_fit_replace_term_edits_one_slot_and_refuses_a_bad_index():
@@ -86,6 +89,10 @@ def test_fit_replace_term_edits_one_slot_and_refuses_a_bad_index():
             fit.replace_term(bad, _with_row(1.8))
 
 
+@pytest.mark.slow(
+    reason="compiles posterior updates for an appended row and a padded "
+    "replacement, 7 s projected on CI"
+)
 def test_replace_term_of_a_padded_row_equals_append_of_the_row(cloud):
     """Writing a row into the padding equals appending that row to an unpadded fit.
 
@@ -128,22 +135,26 @@ def test_replace_term_removes_the_old_row_and_gates_on_the_combined_weights(clou
     _check_target(second)
 
 
-@pytest.mark.medium
-def test_the_refusal_is_per_slice_and_update_refits_only_where_refused():
+@pytest.mark.slow(
+    reason="compiles Laplace refits both under world vmap and under lax.map, 14 s "
+    "projected on CI"
+)
+def test_the_refusal_is_per_slice_and_update_refits_only_where_refused(cloud):
     """Two worlds, one row written: world a keeps the cloud, world b is refitted.
 
     World a has its posterior at 1.5 and b at 3.5; the new row at 1.8 keeps all of a
     and almost nothing of b, so ``replace_term`` refuses b alone and ``update`` runs
     the backend on b's new fit while a keeps its reweighted cloud.
-    Medium tier: it compiles the Laplace refit under a world vmap and a ``lax.map``.
+    It compiles the Laplace refit under a world vmap and a ``lax.map``.
     ``update`` returns the gate reading of ``replace_term`` in both outcomes, under the
     vmap and under ``lax.map`` over three worlds (one ``(3,)`` leaf per field).
+    With 512 draws the refitted radius has a standard error of about 0.01,
+    using the analytic posterior width divided by the square root of the draw count.
     Fails if: the gate raises on a traced value, one decision covers the stack, the
     refit is not the posterior of the new fit, or the refit drops the gate reading.
     """
-    backend = Laplace(n_draws=4000)
-    a = run(_padded_fit(1.5), backend, jax.random.key(0))
-    b = run(_padded_fit(3.5), backend, jax.random.key(1))
+    a = cloud
+    b = run(_padded_fit(3.5), LAPLACE, jax.random.key(1))
     stack = _stack(a, b)
     row = _with_row(1.8)
 
@@ -159,11 +170,11 @@ def test_the_refusal_is_per_slice_and_update_refits_only_where_refused():
     np.testing.assert_allclose(out.log_evidence[0], alone.log_evidence, rtol=1e-12)
 
     def refresh(p, key):
-        return update(p, row, backend, key, index=1, **GATE)
+        return update(p, row, LAPLACE, key, index=1, **GATE)
 
     keys = jax.random.split(jax.random.key(5), 2)
     fresh = eqx.filter_vmap(refresh)(stack, keys)
-    assert fresh.log_weights.shape == (2, 4000)
+    assert fresh.log_weights.shape == (2, N_DRAWS)
     assert isinstance(fresh.info, UpdateInfo)
     np.testing.assert_array_equal(np.asarray(out.info.refused), [False, True])
     for field in ("n_eff", "khat", "refused"):
@@ -183,7 +194,7 @@ def test_the_refusal_is_per_slice_and_update_refits_only_where_refused():
     np.testing.assert_allclose(fresh.log_evidence[0], alone.log_evidence, rtol=1e-12)
     assert np.all(np.isfinite(fresh.log_weights[1]))
     own = refresh(b, keys[1])
-    direct = run(own.fit, backend, keys[1])
+    direct = run(own.fit, LAPLACE, keys[1])
     for got, want in zip(
         jax.tree.leaves(own.info.refit), jax.tree.leaves(direct.info), strict=True
     ):
@@ -213,7 +224,7 @@ def test_update_appends_without_an_index_and_keeps_a_passing_cloud(cloud):
     kept = update(
         cloud,
         _Gauss(jnp.asarray(1.6)),
-        Laplace(n_draws=4000),
+        LAPLACE,
         jax.random.key(1),
         **GATE,
     )
@@ -254,16 +265,13 @@ def test_update_on_a_quadrature_posterior_reads_the_real_refusal():
     Fails if: the quadrature branch hardcodes ``refused`` to false, so a refused
     slice reads as passed although ``update`` refits it.
     """
-    grid = run(
-        Fit(_scene(), {KEY: Uniform(0.0, HIGH)}, (_Gauss(jnp.asarray(1.5)),)),
-        Grid({KEY: midpoint_rule(0.0, HIGH, 200)}),
-        jax.random.key(0),
-    )
+    backend = Grid({KEY: midpoint_rule(0.0, HIGH, 16)})
+    grid = run(_leaf_fit(), backend, jax.random.key(0))
     for term, expected in ((_Gauss(jnp.asarray(1.6)), False), (_NanAbove(1.5), True)):
         out = update(
             grid,
             term,
-            Grid({KEY: midpoint_rule(0.0, HIGH, 200)}),
+            backend,
             jax.random.key(1),
             min_n_eff=None,
             max_khat=None,
@@ -280,7 +288,7 @@ def test_update_refuses_a_refit_with_another_layout(cloud):
         update(
             cloud,
             _with_row(1.8),
-            Laplace(n_draws=1000),
+            Laplace(n_draws=N_DRAWS + 1),
             jax.random.key(1),
             index=1,
             **GATE,
@@ -301,7 +309,7 @@ def test_a_nan_gate_limit_is_refused_on_the_host(cloud):
         update(
             cloud,
             row,
-            Laplace(n_draws=4000),
+            LAPLACE,
             jax.random.key(0),
             max_khat=nan,
             min_n_eff=0,
@@ -316,10 +324,14 @@ def test_a_nan_gate_limit_is_refused_on_the_host(cloud):
     )
 
 
+@pytest.mark.slow(
+    reason="compiles four posterior operations in unchunked and remainder-chunked "
+    "forms, 9 s projected on CI"
+)
 def test_batch_size_gives_the_same_results_as_all_at_once(cloud):
     """Chunked ``lax.map`` over draws equals the vmapped result to rounding.
 
-    4000 draws in chunks of 1000 (divides) and 777 (leaves a remainder).
+    512 draws in chunks of 128 (divides) and 97 (leaves a remainder).
     Tolerance basis: 1e-12 relative; only the reduction order of independent per-draw
     values can differ, and each draw is evaluated by the same code.
     Fails if: the chunking drops or repeats draws, or reorders them.
@@ -333,12 +345,12 @@ def test_batch_size_gives_the_same_results_as_all_at_once(cloud):
         ),
         "replace_term": lambda **kw: cloud.replace_term(1, row, **GATE, **kw),
         "update": lambda **kw: update(
-            cloud, row, Laplace(n_draws=4000), jax.random.key(2), index=1, **GATE, **kw
+            cloud, row, LAPLACE, jax.random.key(2), index=1, **GATE, **kw
         ),
     }
     for name, make in cases.items():
         want = make()
-        for size in (1000, 777):
+        for size in (128, 97):
             got = make(batch_size=size)
             for field in (
                 "log_weights",
@@ -356,15 +368,18 @@ def test_batch_size_gives_the_same_results_as_all_at_once(cloud):
     fit, x = cloud.fit, cloud.samples
     for method in (fit.log_prior, fit.log_likelihood, fit.log_density):
         np.testing.assert_allclose(
-            method(x, batch_size=777), method(x), rtol=1e-12, atol=1e-12
+            method(x, batch_size=97), method(x), rtol=1e-12, atol=1e-12
         )
 
 
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="compiles unchunked and chunked nested and contrastive EIG estimators, 8 "
+    "s projected on CI"
+)
 def test_eig_batch_size_gives_the_same_estimate():
     """Both EIG estimators agree with and without ``batch_size`` (same key).
 
-    Medium tier: four estimator variants compile (about 5 s).
+    Four estimator variants compile.
     Tolerance basis: 1e-12 relative on the estimate and the bias scale; the draws are
     the same, so only the reduction order differs.
     Fails if: the chunked evaluation scores a different set of models.
@@ -419,19 +434,24 @@ def _rv(times, rvs, instrument="a"):
 
 
 RV_GATE = {"min_n_eff": 1, "max_khat": jnp.inf}
+RV_BACKEND = Importance(PriorProposal(), n_draws=64)
 
 
 @pytest.fixture(scope="module")
 def rv_cloud():
-    """A 4000-draw cloud of the slope of ``_Line`` held by one anchoring term."""
+    """A 64-draw importance cloud of the slope of ``_Line`` with an anchoring term."""
     fit = Fit(_Line(jnp.asarray(0.0)), {"slope": Uniform(-3.0, 3.0)}, (_Anchor(),))
-    return run(fit, Laplace(n_draws=4000), jax.random.key(0))
+    return run(fit, RV_BACKEND, jax.random.key(0))
 
 
 def _rv_update(posterior, term):
-    return update(posterior, term, Laplace(n_draws=4000), jax.random.key(1), **RV_GATE)
+    return update(posterior, term, RV_BACKEND, jax.random.key(1), **RV_GATE)
 
 
+@pytest.mark.slow(
+    reason="compiles repeated posterior updates while merging four epochs of the "
+    "same RV instrument, 8 s projected on CI"
+)
 def test_update_merges_epochs_of_one_instrument_into_one_term(rv_cloud):
     """Four single-epoch updates equal one update with the four-row term.
 
@@ -457,6 +477,10 @@ def test_update_merges_epochs_of_one_instrument_into_one_term(rv_cloud):
     assert float(jnp.max(jnp.abs(once.log_weights - rv_cloud.log_weights))) > 1e-3
 
 
+@pytest.mark.slow(
+    reason="compiles RV updates and compares two offset-marginalized likelihoods, "
+    "6 s projected on CI"
+)
 def test_update_appends_a_differently_named_instrument(rv_cloud):
     """A second instrument shares no latent: two RV terms, scores add (1e-12).
 
@@ -512,8 +536,6 @@ def test_update_refuses_ambiguous_and_unmergeable_shared_latents(rv_cloud):
     with pytest.raises(ValueError, match=r"rv_offset::a.*rv_offset::b"):
         _rv_update(posterior, both_terms)
 
-    cloud = run(
-        rv_cloud.fit.append_term(_Summing()), Laplace(n_draws=4000), jax.random.key(0)
-    )
+    cloud = run(rv_cloud.fit.append_term(_Summing()), RV_BACKEND, jax.random.key(0))
     with pytest.raises(NotImplementedError, match="_Summing"):
         _rv_update(cloud, _Summing())

@@ -191,7 +191,19 @@ def test_system_element_parity(precision):
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
 @pytest.mark.float64_only(reason="float64 central differences at relative step 1e-5")
-@pytest.mark.parametrize("padding", [False, True])
+@pytest.mark.parametrize(
+    "padding",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.slow(
+                reason="compiles the masked orbit likelihood and validates gradients "
+                "in orbital elements, 5 s projected on CI"
+            ),
+        ),
+    ],
+)
 def test_element_gradients_and_padding(padding):
     """Truth source: central differences in all seven stored orbital elements.
 

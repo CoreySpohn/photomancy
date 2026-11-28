@@ -1,5 +1,6 @@
 """Contract tests for photomancy.viz corner plots."""
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import matplotlib
@@ -41,27 +42,15 @@ def test_plot_corner_samples_door_excludes_ll_total():
     assert labels == ["P [days]", "e", "cos i"]
 
 
-@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
-@pytest.mark.medium(
-    reason="prior draws, one draw model and the corner door compile apart, 7 s cold"
-)
-def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
-    """Fails if the Posterior door ignores the weights, the orbit path or the row.
-
-    Two prior draws of a one-planet orbit fit, all the weight on the second: every
-    corner sample is that draw's orbit, read through the fit at ``dynamics.orbits``
-    (period, eccentricity, cos i and the argument of periapsis to rtol 1e-12), and a
-    missing path is refused.
-    """
-    from hwoutils.model_paths import resolve
+@pytest.fixture(scope="module")
+def orbit_posterior():
+    """Two draws of the same one-row orbit for the corner and row guards."""
     from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
     from priorities import LogUniform
     from skyscapes.population import kipping_eccentricity
     from system_helpers import _orbits, _scene
 
     from photomancy.infer import Fit, Posterior
-    from photomancy.orbit import classical_elements
-    from photomancy.viz import plot_corner
 
     model = _scene(
         jax.tree.map(lambda x: x[1], _orbits()),
@@ -74,16 +63,45 @@ def test_plot_corner_reads_the_weighted_draws_of_a_posterior():
     )
     block = OrbitBlock(ClassicalChart(), law, rows=(0,), system="dynamics")
     fit = Fit(model, {"dynamics.orbits": block}, ())
-    draws = fit.sample_prior(jax.random.key(0), (2,))
-    posterior = Posterior(
+
+    @eqx.filter_jit
+    def sample_and_score(fit, key):
+        draws = fit.sample_prior(key, (2,))
+        return draws, fit.log_density(draws)
+
+    draws, log_target = sample_and_score(fit, jax.random.key(0))
+    return Posterior(
         samples=draws,
-        log_weights=jnp.array([-jnp.inf, 0.0]),
-        log_target=fit.log_density(draws),
+        log_weights=jnp.full(2, -jnp.log(2.0)),
+        log_target=log_target,
         log_evidence=jnp.array(0.0),
         log_evidence_se=jnp.array(0.0),
         fit=fit,
         info=None,
         kind="monte_carlo",
+    )
+
+
+@pytest.mark.float64_only(reason="float64 posterior coordinates and log weights")
+@pytest.mark.slow(
+    reason="samples an orbit posterior and renders its weighted corner plot, "
+    "16 s projected on CI"
+)
+def test_plot_corner_reads_the_weighted_draws_of_a_posterior(orbit_posterior):
+    """Fails if the Posterior door ignores the weights, the orbit path or the row.
+
+    Two prior draws of a one-planet orbit fit, all the weight on the second: every
+    corner sample is that draw's orbit, read through the fit at ``dynamics.orbits``
+    (period, eccentricity, cos i and the argument of periapsis to rtol 1e-12), and a
+    missing path is refused.
+    """
+    from hwoutils.model_paths import resolve
+
+    from photomancy.orbit import classical_elements
+    from photomancy.viz import plot_corner
+
+    posterior = eqx.tree_at(
+        lambda p: p.log_weights, orbit_posterior, jnp.array([-jnp.inf, 0.0])
     )
     orbit = resolve(posterior.model_at(1), "dynamics.orbits")
     expected = {
@@ -136,43 +154,16 @@ def test_plot_corner_overlay_names_and_ranges():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_classical_elements_refuses_a_planet_outside_the_orbit_rows():
+def test_classical_elements_refuses_a_planet_outside_the_orbit_rows(orbit_posterior):
     """Planet 1 of a one-row orbit block raises instead of clamping to row 0.
 
     A traced ``planet`` is not range checked and does not raise.
     Fails if: the extractor indexes with JAX gather semantics and returns row 0, or
     branches in Python on a traced ``planet``.
     """
-    from orbix.system import ClassicalChart, OrbitBlock, OrbitLaw
-    from priorities import LogUniform
-    from skyscapes.population import kipping_eccentricity
-    from system_helpers import _orbits, _scene
-
-    from photomancy.infer import Fit, Posterior
     from photomancy.orbit import classical_elements
 
-    model = _scene(
-        jax.tree.map(lambda x: x[1], _orbits()),
-        mass_Mearth=1.0,
-        radius_AU=1e-4,
-        albedo=0.3,
-    )
-    law = OrbitLaw(
-        period_d=LogUniform(600.0, 1600.0), eccentricity=kipping_eccentricity()
-    )
-    block = OrbitBlock(ClassicalChart(), law, rows=(0,), system="dynamics")
-    fit = Fit(model, {"dynamics.orbits": block}, ())
-    draws = fit.sample_prior(jax.random.key(0), (2,))
-    posterior = Posterior(
-        samples=draws,
-        log_weights=jnp.zeros(2),
-        log_target=fit.log_density(draws),
-        log_evidence=jnp.array(0.0),
-        log_evidence_se=jnp.array(0.0),
-        fit=fit,
-        info=None,
-        kind="monte_carlo",
-    )
+    posterior = orbit_posterior
     with pytest.raises(ValueError, match="planet 1"):
         classical_elements(
             posterior, jax.random.key(1), 4, orbit_path="dynamics.orbits", planet=1

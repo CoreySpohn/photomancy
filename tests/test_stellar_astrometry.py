@@ -126,9 +126,11 @@ class _Reflex(eqx.Module):
         return jnp.concatenate([ra, dec])
 
 
-# Medium: The seven-parameter reflex fit includes a cold optimizer and Hessian.
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="compiles gradient and curvature for the joint orbit and stellar-reflex "
+    "fit, 19 s projected on CI"
+)
 def test_mass_is_identifiable_from_reflex():
     """A reflex-astrometry fit recovers the planet mass (period -> a -> amplitude).
 

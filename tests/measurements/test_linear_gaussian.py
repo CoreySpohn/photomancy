@@ -107,6 +107,10 @@ def _assert_pinned(term, model, system, scale_AU):
 
 
 @pytest.mark.float64_only(reason="measurement log densities require float64")
+@pytest.mark.slow(
+    reason="compiles independent linear and nonlinear astrometry densities at the "
+    "golden orbit, 6 s projected on CI"
+)
 def test_relative_form_is_the_term_on_the_golden_system():
     """Fails if the design, target or precision units of the form are wrong.
 
@@ -120,6 +124,10 @@ def test_relative_form_is_the_term_on_the_golden_system():
 
 
 @pytest.mark.float64_only(reason="measurement log densities require float64")
+@pytest.mark.slow(
+    reason="compiles the bare-system astrometric form with separate recorded rows, "
+    "7 s projected on CI"
+)
 def test_relative_form_on_a_bare_system_with_records_of_its_row():
     """The form scores float32 astrometry in float64 and rejects another planet."""
     system = _system()
@@ -133,6 +141,10 @@ def test_relative_form_on_a_bare_system_with_records_of_its_row():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
+@pytest.mark.slow(
+    reason="compiles the orbit block and relative linear Gaussian term on a bare "
+    "system, 7 s projected on CI"
+)
 def test_a_fit_on_a_bare_system_joins_the_block_path():
     """Fails if an orbit block on a bare system (``system=""``) cannot be fit.
 

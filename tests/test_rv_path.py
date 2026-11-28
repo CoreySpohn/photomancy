@@ -36,6 +36,10 @@ def _circular_system(periods, masses_kg, cos_i=0.0):
 
 @pytest.mark.parametrize("n_planets", [1, 2])
 @pytest.mark.float64_only(reason="measurement log densities require float64")
+@pytest.mark.slow(
+    reason="compiles RV propagation and marginalized likelihood at three amplitudes, "
+    "6 s per case projected on CI"
+)
 def test_rv_likelihood_prefers_true_amplitude_in_m_per_s(n_planets):
     """A 10 m/s signal favors its true amplitude over half or twice that mass."""
     times = jnp.linspace(0.0, 800.0, 60)

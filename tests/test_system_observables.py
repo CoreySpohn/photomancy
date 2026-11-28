@@ -291,8 +291,9 @@ def test_independent_pair_scores(two_planets):
         _check_scores(f"independent {name}", score, target, [target])
 
 
-@pytest.mark.medium(
-    reason="Solves both multi-planet conventions and independent PMA epochs."
+@pytest.mark.slow(
+    reason="solves orbital predictions in both conventions and at independent "
+    "proper-motion epochs, 8 s projected on CI"
 )
 def test_jacobi_predictions(two_planets):
     """Fails if a term silently reverts to pair masses or a star-centred reflex.

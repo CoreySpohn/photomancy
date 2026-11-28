@@ -58,8 +58,9 @@ def _moments(post):
     )
 
 
-# Medium: three cold compiles (two fits and the appended term) in one test.
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="runs two fitted posteriors around a likelihood update, 9 s projected on CI"
+)
 def test_appending_a_term_tightens_the_posterior():
     """A cloud plus one more observation beats the cloud alone and matches the refit.
 

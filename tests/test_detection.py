@@ -810,6 +810,12 @@ def _image_problem(kind, seed=11, amplitude=_TRUE_AMP):
     return _fit(_SkyImage(image)), mean, mask
 
 
+@pytest.fixture(scope="module")
+def constant_image_problem():
+    """The same seeded constant-variance frame for detection and validation."""
+    return _image_problem("constant")
+
+
 class _RenderedTrial(eqx.Module):
     """The background and unit planet image rendered at one position angle."""
 
@@ -900,10 +906,13 @@ def test_detect_checks_the_nested_image_owner():
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-@pytest.mark.medium(
-    reason="forward-mode scan through the renderer compiles for each of three calls"
+@pytest.mark.slow(
+    reason="compiles unchunked and chunked profiles through a detector image, 16 s "
+    "projected on CI"
 )
-def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame():
+def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame(
+    constant_image_problem,
+):
     """``detect`` is the whitened matched filter for a linear model, Gaussian noise.
 
     Truth source: NumPy ``a_hat = t'Wr / t'Wt``, ``z = t'Wr / sqrt(t'Wt)``,
@@ -917,12 +926,14 @@ def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame():
     same 1e-9: a batch size changes the vectorization and so the summation order
     of the scored-pixel sums, which agree only to the 12 digits the residual keeps,
     so a relative 1e-12 is below that resolution (one platform differed by 3.7e-10).
+    Five angles include the truth, two full batches and one trailing trial.
     """
-    fit, _, mask = _image_problem("constant")
+    fit, _, mask = constant_image_problem
+    angles = _PAS[3:8]
     sky = fit.terms[0]
     resid = np.asarray(sky.image.observed_e) - np.asarray(sky.predict(_sky(0.0, 0.0)))
     want_a, want_z, want_s = [], [], []
-    for pa in np.asarray(_PAS):
+    for pa in np.asarray(angles):
         m0 = np.asarray(sky.predict(_sky(0.0, pa)))
         t = np.asarray(sky.predict(_sky(1.0, pa))) - m0
         w = mask / _VARIANCE
@@ -931,20 +942,20 @@ def test_detect_equals_the_linear_matched_filter_on_a_synthetic_frame():
         want_a.append(twr / twt)
         want_z.append(twr / np.sqrt(twt))
         want_s.append(1.0 / np.sqrt(twt))
-    out = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude")
+    out = detect(fit, {"pa_deg": angles}, amplitude="amplitude", batch_size=None)
     np.testing.assert_allclose(out.a_hat, want_a, rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(out.z, want_z, rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(out.sigma, want_s, rtol=1e-9)
-    assert int(jnp.argmax(out.z)) == int(np.argmax(np.asarray(_PAS) == _TRUE_PA))
+    assert float(angles[int(jnp.argmax(out.z))]) == _TRUE_PA
     assert float(out.z.max()) > 5.0
-    batched = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude", batch_size=5)
+    batched = detect(fit, {"pa_deg": angles}, amplitude="amplitude", batch_size=2)
     np.testing.assert_allclose(batched.z, out.z, rtol=1e-9, atol=1e-9)
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_detect_refuses_a_bad_amplitude_path_or_trial_keys():
+def test_detect_refuses_a_bad_amplitude_path_or_trial_keys(constant_image_problem):
     """The amplitude must be a free one-element leaf law; trials cover the rest."""
-    fit, _, _ = _image_problem("constant")
+    fit, _, _ = constant_image_problem
     with pytest.raises(ValueError, match="free leaf-law"):
         detect(fit, {"pa_deg": _PAS}, amplitude="flux")
     with pytest.raises(ValueError, match="keys"):
@@ -955,15 +966,19 @@ def test_detect_refuses_a_bad_amplitude_path_or_trial_keys():
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="monte-carlo")
-@pytest.mark.medium(reason="two Newton depths through the renderer, 5 s cold")
+@pytest.mark.slow(
+    reason="compiles two Newton depths and a nested-derivative control through a "
+    "Poisson renderer, 19 s projected on CI"
+)
 def test_detect_on_poisson_counts_recovers_the_planet_and_renders_once():
     """On Poisson counts the map peaks at the true angle, and ``detect`` renders once.
 
     The amplitude is within four formal standard errors of the truth, and Newton has
     converged by four steps. The render-once path (a term that offers ``split``) gives
     the map the nested-derivative path gives (the same term without ``split``), and it
-    builds the scene twice (the render with its tangent, and the render of the
-    linearity check) where the nested path builds it at every derivative.
+    builds the scene three times (the host-side shape check, the render with its
+    tangent and the linearity check) where the nested path builds it at every
+    derivative.
 
     Truth source: the injected amplitude and position angle; for the parity, the
     nested-derivative path that ``detect`` takes for a term without ``split``,
@@ -975,29 +990,30 @@ def test_detect_on_poisson_counts_recovers_the_planet_and_renders_once():
     Fails if: the Poisson term is not the one profiled, Newton diverges, the
     render-once path scores a different likelihood (the scored set, the detector law,
     the tangent) or renders more than once.
+    The four angles cover the truth, both nearest trial angles and its antipode.
     """
     fit, _, _ = _image_problem("poisson")
-    out = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude")
+    angles = _PAS[jnp.array([4, 5, 6, 11])]
+    trials = {"pa_deg": angles}
+    del _SCENE_BUILDS[:]
+    out = detect(fit, trials, amplitude="amplitude", n_newton=4)
+    builds_once = len(_SCENE_BUILDS)
     best = int(jnp.argmax(out.z))
-    assert float(_PAS[best]) == _TRUE_PA
+    assert float(angles[best]) == _TRUE_PA
     assert abs(float(out.a_hat[best]) - _TRUE_AMP) < 4.0 * float(out.sigma[best])
-    more = detect(fit, {"pa_deg": _PAS}, amplitude="amplitude", n_newton=8)
+    more = detect(fit, trials, amplitude="amplitude", n_newton=8)
     np.testing.assert_allclose(out.a_hat, more.a_hat, rtol=1e-6, atol=1e-9)
 
     nested = _fit(_NoSplit(fit.terms[0].image))
-    trials = {"pa_deg": _PAS[:7]}  # a new shape, so both paths trace afresh
     del _SCENE_BUILDS[:]
-    once = detect(fit, trials, amplitude="amplitude")
-    builds_once = len(_SCENE_BUILDS)
-    del _SCENE_BUILDS[:]
-    other = detect(nested, trials, amplitude="amplitude")
+    other = detect(nested, trials, amplitude="amplitude", n_newton=4)
     builds_nested = len(_SCENE_BUILDS)
     # the host-side shape check of ``split`` builds the scene once, the trace twice
     # (the render with its tangent, and the render of the linearity check)
     assert builds_once == 3 and builds_nested >= 4, (builds_once, builds_nested)
     for name in ("a_hat", "z", "sigma"):
         np.testing.assert_allclose(
-            getattr(once, name), getattr(other, name), rtol=1e-9, atol=1e-12
+            getattr(out, name), getattr(other, name), rtol=1e-9, atol=1e-12
         )
 
 
@@ -1629,6 +1645,10 @@ class _SquareNoSplit(ForwardTerm):
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
+@pytest.mark.slow(
+    reason="compiles the linear-render and nested-derivative detection paths, 5 s "
+    "projected on CI"
+)
 def test_render_once_detect_holds_only_for_a_prediction_linear_in_the_amplitude():
     """``detect`` checks the render-once path and answers a nonlinear forward.
 

@@ -60,14 +60,6 @@ def _two_mode_posterior():
 
 
 @_posterior_information
-def test_geometric_eig_matches_analytic_gaussian_update():
-    """The log-det shrinkage equals the 1-D conjugate-Gaussian information gain."""
-    eig, cov_new = eig_geometric(jnp.array([[4.0]]), jnp.array([[1.0]]), 1.0)
-    assert jnp.allclose(eig, 0.5 * jnp.log(5.0))
-    assert float(cov_new[0, 0]) < 4.0
-
-
-@_posterior_information
 def test_alias_breaking_eig_zero_when_modes_agree():
     """Zero when modes predict the same observable; positive when they differ."""
     weights = jnp.array([0.5, 0.5])

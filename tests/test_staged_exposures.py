@@ -207,7 +207,10 @@ def _relative_error(fit, truth):
 
 
 @vv.case("scene-fits", "code-verification", basis="spike")
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="runs a staged exposure fit and checks the recovered seams against the "
+    "image reference, 14 s projected on CI"
+)
 def test_self_fit_recovers_the_seams_and_leaves_the_companion_out():
     """A noise-free two-exposure toy fit recovers both seams; the companion stays at 0.
 

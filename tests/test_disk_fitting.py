@@ -23,6 +23,7 @@ from photomancy.infer.likelihoods import gaussian_loglike
 
 WL, TIME = 500.0, 0.0
 GRID = PixelGrid.regular((51, 51), 0.2, "arcsec", orientation=SkyOrientation(0.0))
+GRAD_GRID = PixelGrid.regular((9, 9), 1.2, "arcsec", orientation=SkyOrientation(0.0))
 
 
 GOLDEN = json.loads(
@@ -121,13 +122,19 @@ def test_the_disk_has_no_orientation_leaf_to_free(make_system):
             Fit(system, {f"disk.{leaf}": Normal(jnp.asarray(50.0), 5.0)})
 
 
-# Medium: The disk image and its six-parameter gradient exceed the unit compile budget.
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="differentiates a rendered disk fit through six free coordinates, 11 s "
+    "projected on CI"
+)
 def test_disk_fit_is_finite_and_differentiable(make_system):
-    """The disk fit is finite and grad-safe at the system's own values."""
+    """The disk fit is finite and grad-safe at the system's own values.
+
+    The coarse grid samples the central ray and both sides of the projected disk
+    at approximately the field width of the golden grid.
+    """
     system = make_system()
-    forward = radiance_forward(WL, TIME, grid=GRID)
+    forward = radiance_forward(WL, TIME, grid=GRAD_GRID)
     image = forward(system)
     sigma = 0.02 * float(jnp.max(jnp.abs(image)))
     fit = _fit(system, image, sigma, forward)
@@ -142,9 +149,11 @@ def test_disk_fit_is_finite_and_differentiable(make_system):
     assert float(fit.model_at(x0).disk.sma_AU) == 50.0
 
 
-# Medium: the golden needs the disk render at three points.
 @pytest.mark.float64_only(reason="stored float64 V&V reference values")
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="renders the six-coordinate disk fit at three reference points, 7 s "
+    "projected on CI"
+)
 def test_fit_density_matches_the_prior_adjusted_golden(make_system):
     """Compare the legacy residual sum plus the normalized disk prior at three points.
 
@@ -216,8 +225,9 @@ def test_map_and_laplace_recover_disk_shape_and_orientation(make_system):
     check({p: weighted_mean(post.log_weights, v) for p, v in post.samples.items()})
 
 
-# Medium: verify the relabelings through the disk renderer.
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="renders the disk at multiple equivalent orientations, 9 s projected on CI"
+)
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
 def test_disk_aliases_have_equal_likelihood_and_equal_or_zero_prior(make_system):
     """The forward and physical-coordinate prior respect the Grater symmetries.
@@ -264,13 +274,19 @@ class _Scaled(eqx.Module):
 def test_forward_is_swappable(make_system):
     """A swapped forward module fits end to end, and a closure is refused."""
     system = make_system()
-    forward = _Scaled(radiance_forward(WL, TIME, grid=GRID))
+    forward = _Scaled(radiance_forward(WL, TIME, grid=GRAD_GRID))
     image = forward(system)
     sigma = 0.02 * float(jnp.max(jnp.abs(image)))
     fit = _fit(system, image, sigma, forward)
     x0 = _x(system)
-    assert jnp.isfinite(fit.log_density(x0))
-    assert all(jnp.isfinite(g) for g in jax.grad(fit.log_density)(x0).values())
+
+    @eqx.filter_jit
+    def evaluate(fit, point):
+        return jax.value_and_grad(fit.log_density)(point)
+
+    value, grad = evaluate(fit, x0)
+    assert jnp.isfinite(value)
+    assert all(jnp.isfinite(g) for g in grad.values())
     with pytest.raises(TypeError, match=r"eqx\.Module"):
         ForwardTerm(lambda s: 0.7 * forward.base(s), gaussian_loglike(image, sigma))
 

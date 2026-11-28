@@ -153,6 +153,10 @@ def _truth(scene):
 
 
 @vv.case("scene-fits", "code-verification", basis="floating-point")
+@pytest.mark.slow(
+    reason="compiles the tabulated spectrum and joint photometric quadrature, 5 s "
+    "projected on CI"
+)
 def test_photometry_integrates_the_star_over_a_tabulated_filter():
     """Fails if the contrast samples a rough star at nodes or ignores its table.
 

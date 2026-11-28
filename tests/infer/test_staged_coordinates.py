@@ -75,7 +75,19 @@ def test_prepared_map_bounds_under_trace():
 
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
 @pytest.mark.medium(reason="two L-BFGS runs compile separate stage objectives")
-@pytest.mark.parametrize("law", [Uniform(0.0, 1.0), Beta(2.0, 3.0)])
+@pytest.mark.parametrize(
+    "law",
+    [
+        Uniform(0.0, 1.0),
+        pytest.param(
+            Beta(2.0, 3.0),
+            marks=pytest.mark.slow(
+                reason="compiles two staged L-BFGS objectives after replacing the fit "
+                "term, 6 s projected on CI"
+            ),
+        ),
+    ],
+)
 def test_stage_accepts_changed_terms_and_density(law):
     """A compatible stage reaches the bitwise optimum of its standalone objective.
 

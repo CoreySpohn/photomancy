@@ -57,6 +57,13 @@ def _mean(model, exposure):
     ).predict(model)
 
 
+@pytest.fixture(scope="module")
+def poisson_image():
+    """The shared Poisson scene, exposure and noiseless image."""
+    model, exposure = _setup("poisson")
+    return model, exposure, _mean(model, exposure)
+
+
 @pytest.mark.float32_only(reason="image log densities require float64")
 def test_image_log_density_refuses_float32():
     """Both the direct term and the reusable scorer refuse float32 reductions."""
@@ -74,7 +81,7 @@ def test_image_log_density_refuses_float32():
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-def test_poisson_value_is_the_summed_pmf_of_the_expected_counts():
+def test_poisson_value_is_the_summed_pmf_of_the_expected_counts(poisson_image):
     """A photon-counting detector scores the Poisson pmf of ``predict`` per pixel.
 
     Truth source: ``scipy.stats.poisson.logpmf`` at the expected counts, summed over the
@@ -83,8 +90,8 @@ def test_poisson_value_is_the_summed_pmf_of_the_expected_counts():
     Fails if: the mask is applied after the sum, a NaN at a masked pixel leaks, or the
     density is not normalized.
     """
-    model, exposure = _setup("poisson")
-    mean = np.asarray(_mean(model, exposure))
+    model, exposure, mean = poisson_image
+    mean = np.asarray(mean)
     counts = np.random.default_rng(3).poisson(mean).astype(float)
     mask = np.zeros(counts.shape, bool)
     mask[..., 4:-4, 4:-4] = True
@@ -428,22 +435,27 @@ def test_residual_domain_agrees_with_detector_density(kind, monkeypatch, precisi
 
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
-def test_the_value_peaks_at_the_true_model():
+def test_the_value_peaks_at_the_true_model(poisson_image):
     """Noise-free counts are likelier at the truth than at 5 percent off."""
-    model, exposure = _setup("poisson")
-    term = _scored(model, exposure, jnp.round(_mean(model, exposure)))
+    model, exposure, mean = poisson_image
+    term = _scored(model, exposure, jnp.round(mean))
     off = _setup("poisson", contrast=1.05e-10)[0]
     assert term(model) > term(off)
 
 
-def test_draw_gives_counts_consistent_with_the_expectation_and_keeps_masked_pixels():
+@pytest.mark.slow(
+    reason="compiles a Poisson image simulation and checks the count statistics, 5 "
+    "s projected on CI"
+)
+def test_draw_gives_counts_consistent_with_the_expectation_and_keeps_masked_pixels(
+    poisson_image,
+):
     """Drawn counts are integers about the mean; masked pixels keep their stored value.
 
     Tolerance: with over 350 scored Poisson pixels the standard errors of the
     standard deviation and mean are below 0.04 and 0.06. The bounds are 0.2 and 0.25.
     """
-    model, exposure = _setup("poisson")
-    mean = _mean(model, exposure)
+    model, exposure, mean = poisson_image
     supported = _scored(model, exposure, mean).mask
     mask = supported & jnp.ones(mean.shape, bool).at[0, :3, :].set(False)
     term = ImageTerm(jnp.full(mean.shape, -7.0), mask, exposure=exposure, **_PATHS)
@@ -457,10 +469,14 @@ def test_draw_gives_counts_consistent_with_the_expectation_and_keeps_masked_pixe
 
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
-def test_batched_frames_are_scored_jointly():
+@pytest.mark.slow(
+    reason="compiles scoring and Poisson draws on a batch of images, 9 s projected "
+    "on CI"
+)
+def test_batched_frames_are_scored_jointly(poisson_image):
     """A batch of two frames scores as the sum of the two single frames."""
-    model, exposure = _setup("poisson")
-    mean = np.asarray(_mean(model, exposure))
+    model, exposure, mean = poisson_image
+    mean = np.asarray(mean)
     rng = np.random.default_rng(6)
     frames = rng.poisson(np.broadcast_to(mean, (2, *mean.shape))).astype(float)
     both = _scored(model, exposure, frames)
@@ -474,10 +490,10 @@ def test_batched_frames_are_scored_jointly():
 
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
-def test_exposure_comes_from_the_model_by_path_or_the_term_not_both():
+def test_exposure_comes_from_the_model_by_path_or_the_term_not_both(poisson_image):
     """A path exposure equals a held one; giving both or neither fails."""
-    model, exposure = _setup("poisson")
-    observed = jnp.round(_mean(model, exposure))
+    model, exposure, mean = poisson_image
+    observed = jnp.round(mean)
     held = _scored(model, exposure, observed)
     by_path = ImageTerm(observed, held.mask, exposure_path="exposures[0]", **_PATHS)
     with_exposure = ImageModel(model.scene, model.instrument, (exposure,))
@@ -504,7 +520,7 @@ def test_exposure_comes_from_the_model_by_path_or_the_term_not_both():
 
 
 @pytest.mark.float64_only(reason="float64 image log-density reduction")
-def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument():
+def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument(poisson_image):
     """The model may be the scene itself, with the instrument held by the term.
 
     Truth source: the same frame scored through an ``ImageModel`` with both paths.
@@ -512,8 +528,8 @@ def test_the_term_runs_on_a_scene_rooted_model_with_a_held_instrument():
     Fails if: the empty scene path does not name the model, or the held instrument is
     ignored (``Fit(scene, ...)`` is the model of every orbit posterior).
     """
-    model, exposure = _setup("poisson")
-    observed = jnp.round(_mean(model, exposure))
+    model, exposure, mean = poisson_image
+    observed = jnp.round(mean)
     mask = _scored(model, exposure, observed).mask
     rooted = ImageTerm(observed, mask, instrument=model.instrument, exposure=exposure)
     held = _scored(model, exposure, observed)
@@ -620,10 +636,10 @@ _CONTRAST = "scene.planets[0].physical_model.contrast_grid"
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_an_image_fit_frees_a_scene_leaf_and_gradients_flow():
+def test_an_image_fit_frees_a_scene_leaf_and_gradients_flow(poisson_image):
     """``Fit`` accepts the term over a scene leaf: finite density and gradient."""
-    model, exposure = _setup("poisson")
-    term = _scored(model, exposure, jnp.round(_mean(model, exposure)))
+    model, exposure, mean = poisson_image
+    term = _scored(model, exposure, jnp.round(mean))
     fit = Fit(model, {_CONTRAST: LogUniform(1e-12, 1e-8)}, (term,))
     x = {_CONTRAST: model.scene.planets[0].physical_model.contrast_grid}
     assert np.isfinite(fit.log_density(x))
@@ -634,10 +650,10 @@ def test_an_image_fit_frees_a_scene_leaf_and_gradients_flow():
 
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
-def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene():
+def test_a_scene_rooted_fit_frees_a_leaf_of_the_scene(poisson_image):
     """A held-instrument term on ``Fit(scene, ...)`` scores like the record model."""
-    model, exposure = _setup("poisson")
-    observed = jnp.round(_mean(model, exposure))
+    model, exposure, mean = poisson_image
+    observed = jnp.round(mean)
     mask = _scored(model, exposure, observed).mask
     rooted = ImageTerm(observed, mask, instrument=model.instrument, exposure=exposure)
     path = "planets[0].physical_model.contrast_grid"
@@ -1030,7 +1046,7 @@ def test_a_free_leaf_that_moves_the_field_of_view_is_checked_at_both_ends():
 
 
 class _Patch(AbstractSpeckleField):
-    """A static speckle excess on a 12 cell grid of 0.3 lambda/D, read linearly.
+    """A static speckle excess on a six-cell grid of 0.3 lambda/D, read linearly.
 
     The excess density is ten times the toy coronagraph's static floor (1e-9 per
     square lambda/D), modulated so that no two cells are equal.
@@ -1040,7 +1056,7 @@ class _Patch(AbstractSpeckleField):
     data: jax.Array
     epoch_d: float = eqx.field(static=True, converter=float, default=0.0)
 
-    def __init__(self, n=12, step=0.3):
+    def __init__(self, n=6, step=0.3):
         """Build the field on an ``n`` cell grid of ``step`` lambda/D."""
         self.grid = PixelGrid.focal(n, step, GaussianCoronagraph().grid.frame)
         x, y = self.grid.coordinates()
@@ -1062,7 +1078,7 @@ def _speckle_setup(table_n, detector_n, field=True):
     """The toy setup on a ``table_n`` cell table and a ``detector_n`` pixel detector.
 
     The detector pixel is one table cell at 550 nm (0.3 lambda/D); the speckle field
-    is :class:`_Patch`, 12 cells of 0.3 lambda/D, read linearly.
+    is :class:`_Patch`, six cells of 0.3 lambda/D, read linearly.
     """
     small = make_detector("poisson")
     detector = type(small)(
@@ -1080,7 +1096,7 @@ def _speckle_setup(table_n, detector_n, field=True):
         instrument = eqx.tree_at(
             lambda i: i.speckle, instrument, _Patch(), is_leaf=lambda v: v is None
         )
-    scene = make_scene(contrast=1e-10, sky_pa_deg=40.0)
+    scene = make_scene(contrast=1e-10, sky_pa_deg=40.0, separation_arcsec=0.025)
     return ImageModel(scene, instrument), make_exposure(scene, instrument)
 
 
@@ -1114,17 +1130,20 @@ def _support_counts(model, exposure):
 
 @pytest.mark.float64_only(reason="float64 Fit coordinates")
 @vv.case("scene-fits", "code-verification", basis="exact-algebra")
-@pytest.mark.medium(reason="renders three instruments and one Newton step, 7 s cold")
+@pytest.mark.slow(
+    reason="compiles three speckle and static image renders and a Newton estimate, "
+    "26 s projected on CI"
+)
 def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option():
     """Fails if the option is ignored, admits unsupported pixels or is not recorded.
 
     Fails for a term that ignores the option, an option that admits pixels without
     static data, and a result that loses the record of the option.
 
-    Geometry: the toy coronagraph with a 48 cell table, which covers a 24 pixel
+    Geometry: the toy coronagraph with a 24-cell table, which covers a 12-pixel
     detector at every node of the 500-600 nm band, and a speckle field half the
     detector's width (:class:`_Patch`); a second instrument puts the same field on
-    a 48 pixel detector with the 24 cell table, so the detector is also wider than
+    a 24-pixel detector with the 12-cell table, so the detector is also wider than
     the static table. Every mask is all True unless stated.
 
     Truth sources: the refusal counts are read from coronagraphoto's own two flags
@@ -1157,7 +1176,7 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     or 0-d JAX boolean and stores a Python bool; an int or a boolean array is
     refused.
     """
-    model, exposure = _speckle_setup(48, 24)
+    model, exposure = _speckle_setup(24, 12)
     shape = (1, *model.instrument.detector.shape)
     every = jnp.ones(shape, bool)
     no_static, only = _support_counts(model, exposure)
@@ -1192,7 +1211,7 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     np.testing.assert_array_equal(np.asarray(strict.predict(model))[~supported], 0.0)
     beyond = _beyond_field(model, exposure)
     assert beyond.any()
-    bare, _ = _speckle_setup(48, 24, field=False)
+    bare, _ = _speckle_setup(24, 12, field=False)
     static = np.asarray(term(observed, every, False).predict(bare))
     np.testing.assert_array_equal(mean[..., beyond], static[..., beyond])
     assert np.all(mean[~supported] > 0)
@@ -1217,10 +1236,10 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
     estimate = detection.measure(fit, start, n_newton=1)
     assert estimate.assumptions == ("static_beyond_speckle",)
 
-    wide, wide_exposure = _speckle_setup(24, 48)
+    wide, wide_exposure = _speckle_setup(12, 24)
     no_static, only = _support_counts(wide, wide_exposure)
     assert no_static > 0 and only > 0
-    frame = jnp.zeros((1, 48, 48))
+    frame = jnp.zeros((1, *wide.instrument.detector.shape))
     for option, count in ((True, no_static), (False, no_static + only)):
         loose = ImageTerm(
             frame,
@@ -1236,7 +1255,9 @@ def test_static_light_beyond_the_speckle_field_is_scored_only_under_the_option()
 
 
 @pytest.mark.float64_only(reason="MAP uses float64 coordinates with a narrow detector")
-@pytest.mark.medium(reason="two MAP fits of rendered pixel data")
+@pytest.mark.slow(
+    reason="compiles MAP through wide and narrow image detectors, 21 s projected on CI"
+)
 @vv.case("scene-fits", "code-verification", basis="spike")
 def test_map_fits_flux_scale_with_a_narrow_instrument(monkeypatch):
     """A noise-free image fixes the linear flux scale at one in both instruments.

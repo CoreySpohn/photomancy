@@ -288,7 +288,10 @@ def _seam_error(out, model):
 
 
 @vv.case("scene-fits", "code-verification", basis="spike")
-@pytest.mark.medium
+@pytest.mark.slow(
+    reason="runs the map and staged companion fit and builds its image covariance, "
+    "20 s projected on CI"
+)
 def test_planet_freed_after_the_map_recovers_flux_and_offset():
     """A noise-free toy fit starts the planet from the map peak and recovers it.
 
