@@ -80,6 +80,8 @@ TRIALS = {
     "dynamics.orbits": {"east_arcsec": _EAST[:, None], "north_arcsec": _NORTH[:, None]}
 }
 AMP = "planets[{}].flux_scale"
+# NumPy seeds of the frame counts, one per roll.
+SEEDS = (10, 11)
 STEPS = 100
 
 # the disk fixture of the disk-fitting tests, shared by name
@@ -137,7 +139,13 @@ def _absent(scene, rows=(0, 1)):
 
 
 def _terms(truth):
-    """One ``ImageTerm`` per roll, from the ``Image`` that ``observe`` returns."""
+    """One ``ImageTerm`` per roll, its counts drawn on the host from a fixed seed.
+
+    The detector has no dark current, clock-induced charge, read noise or excess
+    noise, so ``observe`` draws Poisson counts at the detector's mean. The same
+    counts are drawn here with NumPy at that mean, so the realization the cases
+    below are stated on does not move when JAX changes its Poisson sampler.
+    """
     instrument = make_instrument(make_detector("poisson"))
     out = []
     for i, roll in enumerate(ROLLS_DEG):
@@ -150,6 +158,12 @@ def _terms(truth):
             plan=FramePlan(frame_time_s=3000.0, n_frames=2),
         )
         image = cp.observe(jax.random.PRNGKey(10 + i), truth, instrument, exposure)
+        rates = cp.expected(truth, instrument, exposure)
+        mean, _ = instrument.detector.mean_and_variance(rates, exposure.plan)
+        counts = np.random.default_rng(SEEDS[i]).poisson(np.asarray(mean))
+        image = eqx.tree_at(
+            lambda im: im.data, image, jnp.asarray(counts, dtype=image.data.dtype)
+        )
         out.append(
             ImageTerm.on_support(truth, image, instrument=instrument, exposure=exposure)
         )
@@ -351,8 +365,9 @@ def test_measure_recovers_the_bright_planet_position_and_flux(recipe):
     ``SkyPositionBlock.inverse`` writes them) and its injected flux scale. Tolerance
     basis: monte-carlo, 3 formal standard errors per coordinate for the three
     coordinates, a joint false-failure rate near 1 - 0.9973**3 = 0.8 percent for a
-    correct fit; one seeded realization (frames drawn with keys 10 and 11; the formal
-    errors are the square roots of the diagonal of ``LikelihoodEstimate.cov``).
+    correct fit; one seeded realization (frame counts drawn with NumPy seeds 10 and
+    11; the formal errors are the square roots of the diagonal of
+    ``LikelihoodEstimate.cov``).
     Fails if the sky offset, the amplitude or the covariance is wrong, or the fit
     stopped short of the maximum.
     """

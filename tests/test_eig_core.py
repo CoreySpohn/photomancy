@@ -232,6 +232,39 @@ def test_geometric_eig_identity_projection_matches_full():
 
 
 @_posterior_information
+@pytest.mark.parametrize("gap", [1e-6, 1e-12])
+@pytest.mark.parametrize("row", [(1.0, 1.0), (1.0, 0.0), (1.0, -1.0)])
+def test_geometric_eig_near_singular_prior_matches_the_scalar_closed_form(gap, row):
+    """One scalar observation of a nearly degenerate prior gains its closed form.
+
+    Truth source: for one observation ``y = j . z`` with variance ``v``, the gain is
+    ``0.5 log1p(j Sigma j^T / v)``. With correlation ``rho = 1 - gap`` the quadratic
+    form along ``(1, -1)`` is ``2 - 2 rho``, exact in float64 (Sterbenz), so the
+    reference is a float64 expression accurate to a few units in the last place.
+    Tolerance basis: floating-point. Eight units in the last place along the well
+    measured directions; along the thin direction the data perturb the answer by
+    about eps / gap relative, so the bound is eight times that condition number.
+    Fails if the prior is inverted outright: adding the information to a precision
+    with entries near 1 / gap loses the measured direction (a zero or negative gain
+    at gap 1e-12, relative errors near 1e-5 elsewhere).
+    """
+    rho = 1.0 - gap
+    cov = jnp.array([[1.0, rho], [rho, 1.0]])
+    jac = jnp.array([row])
+    variance = 0.5
+    eig, cov_new = eig_geometric(cov, jac, variance)
+    j0, j1 = row
+    quadratic = j0 * j0 + j1 * j1 + 2.0 * rho * j0 * j1
+    if row == (1.0, -1.0):
+        quadratic = 2.0 - 2.0 * rho
+    want = 0.5 * np.log1p(quadratic / variance)
+    eps = float(ulps(1, 1.0))
+    rtol = 8 * eps / gap if row == (1.0, -1.0) else 8 * eps
+    np.testing.assert_allclose(float(eig), want, rtol=rtol, atol=0)
+    assert bool(jnp.all(jnp.isfinite(cov_new)))
+
+
+@_posterior_information
 def test_geometric_eig_correlated_qoi_marginal_gain_positive():
     """A correlated nuisance measurement still informs the QoI marginal."""
     cov = jnp.array([[1.0, 0.8], [0.8, 1.0]])
